@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use spur_acp::config::SpurConfig;
-use spur_acp::connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter};
+use spur_acp::connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 use spur_acp::registry::AgentRegistry;
 use spur_acp::types::*;
 use spur_acp::{DelegationResult, DelegationStatus, SpurEvent};
@@ -197,7 +197,7 @@ impl Orchestrator {
         }
 
         // 6. Spawn brain agent via AgentConnection.
-        let mut connection = self.create_connection(&brain_config);
+        let mut connection = self.create_connection(&brain_config, None);
 
         let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
         let _capabilities = connection
@@ -313,6 +313,7 @@ impl Orchestrator {
         mut self,
         mut user_input_rx: mpsc::Receiver<InteractiveInput>,
         brain_override: Option<String>,
+        permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
     ) -> Result<()> {
         let mut brain: Option<BrainSession> = None;
         let mut pending_messages: VecDeque<String> = VecDeque::new();
@@ -333,7 +334,7 @@ impl Orchestrator {
             // ── Lazy-spawn brain on first message (or after crash) ──────
             if brain.is_none() {
                 match self
-                    .spawn_brain_session(brain_override.as_deref())
+                    .spawn_brain_session(brain_override.as_deref(), permission_tx.clone())
                     .await
                 {
                     Ok(b) => brain = Some(b),
@@ -461,7 +462,7 @@ impl Orchestrator {
             );
         }
 
-        let mut connection = self.create_connection(&agent_config);
+        let mut connection = self.create_connection(&agent_config, None);
 
         let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
         connection
@@ -520,8 +521,19 @@ impl Orchestrator {
             (
                 "claude-code",
                 "claude",
-                vec!["--experimental-acp"],
-                TransportKind::Acp,
+                vec![
+                    "-p",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--bare",
+                    "--include-partial-messages",
+                    "--permission-mode",
+                    "acceptEdits",
+                ],
+                TransportKind::StreamJson,
             ),
             ("codex", "codex", vec!["--acp"], TransportKind::Acp),
             ("gemini", "gemini", vec![], TransportKind::CliWrap),
@@ -563,7 +575,7 @@ impl Orchestrator {
         let mut results = Vec::new();
 
         for config in &agents {
-            let mut connection = self.create_connection(config);
+            let mut connection = self.create_connection(config, None);
             let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
             let health = match connection.initialize(init_request).await {
                 Ok(_) => {
@@ -589,6 +601,7 @@ impl Orchestrator {
     pub async fn spawn_brain_session(
         &mut self,
         brain_override: Option<&str>,
+        permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
     ) -> Result<BrainSession> {
         let session_id = SessionId::new();
 
@@ -646,7 +659,7 @@ impl Orchestrator {
         }
 
         // 4. Spawn brain agent via AgentConnection.
-        let mut connection = self.create_connection(&brain_config);
+        let mut connection = self.create_connection(&brain_config, permission_tx);
 
         let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
         connection
@@ -689,12 +702,14 @@ impl Orchestrator {
     fn create_connection(
         &self,
         config: &spur_acp::config::AgentConfig,
+        permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
     ) -> Box<dyn AgentConnection> {
         match config.transport {
             TransportKind::Acp => Box::new(NativeAcpConnection::new(
                 config.name.clone(),
                 config.command.clone(),
                 config.args.clone(),
+                permission_tx,
             )),
             TransportKind::Stdio => Box::new(StdioAdapter::new(
                 config.name.clone(),
@@ -702,6 +717,11 @@ impl Orchestrator {
                 config.args.clone(),
             )),
             TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
+                config.name.clone(),
+                config.command.clone(),
+                config.args.clone(),
+            )),
+            TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
                 config.name.clone(),
                 config.command.clone(),
                 config.args.clone(),
@@ -933,6 +953,7 @@ impl Orchestrator {
                 agent_config.name.clone(),
                 agent_config.command.clone(),
                 agent_config.args.clone(),
+                None,
             )),
             TransportKind::Stdio => Box::new(StdioAdapter::new(
                 agent_config.name.clone(),
@@ -940,6 +961,11 @@ impl Orchestrator {
                 agent_config.args.clone(),
             )),
             TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
+                agent_config.name.clone(),
+                agent_config.command.clone(),
+                agent_config.args.clone(),
+            )),
+            TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
                 agent_config.name.clone(),
                 agent_config.command.clone(),
                 agent_config.args.clone(),
