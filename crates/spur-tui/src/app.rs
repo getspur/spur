@@ -31,6 +31,7 @@ pub struct App {
     session_detail: Option<SessionDetailView>,
     help_visible: bool,
     should_quit: bool,
+    dirty: bool,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
 }
 
@@ -42,6 +43,7 @@ impl App {
             session_detail: None,
             help_visible: false,
             should_quit: false,
+            dirty: true, // initial render
             user_input_tx,
         }
     }
@@ -74,12 +76,16 @@ impl App {
             if let Some(action) = action {
                 self.process_action(action);
             }
+            self.dirty = true;
         }
-        // Resize events are handled automatically by ratatui on next draw.
+        if let Event::Resize(_, _) = event {
+            self.dirty = true;
+        }
     }
 
     /// Forward a SpurEvent to all views that need it.
     pub fn handle_spur_event(&mut self, event: SpurEvent) {
+        self.dirty = true;
         // Dashboard always receives events (it tracks all sessions).
         self.dashboard.handle_spur_event(&event);
 
@@ -166,11 +172,19 @@ impl App {
 
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
+        // Only mark dirty for ticks when there are active agents (spinners animating)
+        // or text batches to flush.
         match self.current_view {
-            ViewId::Dashboard => self.dashboard.tick(),
+            ViewId::Dashboard => {
+                self.dashboard.tick();
+                if self.dashboard.has_active_agents() {
+                    self.dirty = true;
+                }
+            }
             ViewId::SessionDetail(_) => {
                 if let Some(ref mut detail) = self.session_detail {
                     detail.tick();
+                    self.dirty = true; // session detail always has activity
                 }
             }
         }
@@ -232,7 +246,10 @@ pub async fn run_tui(
             }
         }
 
-        terminal.draw(|f| app.render(f))?;
+        if app.dirty {
+            terminal.draw(|f| app.render(f))?;
+            app.dirty = false;
+        }
 
         if app.should_quit {
             break;

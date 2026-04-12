@@ -8,9 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::AgentState;
-
-const SPINNER_CHARS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+use super::{AgentState, SPINNER_FRAMES, focused_border_style};
 
 pub struct AgentsTree {
     focused: bool,
@@ -34,16 +32,10 @@ impl AgentsTree {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, agents: &[AgentState]) {
-        let border_style = if self.focused {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
         let block = Block::default()
             .title(" Agents ")
             .borders(Borders::ALL)
-            .border_style(border_style);
+            .border_style(focused_border_style(self.focused));
 
         let now = Instant::now();
         let mut lines: Vec<Line> = Vec::new();
@@ -98,7 +90,7 @@ impl AgentsTree {
     ) -> Line<'a> {
         // Spinner character
         let spinner = match agent.status.as_str() {
-            "working" | "spawned" => SPINNER_CHARS[(self.tick_counter % 10) as usize],
+            "working" | "spawned" => SPINNER_FRAMES[(self.tick_counter % 10) as usize],
             "idle" => '○',
             _ => '●',
         };
