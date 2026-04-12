@@ -21,4 +21,6 @@ pub use agent_client_protocol::{
     ToolCall as AcpToolCall, ToolCallUpdate as AcpToolCallUpdate,
     ToolCallStatus, ToolKind, ToolCallContent, ToolCallLocation,
     Plan, PlanEntry, PlanEntryStatus, PlanEntryPriority,
+    RequestPermissionRequest, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, RequestPermissionOutcome, SelectedPermissionOutcome,
 };

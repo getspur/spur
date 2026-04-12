@@ -118,4 +118,17 @@ pub enum TransportKind {
     CliWrap,
 }
 
+// ─── Permission Flow ──────────────────────────────────────────────────
+
+/// A permission request sent from the ACP thread to the TUI.
+pub struct PermissionRequest {
+    pub args: agent_client_protocol::RequestPermissionRequest,
+    pub reply_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
+}
+
+/// The user's permission decision.
+#[derive(Debug, Clone)]
+pub struct PermissionResponse {
+    pub option_id: String,
+}
 
