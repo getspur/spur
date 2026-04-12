@@ -6,7 +6,7 @@ pub mod registry;
 pub mod types;
 
 pub use config::AgentConfig;
-pub use connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter};
+pub use connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 pub use registry::AgentRegistry;
 
 // Re-export domain types

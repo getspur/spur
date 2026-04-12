@@ -18,6 +18,9 @@ pub use native::NativeAcpConnection;
 pub mod stdio_adapter;
 pub use stdio_adapter::StdioAdapter;
 
+pub mod stream_json_adapter;
+pub use stream_json_adapter::StreamJsonAdapter;
+
 use std::path::PathBuf;
 use std::pin::Pin;
 
