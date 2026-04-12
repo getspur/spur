@@ -122,7 +122,7 @@ fn draw_cost_panel(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("${:.2}", app.total_cost),
+            format!("${:.2}", app.total_cost()),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -167,7 +167,7 @@ fn draw_log_panel(f: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((app.log_scroll, 0));
+        .scroll((app.log_scroll as u16, 0));
 
     f.render_widget(paragraph, area);
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crossterm::{
     execute,
@@ -9,10 +9,14 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::broadcast;
 
-use spur_acp::{DelegationStatus, SessionEvent, SpurEvent};
+use spur_acp::{DelegationStatus, SessionEvent, SessionId, SpurEvent};
 
 use crate::events::handle_terminal_events;
 use crate::ui;
+
+// ─── Constants ───────────────────────────────────────────────────────
+
+const MAX_LOG_ENTRIES: usize = 5_000;
 
 // ─── Supporting types ──────────────────────────────────────────────────
 
@@ -30,16 +34,6 @@ pub struct AgentState {
     pub status: String,
 }
 
-/// Tracked state for an active session.
-#[allow(dead_code)]
-pub struct SessionState {
-    pub id: String,
-    pub agent: String,
-    pub role: String,
-    pub status: String,
-    pub duration: String,
-}
-
 /// A single entry in the event log.
 pub struct LogEntry {
     pub timestamp: String,
@@ -52,12 +46,8 @@ pub struct LogEntry {
 pub struct App {
     /// Agents and their current status.
     pub agents: Vec<AgentState>,
-    /// Recent events for the session log.
+    /// Recent events for the session log (capped at MAX_LOG_ENTRIES).
     pub event_log: Vec<LogEntry>,
-    /// Active sessions.
-    pub sessions: Vec<SessionState>,
-    /// Cumulative cost in USD.
-    pub total_cost: f64,
     /// Cost broken down by agent name.
     pub cost_by_agent: HashMap<String, f64>,
     /// Which panel has focus.
@@ -65,8 +55,8 @@ pub struct App {
     /// Whether the user has requested to quit.
     pub should_quit: bool,
     /// Scroll offset for the log panel.
-    pub log_scroll: u16,
-    /// Map from session-id to agent name (for log prefixes).
+    pub log_scroll: usize,
+    /// Map from session-id to (role, agent_name) for log prefixes.
     session_agent: HashMap<String, (String, String)>,
 }
 
@@ -75,8 +65,6 @@ impl Default for App {
         Self {
             agents: Vec::new(),
             event_log: Vec::new(),
-            sessions: Vec::new(),
-            total_cost: 0.0,
             cost_by_agent: HashMap::new(),
             selected_panel: Panel::Log,
             should_quit: false,
@@ -88,14 +76,7 @@ impl Default for App {
 
 impl App {
     fn now_stamp() -> String {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let total_secs = now.as_secs();
-        let hours = (total_secs / 3600) % 24;
-        let minutes = (total_secs / 60) % 60;
-        let seconds = total_secs % 60;
-        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+        chrono::Local::now().format("%H:%M:%S").to_string()
     }
 
     fn push_log(&mut self, prefix: impl Into<String>, message: impl Into<String>) {
@@ -104,9 +85,13 @@ impl App {
             prefix: prefix.into(),
             message: message.into(),
         });
+        // Evict oldest entries when over the cap.
+        if self.event_log.len() > MAX_LOG_ENTRIES {
+            let drain = self.event_log.len() - MAX_LOG_ENTRIES;
+            self.event_log.drain(..drain);
+        }
         // Auto-scroll to bottom
-        let len = self.event_log.len() as u16;
-        self.log_scroll = len.saturating_sub(1);
+        self.log_scroll = self.event_log.len().saturating_sub(1);
     }
 
     /// Lookup or build a prefix like "[brain:kiro]" from a session id.
@@ -118,37 +103,44 @@ impl App {
         }
     }
 
-    fn find_agent_mut(&mut self, name: &str) -> Option<&mut AgentState> {
-        self.agents.iter_mut().find(|a| a.name == name)
+    /// Update the agent status for the agent associated with the given session.
+    fn set_agent_status_for_session(&mut self, session_id: &str, status: &str) {
+        if let Some((_role, agent_name)) = self.session_agent.get(session_id).cloned() {
+            if let Some(a) = self.agents.iter_mut().find(|a| a.name == agent_name) {
+                a.status = status.into();
+            }
+        }
+    }
+
+    /// Common handler for BrainSpawned / WorkerSpawned events.
+    fn handle_agent_spawned(&mut self, agent: String, session: SessionId, role: &str) {
+        let sid = session.0.clone();
+        self.session_agent
+            .insert(sid, (role.into(), agent.clone()));
+        match self.agents.iter_mut().find(|a| a.name == agent) {
+            Some(a) => a.status = "spawned".into(),
+            None => self.agents.push(AgentState {
+                name: agent.clone(),
+                role: role.into(),
+                status: "spawned".into(),
+            }),
+        }
+        self.push_log(
+            format!("[{}:{}]", role, agent),
+            format!("{} agent spawned", role.chars().next().unwrap_or('?').to_uppercase().collect::<String>() + &role[1..]),
+        );
+    }
+
+    /// Compute total cost from per-agent costs.
+    pub fn total_cost(&self) -> f64 {
+        self.cost_by_agent.values().sum()
     }
 
     /// Process a single SpurEvent, updating app state accordingly.
     pub fn process_event(&mut self, event: SpurEvent) {
         match event {
             SpurEvent::BrainSpawned { agent, session } => {
-                let sid = session.0.clone();
-                self.session_agent
-                    .insert(sid.clone(), ("brain".into(), agent.clone()));
-                if self.find_agent_mut(&agent).is_none() {
-                    self.agents.push(AgentState {
-                        name: agent.clone(),
-                        role: "brain".into(),
-                        status: "spawned".into(),
-                    });
-                } else if let Some(a) = self.find_agent_mut(&agent) {
-                    a.status = "spawned".into();
-                }
-                self.sessions.push(SessionState {
-                    id: sid,
-                    agent: agent.clone(),
-                    role: "brain".into(),
-                    status: "spawned".into(),
-                    duration: String::new(),
-                });
-                self.push_log(
-                    format!("[brain:{}]", agent),
-                    "Brain agent spawned".to_string(),
-                );
+                self.handle_agent_spawned(agent, session, "brain");
             }
 
             SpurEvent::WorkerSpawned {
@@ -156,36 +148,13 @@ impl App {
                 session,
                 worktree: _,
             } => {
-                let sid = session.0.clone();
-                self.session_agent
-                    .insert(sid.clone(), ("worker".into(), agent.clone()));
-                if self.find_agent_mut(&agent).is_none() {
-                    self.agents.push(AgentState {
-                        name: agent.clone(),
-                        role: "worker".into(),
-                        status: "spawned".into(),
-                    });
-                } else if let Some(a) = self.find_agent_mut(&agent) {
-                    a.status = "spawned".into();
-                }
-                self.sessions.push(SessionState {
-                    id: sid,
-                    agent: agent.clone(),
-                    role: "worker".into(),
-                    status: "spawned".into(),
-                    duration: String::new(),
-                });
-                self.push_log(
-                    format!("[worker:{}]", agent),
-                    "Worker agent spawned".to_string(),
-                );
+                self.handle_agent_spawned(agent, session, "worker");
             }
 
             SpurEvent::AgentOutput { session, event: se } => {
                 let prefix = self.prefix_for_session(&session.0);
                 match se {
                     SessionEvent::TextDelta(text) => {
-                        // Trim for display; skip empty deltas
                         let trimmed = text.trim();
                         if !trimmed.is_empty() {
                             self.push_log(&prefix, trimmed.to_string());
@@ -193,40 +162,19 @@ impl App {
                     }
                     SessionEvent::StatusUpdate(status) => {
                         let status_str = format!("{:?}", status).to_lowercase();
-                        // Update agent status
-                        if let Some((_role, agent_name)) =
-                            self.session_agent.get(&session.0).cloned()
-                        {
-                            if let Some(a) = self.find_agent_mut(&agent_name) {
-                                a.status = status_str.clone();
-                            }
-                        }
+                        self.set_agent_status_for_session(&session.0, &status_str);
                         self.push_log(&prefix, format!("Status: {}", status_str));
                     }
                     SessionEvent::ToolCallStart { name, .. } => {
                         self.push_log(&prefix, format!("Tool call: {}", name));
                     }
-                    SessionEvent::ToolCallResult { .. } => {
-                        // tool results are usually verbose; skip
-                    }
+                    SessionEvent::ToolCallResult { .. } => {}
                     SessionEvent::Error { message, .. } => {
-                        if let Some((_role, agent_name)) =
-                            self.session_agent.get(&session.0).cloned()
-                        {
-                            if let Some(a) = self.find_agent_mut(&agent_name) {
-                                a.status = "error".into();
-                            }
-                        }
+                        self.set_agent_status_for_session(&session.0, "error");
                         self.push_log(&prefix, format!("Error: {}", message));
                     }
                     SessionEvent::RateLimitHit { retry_after } => {
-                        if let Some((_role, agent_name)) =
-                            self.session_agent.get(&session.0).cloned()
-                        {
-                            if let Some(a) = self.find_agent_mut(&agent_name) {
-                                a.status = "rate-limited".into();
-                            }
-                        }
+                        self.set_agent_status_for_session(&session.0, "rate-limited");
                         let msg = match retry_after {
                             Some(d) => format!("Rate limited (retry after {}s)", d.as_secs()),
                             None => "Rate limited".to_string(),
@@ -234,13 +182,7 @@ impl App {
                         self.push_log(&prefix, msg);
                     }
                     SessionEvent::Complete { .. } => {
-                        if let Some((_role, agent_name)) =
-                            self.session_agent.get(&session.0).cloned()
-                        {
-                            if let Some(a) = self.find_agent_mut(&agent_name) {
-                                a.status = "done".into();
-                            }
-                        }
+                        self.set_agent_status_for_session(&session.0, "done");
                         self.push_log(&prefix, "Session complete");
                     }
                 }
@@ -259,19 +201,11 @@ impl App {
                 status,
             } => {
                 let prefix = self.prefix_for_session(&worker_session.0);
-                if let Some((_role, agent_name)) =
-                    self.session_agent.get(&worker_session.0).cloned()
-                {
-                    if let Some(a) = self.find_agent_mut(&agent_name) {
-                        a.status = match &status {
-                            DelegationStatus::Success => "done",
-                            DelegationStatus::Failed { .. } => "error",
-                            DelegationStatus::Conflict { .. } => "error",
-                            DelegationStatus::Timeout => "error",
-                        }
-                        .into();
-                    }
-                }
+                let status_str = match &status {
+                    DelegationStatus::Success => "done",
+                    _ => "error",
+                };
+                self.set_agent_status_for_session(&worker_session.0, status_str);
                 let msg = match &status {
                     DelegationStatus::Success => "Delegation completed successfully".to_string(),
                     DelegationStatus::Failed { error } => {
@@ -287,19 +221,8 @@ impl App {
 
             SpurEvent::SessionCompleted { session, success } => {
                 let prefix = self.prefix_for_session(&session.0);
-                // Update session status
-                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session.0) {
-                    s.status = if success {
-                        "done".into()
-                    } else {
-                        "failed".into()
-                    };
-                }
-                if let Some((_role, agent_name)) = self.session_agent.get(&session.0).cloned() {
-                    if let Some(a) = self.find_agent_mut(&agent_name) {
-                        a.status = if success { "done" } else { "error" }.into();
-                    }
-                }
+                let status = if success { "done" } else { "error" };
+                self.set_agent_status_for_session(&session.0, status);
                 let msg = if success {
                     "Session completed successfully"
                 } else {
@@ -312,7 +235,7 @@ impl App {
                 agent,
                 retry_after,
             } => {
-                if let Some(a) = self.find_agent_mut(&agent) {
+                if let Some(a) = self.agents.iter_mut().find(|a| a.name == agent) {
                     a.status = "rate-limited".into();
                 }
                 let msg = match retry_after {
@@ -323,7 +246,7 @@ impl App {
             }
 
             SpurEvent::BrainFailover { from, to } => {
-                if let Some(a) = self.find_agent_mut(&from) {
+                if let Some(a) = self.agents.iter_mut().find(|a| a.name == from) {
                     a.status = "error".into();
                 }
                 self.push_log("[spur]", format!("Brain failover: {} -> {}", from, to));
@@ -334,9 +257,7 @@ impl App {
                 agent,
                 estimated_cost_usd,
             } => {
-                let entry = self.cost_by_agent.entry(agent).or_insert(0.0);
-                *entry += estimated_cost_usd;
-                self.total_cost += estimated_cost_usd;
+                *self.cost_by_agent.entry(agent).or_insert(0.0) += estimated_cost_usd;
             }
 
             SpurEvent::ConflictDetected { files } => {
@@ -398,10 +319,8 @@ pub async fn run_tui(
                 Err(broadcast::error::TryRecvError::Empty) => break,
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
                     app.push_log("[tui]", format!("Skipped {} events (lag)", n));
-                    // continue draining
                 }
                 Err(broadcast::error::TryRecvError::Closed) => {
-                    // Channel closed — will exit after final render
                     app.should_quit = true;
                     break;
                 }
