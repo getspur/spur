@@ -139,6 +139,9 @@ impl App {
         if let Some(ref mut detail) = self.session_detail {
             detail.handle_spur_event(&event);
         }
+
+        // Sync status to InputBars
+        self.sync_brain_status();
     }
 
     /// Process a single Action returned by a view.
@@ -177,6 +180,11 @@ impl App {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
+                // Add user message to Session Detail trace for instant feedback
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.push_user_message(&text);
+                }
+
                 if let Some(ref tx) = self.user_input_tx {
                     let input = UserInput {
                         session,
@@ -185,6 +193,8 @@ impl App {
                     };
                     let _ = tx.try_send(input);
                 }
+
+                self.sync_brain_status();
             }
 
             Action::ToggleVerbose => {
@@ -208,6 +218,24 @@ impl App {
             | Action::ScrollToBottom
             | Action::CycleFocus
             | Action::Tick => {}
+        }
+    }
+
+    /// Push current brain status to both views' InputBars.
+    fn sync_brain_status(&mut self) {
+        let status_str = match &self.brain_status {
+            BrainStatus::Idle => "idle",
+            BrainStatus::Thinking => "thinking",
+            BrainStatus::Streaming => "streaming",
+            BrainStatus::Ready => "ready",
+            BrainStatus::Error(_) => "error",
+        };
+
+        self.dashboard
+            .set_brain_status(self.brain_name.as_deref(), status_str);
+
+        if let Some(ref mut detail) = self.session_detail {
+            detail.set_brain_status(status_str);
         }
     }
 
