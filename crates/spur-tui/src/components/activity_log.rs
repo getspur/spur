@@ -48,8 +48,20 @@ impl ActivityLog {
         self.is_following = false;
     }
 
+    pub fn scroll_up_by(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.is_following = false;
+    }
+
     pub fn scroll_down(&mut self, visible_height: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(1);
+        if self.scroll_offset >= self.entries.len().saturating_sub(visible_height) {
+            self.is_following = true;
+        }
+    }
+
+    pub fn scroll_down_by(&mut self, lines: usize, visible_height: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
         if self.scroll_offset >= self.entries.len().saturating_sub(visible_height) {
             self.is_following = true;
         }
