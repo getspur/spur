@@ -13,3 +13,12 @@ pub use domain::{DelegationResult, DelegationStatus, SpurEvent};
 
 // Re-export all remaining types for backward compatibility
 pub use types::*;
+
+// Re-export ACP SDK types for consumer crates (TUI, orchestrator).
+pub use agent_client_protocol::{
+    ContentBlock, ContentChunk, TextContent,
+    SessionNotification, SessionUpdate,
+    ToolCall as AcpToolCall, ToolCallUpdate as AcpToolCallUpdate,
+    ToolCallStatus, ToolKind, ToolCallContent, ToolCallLocation,
+    Plan, PlanEntry, PlanEntryStatus, PlanEntryPriority,
+};
