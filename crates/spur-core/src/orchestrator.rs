@@ -407,19 +407,37 @@ impl Orchestrator {
                         }
                     };
 
+                    let original_session_id = session_id.clone();
                     match self
                         .load_brain_session(connection, brain_name, permission_tx.clone(), session_id)
                         .await
                     {
                         Ok((session, mut history_stream)) => {
                             let spur_id = session.spur_session_id.clone();
-                            // Drain history stream before making the session available.
+                            // Drain history stream (populated if load_session worked,
+                            // empty if we fell back to new_session).
+                            let mut history_count = 0usize;
                             while let Some(notification) = history_stream.next().await {
+                                history_count += 1;
                                 self.emit(SpurEvent::AgentNotification {
                                     session: spur_id.clone(),
                                     notification,
                                 });
                             }
+
+                            // If no history came from the agent (new_session fallback),
+                            // replay conversation from disk so the user sees context.
+                            if history_count == 0 {
+                                let entries = Self::read_session_history_from_disk(&original_session_id);
+                                if !entries.is_empty() {
+                                    info!(count = entries.len(), "Replaying conversation history from disk");
+                                    self.emit(SpurEvent::SessionHistory {
+                                        session: spur_id.clone(),
+                                        entries,
+                                    });
+                                }
+                            }
+
                             brain = Some(session);
                             self.emit(SpurEvent::TurnComplete { session: spur_id });
                         }
@@ -661,7 +679,6 @@ impl Orchestrator {
                     "--output-format",
                     "stream-json",
                     "--verbose",
-                    "--bare",
                     "--include-partial-messages",
                     "--permission-mode",
                     "acceptEdits",
@@ -1039,6 +1056,65 @@ impl Orchestrator {
         }
 
         anyhow::bail!("No filesystem fallback available for agent '{}'", agent_name)
+    }
+
+    /// Read conversation history from a kiro session's JSONL file on disk.
+    /// Returns (role, text) pairs for Prompt and AssistantMessage entries.
+    fn read_session_history_from_disk(session_uuid: &str) -> Vec<spur_acp::HistoryEntry> {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let jsonl_path = home.join(format!(".kiro/sessions/cli/{}.jsonl", session_uuid));
+
+        let content = match std::fs::read_to_string(&jsonl_path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut entries = Vec::new();
+        for line in content.lines() {
+            let json: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let kind = json.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Extract text from the first content block.
+            let text = json
+                .pointer("/data/content")
+                .and_then(|arr| arr.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let item_kind = item.get("kind").and_then(|v| v.as_str())?;
+                            if item_kind == "text" {
+                                item.get("data").and_then(|v| v.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .next()
+                })
+                .unwrap_or("")
+                .to_string();
+
+            if text.is_empty() {
+                continue;
+            }
+
+            match kind {
+                "Prompt" => entries.push(spur_acp::HistoryEntry {
+                    role: "user".into(),
+                    text,
+                }),
+                "AssistantMessage" => entries.push(spur_acp::HistoryEntry {
+                    role: "assistant".into(),
+                    text,
+                }),
+                _ => {} // Skip ToolResults, etc. for v1
+            }
+        }
+        entries
     }
 
     fn create_connection(

@@ -95,6 +95,29 @@ impl SessionDetailView {
         });
     }
 
+    /// Replay conversation history from disk into the trace.
+    pub fn replay_history(&mut self, entries: &[spur_acp::HistoryEntry]) {
+        for entry in entries {
+            match entry.role.as_str() {
+                "user" => {
+                    self.react_trace.push(TraceEntry {
+                        kind: TraceKind::UserMessage,
+                        text: entry.text.clone(),
+                        timestamp: String::new(),
+                    });
+                }
+                "assistant" => {
+                    self.react_trace.push(TraceEntry {
+                        kind: TraceKind::Observe,
+                        text: entry.text.clone(),
+                        timestamp: String::new(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn resolve_pending_permissions(&mut self) {
         self.react_trace.resolve_pending_permissions();
     }
