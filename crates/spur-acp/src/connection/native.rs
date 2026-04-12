@@ -772,3 +772,72 @@ fn auto_deny(
         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
     ))
 }
+
+// ─── Terminal helpers ────────────────────────────────────────────────────────
+
+fn append_terminal_output(
+    output: &std::rc::Rc<std::cell::RefCell<String>>,
+    truncated: &std::rc::Rc<Cell<bool>>,
+    byte_limit: Option<u64>,
+    data: &[u8],
+) {
+    let text = String::from_utf8_lossy(data);
+    let mut buf = output.borrow_mut();
+    buf.push_str(&text);
+    if let Some(limit) = byte_limit {
+        let limit = limit as usize;
+        if buf.len() > limit {
+            let mut start = buf.len() - limit;
+            while !buf.is_char_boundary(start) {
+                start += 1;
+            }
+            *buf = buf[start..].to_string();
+            truncated.set(true);
+        }
+    }
+}
+
+async fn terminal_reader(
+    mut stdout: tokio::process::ChildStdout,
+    mut stderr: tokio::process::ChildStderr,
+    mut child: tokio::process::Child,
+    output: std::rc::Rc<std::cell::RefCell<String>>,
+    truncated: std::rc::Rc<Cell<bool>>,
+    byte_limit: Option<u64>,
+    exit_tx: tokio::sync::watch::Sender<Option<TerminalExitStatus>>,
+) {
+    let mut stdout_buf = [0u8; 4096];
+    let mut stderr_buf = [0u8; 4096];
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+
+    loop {
+        if stdout_done && stderr_done { break; }
+        tokio::select! {
+            result = AsyncReadExt::read(&mut stdout, &mut stdout_buf), if !stdout_done => {
+                match result {
+                    Ok(0) | Err(_) => stdout_done = true,
+                    Ok(n) => append_terminal_output(&output, &truncated, byte_limit, &stdout_buf[..n]),
+                }
+            }
+            result = AsyncReadExt::read(&mut stderr, &mut stderr_buf), if !stderr_done => {
+                match result {
+                    Ok(0) | Err(_) => stderr_done = true,
+                    Ok(n) => append_terminal_output(&output, &truncated, byte_limit, &stderr_buf[..n]),
+                }
+            }
+        }
+    }
+
+    let exit_status = match child.wait().await {
+        Ok(status) => {
+            let mut es = TerminalExitStatus::new();
+            if let Some(code) = status.code() {
+                es = es.exit_code(code as u32);
+            }
+            es
+        }
+        Err(_) => TerminalExitStatus::new(),
+    };
+    let _ = exit_tx.send(Some(exit_status));
+}
