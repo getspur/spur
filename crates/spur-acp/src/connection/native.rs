@@ -23,8 +23,12 @@
 //! | `shutdown()` | Drop the connection, kill the child process |
 //! | `health()` | Return cached `AgentHealth` |
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
+
+use tokio::io::AsyncReadExt;
 
 use async_trait::async_trait;
 use futures::stream::unfold;
@@ -37,6 +41,12 @@ use agent_client_protocol::{
     ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionNotification, WriteTextFileRequest, WriteTextFileResponse,
+    CreateTerminalRequest, CreateTerminalResponse,
+    KillTerminalRequest, KillTerminalResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse,
+    TerminalOutputRequest, TerminalOutputResponse,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    TerminalExitStatus, TerminalId,
 };
 
 use crate::connection::AgentConnection;
@@ -450,8 +460,10 @@ fn acp_thread_main(
             notification_tx: notification_tx_for_client,
             cwd: std::rc::Rc::new(std::cell::RefCell::new(PathBuf::from("."))),
             permission_tx,
+            terminals: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
         };
         let cwd_ref = spur_client.cwd.clone();
+        let terminals_ref = spur_client.terminals.clone();
 
         // Create the ClientSideConnection.
         let (connection, io_future) = ClientSideConnection::new(
@@ -551,6 +563,16 @@ fn acp_thread_main(
                 }
                 AcpCommand::Shutdown { reply } => {
                     tracing::debug!(agent = %agent_name, "NativeAcpConnection: ACP thread received shutdown");
+                    // Kill all spawned terminals.
+                    for (id, terminal) in terminals_ref.borrow().iter() {
+                        if terminal.exit_rx.borrow().is_none() {
+                            tracing::debug!(terminal = %id, "Killing terminal on shutdown");
+                            let _ = std::process::Command::new("kill")
+                                .arg("-9")
+                                .arg(terminal.pid.to_string())
+                                .status();
+                        }
+                    }
                     // Kill the child process.
                     let _ = child.kill().await;
                     let _ = reply.send(Ok(()));
@@ -565,6 +587,13 @@ fn acp_thread_main(
 
 // ─── SpurAcpClientDynamic ───────────────────────────────────────────────────
 
+struct TerminalState {
+    output: std::rc::Rc<std::cell::RefCell<String>>,
+    truncated: std::rc::Rc<Cell<bool>>,
+    exit_rx: tokio::sync::watch::Receiver<Option<TerminalExitStatus>>,
+    pid: u32,
+}
+
 /// A variant of `SpurAcpClient` that reads the notification sender and cwd
 /// from `Rc<RefCell<_>>` so they can be swapped per-prompt.
 ///
@@ -575,6 +604,7 @@ struct SpurAcpClientDynamic {
     notification_tx: std::rc::Rc<std::cell::RefCell<mpsc::UnboundedSender<SessionNotification>>>,
     cwd: std::rc::Rc<std::cell::RefCell<PathBuf>>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
+    terminals: std::rc::Rc<std::cell::RefCell<HashMap<String, TerminalState>>>,
 }
 
 #[async_trait::async_trait(?Send)]
