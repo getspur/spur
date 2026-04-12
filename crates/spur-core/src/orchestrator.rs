@@ -18,7 +18,7 @@ use spur_pm::Issue;
 
 use agent_client_protocol::{
     ContentBlock, InitializeRequest, McpServer, McpServerStdio, PromptRequest,
-    ProtocolVersion, SessionNotification, SessionUpdate, TextContent,
+    ProtocolVersion, SessionUpdate, TextContent,
 };
 
 use spur_cost::CostTracker;
@@ -238,7 +238,7 @@ impl Orchestrator {
 
         // 8. Process brain output + delegation callbacks concurrently.
         let pr_url: Option<String> = None;
-        let mut success = true;
+        let success = true;
 
         // Spawn delegation handler.
         let max_concurrent = self.config.worktree.max_concurrent;
@@ -252,36 +252,22 @@ impl Orchestrator {
 
         // Stream brain output.
         while let Some(notification) = stream.next().await {
-            // Convert SDK SessionNotification to spur SessionEvent for the event bus.
-            let event = notification_to_session_event(&notification);
-
-            match &event {
-                SessionEvent::TextDelta(text) | SessionEvent::MessageDelta(text) => {
-                    print!("{text}");
+            match &notification.update {
+                SessionUpdate::AgentThoughtChunk(chunk)
+                | SessionUpdate::AgentMessageChunk(chunk) => {
+                    if let ContentBlock::Text(tc) = &chunk.content {
+                        print!("{}", tc.text);
+                    }
                 }
-                SessionEvent::ToolCallStart { name, .. } => {
-                    debug!(tool = %name, "Brain calling tool");
-                }
-                SessionEvent::Error { code, message } => {
-                    error!(code, message = %message, "Brain agent error");
-                    success = false;
-                }
-                SessionEvent::RateLimitHit { retry_after } => {
-                    warn!(retry_after = ?retry_after, "Brain hit rate limit");
-                    self.emit(SpurEvent::RateLimitDetected {
-                        agent: brain_name.clone(),
-                        retry_after: *retry_after,
-                    });
-                }
-                SessionEvent::Complete { .. } => {
-                    info!(brain = %brain_name, "Brain session completed");
+                SessionUpdate::ToolCall(tc) => {
+                    debug!(tool = %tc.title, "Brain calling tool");
                 }
                 _ => {}
             }
 
-            self.emit(SpurEvent::AgentOutput {
+            self.emit(SpurEvent::AgentNotification {
                 session: session_id.clone(),
-                event,
+                notification,
             });
         }
 
@@ -393,10 +379,9 @@ impl Orchestrator {
                     item = stream.next() => {
                         match item {
                             Some(notification) => {
-                                let event = notification_to_session_event(&notification);
-                                self.emit(SpurEvent::AgentOutput {
+                                self.emit(SpurEvent::AgentNotification {
                                     session: b.spur_session_id.clone(),
-                                    event,
+                                    notification,
                                 });
                             }
                             None => break, // Turn complete
@@ -496,16 +481,14 @@ impl Orchestrator {
 
         let mut stream = connection.prompt(prompt_request).await?;
 
-        let mut success = true;
+        let success = true;
         while let Some(notification) = stream.next().await {
-            let event = notification_to_session_event(&notification);
-            match &event {
-                SessionEvent::TextDelta(text) | SessionEvent::MessageDelta(text) => {
-                    print!("{text}");
-                }
-                SessionEvent::Error { message, .. } => {
-                    error!(message = %message, "Agent error");
-                    success = false;
+            match &notification.update {
+                SessionUpdate::AgentThoughtChunk(chunk)
+                | SessionUpdate::AgentMessageChunk(chunk) => {
+                    if let ContentBlock::Text(tc) = &chunk.content {
+                        print!("{}", tc.text);
+                    }
                 }
                 _ => {}
             }
@@ -1020,15 +1003,12 @@ impl Orchestrator {
         match connection.prompt(prompt_request).await {
             Ok(mut stream) => {
                 while let Some(notification) = stream.next().await {
-                    let event = notification_to_session_event(&notification);
-                    match event {
-                        SessionEvent::TextDelta(text)
-                        | SessionEvent::MessageDelta(text) => {
-                            output_text.push_str(&text);
-                        }
-                        SessionEvent::Error { message, .. } => {
-                            worker_success = false;
-                            output_text.push_str(&format!("\nError: {message}"));
+                    match &notification.update {
+                        SessionUpdate::AgentThoughtChunk(chunk)
+                        | SessionUpdate::AgentMessageChunk(chunk) => {
+                            if let ContentBlock::Text(tc) = &chunk.content {
+                                output_text.push_str(&tc.text);
+                            }
                         }
                         _ => {}
                     }
@@ -1087,56 +1067,6 @@ impl Orchestrator {
             summary,
             estimated_cost_usd: cost,
         }
-    }
-}
-
-// ─── SDK → spur type conversion ─────────────────────────────────────
-
-/// Convert an SDK `SessionNotification` into spur's internal `SessionEvent`.
-///
-/// This is the boundary conversion layer. Task 11 will unify the types;
-/// for now we translate at the orchestrator boundary so SpurEvent can
-/// continue to carry `SessionEvent`.
-fn notification_to_session_event(notification: &SessionNotification) -> SessionEvent {
-    match &notification.update {
-        SessionUpdate::AgentMessageChunk(chunk) => {
-            // Agent's RESPONSE to the user — render as chat message.
-            if let ContentBlock::Text(text_content) = &chunk.content {
-                SessionEvent::MessageDelta(text_content.text.clone())
-            } else {
-                SessionEvent::MessageDelta("[non-text content]".to_string())
-            }
-        }
-        SessionUpdate::AgentThoughtChunk(chunk) => {
-            // Agent's INTERNAL THINKING — render as dim reasoning.
-            if let ContentBlock::Text(text_content) = &chunk.content {
-                SessionEvent::TextDelta(text_content.text.clone())
-            } else {
-                SessionEvent::StatusUpdate(AgentStatus::Thinking)
-            }
-        }
-        SessionUpdate::ToolCall(tool_call) => SessionEvent::ToolCallStart {
-            id: tool_call.tool_call_id.to_string(),
-            name: tool_call.title.clone(),
-            input: tool_call
-                .raw_input
-                .clone()
-                .unwrap_or(serde_json::Value::Null),
-        },
-        SessionUpdate::ToolCallUpdate(tool_call_update) => SessionEvent::ToolCallResult {
-            id: tool_call_update.tool_call_id.to_string(),
-            output: tool_call_update
-                .fields
-                .raw_output
-                .clone()
-                .unwrap_or(serde_json::Value::Null),
-        },
-        // Map remaining SDK variants to appropriate spur events.
-        SessionUpdate::UserMessageChunk(_) => {
-            SessionEvent::StatusUpdate(AgentStatus::Working)
-        }
-        SessionUpdate::Plan(_) => SessionEvent::StatusUpdate(AgentStatus::Thinking),
-        _ => SessionEvent::StatusUpdate(AgentStatus::Working),
     }
 }
 
