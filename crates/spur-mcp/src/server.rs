@@ -229,7 +229,7 @@ impl McpCallbackServer {
                 }
             };
 
-            let id = request.id.clone().unwrap_or(Value::Null);
+            let _id = request.id.clone().unwrap_or(Value::Null);
             let response = self.dispatch(request).await;
 
             let mut buf = serde_json::to_vec(&response)?;
