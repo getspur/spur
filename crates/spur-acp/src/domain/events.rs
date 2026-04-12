@@ -28,4 +28,13 @@ pub enum SpurEvent {
     // ── Session picker events ───────────────────────────────────────
     SessionsListed { agent: String, sessions: Vec<SessionInfo> },
     SessionsListError { message: String },
+    /// Replayed conversation history from disk (when agent doesn't support load_session).
+    SessionHistory { session: SessionId, entries: Vec<HistoryEntry> },
+}
+
+/// A single entry in a replayed conversation history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub role: String,
+    pub text: String,
 }

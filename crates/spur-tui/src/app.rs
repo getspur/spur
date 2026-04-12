@@ -186,6 +186,12 @@ impl App {
                 }
                 return;
             }
+            SpurEvent::SessionHistory { ref entries, .. } => {
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.replay_history(entries);
+                }
+                return;
+            }
             _ => {}
         }
 
