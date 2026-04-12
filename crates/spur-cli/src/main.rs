@@ -396,7 +396,7 @@ async fn main() -> Result<()> {
 async fn cmd_init(repo_root: PathBuf) -> Result<()> {
     println!("[spur] Scanning for agents...");
     let config = SpurConfig::default();
-    let mut orch = Orchestrator::new(repo_root, config)?;
+    let mut orch = Orchestrator::new(repo_root.clone(), config)?;
     let found = orch.init_agents().await?;
 
     if found.is_empty() {
@@ -409,7 +409,23 @@ async fn cmd_init(repo_root: PathBuf) -> Result<()> {
         }
     }
 
-    // TODO: write agents.toml
+    // Build config from discovered agents and write to .spur/config.toml
+    let agents_entries: Vec<spur_acp::config::AgentConfig> = orch
+        .registry
+        .list()
+        .into_iter()
+        .cloned()
+        .collect();
+    let mut persist_config = SpurConfig::default();
+    persist_config.agents.entries = agents_entries;
+
+    let config_dir = repo_root.join(".spur");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("config.toml");
+    let toml_str = toml::to_string_pretty(&persist_config)?;
+    std::fs::write(&config_path, toml_str)?;
+    println!("[spur] Config written to {}", config_path.display());
+
     println!("[spur] Initialized.");
     Ok(())
 }
