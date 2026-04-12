@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/spur-acp",
+    "crates/spur-mcp",
+    "crates/spur-core",
+    "crates/spur-pm",
+    "crates/spur-worktree",
+    "crates/spur-cost",
+    "crates/spur-tui",
+    "crates/spur-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+pin-project-lite = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+directories = "5"
+
+# Workspace crates
+spur-acp = { path = "crates/spur-acp" }
+spur-mcp = { path = "crates/spur-mcp" }
+spur-core = { path = "crates/spur-core" }
+spur-pm = { path = "crates/spur-pm" }
+spur-worktree = { path = "crates/spur-worktree" }
+spur-cost = { path = "crates/spur-cost" }
+spur-tui = { path = "crates/spur-tui" }

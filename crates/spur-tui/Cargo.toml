@@ -1,0 +1,15 @@
+[package]
+name = "spur-tui"
+description = "Ratatui-based terminal dashboard (Phase 2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+spur-acp = { workspace = true }
+spur-core = { workspace = true }
+tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+anyhow = { workspace = true }
