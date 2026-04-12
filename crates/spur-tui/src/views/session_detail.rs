@@ -52,6 +52,28 @@ impl SessionDetailView {
         crate::components::format_elapsed(self.started_at)
     }
 
+    /// Update the brain status label shown in the InputBar.
+    pub fn set_brain_status(&mut self, status: &str) {
+        let label = match status {
+            "idle" => None,
+            "thinking" => Some(format!("[{} \u{00b7}\u{00b7}\u{00b7}]", self.agent_name)),
+            "streaming" => Some(format!("[{} \u{25b8}\u{25b8}\u{25b8}]", self.agent_name)),
+            "ready" => Some(format!("[{}: ready]", self.agent_name)),
+            "error" => Some(format!("[{}: error]", self.agent_name)),
+            other => Some(format!("[{}: {}]", self.agent_name, other)),
+        };
+        self.input_bar.set_status(label);
+    }
+
+    /// Add a user message to the ReAct trace for instant feedback.
+    pub fn push_user_message(&mut self, text: &str) {
+        self.react_trace.push(TraceEntry {
+            kind: TraceKind::UserMessage,
+            text: text.to_string(),
+            timestamp: Self::now_stamp(),
+        });
+    }
+
 }
 
 impl View for SessionDetailView {
