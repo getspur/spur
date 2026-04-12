@@ -147,6 +147,13 @@ impl DashboardView {
     fn first_session_id(&self) -> Option<String> {
         self.session_agent.keys().next().cloned()
     }
+
+    /// Look up the (agent_name, role) for a given session id.
+    pub fn agent_info_for_session(&self, session_id: &str) -> Option<(String, String)> {
+        self.session_agent
+            .get(session_id)
+            .map(|(role, agent)| (agent.clone(), role.clone()))
+    }
 }
 
 impl View for DashboardView {
