@@ -15,6 +15,7 @@ use spur_acp::{DelegationStatus, SessionEvent, SpurEvent};
 use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
+use crate::components::input_bar::InputBar;
 use crate::components::status_bar::StatusBar;
 use crate::components::{AgentState, LogEntry, LogEntryKind};
 
@@ -31,6 +32,7 @@ pub enum Panel {
 pub struct DashboardView {
     agents_tree: AgentsTree,
     activity_log: ActivityLog,
+    input_bar: InputBar,
     agents: Vec<AgentState>,
     cost_by_agent: HashMap<String, f64>,
     session_agent: HashMap<String, (String, String)>,
@@ -48,6 +50,7 @@ impl DashboardView {
         Self {
             agents_tree: AgentsTree::new(),
             activity_log,
+            input_bar: InputBar::new(),
             agents: Vec::new(),
             cost_by_agent: HashMap::new(),
             session_agent: HashMap::new(),
@@ -159,58 +162,127 @@ impl DashboardView {
             .get(session_id)
             .map(|(role, agent)| (agent.clone(), role.clone()))
     }
+
+    /// Update the brain status label shown in the InputBar.
+    pub fn set_brain_status(&mut self, name: Option<&str>, status: &str) {
+        let label = match (name, status) {
+            (_, "idle") => None,
+            (Some(n), "thinking") => Some(format!("[{} \u{00b7}\u{00b7}\u{00b7}]", n)),
+            (Some(n), "streaming") => Some(format!("[{} \u{25b8}\u{25b8}\u{25b8}]", n)),
+            (Some(n), "ready") => Some(format!("[{}: ready]", n)),
+            (Some(n), "error") => Some(format!("[{}: error]", n)),
+            (None, _) => None,
+            (Some(n), other) => Some(format!("[{}: {}]", n, other)),
+        };
+        self.input_bar.set_status(label);
+    }
 }
 
 impl View for DashboardView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                // Default visible height estimate; actual value depends on render area
-                self.activity_log.scroll_down(20);
-                Some(Action::ScrollDown)
+        // Priority 1: If key is printable or editing, route to InputBar
+        let is_editing_key = matches!(
+            key.code,
+            KeyCode::Char(_)
+                | KeyCode::Backspace
+                | KeyCode::Delete
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Enter
+        );
+
+        if is_editing_key {
+            // Check if InputBar handles it (Enter on non-empty submits)
+            if let Some((text, interrupt)) = self.input_bar.handle_key(key) {
+                // Text submitted — send as message
+                return Some(Action::SendMessage {
+                    session: spur_acp::SessionId::new(),
+                    text,
+                    interrupt,
+                });
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.activity_log.scroll_up();
-                Some(Action::ScrollUp)
+
+            // If InputBar was empty and user typed a navigation char, treat as nav
+            if self.input_bar.text().len() == 1 {
+                let ch = self.input_bar.text().chars().next().unwrap();
+                match ch {
+                    'j' => {
+                        self.input_bar.clear();
+                        self.activity_log.scroll_down(20);
+                        return Some(Action::ScrollDown);
+                    }
+                    'k' => {
+                        self.input_bar.clear();
+                        self.activity_log.scroll_up();
+                        return Some(Action::ScrollUp);
+                    }
+                    'g' => {
+                        self.input_bar.clear();
+                        self.activity_log.scroll_to_top();
+                        return Some(Action::ScrollToTop);
+                    }
+                    'G' => {
+                        self.input_bar.clear();
+                        self.activity_log.scroll_to_bottom();
+                        return Some(Action::ScrollToBottom);
+                    }
+                    'v' => {
+                        self.input_bar.clear();
+                        self.verbose = !self.verbose;
+                        return Some(Action::ToggleVerbose);
+                    }
+                    'q' => {
+                        self.input_bar.clear();
+                        return Some(Action::Quit);
+                    }
+                    '?' => {
+                        self.input_bar.clear();
+                        return Some(Action::ShowHelp);
+                    }
+                    _ => {}
+                }
             }
-            KeyCode::Char('g') => {
-                self.activity_log.scroll_to_top();
-                Some(Action::ScrollToTop)
+
+            // Enter on empty InputBar → drill into session (if any)
+            if key.code == KeyCode::Enter && self.input_bar.is_empty() {
+                return self.first_session_id().map(|sid| {
+                    Action::NavigateTo(ViewId::SessionDetail(spur_acp::SessionId(sid)))
+                });
             }
-            KeyCode::Char('G') => {
-                self.activity_log.scroll_to_bottom();
-                Some(Action::ScrollToBottom)
-            }
-            KeyCode::Tab => {
-                self.focused_panel = match self.focused_panel {
-                    Panel::Agents => Panel::Log,
-                    Panel::Log => Panel::Agents,
-                };
-                self.agents_tree
-                    .set_focused(self.focused_panel == Panel::Agents);
-                self.activity_log
-                    .set_focused(self.focused_panel == Panel::Log);
-                Some(Action::CycleFocus)
-            }
-            KeyCode::Enter => self
-                .first_session_id()
-                .map(|sid| Action::NavigateTo(ViewId::SessionDetail(spur_acp::SessionId(sid)))),
-            KeyCode::Char(c @ '1'..='9') => {
-                let n = (c as u8 - b'0') as usize;
-                self.nth_session_id(n)
-                    .map(|sid| Action::NavigateTo(ViewId::SessionDetail(spur_acp::SessionId(sid))))
-            }
-            KeyCode::Char('v') => {
-                self.verbose = !self.verbose;
-                Some(Action::ToggleVerbose)
-            }
-            KeyCode::Char('i') => self
-                .first_session_id()
-                .map(|sid| Action::NavigateTo(ViewId::SessionDetail(spur_acp::SessionId(sid)))),
-            KeyCode::Char('?') => Some(Action::ShowHelp),
-            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-            _ => None,
+
+            return None;
         }
+
+        // Priority 2: Non-editing keys when InputBar is empty
+        if self.input_bar.is_empty() {
+            match key.code {
+                KeyCode::Up => {
+                    self.activity_log.scroll_up();
+                    return Some(Action::ScrollUp);
+                }
+                KeyCode::Down => {
+                    self.activity_log.scroll_down(20);
+                    return Some(Action::ScrollDown);
+                }
+                KeyCode::Tab => {
+                    self.focused_panel = match self.focused_panel {
+                        Panel::Agents => Panel::Log,
+                        Panel::Log => Panel::Agents,
+                    };
+                    self.agents_tree
+                        .set_focused(self.focused_panel == Panel::Agents);
+                    self.activity_log
+                        .set_focused(self.focused_panel == Panel::Log);
+                    return Some(Action::CycleFocus);
+                }
+                KeyCode::Esc => return Some(Action::Quit),
+                _ => {}
+            }
+        }
+
+        None
     }
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {
@@ -530,7 +602,6 @@ impl View for DashboardView {
 
     fn render(&self, frame: &mut Frame, area: Rect) {
         if self.agents.is_empty() {
-            // Empty state: centered welcome message
             let lines = vec![
                 Line::from(""),
                 Line::from(Span::styled(
@@ -541,26 +612,26 @@ impl View for DashboardView {
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Waiting for agents to spawn...",
+                    "Multi-agent orchestrator",
                     Style::default().fg(Color::DarkGray),
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Run `spur run <issue>` to start",
+                    "Type a task below to start",
                     Style::default().fg(Color::DarkGray),
                 )),
             ];
             let paragraph = Paragraph::new(lines)
                 .alignment(ratatui::layout::Alignment::Center);
 
-            // Use the full area minus 1 line for the status bar
+            let input_height = self.input_bar.required_height();
             let chunks = Layout::vertical([
                 Constraint::Min(4),
+                Constraint::Length(input_height),
                 Constraint::Length(1),
             ])
             .split(area);
 
-            // Center vertically
             let v_pad = chunks[0].height.saturating_sub(6) / 2;
             let content_area = Rect {
                 x: chunks[0].x,
@@ -569,9 +640,10 @@ impl View for DashboardView {
                 height: chunks[0].height.saturating_sub(v_pad),
             };
             frame.render_widget(paragraph, content_area);
+            self.input_bar.render(frame, chunks[1]);
             StatusBar::render(
                 frame,
-                chunks[1],
+                chunks[2],
                 &ViewId::Dashboard,
                 self.total_cost(),
                 &self.elapsed(),
@@ -579,23 +651,26 @@ impl View for DashboardView {
             return;
         }
 
-        // Normal layout: agents tree on top, activity log fills middle, status bar at bottom
         let agents_height = (self.agents.len() as u16 + 2)
             .clamp(4, area.height * 40 / 100)
             .min(12);
 
+        let input_height = self.input_bar.required_height();
+
         let chunks = Layout::vertical([
-            Constraint::Length(agents_height), // agents tree
-            Constraint::Min(4),               // activity log (fills)
-            Constraint::Length(1),             // status bar
+            Constraint::Length(agents_height),    // agents tree
+            Constraint::Min(4),                  // activity log (fills)
+            Constraint::Length(input_height),     // input bar
+            Constraint::Length(1),                // status bar
         ])
         .split(area);
 
         self.agents_tree.render(frame, chunks[0], &self.agents);
         self.activity_log.render(frame, chunks[1]);
+        self.input_bar.render(frame, chunks[2]);
         StatusBar::render(
             frame,
-            chunks[2],
+            chunks[3],
             &ViewId::Dashboard,
             self.total_cost(),
             &self.elapsed(),
