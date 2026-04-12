@@ -13,15 +13,22 @@ use crate::components::help_overlay::HelpOverlay;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
 use crate::views::session_detail::SessionDetailView;
+use crate::views::session_picker::SessionPickerView;
 use crate::views::View;
 
 // ─── Supporting types ──────────────────────────────────────────────────
 
-/// A user input message destined for a specific agent session.
-pub struct UserInput {
-    pub session: SessionId,
-    pub text: String,
-    pub interrupt: bool,
+/// A user input message or control command sent from the TUI to the backend.
+pub enum UserInput {
+    Message {
+        session: SessionId,
+        text: String,
+        interrupt: bool,
+    },
+    ListSessions,
+    ResumeSession {
+        session_id: String,
+    },
 }
 
 /// Tracks the brain agent's current state for status indicators.
@@ -40,6 +47,7 @@ pub struct App {
     current_view: ViewId,
     dashboard: DashboardView,
     session_detail: Option<SessionDetailView>,
+    session_picker: Option<SessionPickerView>,
     help_visible: bool,
     should_quit: bool,
     dirty: bool,
@@ -52,11 +60,18 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(user_input_tx: Option<mpsc::Sender<UserInput>>) -> Self {
-        Self {
-            current_view: ViewId::Dashboard,
+    pub fn new(user_input_tx: Option<mpsc::Sender<UserInput>>, start_in_picker: bool) -> Self {
+        let (current_view, session_picker) = if start_in_picker {
+            (ViewId::SessionPicker, Some(SessionPickerView::new()))
+        } else {
+            (ViewId::Dashboard, None)
+        };
+
+        let app = Self {
+            current_view,
             dashboard: DashboardView::new(),
             session_detail: None,
+            session_picker,
             help_visible: false,
             should_quit: false,
             dirty: true, // initial render
@@ -65,7 +80,15 @@ impl App {
             brain_name: None,
             pending_user_messages: Vec::new(),
             pending_permission: None,
+        };
+
+        if start_in_picker {
+            if let Some(ref tx) = app.user_input_tx {
+                let _ = tx.try_send(UserInput::ListSessions);
+            }
         }
+
+        app
     }
 
     /// Dispatch a crossterm event (keyboard, resize, mouse, etc.) to the active view.
@@ -91,6 +114,9 @@ impl App {
                         } else {
                             None
                         }
+                    }
+                    ViewId::SessionPicker => {
+                        self.session_picker.as_mut().and_then(|p| p.handle_key(key))
                     }
                 };
 
@@ -135,6 +161,9 @@ impl App {
                     }
                 }
             }
+            ViewId::SessionPicker => {
+                // No mouse scroll in v1 picker.
+            }
         }
         self.dirty = true;
     }
@@ -142,6 +171,23 @@ impl App {
     /// Forward a SpurEvent to all views that need it.
     pub fn handle_spur_event(&mut self, event: SpurEvent) {
         self.dirty = true;
+
+        // Handle session list responses before forwarding to views
+        match &event {
+            SpurEvent::SessionsListed { agent, sessions } => {
+                if let Some(ref mut picker) = self.session_picker {
+                    picker.set_sessions(agent.clone(), sessions.clone());
+                }
+                return;
+            }
+            SpurEvent::SessionsListError { message } => {
+                if let Some(ref mut picker) = self.session_picker {
+                    picker.set_error(message.clone());
+                }
+                return;
+            }
+            _ => {}
+        }
 
         // Track brain status transitions
         match &event {
@@ -169,8 +215,8 @@ impl App {
                     self.session_detail = Some(view);
                 }
 
-                // Auto-navigate from Dashboard
-                if matches!(self.current_view, ViewId::Dashboard) {
+                // Auto-navigate from Dashboard or SessionPicker
+                if matches!(self.current_view, ViewId::Dashboard | ViewId::SessionPicker) {
                     self.current_view = ViewId::SessionDetail(session.clone());
                 }
             }
@@ -219,6 +265,10 @@ impl App {
                 // session_detail kept alive (same as NavigateBack)
             }
 
+            Action::NavigateTo(ViewId::SessionPicker) => {
+                self.current_view = ViewId::SessionPicker;
+            }
+
             Action::NavigateBack => {
                 self.current_view = ViewId::Dashboard;
                 // Note: session_detail is intentionally kept alive so it
@@ -245,7 +295,7 @@ impl App {
                 }
 
                 if let Some(ref tx) = self.user_input_tx {
-                    let input = UserInput {
+                    let input = UserInput::Message {
                         session,
                         text,
                         interrupt,
@@ -254,6 +304,20 @@ impl App {
                 }
 
                 self.sync_brain_status();
+            }
+
+            Action::RequestSessions => {
+                self.session_picker = Some(SessionPickerView::new());
+                self.current_view = ViewId::SessionPicker;
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::ListSessions);
+                }
+            }
+
+            Action::ResumeSession { session_id } => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::ResumeSession { session_id });
+                }
             }
 
             Action::ToggleVerbose => {
@@ -381,6 +445,9 @@ impl App {
                     self.dirty = true; // session detail always has activity
                 }
             }
+            ViewId::SessionPicker => {
+                self.session_picker.as_mut().map(|p| p.tick());
+            }
         }
     }
 
@@ -394,6 +461,9 @@ impl App {
                 if let Some(ref detail) = self.session_detail {
                     detail.render(frame, area);
                 }
+            }
+            ViewId::SessionPicker => {
+                self.session_picker.as_ref().map(|p| p.render(frame, area));
             }
         }
 
@@ -410,9 +480,10 @@ pub async fn run_tui(
     event_rx: broadcast::Receiver<SpurEvent>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     mut perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
+    start_in_picker: bool,
 ) -> anyhow::Result<()> {
     let mut terminal = tui::setup()?;
-    let mut app = App::new(user_input_tx);
+    let mut app = App::new(user_input_tx, start_in_picker);
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
     let mut event_rx = event_rx;
