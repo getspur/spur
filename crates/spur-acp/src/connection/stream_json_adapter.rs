@@ -95,31 +95,39 @@ impl AgentConnection for StreamJsonAdapter {
         self.stdin = Some(BufWriter::new(stdin));
         self.child = Some(child);
 
-        // Read first line — expect system/init event.
+        // Read lines until we find the system/init event.
+        // Without --bare, Claude emits hook lifecycle events before init.
         let mut reader = BufReader::new(stdout);
-        let mut first_line = String::new();
-        reader.read_line(&mut first_line).await.map_err(|e| {
-            anyhow::anyhow!("StreamJsonAdapter '{}': failed to read init: {e}", self.agent_name)
-        })?;
+        let mut session_id_str = String::new();
+        let mut model = None;
 
-        let init_event = parse_event(first_line.trim()).map_err(|e| {
-            anyhow::anyhow!(
-                "StreamJsonAdapter '{}': failed to parse init: {e}\nLine: {}",
-                self.agent_name, first_line.trim()
-            )
-        })?;
-
-        let (session_id_str, model) = match init_event {
-            ClaudeEvent::System(ref sys) if sys.subtype == "init" => {
-                (sys.session_id.clone(), sys.model.clone())
-            }
-            _ => {
+        loop {
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line).await.map_err(|e| {
+                anyhow::anyhow!("StreamJsonAdapter '{}': failed to read stdout: {e}", self.agent_name)
+            })?;
+            if bytes == 0 {
                 return Err(anyhow::anyhow!(
-                    "StreamJsonAdapter '{}': expected system/init, got: {}",
-                    self.agent_name, first_line.trim()
+                    "StreamJsonAdapter '{}': stdout closed before system/init event",
+                    self.agent_name
                 ));
             }
-        };
+
+            match parse_event(line.trim()) {
+                Ok(ClaudeEvent::System(ref sys)) if sys.subtype == "init" => {
+                    session_id_str = sys.session_id.clone();
+                    model = sys.model.clone();
+                    break;
+                }
+                _ => {
+                    tracing::debug!(
+                        agent = %self.agent_name,
+                        "StreamJsonAdapter: skipping pre-init event"
+                    );
+                    continue;
+                }
+            }
+        }
 
         let session_id = SessionId::new(session_id_str);
         self.session_id = Some(session_id.clone());
