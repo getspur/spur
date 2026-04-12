@@ -152,6 +152,14 @@ impl DashboardView {
         self.activity_log.scroll_down(20);
     }
 
+    pub fn scroll_activity_up_by(&mut self, lines: usize) {
+        self.activity_log.scroll_up_by(lines);
+    }
+
+    pub fn scroll_activity_down_by(&mut self, lines: usize) {
+        self.activity_log.scroll_down_by(lines, 20);
+    }
+
     /// Whether any agents are in an active (animating) state.
     pub fn has_active_agents(&self) -> bool {
         self.agents.iter().any(|a| matches!(a.status.as_str(), "working" | "spawned"))
@@ -303,26 +311,8 @@ impl View for DashboardView {
             SpurEvent::AgentNotification { session, notification } => {
                 let prefix = self.prefix_for_session(&session.0);
                 match &notification.update {
-                    spur_acp::SessionUpdate::AgentThoughtChunk(chunk) => {
-                        if let spur_acp::ContentBlock::Text(tc) = &chunk.content {
-                            let trimmed = tc.text.trim();
-                            if !trimmed.is_empty() {
-                                let entry = self.text_batch
-                                    .entry(session.0.clone())
-                                    .or_insert_with(|| (String::new(), Instant::now()));
-                                entry.0.push_str(trimmed);
-                                if entry.0.len() > 200 {
-                                    let mut start = entry.0.len() - 200;
-                                    while !entry.0.is_char_boundary(start) {
-                                        start += 1;
-                                    }
-                                    entry.0 = entry.0[start..].to_string();
-                                }
-                                entry.1 = Instant::now();
-                            }
-                        }
-                    }
-                    spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                    spur_acp::SessionUpdate::AgentThoughtChunk(chunk)
+                    | spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
                         if let spur_acp::ContentBlock::Text(tc) = &chunk.content {
                             let trimmed = tc.text.trim();
                             if !trimmed.is_empty() {
