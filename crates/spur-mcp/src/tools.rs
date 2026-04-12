@@ -1,29 +1,28 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_acp::DelegationResult;
+use tokio::sync::oneshot;
 
 // ─── Request/Response types for orchestrator communication ────────────
 
 /// A delegation request sent from the MCP server to the orchestrator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Each request carries a oneshot sender so the orchestrator can respond
+/// directly to the originating handler — no shared response channel, no
+/// ID-based matching, no dropped messages.
+#[derive(Debug)]
 pub struct DelegationRequest {
     pub id: String,
     pub agent: String,
     pub task: String,
     pub context_files: Vec<String>,
+    /// Oneshot channel for the orchestrator to send the result back.
+    pub respond_to: oneshot::Sender<DelegationResult>,
 }
 
-/// A delegation response sent from the orchestrator back to the MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DelegationResponse {
-    pub id: String,
-    pub result: DelegationResult,
-}
-
-/// Channel pair the orchestrator holds to communicate with the MCP server.
+/// Channel the orchestrator holds to receive requests from the MCP server.
 pub struct DelegationChannel {
     pub request_rx: tokio::sync::mpsc::Receiver<DelegationRequest>,
-    pub response_tx: tokio::sync::mpsc::Sender<DelegationResponse>,
 }
 
 // ─── Tool definition ──────────────────────────────────────────────────
