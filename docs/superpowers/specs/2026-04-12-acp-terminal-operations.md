@@ -71,10 +71,11 @@ release_terminal(terminal_id)
 ### create_terminal
 
 1. Resolve `cwd`: use `args.cwd` if provided, else `self.cwd` (session working directory)
-2. Build `tokio::process::Command` with `args.command`, `args.args`, cwd, env vars
-3. Set `stdout(Stdio::piped())`, `stderr(Stdio::piped())`
-4. Spawn the process
-5. Get PID from `child.id()`
+2. Resolve `output_byte_limit`: use `args.output_byte_limit.or(Some(10 * 1024 * 1024))` — default 10MB limit prevents OOM when agent doesn't set one
+3. Build `tokio::process::Command` with `args.command`, `args.args`, cwd, env vars (iterate `args.env`, call `.env(name, value)` for each)
+4. Set `stdout(Stdio::piped())`, `stderr(Stdio::piped())`
+5. Spawn the process
+6. Get PID from `child.id()` — return error if None (defensive; process may exit between spawn and id())
 6. Take `stdout` and `stderr` handles from child
 7. Create `watch::channel::<Option<TerminalExitStatus>>(None)`
 8. Create shared `output: Rc<RefCell<String>>` and `truncated: Rc<Cell<bool>>`
@@ -95,14 +96,17 @@ release_terminal(terminal_id)
 
 1. Look up terminal, clone `exit_rx`
 2. Drop the map borrow
-3. Loop: `exit_rx.changed().await`, check if value is `Some`
+3. Loop: `exit_rx.changed().await`
+   - `Ok(())` → check if value is `Some` → return exit status
+   - `Err(_)` → sender dropped (reader task exited). Check final value; if None, return default `TerminalExitStatus::new()`
 4. Return `WaitForTerminalExitResponse::new(exit_status)`
 
 ### kill_terminal
 
-1. Look up terminal, get `pid`
-2. Kill via `std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status()`. Safe, no `unsafe` block, works on macOS and Linux.
-3. Return `KillTerminalResponse::new()`
+1. Look up terminal, extract `pid` and check `exit_rx.borrow().is_none()` (still running?) in ONE borrow scope
+2. Drop the map borrow
+3. If still running, kill via `std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status()`. Check-then-kill prevents PID reuse issues.
+4. Return `KillTerminalResponse::new()`
 
 ### release_terminal
 
@@ -123,16 +127,65 @@ async fn terminal_reader(
     byte_limit: Option<u64>,
     exit_tx: watch::Sender<Option<TerminalExitStatus>>,
 ) {
-    // Read both streams into shared buffer using tokio::select!
-    // When both EOF → child.wait() → send exit status
+    let mut stdout_buf = [0u8; 4096];
+    let mut stderr_buf = [0u8; 4096];
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+
+    loop {
+        if stdout_done && stderr_done { break; }  // MUST check before select!
+        tokio::select! {
+            result = AsyncReadExt::read(&mut stdout, &mut stdout_buf), if !stdout_done => {
+                match result {
+                    Ok(0) | Err(_) => stdout_done = true,
+                    Ok(n) => append_output(&output, &truncated, byte_limit, &stdout_buf[..n]),
+                }
+            }
+            result = AsyncReadExt::read(&mut stderr, &mut stderr_buf), if !stderr_done => {
+                match result {
+                    Ok(0) | Err(_) => stderr_done = true,
+                    Ok(n) => append_output(&output, &truncated, byte_limit, &stderr_buf[..n]),
+                }
+            }
+        }
+    }
+
+    let exit_status = match child.wait().await {
+        Ok(status) => {
+            let mut es = TerminalExitStatus::new();
+            if let Some(code) = status.code() { es = es.exit_code(code as u32); }
+            es
+        }
+        Err(_) => TerminalExitStatus::new(),
+    };
+    let _ = exit_tx.send(Some(exit_status));
 }
 ```
 
-The reader task runs on the `LocalSet` via `spawn_local`. It merges stdout and stderr into a single buffer (ACP spec only has one `output` field). Output truncation uses the same char-boundary-safe pattern as the dashboard's text_batch capping.
+The reader task runs on the `LocalSet` via `spawn_local`. It merges stdout and stderr into a single buffer (ACP spec only has one `output` field). The `if stdout_done && stderr_done` guard MUST be checked before `select!` — an empty `select!` (no enabled branches) panics. Output truncation uses the same char-boundary-safe pattern as the dashboard's text_batch capping.
 
 ## Cleanup
 
-When the ACP thread exits (shutdown command or crash), all terminal processes must be killed. In the shutdown handler of `acp_thread_main`, iterate `terminals` and kill each PID. `tokio::process::Child` does NOT kill on drop — explicit cleanup is required.
+When the ACP thread exits (shutdown command or crash), all terminal processes must be killed. `tokio::process::Child` does NOT kill on drop — explicit cleanup is required.
+
+The `terminals` map is `Rc<RefCell<HashMap>>`. Before moving `SpurAcpClientDynamic` into `ClientSideConnection::new()`, clone the `Rc` (same pattern as existing `cwd_ref`):
+
+```rust
+let terminals_ref = spur_client.terminals.clone();  // Rc clone — cheap
+```
+
+In the shutdown handler of `acp_thread_main`, use this retained reference:
+```rust
+AcpCommand::Shutdown { reply } => {
+    for (_, terminal) in terminals_ref.borrow().iter() {
+        let _ = std::process::Command::new("kill")
+            .arg("-9").arg(terminal.pid.to_string()).status();
+    }
+    let _ = child.kill().await;
+    let _ = reply.send(Ok(()));
+    break;
+}
+```
 
 ## Files changed
 
