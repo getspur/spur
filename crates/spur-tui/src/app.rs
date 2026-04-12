@@ -4,6 +4,7 @@ use crossterm::event::{Event, KeyCode, MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::Frame;
 use tokio::sync::{broadcast, mpsc};
+use tokio::time::timeout;
 
 use spur_acp::{SessionId, SpurEvent};
 
@@ -348,6 +349,7 @@ pub async fn run_tui(
     let mut event_rx = event_rx;
 
     loop {
+        // Phase 1: Wait for at least one event (async yield point).
         tokio::select! {
             Some(Ok(crossterm_event)) = event_stream.next() => {
                 app.handle_crossterm_event(crossterm_event);
@@ -357,10 +359,7 @@ pub async fn run_tui(
                     Ok(spur_event) => {
                         app.handle_spur_event(spur_event);
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        // Lost some events due to slow consumption; continue.
-                        let _ = n;
-                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => {
                         app.should_quit = true;
                     }
@@ -371,6 +370,25 @@ pub async fn run_tui(
             }
         }
 
+        // Phase 2: Drain all remaining crossterm events (non-blocking).
+        // This collapses bursts of mouse scroll events into one render pass.
+        loop {
+            match timeout(Duration::ZERO, event_stream.next()).await {
+                Ok(Some(Ok(ev))) => app.handle_crossterm_event(ev),
+                _ => break,
+            }
+        }
+
+        // Phase 3: Drain all remaining spur events (non-blocking).
+        loop {
+            match event_rx.try_recv() {
+                Ok(spur_event) => app.handle_spur_event(spur_event),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+
+        // Phase 4: Single render pass.
         if app.dirty {
             terminal.draw(|f| app.render(f))?;
             app.dirty = false;
