@@ -1,7 +1,7 @@
 use crate::adapter::PmAdapter;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use spur_acp::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams};
+use crate::types::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams};
 use std::sync::Mutex;
 use tokio::process::Command;
 

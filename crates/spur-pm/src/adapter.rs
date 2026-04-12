@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use spur_acp::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PrParams};
+use crate::types::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PrParams};
 
 /// Trait for PM tool adapters (GitHub, Linear, Plane).
 #[async_trait]
