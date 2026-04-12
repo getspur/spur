@@ -11,5 +11,7 @@ spur-acp = { workspace = true }
 spur-core = { workspace = true }
 tokio = { workspace = true }
 ratatui = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
 anyhow = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
