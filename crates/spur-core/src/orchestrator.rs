@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use spur_acp::config::SpurConfig;
@@ -203,10 +203,13 @@ impl Orchestrator {
         let mut success = true;
 
         // Spawn delegation handler.
+        let max_concurrent = self.config.worktree.max_concurrent;
         let delegation_handle = tokio::spawn(Self::handle_delegations(
             delegation_channel,
             self.repo_root.clone(),
             self.config.agents.entries.clone(),
+            max_concurrent,
+            self.event_tx.clone(),
         ));
 
         // Stream brain output.
@@ -509,13 +512,18 @@ impl Orchestrator {
     }
 
     /// Handle delegation requests from the MCP callback server.
+    ///
+    /// Spawns each delegation as a separate tokio task, allowing multiple
+    /// workers to run concurrently. A semaphore limits the number of
+    /// simultaneous workers to `max_concurrent`.
     async fn handle_delegations(
         mut channel: DelegationChannel,
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
+        max_concurrent: usize,
+        event_tx: broadcast::Sender<SpurEvent>,
     ) {
-        let registry = AgentRegistry::load(agent_configs);
-        let mut worktrees = WorktreeManager::new(repo_root);
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
         while let Some(request) = channel.request_rx.recv().await {
             debug!(
@@ -524,24 +532,52 @@ impl Orchestrator {
                 "Received delegation request"
             );
 
-            let result = Self::execute_delegation(&request, &registry, &mut worktrees).await;
+            let response_tx = channel.response_tx.clone();
+            let repo_root = repo_root.clone();
+            let agent_configs = agent_configs.clone();
+            let semaphore = Arc::clone(&semaphore);
+            let event_tx = event_tx.clone();
 
-            let response = spur_mcp::DelegationResponse {
-                id: request.id,
-                result,
-            };
+            tokio::spawn(async move {
+                // Acquire a permit before starting the delegation.
+                let _permit = match semaphore.acquire().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        error!("Semaphore closed — aborting delegation");
+                        return;
+                    }
+                };
 
-            if channel.response_tx.send(response).await.is_err() {
-                error!("Failed to send delegation response — brain disconnected");
-                break;
-            }
+                let result = Self::execute_delegation(
+                    request.clone(),
+                    repo_root,
+                    agent_configs,
+                    event_tx,
+                )
+                .await;
+
+                let response = spur_mcp::DelegationResponse {
+                    id: request.id,
+                    result,
+                };
+
+                if response_tx.send(response).await.is_err() {
+                    error!("Failed to send delegation response — brain disconnected");
+                }
+            });
         }
     }
 
+    /// Execute a single delegation request.
+    ///
+    /// This method is fully self-contained: it creates its own
+    /// `WorktreeManager` and `AgentRegistry` so it can run in an
+    /// independent tokio task without shared mutable state.
     async fn execute_delegation(
-        request: &DelegationRequest,
-        registry: &AgentRegistry,
-        worktrees: &mut WorktreeManager,
+        request: DelegationRequest,
+        repo_root: PathBuf,
+        agent_configs: Vec<spur_acp::config::AgentConfig>,
+        event_tx: broadcast::Sender<SpurEvent>,
     ) -> DelegationResult {
         // Special agent names for PM operations (from MCP server).
         if request.agent.starts_with("__") {
@@ -554,6 +590,8 @@ impl Orchestrator {
                 estimated_cost_usd: 0.0,
             };
         }
+
+        let registry = AgentRegistry::load(agent_configs);
 
         let agent_config = match registry.get(&request.agent) {
             Some(c) => c.clone(),
@@ -569,7 +607,20 @@ impl Orchestrator {
             }
         };
 
+        let worker_session = SessionId::new();
+
+        // Emit DelegationRequested event.
+        let _ = event_tx.send(SpurEvent::DelegationRequested {
+            from: worker_session.clone(),
+            to_agent: request.agent.clone(),
+            task: request.task.clone(),
+        });
+
         let start = Instant::now();
+
+        // Each delegation gets its own WorktreeManager so concurrent
+        // delegations do not share mutable state.
+        let mut worktrees = WorktreeManager::new(repo_root);
 
         // 1. Snapshot brain state and create worktree.
         let snapshot_branch = match worktrees.snapshot_brain_state().await {
@@ -586,7 +637,6 @@ impl Orchestrator {
             }
         };
 
-        let worker_session = SessionId::new();
         let worktree_info = match worktrees
             .create_worktree(&worker_session, &request.agent, &snapshot_branch)
             .await
@@ -629,6 +679,13 @@ impl Orchestrator {
                 estimated_cost_usd: 0.0,
             };
         }
+
+        // Emit WorkerSpawned event.
+        let _ = event_tx.send(SpurEvent::WorkerSpawned {
+            agent: request.agent.clone(),
+            session: worker_session.clone(),
+            worktree: worktree_info.path.clone(),
+        });
 
         let session = match transport.create_session().await {
             Ok(s) => s,
@@ -707,14 +764,22 @@ impl Orchestrator {
             Some(output_text)
         };
 
+        let status = if worker_success {
+            DelegationStatus::Success
+        } else {
+            DelegationStatus::Failed {
+                error: "Worker reported errors".into(),
+            }
+        };
+
+        // Emit DelegationCompleted event.
+        let _ = event_tx.send(SpurEvent::DelegationCompleted {
+            worker_session,
+            status: status.clone(),
+        });
+
         DelegationResult {
-            status: if worker_success {
-                DelegationStatus::Success
-            } else {
-                DelegationStatus::Failed {
-                    error: "Worker reported errors".into(),
-                }
-            },
+            status,
             diff,
             summary,
             estimated_cost_usd: cost,

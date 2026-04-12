@@ -166,6 +166,75 @@ pub fn query_session(conn: &Connection, id: &str) -> Result<Option<SessionRecord
     }
 }
 
+/// Return the most recent sessions, ordered by started_at descending.
+pub fn query_recent_sessions(conn: &Connection, limit: usize) -> Result<Vec<SessionRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent, role, parent_session, task_summary, project,
+                issue_ref, started_at, ended_at, status, duration_seconds,
+                estimated_cost_usd
+         FROM sessions
+         ORDER BY started_at DESC
+         LIMIT ?1",
+    )?;
+
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(SessionRecord {
+            id: row.get(0)?,
+            agent: row.get(1)?,
+            role: row.get(2)?,
+            parent_session: row.get(3)?,
+            task_summary: row.get(4)?,
+            project: row.get(5)?,
+            issue_ref: row.get(6)?,
+            started_at: row.get(7)?,
+            ended_at: row.get(8)?,
+            status: row.get(9)?,
+            duration_seconds: row.get(10)?,
+            estimated_cost_usd: row.get(11)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Return all delegations where the given session is either the brain or the worker.
+pub fn query_delegations_for_session(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<DelegationRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, brain_session, worker_session, task, agent,
+                requested_at, completed_at, status, diff_stats
+         FROM delegation_log
+         WHERE brain_session = ?1 OR worker_session = ?1
+         ORDER BY requested_at ASC",
+    )?;
+
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(DelegationRecord {
+            id: row.get(0)?,
+            brain_session: row.get(1)?,
+            worker_session: row.get(2)?,
+            task: row.get(3)?,
+            agent: row.get(4)?,
+            requested_at: row.get(5)?,
+            completed_at: row.get(6)?,
+            status: row.get(7)?,
+            diff_stats: row.get(8)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
 // ─── Delegation Queries ───────────────────────────────────────────────
 
 /// Insert a delegation log entry. Returns the auto-generated row ID.

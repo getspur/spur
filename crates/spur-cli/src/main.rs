@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use spur_acp::config::SpurConfig;
+use spur_acp::SessionId;
 use spur_core::{Orchestrator, RunOpts};
 
 #[derive(Parser)]
@@ -155,14 +156,113 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Sessions { command } => {
+            let orch = load_orchestrator(repo_root)?;
             match command {
-                None => println!("No active sessions."),
-                Some(SessionsCommands::Show { id }) => println!("Session: {id}"),
-                Some(SessionsCommands::Kill { id }) => println!("Killing session: {id}"),
+                None => {
+                    if let Some(ref ct) = orch.cost_tracker {
+                        let sessions = ct.recent_sessions(20)?;
+                        if sessions.is_empty() {
+                            println!("No sessions recorded yet.");
+                        } else {
+                            println!(
+                                "{:<14} {:<14} {:<9} {:<12} {:<12} {:>8}",
+                                "ID (short)", "Agent", "Role", "Status", "Duration", "Cost"
+                            );
+                            println!("{}", "\u{2500}".repeat(73));
+                            for s in &sessions {
+                                let short_id = if s.id.len() > 8 {
+                                    &s.id[..8]
+                                } else {
+                                    &s.id
+                                };
+                                let duration = match s.duration_seconds {
+                                    Some(d) => format!("{}m {:02}s", d / 60, d % 60),
+                                    None => "-".to_string(),
+                                };
+                                let cost = match s.estimated_cost_usd {
+                                    Some(c) => format!("${:.2}", c),
+                                    None => "-".to_string(),
+                                };
+                                println!(
+                                    "{:<14} {:<14} {:<9} {:<12} {:<12} {:>8}",
+                                    short_id, s.agent, s.role, s.status, duration, cost,
+                                );
+                            }
+                        }
+                    } else {
+                        println!("Cost tracking not available.");
+                    }
+                }
+                Some(SessionsCommands::Show { id }) => {
+                    if let Some(ref ct) = orch.cost_tracker {
+                        let sid = SessionId(id.clone());
+                        match ct.session_detail(&sid)? {
+                            Some(s) => {
+                                println!("Session:  {}", s.id);
+                                println!("Agent:    {}", s.agent);
+                                println!("Role:     {}", s.role);
+                                println!("Status:   {}", s.status);
+                                println!("Started:  {}", s.started_at);
+                                println!(
+                                    "Ended:    {}",
+                                    s.ended_at.as_deref().unwrap_or("-")
+                                );
+                                let duration = match s.duration_seconds {
+                                    Some(d) => format!("{}m {:02}s", d / 60, d % 60),
+                                    None => "-".to_string(),
+                                };
+                                println!("Duration: {}", duration);
+                                let cost = match s.estimated_cost_usd {
+                                    Some(c) => format!("${:.2}", c),
+                                    None => "-".to_string(),
+                                };
+                                println!("Cost:     {}", cost);
+                                println!(
+                                    "Task:     {}",
+                                    s.task_summary.as_deref().unwrap_or("-")
+                                );
+
+                                let delegations = ct.session_delegations(&sid)?;
+                                if !delegations.is_empty() {
+                                    println!("\nDelegations:");
+                                    for d in &delegations {
+                                        let del_duration = match (&d.requested_at, &d.completed_at) {
+                                            (req, Some(comp)) => {
+                                                if let (Ok(start), Ok(end)) = (
+                                                    chrono::DateTime::parse_from_rfc3339(req),
+                                                    chrono::DateTime::parse_from_rfc3339(comp),
+                                                ) {
+                                                    let secs = (end - start).num_seconds();
+                                                    format!("{}m {:02}s", secs / 60, secs % 60)
+                                                } else {
+                                                    "-".to_string()
+                                                }
+                                            }
+                                            _ => "-".to_string(),
+                                        };
+                                        println!(
+                                            "  \u{2192} {}: \"{}\" [{}, {}]",
+                                            d.agent, d.task, d.status, del_duration,
+                                        );
+                                    }
+                                }
+                            }
+                            None => println!("Session not found: {id}"),
+                        }
+                    } else {
+                        println!("Cost tracking not available.");
+                    }
+                }
+                Some(SessionsCommands::Kill { id }) => {
+                    println!(
+                        "[spur] Would kill session {}, but active session tracking is not yet implemented.",
+                        id
+                    );
+                }
             }
             Ok(())
         }
-        Commands::Cost { week, by, export: _ } => {
+        Commands::Cost { week, by, export } => {
             let orch = load_orchestrator(repo_root)?;
             if let Some(ref ct) = orch.cost_tracker {
                 let summaries = if week {
@@ -172,6 +272,17 @@ async fn main() -> Result<()> {
                 };
                 if summaries.is_empty() {
                     println!("No cost data recorded yet.");
+                } else if export.as_deref() == Some("csv") {
+                    println!("agent,cost_usd,sessions,duration_seconds");
+                    for s in &summaries {
+                        println!(
+                            "{},{:.2},{},{}",
+                            s.agent,
+                            s.total_cost_usd,
+                            s.session_count,
+                            s.total_duration_seconds,
+                        );
+                    }
                 } else {
                     let total: f64 = summaries.iter().map(|s| s.total_cost_usd).sum();
                     println!(
