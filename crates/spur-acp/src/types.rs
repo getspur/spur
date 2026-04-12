@@ -116,6 +116,7 @@ pub enum TransportKind {
     Acp,
     Stdio,
     CliWrap,
+    StreamJson,
 }
 
 // ─── Permission Flow ──────────────────────────────────────────────────
