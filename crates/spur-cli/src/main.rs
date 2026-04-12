@@ -72,8 +72,12 @@ enum Commands {
         #[command(subcommand)]
         command: WorkflowCommands,
     },
-    /// Launch TUI dashboard
-    Watch,
+    /// Launch interactive TUI dashboard
+    Watch {
+        /// Override the brain agent (default from config)
+        #[arg(long)]
+        brain: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -325,10 +329,38 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Watch => {
+        Commands::Watch { brain } => {
             let orch = load_orchestrator(repo_root)?;
             let event_rx = orch.subscribe();
-            spur_tui::run_tui(event_rx, None).await?;
+
+            // Create user input channel
+            let (user_tx, user_rx) = tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
+
+            // Spawn interactive orchestrator (moves ownership)
+            let orch_handle = tokio::spawn(async move {
+                if let Err(e) = orch.run_interactive(user_rx, brain).await {
+                    tracing::error!(error = %e, "Interactive session error");
+                }
+            });
+
+            // Create a wrapper sender that converts TUI's UserInput to InteractiveInput
+            let (tui_tx, mut tui_rx) = tokio::sync::mpsc::channel::<spur_tui::UserInput>(32);
+            tokio::spawn(async move {
+                while let Some(input) = tui_rx.recv().await {
+                    let _ = user_tx
+                        .send(spur_core::InteractiveInput {
+                            text: input.text,
+                            interrupt: input.interrupt,
+                        })
+                        .await;
+                }
+            });
+
+            // Run TUI (blocks main task)
+            spur_tui::run_tui(event_rx, Some(tui_tx)).await?;
+
+            // After TUI exits, abort orchestrator
+            orch_handle.abort();
             Ok(())
         }
     }
