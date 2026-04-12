@@ -905,15 +905,29 @@ impl Orchestrator {
                 .args(Vec::new()),
         )];
 
-        let load_request = LoadSessionRequest::new(
-            acp_session_id.clone(),
-            self.repo_root.clone(),
-        ).mcp_servers(mcp_servers);
-
-        let history_stream = connection
-            .load_session(load_request)
+        // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
+        // fall back to new_session so we have a working session for subsequent prompts.
+        // The historical conversation is displayed from the disk fallback in either case.
+        let (final_acp_session_id, history_stream) = match connection
+            .load_session(
+                LoadSessionRequest::new(acp_session_id.clone(), self.repo_root.clone())
+                    .mcp_servers(mcp_servers.clone()),
+            )
             .await
-            .context("Failed to load brain session")?;
+        {
+            Ok(stream) => {
+                debug!(brain = %brain_name, "load_session succeeded");
+                (acp_session_id, Some(stream))
+            }
+            Err(e) => {
+                warn!(brain = %brain_name, error = %e, "load_session failed, falling back to new_session");
+                let session_response = connection
+                    .new_session(self.repo_root.clone(), mcp_servers)
+                    .await
+                    .context("Failed to create fallback session after load_session failure")?;
+                (session_response.session_id.to_string(), None)
+            }
+        };
 
         // Spawn delegation handler.
         let max_concurrent = self.config.worktree.max_concurrent;
@@ -927,14 +941,21 @@ impl Orchestrator {
 
         let brain_session = BrainSession {
             connection,
-            acp_session_id,
+            acp_session_id: final_acp_session_id,
             spur_session_id: session_id,
             brain_name,
             mcp_server,
             delegation_handle,
         };
 
-        Ok((brain_session, history_stream))
+        // Return an empty stream if we fell back to new_session.
+        let stream: std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>> =
+            match history_stream {
+                Some(s) => s,
+                None => Box::pin(futures::stream::empty()),
+            };
+
+        Ok((brain_session, stream))
     }
 
     /// Spawn a brain agent session with MCP callback server and delegation handler.
