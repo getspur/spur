@@ -7,11 +7,16 @@ use tokio::sync::{broadcast, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use spur_acp::config::SpurConfig;
+use spur_acp::connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter};
 use spur_acp::registry::AgentRegistry;
-use spur_acp::transport::{AcpTransport, AgentTransport, CliWrapTransport};
 use spur_acp::types::*;
 use spur_acp::{DelegationResult, DelegationStatus, SpurEvent};
 use spur_pm::Issue;
+
+use agent_client_protocol::{
+    ContentBlock, InitializeRequest, McpServer, McpServerStdio, PromptRequest,
+    ProtocolVersion, SessionNotification, SessionUpdate, TextContent,
+};
 
 use spur_cost::CostTracker;
 use spur_mcp::{DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo};
@@ -172,31 +177,43 @@ impl Orchestrator {
             );
         }
 
-        // 6. Spawn brain agent.
-        let mut transport = self.create_transport(&brain_config);
-        let capabilities = transport
-            .initialize(Some(mcp_endpoint))
+        // 6. Spawn brain agent via AgentConnection.
+        let mut connection = self.create_connection(&brain_config);
+
+        let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+        let _capabilities = connection
+            .initialize(init_request)
             .await
             .context("Failed to initialize brain agent")?;
 
         debug!(
             brain = %brain_name,
-            supports_mcp = capabilities.supports_mcp,
             "Brain agent initialized"
         );
 
-        let brain_session = transport
-            .create_session()
+        // Build MCP server config for the SPUR callback server (stdio-based UDS).
+        // The MCP callback server exposes a Unix domain socket; we model it as a
+        // stdio-based MCP server whose command is `socat` connecting to the socket.
+        // However, the cleaner approach per ACP spec is to pass the socket path as
+        // a stdio MCP server that the agent can connect to.
+        let mcp_servers = vec![McpServer::Stdio(
+            McpServerStdio::new("spur-mcp", &mcp_endpoint.socket_path)
+                .args(Vec::new()),
+        )];
+
+        let session_response = connection
+            .new_session(self.repo_root.clone(), mcp_servers)
             .await
             .context("Failed to create brain session")?;
 
         // 7. Send prompt and stream events.
-        let prompt = vec![PromptBlock::Text {
-            text: prompt_text.clone(),
-        }];
+        let prompt_request = PromptRequest::new(
+            session_response.session_id.clone(),
+            vec![ContentBlock::Text(TextContent::new(prompt_text.clone()))],
+        );
 
-        let mut stream = transport
-            .prompt(brain_session.clone(), prompt)
+        let mut stream = connection
+            .prompt(prompt_request)
             .await
             .context("Failed to send prompt to brain")?;
 
@@ -216,7 +233,10 @@ impl Orchestrator {
 
         // Stream brain output.
         use futures::StreamExt;
-        while let Some(event) = stream.next().await {
+        while let Some(notification) = stream.next().await {
+            // Convert SDK SessionNotification to spur SessionEvent for the event bus.
+            let event = notification_to_session_event(&notification);
+
             match &event {
                 SessionEvent::TextDelta(text) => {
                     print!("{text}");
@@ -248,7 +268,7 @@ impl Orchestrator {
         }
 
         // 9. Clean up.
-        let _ = transport.shutdown().await;
+        let _ = connection.shutdown().await;
         let _ = mcp_server.shutdown();
         delegation_handle.abort();
 
@@ -312,23 +332,30 @@ impl Orchestrator {
             );
         }
 
-        let mut transport = self.create_transport(&agent_config);
-        transport
-            .initialize(None)
+        let mut connection = self.create_connection(&agent_config);
+
+        let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+        connection
+            .initialize(init_request)
             .await
             .context("Failed to initialize agent")?;
 
-        let agent_session = transport.create_session().await?;
+        let session_response = connection
+            .new_session(self.repo_root.clone(), vec![])
+            .await
+            .context("Failed to create agent session")?;
 
-        let prompt = vec![PromptBlock::Text {
-            text: task.to_string(),
-        }];
+        let prompt_request = PromptRequest::new(
+            session_response.session_id.clone(),
+            vec![ContentBlock::Text(TextContent::new(task.to_string()))],
+        );
 
-        let mut stream = transport.prompt(agent_session, prompt).await?;
+        let mut stream = connection.prompt(prompt_request).await?;
 
         let mut success = true;
         use futures::StreamExt;
-        while let Some(event) = stream.next().await {
+        while let Some(notification) = stream.next().await {
+            let event = notification_to_session_event(&notification);
             match &event {
                 SessionEvent::TextDelta(text) => print!("{text}"),
                 SessionEvent::Error { message, .. } => {
@@ -339,7 +366,7 @@ impl Orchestrator {
             }
         }
 
-        let _ = transport.shutdown().await;
+        let _ = connection.shutdown().await;
         let duration = start.elapsed();
 
         if let Some(ref ct) = self.cost_tracker {
@@ -408,10 +435,11 @@ impl Orchestrator {
         let mut results = Vec::new();
 
         for config in &agents {
-            let mut transport = self.create_transport(config);
-            let health = match transport.initialize(None).await {
+            let mut connection = self.create_connection(config);
+            let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+            let health = match connection.initialize(init_request).await {
                 Ok(_) => {
-                    let _ = transport.shutdown().await;
+                    let _ = connection.shutdown().await;
                     AgentHealth::Ready
                 }
                 Err(e) => AgentHealth::Error(e.to_string()),
@@ -429,29 +457,26 @@ impl Orchestrator {
 
     // ─── Private helpers ─────────────────────────────────────────────
 
-    fn create_transport(
+    fn create_connection(
         &self,
         config: &spur_acp::config::AgentConfig,
-    ) -> Box<dyn AgentTransport> {
+    ) -> Box<dyn AgentConnection> {
         match config.transport {
-            TransportKind::Acp => Box::new(AcpTransport::new(
+            TransportKind::Acp => Box::new(NativeAcpConnection::new(
                 config.name.clone(),
                 config.command.clone(),
                 config.args.clone(),
             )),
-            TransportKind::CliWrap => Box::new(CliWrapTransport::new(
+            TransportKind::Stdio => Box::new(StdioAdapter::new(
                 config.name.clone(),
                 config.command.clone(),
                 config.args.clone(),
             )),
-            TransportKind::Stdio => {
-                // Stdio transport is Phase 2; fall back to CliWrap.
-                Box::new(CliWrapTransport::new(
-                    config.name.clone(),
-                    config.command.clone(),
-                    config.args.clone(),
-                ))
-            }
+            TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
+                config.name.clone(),
+                config.command.clone(),
+                config.args.clone(),
+            )),
         }
     }
 
@@ -673,21 +698,27 @@ impl Orchestrator {
             }
         };
 
-        // 2. Spawn worker agent in worktree.
-        let mut transport: Box<dyn AgentTransport> = match agent_config.transport {
-            TransportKind::Acp => Box::new(AcpTransport::new(
+        // 2. Spawn worker agent in worktree via AgentConnection.
+        let mut connection: Box<dyn AgentConnection> = match agent_config.transport {
+            TransportKind::Acp => Box::new(NativeAcpConnection::new(
                 agent_config.name.clone(),
                 agent_config.command.clone(),
                 agent_config.args.clone(),
             )),
-            _ => Box::new(CliWrapTransport::new(
+            TransportKind::Stdio => Box::new(StdioAdapter::new(
+                agent_config.name.clone(),
+                agent_config.command.clone(),
+                agent_config.args.clone(),
+            )),
+            TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
                 agent_config.name.clone(),
                 agent_config.command.clone(),
                 agent_config.args.clone(),
             )),
         };
 
-        if let Err(e) = transport.initialize(None).await {
+        let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+        if let Err(e) = connection.initialize(init_request).await {
             let _ = worktrees.remove_worktree(&worker_session).await;
             return DelegationResult {
                 status: DelegationStatus::Failed {
@@ -706,10 +737,14 @@ impl Orchestrator {
             worktree: worktree_info.path.clone(),
         });
 
-        let session = match transport.create_session().await {
+        // Workers get no MCP servers (per spec).
+        let session_response = match connection
+            .new_session(worktree_info.path.clone(), vec![])
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
-                let _ = transport.shutdown().await;
+                let _ = connection.shutdown().await;
                 let _ = worktrees.remove_worktree(&worker_session).await;
                 return DelegationResult {
                     status: DelegationStatus::Failed {
@@ -723,21 +758,24 @@ impl Orchestrator {
         };
 
         // 3. Send task to worker.
-        let prompt = vec![PromptBlock::Text {
-            text: format!(
-                "Working directory: {}\n\nTask: {}",
-                worktree_info.path.display(),
-                task
-            ),
-        }];
+        let prompt_text = format!(
+            "Working directory: {}\n\nTask: {}",
+            worktree_info.path.display(),
+            task
+        );
+        let prompt_request = PromptRequest::new(
+            session_response.session_id.clone(),
+            vec![ContentBlock::Text(TextContent::new(prompt_text))],
+        );
 
         let mut output_text = String::new();
         let mut worker_success = true;
 
-        match transport.prompt(session, prompt).await {
+        match connection.prompt(prompt_request).await {
             Ok(mut stream) => {
                 use futures::StreamExt;
-                while let Some(event) = stream.next().await {
+                while let Some(notification) = stream.next().await {
+                    let event = notification_to_session_event(&notification);
                     match event {
                         SessionEvent::TextDelta(text) => {
                             output_text.push_str(&text);
@@ -756,7 +794,7 @@ impl Orchestrator {
             }
         }
 
-        let _ = transport.shutdown().await;
+        let _ = connection.shutdown().await;
 
         // 4. Collect diff.
         let diff = worktrees
@@ -803,6 +841,52 @@ impl Orchestrator {
             summary,
             estimated_cost_usd: cost,
         }
+    }
+}
+
+// ─── SDK → spur type conversion ─────────────────────────────────────
+
+/// Convert an SDK `SessionNotification` into spur's internal `SessionEvent`.
+///
+/// This is the boundary conversion layer. Task 11 will unify the types;
+/// for now we translate at the orchestrator boundary so SpurEvent can
+/// continue to carry `SessionEvent`.
+fn notification_to_session_event(notification: &SessionNotification) -> SessionEvent {
+    match &notification.update {
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            // Extract text from the content block.
+            if let ContentBlock::Text(text_content) = &chunk.content {
+                SessionEvent::TextDelta(text_content.text.clone())
+            } else {
+                // Non-text chunks become a generic text delta with a placeholder.
+                SessionEvent::TextDelta("[non-text content]".to_string())
+            }
+        }
+        SessionUpdate::AgentThoughtChunk(_chunk) => {
+            SessionEvent::StatusUpdate(AgentStatus::Thinking)
+        }
+        SessionUpdate::ToolCall(tool_call) => SessionEvent::ToolCallStart {
+            id: tool_call.tool_call_id.to_string(),
+            name: tool_call.title.clone(),
+            input: tool_call
+                .raw_input
+                .clone()
+                .unwrap_or(serde_json::Value::Null),
+        },
+        SessionUpdate::ToolCallUpdate(tool_call_update) => SessionEvent::ToolCallResult {
+            id: tool_call_update.tool_call_id.to_string(),
+            output: tool_call_update
+                .fields
+                .raw_output
+                .clone()
+                .unwrap_or(serde_json::Value::Null),
+        },
+        // Map remaining SDK variants to appropriate spur events.
+        SessionUpdate::UserMessageChunk(_) => {
+            SessionEvent::StatusUpdate(AgentStatus::Working)
+        }
+        SessionUpdate::Plan(_) => SessionEvent::StatusUpdate(AgentStatus::Thinking),
+        _ => SessionEvent::StatusUpdate(AgentStatus::Working),
     }
 }
 
