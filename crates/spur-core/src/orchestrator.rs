@@ -1079,11 +1079,11 @@ impl Orchestrator {
             };
             let kind = json.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
-            // Extract text from the first content block.
+            // Concatenate ALL text content blocks (messages can have multiple).
             let text = json
                 .pointer("/data/content")
                 .and_then(|arr| arr.as_array())
-                .and_then(|arr| {
+                .map(|arr| {
                     arr.iter()
                         .filter_map(|item| {
                             let item_kind = item.get("kind").and_then(|v| v.as_str())?;
@@ -1093,10 +1093,10 @@ impl Orchestrator {
                                 None
                             }
                         })
-                        .next()
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 })
-                .unwrap_or("")
-                .to_string();
+                .unwrap_or_default();
 
             if text.is_empty() {
                 continue;
