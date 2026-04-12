@@ -187,8 +187,19 @@ impl App {
                 return;
             }
             SpurEvent::SessionHistory { ref entries, .. } => {
+                tracing::info!(
+                    entry_count = entries.len(),
+                    has_session_detail = self.session_detail.is_some(),
+                    "SessionHistory: replaying history"
+                );
                 if let Some(ref mut detail) = self.session_detail {
                     detail.replay_history(entries);
+                    tracing::info!(
+                        trace_entries = detail.trace_entry_count(),
+                        "SessionHistory: replay complete"
+                    );
+                } else {
+                    tracing::warn!("SessionHistory: session_detail is None, history lost!");
                 }
                 return;
             }
@@ -291,12 +302,25 @@ impl App {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
+                tracing::info!(
+                    text_len = text.len(),
+                    has_session_detail = self.session_detail.is_some(),
+                    view = ?self.current_view,
+                    brain_status = ?self.brain_status,
+                    "SendMessage: pushing user message to trace"
+                );
+
                 // Add user message to Session Detail trace for instant feedback.
                 // If session_detail doesn't exist yet (first message before
                 // BrainSpawned), buffer it for replay when the view is created.
                 if let Some(ref mut detail) = self.session_detail {
                     detail.push_user_message(&text);
+                    tracing::info!(
+                        entries = detail.trace_entry_count(),
+                        "SendMessage: pushed to session_detail"
+                    );
                 } else {
+                    tracing::warn!("SendMessage: session_detail is None, buffering");
                     self.pending_user_messages.push(text.clone());
                 }
 

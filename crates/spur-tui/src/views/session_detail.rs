@@ -47,6 +47,11 @@ impl SessionDetailView {
         &self.session_id
     }
 
+    /// Number of entries in the trace (for debug logging).
+    pub fn trace_entry_count(&self) -> usize {
+        self.react_trace.entry_count()
+    }
+
     /// Current local time formatted as HH:MM:SS.
     fn now_stamp() -> String {
         crate::components::now_stamp()
