@@ -1,294 +1,196 @@
-use std::collections::HashMap;
-use std::io;
 use std::time::Duration;
 
-use crossterm::{
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ratatui::{backend::CrosstermBackend, Terminal};
-use tokio::sync::broadcast;
+use crossterm::event::{Event, KeyCode};
+use futures::StreamExt;
+use ratatui::Frame;
+use tokio::sync::{broadcast, mpsc};
 
-use spur_acp::{DelegationStatus, SessionEvent, SessionId, SpurEvent};
+use spur_acp::{SessionId, SpurEvent};
 
-use crate::events::handle_terminal_events;
-use crate::ui;
-
-// ─── Constants ───────────────────────────────────────────────────────
-
-const MAX_LOG_ENTRIES: usize = 5_000;
+use crate::action::{Action, ViewId};
+use crate::components::help_overlay::HelpOverlay;
+use crate::tui;
+use crate::views::dashboard::DashboardView;
+use crate::views::session_detail::SessionDetailView;
+use crate::views::View;
 
 // ─── Supporting types ──────────────────────────────────────────────────
 
-/// Which panel currently has focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Panel {
-    Agents,
-    Log,
-}
-
-/// Tracked state for a single agent.
-pub struct AgentState {
-    pub name: String,
-    pub role: String,
-    pub status: String,
-}
-
-/// A single entry in the event log.
-pub struct LogEntry {
-    pub timestamp: String,
-    pub prefix: String,
-    pub message: String,
+/// A user input message destined for a specific agent session.
+pub struct UserInput {
+    pub session: SessionId,
+    pub text: String,
+    pub interrupt: bool,
 }
 
 // ─── App state ─────────────────────────────────────────────────────────
 
 pub struct App {
-    /// Agents and their current status.
-    pub agents: Vec<AgentState>,
-    /// Recent events for the session log (capped at MAX_LOG_ENTRIES).
-    pub event_log: Vec<LogEntry>,
-    /// Cost broken down by agent name.
-    pub cost_by_agent: HashMap<String, f64>,
-    /// Which panel has focus.
-    pub selected_panel: Panel,
-    /// Whether the user has requested to quit.
-    pub should_quit: bool,
-    /// Scroll offset for the log panel.
-    pub log_scroll: usize,
-    /// Map from session-id to (role, agent_name) for log prefixes.
-    session_agent: HashMap<String, (String, String)>,
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self {
-            agents: Vec::new(),
-            event_log: Vec::new(),
-            cost_by_agent: HashMap::new(),
-            selected_panel: Panel::Log,
-            should_quit: false,
-            log_scroll: 0,
-            session_agent: HashMap::new(),
-        }
-    }
+    current_view: ViewId,
+    dashboard: DashboardView,
+    session_detail: Option<SessionDetailView>,
+    help_visible: bool,
+    should_quit: bool,
+    user_input_tx: Option<mpsc::Sender<UserInput>>,
 }
 
 impl App {
-    fn now_stamp() -> String {
-        chrono::Local::now().format("%H:%M:%S").to_string()
-    }
-
-    fn push_log(&mut self, prefix: impl Into<String>, message: impl Into<String>) {
-        self.event_log.push(LogEntry {
-            timestamp: Self::now_stamp(),
-            prefix: prefix.into(),
-            message: message.into(),
-        });
-        // Evict oldest entries when over the cap.
-        if self.event_log.len() > MAX_LOG_ENTRIES {
-            let drain = self.event_log.len() - MAX_LOG_ENTRIES;
-            self.event_log.drain(..drain);
-        }
-        // Auto-scroll to bottom
-        self.log_scroll = self.event_log.len().saturating_sub(1);
-    }
-
-    /// Lookup or build a prefix like "[brain:kiro]" from a session id.
-    fn prefix_for_session(&self, session_id: &str) -> String {
-        if let Some((role, agent)) = self.session_agent.get(session_id) {
-            format!("[{}:{}]", role, agent)
-        } else {
-            format!("[session:{}]", &session_id[..8.min(session_id.len())])
+    pub fn new(user_input_tx: Option<mpsc::Sender<UserInput>>) -> Self {
+        Self {
+            current_view: ViewId::Dashboard,
+            dashboard: DashboardView::new(),
+            session_detail: None,
+            help_visible: false,
+            should_quit: false,
+            user_input_tx,
         }
     }
 
-    /// Update the agent status for the agent associated with the given session.
-    fn set_agent_status_for_session(&mut self, session_id: &str, status: &str) {
-        if let Some((_role, agent_name)) = self.session_agent.get(session_id).cloned() {
-            if let Some(a) = self.agents.iter_mut().find(|a| a.name == agent_name) {
-                a.status = status.into();
-            }
-        }
-    }
-
-    /// Common handler for BrainSpawned / WorkerSpawned events.
-    fn handle_agent_spawned(&mut self, agent: String, session: SessionId, role: &str) {
-        let sid = session.0.clone();
-        self.session_agent
-            .insert(sid, (role.into(), agent.clone()));
-        match self.agents.iter_mut().find(|a| a.name == agent) {
-            Some(a) => a.status = "spawned".into(),
-            None => self.agents.push(AgentState {
-                name: agent.clone(),
-                role: role.into(),
-                status: "spawned".into(),
-            }),
-        }
-        self.push_log(
-            format!("[{}:{}]", role, agent),
-            format!("{} agent spawned", role.chars().next().unwrap_or('?').to_uppercase().collect::<String>() + &role[1..]),
-        );
-    }
-
-    /// Compute total cost from per-agent costs.
-    pub fn total_cost(&self) -> f64 {
-        self.cost_by_agent.values().sum()
-    }
-
-    /// Process a single SpurEvent, updating app state accordingly.
-    pub fn process_event(&mut self, event: SpurEvent) {
-        match event {
-            SpurEvent::BrainSpawned { agent, session } => {
-                self.handle_agent_spawned(agent, session, "brain");
+    /// Dispatch a crossterm event (keyboard, resize, etc.) to the active view.
+    pub fn handle_crossterm_event(&mut self, event: Event) {
+        if let Event::Key(key) = event {
+            // Help overlay intercepts ? (toggle) and Esc (close) before views.
+            if self.help_visible {
+                match key.code {
+                    KeyCode::Char('?') | KeyCode::Esc => {
+                        self.help_visible = false;
+                        return;
+                    }
+                    _ => return, // swallow all keys while help is visible
+                }
             }
 
-            SpurEvent::WorkerSpawned {
-                agent,
+            let action = match self.current_view {
+                ViewId::Dashboard => self.dashboard.handle_key(key),
+                ViewId::SessionDetail(_) => {
+                    if let Some(ref mut detail) = self.session_detail {
+                        detail.handle_key(key)
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(action) = action {
+                self.process_action(action);
+            }
+        }
+        // Resize events are handled automatically by ratatui on next draw.
+    }
+
+    /// Forward a SpurEvent to all views that need it.
+    pub fn handle_spur_event(&mut self, event: SpurEvent) {
+        // Dashboard always receives events (it tracks all sessions).
+        self.dashboard.handle_spur_event(&event);
+
+        // Session detail receives events too (it filters internally by session).
+        if let Some(ref mut detail) = self.session_detail {
+            detail.handle_spur_event(&event);
+        }
+    }
+
+    /// Process a single Action returned by a view.
+    fn process_action(&mut self, action: Action) {
+        match action {
+            Action::Quit => {
+                self.should_quit = true;
+            }
+
+            Action::NavigateTo(ViewId::SessionDetail(ref session_id)) => {
+                // Look up agent name and role from dashboard's session_agent map.
+                let (agent_name, role) = self
+                    .dashboard
+                    .agent_info_for_session(&session_id.0)
+                    .unwrap_or_else(|| {
+                        let short = &session_id.0[..8.min(session_id.0.len())];
+                        (short.to_string(), "unknown".to_string())
+                    });
+
+                self.session_detail = Some(SessionDetailView::new(
+                    session_id.clone(),
+                    agent_name,
+                    role,
+                ));
+                self.current_view = ViewId::SessionDetail(session_id.clone());
+            }
+
+            Action::NavigateTo(ViewId::Dashboard) => {
+                self.current_view = ViewId::Dashboard;
+                self.session_detail = None;
+            }
+
+            Action::NavigateBack => {
+                self.current_view = ViewId::Dashboard;
+                self.session_detail = None;
+            }
+
+            Action::SendMessage {
                 session,
-                worktree: _,
+                text,
+                interrupt,
             } => {
-                self.handle_agent_spawned(agent, session, "worker");
-            }
-
-            SpurEvent::AgentOutput { session, event: se } => {
-                let prefix = self.prefix_for_session(&session.0);
-                match se {
-                    SessionEvent::TextDelta(text) => {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            self.push_log(&prefix, trimmed.to_string());
-                        }
-                    }
-                    SessionEvent::StatusUpdate(status) => {
-                        let status_str = format!("{:?}", status).to_lowercase();
-                        self.set_agent_status_for_session(&session.0, &status_str);
-                        self.push_log(&prefix, format!("Status: {}", status_str));
-                    }
-                    SessionEvent::ToolCallStart { name, .. } => {
-                        self.push_log(&prefix, format!("Tool call: {}", name));
-                    }
-                    SessionEvent::ToolCallResult { .. } => {}
-                    SessionEvent::Error { message, .. } => {
-                        self.set_agent_status_for_session(&session.0, "error");
-                        self.push_log(&prefix, format!("Error: {}", message));
-                    }
-                    SessionEvent::RateLimitHit { retry_after } => {
-                        self.set_agent_status_for_session(&session.0, "rate-limited");
-                        let msg = match retry_after {
-                            Some(d) => format!("Rate limited (retry after {}s)", d.as_secs()),
-                            None => "Rate limited".to_string(),
-                        };
-                        self.push_log(&prefix, msg);
-                    }
-                    SessionEvent::Complete { .. } => {
-                        self.set_agent_status_for_session(&session.0, "done");
-                        self.push_log(&prefix, "Session complete");
-                    }
+                if let Some(ref tx) = self.user_input_tx {
+                    let input = UserInput {
+                        session,
+                        text,
+                        interrupt,
+                    };
+                    // Use try_send to avoid blocking the event loop.
+                    let _ = tx.try_send(input);
                 }
             }
 
-            SpurEvent::DelegationRequested {
-                from: _,
-                to_agent,
-                task,
-            } => {
-                self.push_log("[brain]", format!("Delegating to {}: {}", to_agent, task));
+            Action::ToggleVerbose => {
+                // Verbose mode is tracked by the dashboard view internally.
+                // We toggle it via a dedicated method or re-send the key.
+                // For now, the dashboard already handles this in handle_key.
             }
 
-            SpurEvent::DelegationCompleted {
-                worker_session,
-                status,
-            } => {
-                let prefix = self.prefix_for_session(&worker_session.0);
-                let status_str = match &status {
-                    DelegationStatus::Success => "done",
-                    _ => "error",
-                };
-                self.set_agent_status_for_session(&worker_session.0, status_str);
-                let msg = match &status {
-                    DelegationStatus::Success => "Delegation completed successfully".to_string(),
-                    DelegationStatus::Failed { error } => {
-                        format!("Delegation failed: {}", error)
-                    }
-                    DelegationStatus::Conflict { files } => {
-                        format!("Delegation conflict in {} files", files.len())
-                    }
-                    DelegationStatus::Timeout => "Delegation timed out".to_string(),
-                };
-                self.push_log(&prefix, msg);
+            Action::ShowHelp => {
+                self.help_visible = true;
             }
 
-            SpurEvent::SessionCompleted { session, success } => {
-                let prefix = self.prefix_for_session(&session.0);
-                let status = if success { "done" } else { "error" };
-                self.set_agent_status_for_session(&session.0, status);
-                let msg = if success {
-                    "Session completed successfully"
-                } else {
-                    "Session failed"
-                };
-                self.push_log(&prefix, msg);
+            Action::HideHelp => {
+                self.help_visible = false;
             }
 
-            SpurEvent::RateLimitDetected {
-                agent,
-                retry_after,
-            } => {
-                if let Some(a) = self.agents.iter_mut().find(|a| a.name == agent) {
-                    a.status = "rate-limited".into();
+            // Scroll actions are already handled inside the views' handle_key methods.
+            Action::ScrollUp
+            | Action::ScrollDown
+            | Action::ScrollToTop
+            | Action::ScrollToBottom
+            | Action::CycleFocus
+            | Action::Tick => {}
+        }
+    }
+
+    /// Tick the active view (for animations, batched text flush, etc.).
+    pub fn tick(&mut self) {
+        match self.current_view {
+            ViewId::Dashboard => self.dashboard.tick(),
+            ViewId::SessionDetail(_) => {
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.tick();
                 }
-                let msg = match retry_after {
-                    Some(d) => format!("Rate limited (retry after {}s)", d.as_secs()),
-                    None => "Rate limited".to_string(),
-                };
-                self.push_log(format!("[{}]", agent), msg);
             }
+        }
+    }
 
-            SpurEvent::BrainFailover { from, to } => {
-                if let Some(a) = self.agents.iter_mut().find(|a| a.name == from) {
-                    a.status = "error".into();
+    /// Render the active view, then overlay help if visible.
+    pub fn render(&self, frame: &mut Frame) {
+        let area = frame.area();
+
+        match self.current_view {
+            ViewId::Dashboard => self.dashboard.render(frame, area),
+            ViewId::SessionDetail(_) => {
+                if let Some(ref detail) = self.session_detail {
+                    detail.render(frame, area);
                 }
-                self.push_log("[spur]", format!("Brain failover: {} -> {}", from, to));
             }
+        }
 
-            SpurEvent::CostUpdate {
-                session: _,
-                agent,
-                estimated_cost_usd,
-            } => {
-                *self.cost_by_agent.entry(agent).or_insert(0.0) += estimated_cost_usd;
-            }
-
-            SpurEvent::ConflictDetected { files } => {
-                self.push_log(
-                    "[spur]",
-                    format!(
-                        "Conflict detected in {} file(s): {}",
-                        files.len(),
-                        files
-                            .iter()
-                            .map(|f| f.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                );
-            }
-
-            SpurEvent::IssueReceived { source, id } => {
-                self.push_log("[pm]", format!("Issue received from {}: {}", source, id));
-            }
-
-            SpurEvent::PrCreated { url } => {
-                self.push_log("[spur]", format!("PR created: {}", url));
-            }
-
-            SpurEvent::IssueUpdated { source, id, status } => {
-                self.push_log(
-                    "[pm]",
-                    format!("Issue {} ({}) updated: {}", id, source, status),
-                );
-            }
+        if self.help_visible {
+            HelpOverlay::render(frame, area);
         }
     }
 }
@@ -297,56 +199,46 @@ impl App {
 
 /// Run the TUI dashboard, consuming events from the broadcast receiver.
 pub async fn run_tui(
-    mut event_rx: broadcast::Receiver<SpurEvent>,
+    event_rx: broadcast::Receiver<SpurEvent>,
+    user_input_tx: Option<mpsc::Sender<UserInput>>,
 ) -> anyhow::Result<()> {
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
+    let mut terminal = tui::setup()?;
+    let mut app = App::new(user_input_tx);
+    let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
+    let mut event_stream = crossterm::event::EventStream::new();
+    let mut event_rx = event_rx;
 
-    let mut app = App::default();
-    let tick_rate = Duration::from_millis(100);
-
-    // Main loop
     loop {
-        // 1. Drain all pending SpurEvents (non-blocking)
-        loop {
-            match event_rx.try_recv() {
-                Ok(ev) => app.process_event(ev),
-                Err(broadcast::error::TryRecvError::Empty) => break,
-                Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                    app.push_log("[tui]", format!("Skipped {} events (lag)", n));
+        tokio::select! {
+            Some(Ok(crossterm_event)) = event_stream.next() => {
+                app.handle_crossterm_event(crossterm_event);
+            }
+            result = event_rx.recv() => {
+                match result {
+                    Ok(spur_event) => {
+                        app.handle_spur_event(spur_event);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // Lost some events due to slow consumption; continue.
+                        let _ = n;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        app.should_quit = true;
+                    }
                 }
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    app.should_quit = true;
-                    break;
-                }
+            }
+            _ = tick_interval.tick() => {
+                app.tick();
             }
         }
 
-        // 2. Render
-        terminal.draw(|f| ui::draw(f, &app))?;
-
-        // 3. Check for quit
-        if app.should_quit {
-            break;
-        }
-
-        // 4. Handle keyboard events (blocking up to tick_rate)
-        handle_terminal_events(&mut app, tick_rate)?;
+        terminal.draw(|f| app.render(f))?;
 
         if app.should_quit {
             break;
         }
     }
 
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
+    tui::teardown(&mut terminal)?;
     Ok(())
 }
