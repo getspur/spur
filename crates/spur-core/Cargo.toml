@@ -12,6 +12,7 @@ spur-mcp = { workspace = true }
 spur-pm = { workspace = true }
 spur-worktree = { workspace = true }
 spur-cost = { workspace = true }
+agent-client-protocol = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
