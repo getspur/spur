@@ -21,6 +21,8 @@ pub enum Action {
     HideHelp,
     Tick,
     PermissionGrant(PermissionChoice),
+    RequestSessions,
+    ResumeSession { session_id: String },
 }
 
 /// Which permission option the user selected.
@@ -39,4 +41,5 @@ pub enum PermissionChoice {
 pub enum ViewId {
     Dashboard,
     SessionDetail(SessionId),
+    SessionPicker,
 }

@@ -28,8 +28,8 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use agent_client_protocol::{
-    InitializeRequest, InitializeResponse, McpServer, NewSessionResponse, PromptRequest,
-    SessionNotification,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    McpServer, NewSessionResponse, PromptRequest, SessionNotification,
 };
 
 use crate::types::AgentHealth;
@@ -104,4 +104,26 @@ pub trait AgentConnection: Send + Sync {
     /// This is a synchronous, non-fallible query -- implementations should
     /// cache the last-known health and return it immediately.
     fn health(&self) -> AgentHealth;
+
+    /// Load an existing session by ID, returning a stream of historical notifications.
+    ///
+    /// Not all transports support this; the default implementation returns an error.
+    async fn load_session(
+        &mut self,
+        request: LoadSessionRequest,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+        let _ = request;
+        Err(anyhow::anyhow!("load_session not supported by this transport"))
+    }
+
+    /// List all sessions known to the agent.
+    ///
+    /// Not all transports support this; the default implementation returns an error.
+    async fn list_sessions(
+        &mut self,
+        request: ListSessionsRequest,
+    ) -> anyhow::Result<ListSessionsResponse> {
+        let _ = request;
+        Err(anyhow::anyhow!("list_sessions not supported by this transport"))
+    }
 }

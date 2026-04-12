@@ -99,6 +99,9 @@ enum Commands {
         /// Override the brain agent (default from config)
         #[arg(long)]
         brain: Option<String>,
+        /// Show session picker on launch
+        #[arg(long)]
+        sessions: bool,
     },
 }
 
@@ -352,7 +355,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Watch { brain } => {
+        Commands::Watch { brain, sessions } => {
             let orch = load_orchestrator(repo_root)?;
             let event_rx = orch.subscribe();
 
@@ -374,17 +377,23 @@ async fn main() -> Result<()> {
             let (tui_tx, mut tui_rx) = tokio::sync::mpsc::channel::<spur_tui::UserInput>(32);
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
-                    let _ = user_tx
-                        .send(spur_core::InteractiveInput {
-                            text: input.text,
-                            interrupt: input.interrupt,
-                        })
-                        .await;
+                    let converted = match input {
+                        spur_tui::UserInput::Message { text, interrupt, .. } => {
+                            spur_core::InteractiveInput::Message { text, interrupt }
+                        }
+                        spur_tui::UserInput::ListSessions => {
+                            spur_core::InteractiveInput::ListSessions
+                        }
+                        spur_tui::UserInput::ResumeSession { session_id } => {
+                            spur_core::InteractiveInput::ResumeSession { session_id }
+                        }
+                    };
+                    let _ = user_tx.send(converted).await;
                 }
             });
 
             // Run TUI with permission channel (blocks main task)
-            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx)).await?;
+            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), sessions).await?;
 
             // After TUI exits, abort orchestrator
             orch_handle.abort();
