@@ -374,17 +374,19 @@ async fn main() -> Result<()> {
             let (tui_tx, mut tui_rx) = tokio::sync::mpsc::channel::<spur_tui::UserInput>(32);
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
-                    let _ = user_tx
-                        .send(spur_core::InteractiveInput {
-                            text: input.text,
-                            interrupt: input.interrupt,
-                        })
-                        .await;
+                    if let spur_tui::UserInput::Message { text, interrupt, .. } = input {
+                        let _ = user_tx
+                            .send(spur_core::InteractiveInput {
+                                text,
+                                interrupt,
+                            })
+                            .await;
+                    }
                 }
             });
 
             // Run TUI with permission channel (blocks main task)
-            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx)).await?;
+            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), false).await?;
 
             // After TUI exits, abort orchestrator
             orch_handle.abort();
