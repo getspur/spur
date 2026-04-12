@@ -45,62 +45,6 @@ pub enum AgentHealth {
     RateLimited { retry_after: Option<Duration> },
 }
 
-// ─── Agent Status (during session) ─────────────────────────────────────
-
-/// Status updates streamed from an agent during a session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentStatus {
-    Thinking,
-    Working,
-    Idle,
-    Done,
-    Error,
-}
-
-// ─── Session Events ────────────────────────────────────────────────────
-
-/// Events streamed back from an agent session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SessionEvent {
-    /// Incremental thinking text from the agent (internal reasoning).
-    TextDelta(String),
-
-    /// Incremental message text from the agent (response to user).
-    MessageDelta(String),
-
-    /// Agent started a tool call.
-    ToolCallStart {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-
-    /// Agent received a tool call result.
-    ToolCallResult {
-        id: String,
-        output: serde_json::Value,
-    },
-
-    /// Agent status update (thinking, working, done, etc.).
-    StatusUpdate(AgentStatus),
-
-    /// Agent hit a rate limit.
-    RateLimitHit {
-        retry_after: Option<Duration>,
-    },
-
-    /// Agent reported an error.
-    Error {
-        code: i32,
-        message: String,
-    },
-
-    /// Session completed.
-    Complete {
-        session_id: SessionId,
-    },
-}
-
 // ─── Agent Capabilities ────────────────────────────────────────────────
 
 /// Capabilities reported by an agent during ACP initialize.
