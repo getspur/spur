@@ -1,10 +1,32 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use tracing_subscriber::prelude::*;
 
 use spur_acp::config::SpurConfig;
 use spur_acp::SessionId;
 use spur_core::{Orchestrator, RunOpts};
+
+/// Returns an optional guard that must be held until process exit to flush buffered logs.
+fn init_tracing(
+    tui_mode: bool,
+    repo_root: &Path,
+) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+    if tui_mode {
+        let log_dir = repo_root.join(".spur").join("logs");
+        std::fs::create_dir_all(&log_dir)?;
+        let file_appender = tracing_appender::rolling::daily(log_dir, "spur.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+            .init();
+        Ok(Some(guard))
+    } else {
+        tracing_subscriber::fmt::init();
+        Ok(None)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "spur", about = "Multi-agent orchestrator — issue in, PR out")]
@@ -112,10 +134,11 @@ enum WorkflowCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     let cli = Cli::parse();
     let repo_root = std::env::current_dir()?;
+
+    let tui_mode = matches!(cli.command, Commands::Watch { .. });
+    let _tracing_guard = init_tracing(tui_mode, &repo_root)?;
 
     match cli.command {
         Commands::Init => cmd_init(repo_root).await,
@@ -333,12 +356,16 @@ async fn main() -> Result<()> {
             let orch = load_orchestrator(repo_root)?;
             let event_rx = orch.subscribe();
 
+            // Create permission channel
+            let (perm_tx, perm_rx) =
+                tokio::sync::mpsc::unbounded_channel::<spur_acp::types::PermissionRequest>();
+
             // Create user input channel
             let (user_tx, user_rx) = tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
 
-            // Spawn interactive orchestrator (moves ownership)
+            // Spawn interactive orchestrator with permission channel (moves ownership)
             let orch_handle = tokio::spawn(async move {
-                if let Err(e) = orch.run_interactive(user_rx, brain).await {
+                if let Err(e) = orch.run_interactive(user_rx, brain, Some(perm_tx)).await {
                     tracing::error!(error = %e, "Interactive session error");
                 }
             });
@@ -356,8 +383,8 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Run TUI (blocks main task)
-            spur_tui::run_tui(event_rx, Some(tui_tx)).await?;
+            // Run TUI with permission channel (blocks main task)
+            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx)).await?;
 
             // After TUI exits, abort orchestrator
             orch_handle.abort();
