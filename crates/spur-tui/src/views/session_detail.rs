@@ -108,7 +108,9 @@ impl SessionDetailView {
                 }
                 "assistant" => {
                     self.react_trace.push(TraceEntry {
-                        kind: TraceKind::Observe,
+                        kind: TraceKind::AgentMessage {
+                            agent: self.agent_name.clone(),
+                        },
                         text: entry.text.clone(),
                         timestamp: String::new(),
                     });

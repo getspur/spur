@@ -124,11 +124,18 @@ impl ReactTrace {
     }
 
     pub fn scroll_up(&mut self) {
+        // When following, scroll_offset may be stale. Sync to real bottom first.
+        if self.is_following {
+            self.scroll_offset = self.max_offset();
+        }
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
         self.is_following = false;
     }
 
     pub fn scroll_up_by(&mut self, lines: usize) {
+        if self.is_following {
+            self.scroll_offset = self.max_offset();
+        }
         self.scroll_offset = self.scroll_offset.saturating_sub(lines);
         self.is_following = false;
     }
@@ -150,6 +157,9 @@ impl ReactTrace {
     }
 
     pub fn page_up(&mut self) {
+        if self.is_following {
+            self.scroll_offset = self.max_offset();
+        }
         let jump = self.last_visible_height.get().saturating_sub(2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_sub(jump);
         self.is_following = false;
