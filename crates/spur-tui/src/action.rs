@@ -20,6 +20,8 @@ pub enum Action {
     ShowHelp,
     HideHelp,
     Tick,
+    PermissionResponse { option_id: String },
+    PermissionDenied,
 }
 
 /// Identifies which view is active.
