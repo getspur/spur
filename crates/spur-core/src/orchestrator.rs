@@ -18,7 +18,7 @@ use spur_pm::Issue;
 
 use agent_client_protocol::{
     ContentBlock, InitializeRequest, ListSessionsRequest, LoadSessionRequest, McpServer,
-    McpServerStdio, PromptRequest, ProtocolVersion, SessionUpdate, TextContent,
+    McpServerStdio, PromptRequest, ProtocolVersion, SessionInfo, SessionUpdate, TextContent,
 };
 
 use spur_cost::CostTracker;
@@ -356,15 +356,24 @@ impl Orchestrator {
                         }
                     };
 
-                    match conn.list_sessions(ListSessionsRequest::new()).await {
-                        Ok(response) => {
+                    let sessions_result = match conn.list_sessions(ListSessionsRequest::new()).await {
+                        Ok(response) => Ok(response.sessions),
+                        Err(e) => {
+                            // Fallback: read sessions from agent's local storage.
+                            warn!(error = %e, "list_sessions failed, trying filesystem fallback");
+                            Self::list_sessions_from_disk(&brain_name)
+                        }
+                    };
+
+                    match sessions_result {
+                        Ok(sessions) => {
                             self.emit(SpurEvent::SessionsListed {
                                 agent: brain_name.clone(),
-                                sessions: response.sessions,
+                                sessions,
                             });
                         }
                         Err(e) => {
-                            error!(error = %e, "list_sessions failed");
+                            error!(error = %e, "list_sessions failed (no fallback available)");
                             self.emit(SpurEvent::SessionsListError {
                                 message: e.to_string(),
                             });
@@ -938,6 +947,77 @@ impl Orchestrator {
             .connect_brain(brain_override, permission_tx.clone())
             .await?;
         self.create_brain_session(connection, brain_name, permission_tx).await
+    }
+
+    /// Fallback: read sessions from an agent's local storage on disk.
+    /// Currently supports kiro-cli (~/.kiro/sessions/cli/*.json).
+    fn list_sessions_from_disk(agent_name: &str) -> Result<Vec<SessionInfo>> {
+        // kiro-cli stores sessions in ~/.kiro/sessions/cli/<uuid>.json
+        if agent_name.contains("kiro") {
+            let home = std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            let sessions_dir = home.join(".kiro/sessions/cli");
+
+            if !sessions_dir.exists() {
+                return Ok(Vec::new());
+            }
+
+            let mut sessions: Vec<SessionInfo> = Vec::new();
+            for entry in std::fs::read_dir(&sessions_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                // Parse the minimal fields we need from kiro's session format.
+                let json: serde_json::Value = match serde_json::from_str(&content) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let session_id = match json.get("session_id").and_then(|v| v.as_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+                let cwd = json
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let title = json
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let updated_at = json
+                    .get("updated_at")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let mut info = SessionInfo::new(session_id, PathBuf::from(cwd));
+                info = info.title(title);
+                info = info.updated_at(updated_at);
+                sessions.push(info);
+            }
+
+            // Sort by updated_at descending (most recent first).
+            sessions.sort_by(|a, b| {
+                let a_time = a.updated_at.as_deref().unwrap_or("");
+                let b_time = b.updated_at.as_deref().unwrap_or("");
+                b_time.cmp(a_time)
+            });
+
+            info!(count = sessions.len(), "Loaded sessions from kiro disk storage");
+            return Ok(sessions);
+        }
+
+        anyhow::bail!("No filesystem fallback available for agent '{}'", agent_name)
     }
 
     fn create_connection(
