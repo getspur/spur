@@ -1,0 +1,78 @@
+<h2>SPUR TUI — Revised Design</h2>
+<p class="subtitle">After MCTS evaluation: vertical split is the clear winner. Here's why, plus the refined design.</p>
+
+<div class="section">
+  <h3>Why Option A (horizontal sidebar) was eliminated</h3>
+  <p>At 80 columns, a 30% sidebar = 24 chars. A full agent line needs ~50 chars (<code>⠋ kiro BRAIN working 3m42s $0.82</code>). The sidebar physically can't fit the information we need to show. You'd have to split it across two panels (agents + cost separately) or truncate fields, both of which defeat the redesign's goals.</p>
+</div>
+
+<div class="section">
+  <h3>Refined Design: Vertical Split with Smart Log</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">spur watch — Active Session (80x24)</div>
+    <div class="mockup-body" style="font-family:'SF Mono',Menlo,monospace;font-size:11.5px;line-height:1.5;background:#0d1117;color:#c9d1d9;padding:12px;white-space:pre;border-radius:4px">
+<span style="color:#58a6ff">┌─ Agents ────────────────────────────────────────────────────────────┐</span>
+ <span style="color:#3fb950">⠋</span> kiro         <span style="color:#58a6ff;opacity:0.7">BRAIN</span>   <span style="color:#3fb950">working</span>   3m 42s    <span style="color:#d29922">$0.82</span>
+   ├─ <span style="color:#3fb950">⠋</span> claude  <span style="color:#58a6ff;opacity:0.7">WORKER</span>  <span style="color:#3fb950">working</span>   2m 15s    <span style="color:#d29922">$0.42</span>
+   └─ <span style="color:#484f58">○</span> codex   <span style="color:#58a6ff;opacity:0.7">WORKER</span>  <span style="color:#484f58">idle</span>
+<span style="color:#58a6ff">├─ Activity ──────────────────────────────────────────────────────────┤</span>
+ <span style="color:#484f58">10:32:01</span> <span style="color:#58a6ff">[brain:kiro]</span>     Tool: <span style="color:#c9d1d9">bash</span> — git status
+ <span style="color:#484f58">10:32:03</span> <span style="color:#58a6ff">[brain:kiro]</span>     <span style="color:#58a6ff">→ Delegating to claude:</span> fix auth module
+ <span style="color:#484f58">10:32:05</span> <span style="color:#58a6ff">[worker:claude]</span>  Tool: <span style="color:#c9d1d9">write</span> — src/auth.rs
+ <span style="color:#484f58">10:32:08</span> <span style="color:#58a6ff">[worker:claude]</span>  Tool: <span style="color:#c9d1d9">bash</span> — cargo test
+ <span style="color:#484f58">10:32:10</span> <span style="color:#58a6ff">[worker:claude]</span>  <span style="color:#484f58">▸ ...verifying the token validation logic passes all</span>
+ <span style="color:#484f58">10:32:12</span> <span style="color:#58a6ff">[worker:claude]</span>  <span style="color:#3fb950">✓ Delegation complete</span> <span style="color:#484f58">($0.42, 2m 15s)</span>
+ <span style="color:#484f58">10:32:14</span> <span style="color:#58a6ff">[brain:kiro]</span>     Tool: <span style="color:#c9d1d9">bash</span> — git diff
+ <span style="color:#484f58">10:32:16</span> <span style="color:#58a6ff">[brain:kiro]</span>     <span style="color:#484f58">▸ ...reviewing the changes to ensure correctness be</span>
+ <span style="color:#484f58">10:32:18</span> <span style="color:#58a6ff">[brain:kiro]</span>     Tool: <span style="color:#c9d1d9">bash</span> — git add -A && git commit
+                                                          <span style="color:#484f58">▼ following</span>
+<span style="color:#58a6ff">└─────────────────────────────────────────────────────────────────────┘</span>
+<span style="color:#484f58"> [q] [Tab] [j/k] [/]filter [v]verbose [?]help</span>    <span style="color:#d29922">$1.24</span> <span style="color:#484f58">│</span> <span style="color:#484f58">3m 42s</span> <span style="color:#484f58">│</span> <span style="color:#58a6ff;font-weight:bold">SPUR</span></div>
+  </div>
+
+  <div style="margin-top:16px">
+    <h3>Key Design Decisions</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
+      <div style="background:#161b22;padding:12px;border-radius:6px;border:1px solid #30363d">
+        <div class="label">Log Content</div>
+        <p style="font-size:13px;margin:4px 0 0">Actions shown immediately (tool calls, delegations, errors). Text deltas batched at 500ms into condensed previews: <code style="color:#484f58">▸ ...last 50 chars of agent output</code>. Press <kbd>v</kbd> for full verbose text.</p>
+      </div>
+      <div style="background:#161b22;padding:12px;border-radius:6px;border:1px solid #30363d">
+        <div class="label">Agents Panel</div>
+        <p style="font-size:13px;margin:4px 0 0">Capped at max 40% of screen height. Scrollable if more agents. Brain→worker tree with inline status, elapsed, cost. Spinner animation for working agents.</p>
+      </div>
+      <div style="background:#161b22;padding:12px;border-radius:6px;border:1px solid #30363d">
+        <div class="label">Scroll Behavior</div>
+        <p style="font-size:13px;margin:4px 0 0">"Sticky bottom" — auto-follows new entries. Scrolling up pauses auto-follow. Shows <code>▼ following</code> indicator when active. Scrolling back to bottom re-enables.</p>
+      </div>
+      <div style="background:#161b22;padding:12px;border-radius:6px;border:1px solid #30363d">
+        <div class="label">Empty State</div>
+        <p style="font-size:13px;margin:4px 0 0">When no sessions active: centered message "No active sessions. Start: <code>spur run 'task'</code>". When complete: summary replaces agents panel.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:20px">
+  <h3>Narrow Terminal (40x24 — tmux split pane)</h3>
+  <div class="mockup">
+    <div class="mockup-header">spur watch — 40 cols</div>
+    <div class="mockup-body" style="font-family:'SF Mono',Menlo,monospace;font-size:11px;line-height:1.5;background:#0d1117;color:#c9d1d9;padding:8px;white-space:pre;border-radius:4px">
+<span style="color:#58a6ff">┌─ Agents ──────────────────────┐</span>
+ <span style="color:#3fb950">⠋</span> kiro    <span style="color:#58a6ff;opacity:0.7">B</span> <span style="color:#3fb950">work</span> 3m42 <span style="color:#d29922">$0.82</span>
+   ├ <span style="color:#3fb950">⠋</span> claude <span style="color:#58a6ff;opacity:0.7">W</span> <span style="color:#3fb950">work</span> 2m15 <span style="color:#d29922">$0.42</span>
+   └ <span style="color:#484f58">○</span> codex  <span style="color:#58a6ff;opacity:0.7">W</span> <span style="color:#484f58">idle</span>
+<span style="color:#58a6ff">├─ Activity ────────────────────┤</span>
+ <span style="color:#484f58">32:01</span> <span style="color:#58a6ff">[kiro]</span> bash: git st
+ <span style="color:#484f58">32:03</span> <span style="color:#58a6ff">[kiro]</span> <span style="color:#58a6ff">→ claude</span>
+ <span style="color:#484f58">32:05</span> <span style="color:#58a6ff">[claude]</span> write auth
+ <span style="color:#484f58">32:08</span> <span style="color:#58a6ff">[claude]</span> bash: test
+ <span style="color:#484f58">32:12</span> <span style="color:#58a6ff">[claude]</span> <span style="color:#3fb950">✓ done</span>
+ <span style="color:#484f58">32:14</span> <span style="color:#58a6ff">[kiro]</span> bash: diff
+                        <span style="color:#484f58">▼</span>
+<span style="color:#58a6ff">└──────────────────────────────┘</span>
+<span style="color:#484f58"> [q] [j/k] [?]</span>  <span style="color:#d29922">$1.24</span> <span style="color:#58a6ff">SPUR</span></div>
+  </div>
+  <p style="font-size:13px;margin-top:8px;color:#8b949e">At narrow widths: role abbreviates (B/W), status truncates, timestamps shorten, prefixes drop role. All info still accessible — just compressed.</p>
+</div>

@@ -92,6 +92,25 @@ pub fn init_db(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+// ─── Row Helpers ─────────────────────────────────────────────────────
+
+fn session_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
+    Ok(SessionRecord {
+        id: row.get(0)?,
+        agent: row.get(1)?,
+        role: row.get(2)?,
+        parent_session: row.get(3)?,
+        task_summary: row.get(4)?,
+        project: row.get(5)?,
+        issue_ref: row.get(6)?,
+        started_at: row.get(7)?,
+        ended_at: row.get(8)?,
+        status: row.get(9)?,
+        duration_seconds: row.get(10)?,
+        estimated_cost_usd: row.get(11)?,
+    })
+}
+
 // ─── Session Queries ──────────────────────────────────────────────────
 
 /// Insert a new session record.
@@ -148,20 +167,7 @@ pub fn query_session(conn: &Connection, id: &str) -> Result<Option<SessionRecord
 
     let mut rows = stmt.query(params![id])?;
     match rows.next()? {
-        Some(row) => Ok(Some(SessionRecord {
-            id: row.get(0)?,
-            agent: row.get(1)?,
-            role: row.get(2)?,
-            parent_session: row.get(3)?,
-            task_summary: row.get(4)?,
-            project: row.get(5)?,
-            issue_ref: row.get(6)?,
-            started_at: row.get(7)?,
-            ended_at: row.get(8)?,
-            status: row.get(9)?,
-            duration_seconds: row.get(10)?,
-            estimated_cost_usd: row.get(11)?,
-        })),
+        Some(row) => Ok(Some(session_from_row(row)?)),
         None => Ok(None),
     }
 }
@@ -177,28 +183,8 @@ pub fn query_recent_sessions(conn: &Connection, limit: usize) -> Result<Vec<Sess
          LIMIT ?1",
     )?;
 
-    let rows = stmt.query_map(params![limit as i64], |row| {
-        Ok(SessionRecord {
-            id: row.get(0)?,
-            agent: row.get(1)?,
-            role: row.get(2)?,
-            parent_session: row.get(3)?,
-            task_summary: row.get(4)?,
-            project: row.get(5)?,
-            issue_ref: row.get(6)?,
-            started_at: row.get(7)?,
-            ended_at: row.get(8)?,
-            status: row.get(9)?,
-            duration_seconds: row.get(10)?,
-            estimated_cost_usd: row.get(11)?,
-        })
-    })?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-    Ok(results)
+    let rows = stmt.query_map(params![limit as i64], |row| session_from_row(row))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Return all delegations where the given session is either the brain or the worker.
@@ -227,12 +213,7 @@ pub fn query_delegations_for_session(
             diff_stats: row.get(8)?,
         })
     })?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-    Ok(results)
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 // ─── Delegation Queries ───────────────────────────────────────────────
@@ -297,12 +278,7 @@ pub fn query_cost_today(conn: &Connection) -> Result<Vec<CostSummary>> {
             total_duration_seconds: row.get(3)?,
         })
     })?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-    Ok(results)
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Sum costs by agent for a date range (ISO 8601 strings, inclusive).
@@ -326,12 +302,7 @@ pub fn query_cost_range(conn: &Connection, from: &str, to: &str) -> Result<Vec<C
             total_duration_seconds: row.get(3)?,
         })
     })?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-    Ok(results)
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Sum costs grouped by project.
@@ -352,10 +323,5 @@ pub fn query_cost_by_project(conn: &Connection) -> Result<Vec<ProjectCostSummary
             session_count: row.get(2)?,
         })
     })?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-    Ok(results)
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }

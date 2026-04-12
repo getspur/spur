@@ -1,0 +1,63 @@
+<h2>SPUR TUI Layout</h2>
+<p class="subtitle">Which layout works better for monitoring a multi-agent orchestrator?</p>
+
+<div class="split">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)" style="flex:1;cursor:pointer">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Horizontal Split (current)</h3>
+      <p>Left sidebar for agents + cost, right panel for logs. Like gitui/lazygit.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-header">spur watch — 80x24</div>
+        <div class="mockup-body" style="font-family:monospace;font-size:11px;line-height:1.4;background:#1a1a2e;color:#e0e0e0;padding:8px;white-space:pre">
+<span style="color:#00bcd4">┌─ Agents ────────┬── Activity Log ──────────────┐</span>
+<span style="color:#4caf50"> ⠋</span> kiro      <span style="color:#00bcd4;opacity:0.7">BRAIN</span>  <span style="color:#666">│</span> <span style="color:#555">10:32:01</span> <span style="color:#00bcd4">[brain:kiro]</span>
+  <span style="color:#4caf50">●</span> claude   <span style="color:#00bcd4;opacity:0.7">WRKR</span>   <span style="color:#666">│</span>   Tool: bash — git status
+  <span style="color:#666">○</span> codex    <span style="color:#00bcd4;opacity:0.7">WRKR</span>   <span style="color:#666">│</span> <span style="color:#555">10:32:03</span> <span style="color:#00bcd4">[brain:kiro]</span>
+                    <span style="color:#666">│</span>   Delegating to claude...
+<span style="color:#666">├─ Cost ──────────┤</span> <span style="color:#555">10:32:05</span> <span style="color:#00bcd4">[worker:claude]</span>
+  kiro    <span style="color:#ffc107">$0.82</span>  <span style="color:#666">│</span>   Tool: write auth.rs
+  claude  <span style="color:#ffc107">$0.42</span>  <span style="color:#666">│</span> <span style="color:#555">10:32:08</span> <span style="color:#00bcd4">[worker:claude]</span>
+  <span style="font-weight:bold">total   <span style="color:#4caf50">$1.24</span></span>  <span style="color:#666">│</span>   Tool: bash — cargo test
+                    <span style="color:#666">│</span> <span style="color:#555">10:32:12</span> <span style="color:#4caf50">✓</span> Delegation complete
+<span style="color:#00bcd4">└─────────────────┴──────────────────────────────┘</span>
+<span style="color:#888"> [q]uit [Tab] [↑↓]scroll              SPUR v0.1</span></div>
+      </div>
+      <div class="pros-cons" style="margin-top:8px">
+        <div class="pros"><h4>Pros</h4><ul><li>Familiar gitui/lazygit pattern</li><li>Agents always visible while reading logs</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Cramped on narrow terminals (&lt;80 cols)</li><li>Cost panel squeezed below agents</li><li>Agent info split across two panels</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)" style="flex:1;cursor:pointer">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Vertical Split (proposed)</h3>
+      <p>Agents tree on top (auto-sized), activity log fills below. Like k9s/bottom.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-header">spur watch — 80x24</div>
+        <div class="mockup-body" style="font-family:monospace;font-size:11px;line-height:1.4;background:#1a1a2e;color:#e0e0e0;padding:8px;white-space:pre">
+<span style="color:#00bcd4">┌─ Agents ────────────────────────────────────────┐</span>
+ <span style="color:#4caf50">⠋</span> kiro         <span style="color:#00bcd4;opacity:0.7">BRAIN</span>   <span style="color:#4caf50">working</span>  3m 42s   <span style="color:#ffc107">$0.82</span>
+   ├─ <span style="color:#4caf50">⠋</span> claude  <span style="color:#00bcd4;opacity:0.7">WORKER</span>  <span style="color:#4caf50">working</span>  2m 15s   <span style="color:#ffc107">$0.42</span>
+   └─ <span style="color:#666">○</span> codex   <span style="color:#00bcd4;opacity:0.7">WORKER</span>  <span style="color:#666">idle</span>
+<span style="color:#00bcd4">├─ Activity Log ──────────────────────────────────┤</span>
+ <span style="color:#555">10:32:01</span> <span style="color:#00bcd4">[brain:kiro]</span>     Tool: bash — git status
+ <span style="color:#555">10:32:03</span> <span style="color:#00bcd4">[brain:kiro]</span>     <span style="color:#00bcd4">→ Delegating to claude: fix auth</span>
+ <span style="color:#555">10:32:05</span> <span style="color:#00bcd4">[worker:claude]</span>  Tool: write — src/auth.rs
+ <span style="color:#555">10:32:08</span> <span style="color:#00bcd4">[worker:claude]</span>  Tool: bash — cargo test
+ <span style="color:#555">10:32:12</span> <span style="color:#00bcd4">[worker:claude]</span>  <span style="color:#4caf50">✓ Delegation complete</span> ($0.42)
+ <span style="color:#555">10:32:14</span> <span style="color:#00bcd4">[brain:kiro]</span>     Tool: bash — git diff
+ <span style="color:#555">10:32:18</span> <span style="color:#00bcd4">[brain:kiro]</span>     <span style="color:#4caf50">✓ Session complete</span>
+                                                      <span style="color:#555">▼ following</span>
+<span style="color:#00bcd4">└─────────────────────────────────────────────────┘</span>
+<span style="color:#888"> [q] [Tab] [j/k] [/]filter [?]help</span>  <span style="color:#ffc107">$1.24</span>  <span style="color:#888">3m 42s</span>  <span style="color:#00bcd4;font-weight:bold">SPUR</span></div>
+      </div>
+      <div class="pros-cons" style="margin-top:8px">
+        <div class="pros"><h4>Pros</h4><ul><li>Works at any terminal width (even 40 cols)</li><li>All agent info on one line (name, status, time, cost)</li><li>Tree shows brain→worker hierarchy</li><li>Log gets maximum vertical space</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Agents panel shrinks when many agents</li><li>Less familiar than sidebar layouts</li></ul></div>
+      </div>
+    </div>
+  </div>
+</div>
