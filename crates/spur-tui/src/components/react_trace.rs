@@ -203,6 +203,15 @@ impl ReactTrace {
         })
     }
 
+    /// Mark all pending permission entries as resolved.
+    pub fn resolve_pending_permissions(&mut self) {
+        for entry in &mut self.entries {
+            if let TraceKind::Permission { pending, .. } = &mut entry.kind {
+                *pending = false;
+            }
+        }
+    }
+
     /// Render the full ReAct trace into the given frame area.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let following_indicator = if self.is_following {

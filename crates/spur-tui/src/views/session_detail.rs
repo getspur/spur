@@ -95,6 +95,10 @@ impl SessionDetailView {
         });
     }
 
+    pub fn resolve_pending_permissions(&mut self) {
+        self.react_trace.resolve_pending_permissions();
+    }
+
     pub fn push_permission(&mut self, description: &str, countdown: u8) {
         self.react_trace.push(TraceEntry {
             kind: TraceKind::Permission {
@@ -113,23 +117,18 @@ impl View for SessionDetailView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         // Priority 1: Permission handling when a permission is pending.
         if self.react_trace.has_pending_permission() {
+            use crate::action::PermissionChoice;
             match key.code {
                 KeyCode::Char('y') => {
-                    return Some(Action::PermissionResponse {
-                        option_id: String::new(), // App resolves to first option
-                    });
+                    return Some(Action::PermissionGrant(PermissionChoice::Allow));
                 }
                 KeyCode::Char('n') => {
-                    return Some(Action::PermissionDenied);
+                    return Some(Action::PermissionGrant(PermissionChoice::Deny));
                 }
                 KeyCode::Char('a') => {
-                    return Some(Action::PermissionResponse {
-                        option_id: "always".to_string(), // App resolves to always-allow
-                    });
+                    return Some(Action::PermissionGrant(PermissionChoice::AlwaysAllow));
                 }
-                _ => {
-                    // Fall through to normal key handling
-                }
+                _ => {}
             }
         }
 
