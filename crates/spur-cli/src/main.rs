@@ -374,14 +374,18 @@ async fn main() -> Result<()> {
             let (tui_tx, mut tui_rx) = tokio::sync::mpsc::channel::<spur_tui::UserInput>(32);
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
-                    if let spur_tui::UserInput::Message { text, interrupt, .. } = input {
-                        let _ = user_tx
-                            .send(spur_core::InteractiveInput {
-                                text,
-                                interrupt,
-                            })
-                            .await;
-                    }
+                    let converted = match input {
+                        spur_tui::UserInput::Message { text, interrupt, .. } => {
+                            spur_core::InteractiveInput::Message { text, interrupt }
+                        }
+                        spur_tui::UserInput::ListSessions => {
+                            spur_core::InteractiveInput::ListSessions
+                        }
+                        spur_tui::UserInput::ResumeSession { session_id } => {
+                            spur_core::InteractiveInput::ResumeSession { session_id }
+                        }
+                    };
+                    let _ = user_tx.send(converted).await;
                 }
             });
 

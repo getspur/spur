@@ -17,8 +17,8 @@ use spur_acp::{DelegationResult, DelegationStatus, SpurEvent};
 use spur_pm::Issue;
 
 use agent_client_protocol::{
-    ContentBlock, InitializeRequest, McpServer, McpServerStdio, PromptRequest,
-    ProtocolVersion, SessionUpdate, TextContent,
+    ContentBlock, InitializeRequest, ListSessionsRequest, LoadSessionRequest, McpServer,
+    McpServerStdio, PromptRequest, ProtocolVersion, SessionUpdate, TextContent,
 };
 
 use spur_cost::CostTracker;
@@ -58,9 +58,10 @@ pub struct BrainSession {
 }
 
 /// A user input message from the TUI.
-pub struct InteractiveInput {
-    pub text: String,
-    pub interrupt: bool,
+pub enum InteractiveInput {
+    Message { text: String, interrupt: bool },
+    ListSessions,
+    ResumeSession { session_id: String },
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -316,110 +317,231 @@ impl Orchestrator {
         permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
     ) -> Result<()> {
         let mut brain: Option<BrainSession> = None;
-        let mut pending_messages: VecDeque<String> = VecDeque::new();
+        let mut pending_messages: VecDeque<InteractiveInput> = VecDeque::new();
+        // Pre-connected (initialized) agent connection, ready for create_brain_session
+        // or load_brain_session without re-running connect_brain.
+        let mut agent_connection: Option<(Box<dyn spur_acp::AgentConnection>, String)> = None;
 
         loop {
-            // ── Phase 2: Get next message (from queue or user) ──────────
-            // If multiple messages queued during streaming, concatenate into one prompt.
-            let text = if !pending_messages.is_empty() {
-                let msgs: Vec<String> = pending_messages.drain(..).collect();
-                msgs.join("\n")
+            // ── Get next input (from queue or user) ────────────────────
+            let input = if !pending_messages.is_empty() {
+                pending_messages.pop_front().unwrap()
             } else {
                 match user_input_rx.recv().await {
-                    Some(input) => input.text,
+                    Some(i) => i,
                     None => break, // TUI closed
                 }
             };
 
-            // ── Lazy-spawn brain on first message (or after crash) ──────
-            if brain.is_none() {
-                match self
-                    .spawn_brain_session(brain_override.as_deref(), permission_tx.clone())
-                    .await
-                {
-                    Ok(b) => brain = Some(b),
-                    Err(e) => {
-                        error!(error = %e, "Failed to spawn brain");
-                        self.emit(SpurEvent::BrainError {
-                            session: SessionId::new(),
-                            message: e.to_string(),
-                        });
-                        continue;
+            match input {
+                // ── ListSessions ────────────────────────────────────────
+                InteractiveInput::ListSessions => {
+                    // Connect if we don't already have an initialized connection.
+                    let (mut conn, brain_name) = match agent_connection.take() {
+                        Some(existing) => existing,
+                        None => {
+                            match self
+                                .connect_brain(brain_override.as_deref(), permission_tx.clone())
+                                .await
+                            {
+                                Ok(pair) => pair,
+                                Err(e) => {
+                                    error!(error = %e, "Failed to connect brain for list_sessions");
+                                    self.emit(SpurEvent::SessionsListError {
+                                        message: e.to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
+                    match conn.list_sessions(ListSessionsRequest::new()).await {
+                        Ok(response) => {
+                            self.emit(SpurEvent::SessionsListed {
+                                agent: brain_name.clone(),
+                                sessions: response.sessions,
+                            });
+                        }
+                        Err(e) => {
+                            error!(error = %e, "list_sessions failed");
+                            self.emit(SpurEvent::SessionsListError {
+                                message: e.to_string(),
+                            });
+                        }
                     }
+
+                    // Stash the connection for future use.
+                    agent_connection = Some((conn, brain_name));
                 }
-            }
-            let b = brain.as_mut().unwrap();
 
-            // ── Send prompt ─────────────────────────────────────────────
-            let prompt_request = PromptRequest::new(
-                b.acp_session_id.clone(),
-                vec![ContentBlock::Text(TextContent::new(text))],
-            );
+                // ── ResumeSession ───────────────────────────────────────
+                InteractiveInput::ResumeSession { session_id } => {
+                    // Use pre-connected or connect fresh.
+                    let (connection, brain_name) = match agent_connection.take() {
+                        Some(existing) => existing,
+                        None => {
+                            match self
+                                .connect_brain(brain_override.as_deref(), permission_tx.clone())
+                                .await
+                            {
+                                Ok(pair) => pair,
+                                Err(e) => {
+                                    error!(error = %e, "Failed to connect brain for resume");
+                                    self.emit(SpurEvent::BrainError {
+                                        session: SessionId::new(),
+                                        message: e.to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    };
 
-            let mut stream = match b.connection.prompt(prompt_request).await {
-                Ok(s) => s,
-                Err(e) => {
-                    error!(error = %e, "Brain prompt failed");
-                    self.emit(SpurEvent::BrainError {
-                        session: b.spur_session_id.clone(),
-                        message: e.to_string(),
-                    });
-                    // Abort delegation handler, shutdown brain
-                    b.delegation_handle.abort();
-                    let _ = b.connection.shutdown().await;
-                    brain = None;
-                    continue;
-                }
-            };
-
-            // ── Phase 1: Stream output + check for interrupts ───────────
-            let mut cancel_deadline: Option<tokio::time::Instant> = None;
-
-            loop {
-                tokio::select! {
-                    item = stream.next() => {
-                        match item {
-                            Some(notification) => {
+                    match self
+                        .load_brain_session(connection, brain_name, permission_tx.clone(), session_id)
+                        .await
+                    {
+                        Ok((session, mut history_stream)) => {
+                            let spur_id = session.spur_session_id.clone();
+                            // Drain history stream before making the session available.
+                            while let Some(notification) = history_stream.next().await {
                                 self.emit(SpurEvent::AgentNotification {
-                                    session: b.spur_session_id.clone(),
+                                    session: spur_id.clone(),
                                     notification,
                                 });
                             }
-                            None => break, // Turn complete
+                            brain = Some(session);
+                            self.emit(SpurEvent::TurnComplete { session: spur_id });
                         }
-                    }
-                    Some(input) = user_input_rx.recv() => {
-                        if input.interrupt {
-                            let _ = b.connection.cancel(&b.acp_session_id).await;
-                            cancel_deadline = Some(
-                                tokio::time::Instant::now()
-                                    + std::time::Duration::from_secs(5),
-                            );
+                        Err(e) => {
+                            error!(error = %e, "Failed to load brain session");
+                            self.emit(SpurEvent::BrainError {
+                                session: SessionId::new(),
+                                message: e.to_string(),
+                            });
                         }
-                        // Strip ! prefix from interrupt messages before queueing
-                        let msg = if input.interrupt {
-                            input.text.strip_prefix('!').unwrap_or(&input.text).to_string()
-                        } else {
-                            input.text
-                        };
-                        pending_messages.push_back(msg);
-                    }
-                    _ = async {
-                        match cancel_deadline {
-                            Some(deadline) => tokio::time::sleep_until(deadline).await,
-                            None => futures::future::pending().await,
-                        }
-                    } => {
-                        warn!("Cancel timeout — force-ending stream");
-                        break;
                     }
                 }
-            }
 
-            // Emit turn complete
-            self.emit(SpurEvent::TurnComplete {
-                session: b.spur_session_id.clone(),
-            });
+                // ── Message ─────────────────────────────────────────────
+                InteractiveInput::Message { text, interrupt } => {
+                    // Flatten interrupt messages (they were queued during streaming).
+                    let text = if interrupt {
+                        text.strip_prefix('!').unwrap_or(&text).to_string()
+                    } else {
+                        text
+                    };
+
+                    // ── Lazy-spawn brain on first message (or after crash) ──
+                    if brain.is_none() {
+                        // Use pre-connected agent if available; otherwise connect_brain.
+                        let result = match agent_connection.take() {
+                            Some((connection, brain_name)) => {
+                                self.create_brain_session(connection, brain_name, permission_tx.clone())
+                                    .await
+                            }
+                            None => {
+                                self.spawn_brain_session(brain_override.as_deref(), permission_tx.clone())
+                                    .await
+                            }
+                        };
+
+                        match result {
+                            Ok(b) => brain = Some(b),
+                            Err(e) => {
+                                error!(error = %e, "Failed to spawn brain");
+                                self.emit(SpurEvent::BrainError {
+                                    session: SessionId::new(),
+                                    message: e.to_string(),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    let b = brain.as_mut().unwrap();
+
+                    // ── Send prompt ─────────────────────────────────────
+                    let prompt_request = PromptRequest::new(
+                        b.acp_session_id.clone(),
+                        vec![ContentBlock::Text(TextContent::new(text))],
+                    );
+
+                    let mut stream = match b.connection.prompt(prompt_request).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!(error = %e, "Brain prompt failed");
+                            self.emit(SpurEvent::BrainError {
+                                session: b.spur_session_id.clone(),
+                                message: e.to_string(),
+                            });
+                            b.delegation_handle.abort();
+                            let _ = b.connection.shutdown().await;
+                            brain = None;
+                            continue;
+                        }
+                    };
+
+                    // ── Stream output + check for interrupts ────────────
+                    let mut cancel_deadline: Option<tokio::time::Instant> = None;
+
+                    loop {
+                        tokio::select! {
+                            item = stream.next() => {
+                                match item {
+                                    Some(notification) => {
+                                        self.emit(SpurEvent::AgentNotification {
+                                            session: b.spur_session_id.clone(),
+                                            notification,
+                                        });
+                                    }
+                                    None => break, // Turn complete
+                                }
+                            }
+                            Some(queued) = user_input_rx.recv() => {
+                                match queued {
+                                    InteractiveInput::Message { text: msg_text, interrupt: msg_interrupt } => {
+                                        if msg_interrupt {
+                                            let _ = b.connection.cancel(&b.acp_session_id).await;
+                                            cancel_deadline = Some(
+                                                tokio::time::Instant::now()
+                                                    + std::time::Duration::from_secs(5),
+                                            );
+                                        }
+                                        let queued_text = if msg_interrupt {
+                                            msg_text.strip_prefix('!').unwrap_or(&msg_text).to_string()
+                                        } else {
+                                            msg_text
+                                        };
+                                        pending_messages.push_back(InteractiveInput::Message {
+                                            text: queued_text,
+                                            interrupt: false,
+                                        });
+                                    }
+                                    other => {
+                                        // Queue non-message inputs for after streaming completes.
+                                        pending_messages.push_back(other);
+                                    }
+                                }
+                            }
+                            _ = async {
+                                match cancel_deadline {
+                                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                    None => futures::future::pending().await,
+                                }
+                            } => {
+                                warn!("Cancel timeout — force-ending stream");
+                                break;
+                            }
+                        }
+                    }
+
+                    // Emit turn complete
+                    self.emit(SpurEvent::TurnComplete {
+                        session: b.spur_session_id.clone(),
+                    });
+                }
+            }
         }
 
         // ── Cleanup ─────────────────────────────────────────────────────
@@ -427,6 +549,10 @@ impl Orchestrator {
             b.delegation_handle.abort();
             let _ = b.connection.shutdown().await;
             let _ = b.mcp_server.shutdown();
+        }
+        // Drop any pre-connected but unused connection.
+        if let Some((mut conn, _)) = agent_connection.take() {
+            let _ = conn.shutdown().await;
         }
 
         info!("Interactive session ended");
@@ -595,15 +721,15 @@ impl Orchestrator {
 
     // ─── Private helpers ─────────────────────────────────────────────
 
-    /// Spawn a brain agent session with MCP callback server and delegation handler.
-    pub async fn spawn_brain_session(
+    /// Resolve and initialize a brain agent connection without starting a full session.
+    ///
+    /// Steps: resolve brain name from config → get brain_config from registry →
+    /// create connection → initialize. Returns (connection, brain_name).
+    async fn connect_brain(
         &mut self,
         brain_override: Option<&str>,
         permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
-    ) -> Result<BrainSession> {
-        let session_id = SessionId::new();
-
-        // 1. Resolve brain agent.
+    ) -> Result<(Box<dyn spur_acp::AgentConnection>, String)> {
         let brain_name = brain_override
             .unwrap_or(&self.config.brain.default)
             .to_string();
@@ -614,13 +740,37 @@ impl Orchestrator {
             .ok_or_else(|| anyhow!("Brain agent '{}' not found in registry", brain_name))?
             .clone();
 
-        info!(brain = %brain_name, session = %session_id, "Spawning brain session");
+        let mut connection = self.create_connection(&brain_config, permission_tx);
+
+        let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+        connection
+            .initialize(init_request)
+            .await
+            .context("Failed to initialize brain agent")?;
+
+        debug!(brain = %brain_name, "Brain agent connected and initialized");
+        Ok((connection, brain_name))
+    }
+
+    /// Create a full brain session from an already-initialized connection.
+    ///
+    /// Emits BrainSpawned, starts MCP callback server, logs session start,
+    /// calls new_session, spawns delegation handler. Returns BrainSession.
+    async fn create_brain_session(
+        &mut self,
+        mut connection: Box<dyn spur_acp::AgentConnection>,
+        brain_name: String,
+        _permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+    ) -> Result<BrainSession> {
+        let session_id = SessionId::new();
+
+        info!(brain = %brain_name, session = %session_id, "Creating brain session");
         self.emit(SpurEvent::BrainSpawned {
             agent: brain_name.clone(),
             session: session_id.clone(),
         });
 
-        // 2. Start MCP callback server.
+        // Start MCP callback server.
         let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
         let mut mcp_server = mcp_server;
 
@@ -643,7 +793,7 @@ impl Orchestrator {
             .start()
             .context("Failed to start MCP callback server")?;
 
-        // 3. Log session start.
+        // Log session start.
         if let Some(ref ct) = self.cost_tracker {
             let _ = ct.start_session(
                 &session_id,
@@ -656,17 +806,6 @@ impl Orchestrator {
             );
         }
 
-        // 4. Spawn brain agent via AgentConnection.
-        let mut connection = self.create_connection(&brain_config, permission_tx);
-
-        let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
-        connection
-            .initialize(init_request)
-            .await
-            .context("Failed to initialize brain agent")?;
-
-        debug!(brain = %brain_name, "Brain agent initialized");
-
         let mcp_servers = vec![McpServer::Stdio(
             McpServerStdio::new("spur-mcp", &mcp_endpoint.socket_path)
                 .args(Vec::new()),
@@ -677,7 +816,7 @@ impl Orchestrator {
             .await
             .context("Failed to create brain session")?;
 
-        // 5. Spawn delegation handler.
+        // Spawn delegation handler.
         let max_concurrent = self.config.worktree.max_concurrent;
         let delegation_handle = tokio::spawn(Self::handle_delegations(
             delegation_channel,
@@ -695,6 +834,110 @@ impl Orchestrator {
             mcp_server,
             delegation_handle,
         })
+    }
+
+    /// Load an existing session and return a BrainSession + history stream.
+    ///
+    /// Similar to create_brain_session but calls load_session instead of new_session.
+    /// The history stream delivers past session notifications (historical context).
+    async fn load_brain_session(
+        &mut self,
+        mut connection: Box<dyn spur_acp::AgentConnection>,
+        brain_name: String,
+        _permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+        acp_session_id: String,
+    ) -> Result<(BrainSession, std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>)> {
+        let session_id = SessionId::new();
+
+        info!(brain = %brain_name, session = %session_id, acp_session = %acp_session_id, "Loading brain session");
+        self.emit(SpurEvent::BrainSpawned {
+            agent: brain_name.clone(),
+            session: session_id.clone(),
+        });
+
+        // Start MCP callback server.
+        let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
+        let mut mcp_server = mcp_server;
+
+        let workers: Vec<WorkerInfo> = self
+            .registry
+            .worker_capable()
+            .iter()
+            .map(|c| WorkerInfo {
+                name: c.name.clone(),
+                description: c.capabilities.join(", "),
+                cost_tier: c.cost_tier,
+            })
+            .collect();
+        mcp_server.set_workers(workers);
+
+        let mcp_endpoint = mcp_server.endpoint();
+        let mcp_server = Arc::new(mcp_server);
+        let _mcp_handle = mcp_server
+            .clone()
+            .start()
+            .context("Failed to start MCP callback server")?;
+
+        // Log session start.
+        if let Some(ref ct) = self.cost_tracker {
+            let _ = ct.start_session(
+                &session_id,
+                &brain_name,
+                "brain",
+                None,
+                "(resumed)",
+                self.config.project.as_ref().map(|p| p.name.as_str()),
+                None,
+            );
+        }
+
+        let mcp_servers = vec![McpServer::Stdio(
+            McpServerStdio::new("spur-mcp", &mcp_endpoint.socket_path)
+                .args(Vec::new()),
+        )];
+
+        let load_request = LoadSessionRequest::new(
+            acp_session_id.clone(),
+            self.repo_root.clone(),
+        ).mcp_servers(mcp_servers);
+
+        let history_stream = connection
+            .load_session(load_request)
+            .await
+            .context("Failed to load brain session")?;
+
+        // Spawn delegation handler.
+        let max_concurrent = self.config.worktree.max_concurrent;
+        let delegation_handle = tokio::spawn(Self::handle_delegations(
+            delegation_channel,
+            self.repo_root.clone(),
+            self.config.agents.entries.clone(),
+            max_concurrent,
+            self.event_tx.clone(),
+        ));
+
+        let brain_session = BrainSession {
+            connection,
+            acp_session_id,
+            spur_session_id: session_id,
+            brain_name,
+            mcp_server,
+            delegation_handle,
+        };
+
+        Ok((brain_session, history_stream))
+    }
+
+    /// Spawn a brain agent session with MCP callback server and delegation handler.
+    pub async fn spawn_brain_session(
+        &mut self,
+        brain_override: Option<&str>,
+        permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+    ) -> Result<BrainSession> {
+        let (connection, brain_name) = self
+            .connect_brain(brain_override, permission_tx.clone())
+            .await?;
+        self.create_brain_session(connection, brain_name, permission_tx).await
     }
 
     fn create_connection(

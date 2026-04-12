@@ -37,7 +37,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::{
     Agent, CancelNotification, Client, ClientSideConnection, InitializeRequest,
-    InitializeResponse, McpServer, NewSessionRequest, NewSessionResponse, PromptRequest,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    McpServer, NewSessionRequest, NewSessionResponse, PromptRequest,
     ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionNotification, WriteTextFileRequest, WriteTextFileResponse,
@@ -76,6 +77,14 @@ enum AcpCommand {
     },
     Shutdown {
         reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    LoadSession {
+        request: LoadSessionRequest,
+        reply: oneshot::Sender<anyhow::Result<mpsc::UnboundedReceiver<SessionNotification>>>,
+    },
+    ListSessions {
+        request: ListSessionsRequest,
+        reply: oneshot::Sender<anyhow::Result<ListSessionsResponse>>,
     },
 }
 
@@ -352,6 +361,75 @@ impl AgentConnection for NativeAcpConnection {
     fn health(&self) -> AgentHealth {
         self.health_status.clone()
     }
+
+    // ─── load_session ────────────────────────────────────────────────────
+
+    async fn load_session(
+        &mut self,
+        request: LoadSessionRequest,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': not initialized",
+                self.agent_name
+            )
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx.send(AcpCommand::LoadSession {
+            request,
+            reply: reply_tx,
+        }).map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died",
+                self.agent_name
+            )
+        })?;
+
+        let notification_rx = reply_rx.await.map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died during load_session setup",
+                self.agent_name
+            )
+        })??;
+
+        let stream = unfold(notification_rx, |mut rx| async move {
+            rx.recv().await.map(|notif| (notif, rx))
+        });
+        Ok(Box::pin(stream))
+    }
+
+    // ─── list_sessions ───────────────────────────────────────────────────
+
+    async fn list_sessions(
+        &mut self,
+        request: ListSessionsRequest,
+    ) -> anyhow::Result<ListSessionsResponse> {
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': not initialized",
+                self.agent_name
+            )
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx.send(AcpCommand::ListSessions {
+            request,
+            reply: reply_tx,
+        }).map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died",
+                self.agent_name
+            )
+        })?;
+
+        reply_rx.await.map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died during list_sessions",
+                self.agent_name
+            )
+        })?
+    }
 }
 
 // ─── Dedicated ACP thread ───────────────────────────────────────────────────
@@ -577,6 +655,46 @@ fn acp_thread_main(
                     let _ = child.kill().await;
                     let _ = reply.send(Ok(()));
                     break;
+                }
+                AcpCommand::LoadSession { request, reply } => {
+                    // Update cwd to match the loaded session's cwd.
+                    *cwd_ref.borrow_mut() = request.cwd.clone();
+
+                    // Create a fresh notification channel for the load_session history stream.
+                    let (tx, rx) = mpsc::unbounded_channel::<SessionNotification>();
+                    *notification_tx.borrow_mut() = tx;
+
+                    // Send the receiver back immediately.
+                    let _ = reply.send(Ok(rx));
+
+                    // Call load_session — this delivers historical notifications via the
+                    // Client::session_notification callback while it runs.
+                    let agent_name_load = agent_name.clone();
+                    let _load_result = connection.load_session(request).await;
+                    match &_load_result {
+                        Ok(_) => {
+                            tracing::debug!(
+                                agent = %agent_name_load,
+                                "NativeAcpConnection: load_session completed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                agent = %agent_name_load,
+                                "NativeAcpConnection: load_session failed: {e}"
+                            );
+                        }
+                    }
+
+                    // Signal stream completion.
+                    let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
+                    *notification_tx.borrow_mut() = dead_tx;
+                }
+                AcpCommand::ListSessions { request, reply } => {
+                    let result = connection.list_sessions(request).await;
+                    let _ = reply.send(result.map_err(|e| {
+                        anyhow::anyhow!("NativeAcpConnection '{}': list_sessions failed: {e}", agent_name)
+                    }));
                 }
             }
         }
