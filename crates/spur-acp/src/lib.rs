@@ -6,6 +6,7 @@ pub mod transport;
 pub mod types;
 
 pub use config::AgentConfig;
+pub use connection::AgentConnection;
 pub use registry::AgentRegistry;
 pub use transport::{AgentTransport, AcpTransport, CliWrapTransport, StdioTransport};
 
