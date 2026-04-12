@@ -10,6 +10,7 @@ use spur_acp::config::SpurConfig;
 use spur_acp::registry::AgentRegistry;
 use spur_acp::transport::{AcpTransport, AgentTransport, CliWrapTransport};
 use spur_acp::types::*;
+use spur_acp::{DelegationResult, DelegationStatus, SpurEvent};
 use spur_pm::Issue;
 
 use spur_cost::CostTracker;
