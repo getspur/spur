@@ -53,6 +53,9 @@ thiserror = "2"
 anyhow = "1"
 directories = "5"
 
+# ACP SDK
+agent-client-protocol = "0.10"
+
 # Workspace crates
 spur-acp = { path = "crates/spur-acp" }
 spur-mcp = { path = "crates/spur-mcp" }

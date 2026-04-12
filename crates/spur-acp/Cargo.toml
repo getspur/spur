@@ -20,3 +20,4 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 directories = { workspace = true }
+agent-client-protocol = { workspace = true }
