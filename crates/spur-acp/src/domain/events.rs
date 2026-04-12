@@ -21,4 +21,7 @@ pub enum SpurEvent {
     IssueReceived { source: String, id: String },
     PrCreated { url: String },
     IssueUpdated { source: String, id: String, status: String },
+    // ── Interactive loop events ──────────────────────────────────────
+    TurnComplete { session: SessionId },
+    BrainError { session: SessionId, message: String },
 }

@@ -282,6 +282,26 @@ impl View for SessionDetailView {
                 }
             }
 
+            SpurEvent::TurnComplete { session } => {
+                if session.0 == self.session_id.0 {
+                    self.react_trace.push(TraceEntry {
+                        kind: TraceKind::Think,
+                        text: "Turn complete — ready for input".to_string(),
+                        timestamp: Self::now_stamp(),
+                    });
+                }
+            }
+
+            SpurEvent::BrainError { session, message } => {
+                if session.0 == self.session_id.0 {
+                    self.react_trace.push(TraceEntry {
+                        kind: TraceKind::Think,
+                        text: format!("BRAIN ERROR: {}", message),
+                        timestamp: Self::now_stamp(),
+                    });
+                }
+            }
+
             // All other event types are not relevant to this session view.
             _ => {}
         }
