@@ -333,8 +333,10 @@ impl Orchestrator {
 
         loop {
             // ── Phase 2: Get next message (from queue or user) ──────────
-            let text = if let Some(msg) = pending_messages.pop_front() {
-                msg
+            // If multiple messages queued during streaming, concatenate into one prompt.
+            let text = if !pending_messages.is_empty() {
+                let msgs: Vec<String> = pending_messages.drain(..).collect();
+                msgs.join("\n")
             } else {
                 match user_input_rx.recv().await {
                     Some(input) => input.text,
@@ -408,7 +410,13 @@ impl Orchestrator {
                                     + std::time::Duration::from_secs(5),
                             );
                         }
-                        pending_messages.push_back(input.text);
+                        // Strip ! prefix from interrupt messages before queueing
+                        let msg = if input.interrupt {
+                            input.text.strip_prefix('!').unwrap_or(&input.text).to_string()
+                        } else {
+                            input.text
+                        };
+                        pending_messages.push_back(msg);
                     }
                     _ = async {
                         match cancel_deadline {
