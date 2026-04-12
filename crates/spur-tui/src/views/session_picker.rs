@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -36,14 +38,15 @@ enum PickerState {
 
 pub struct SessionPickerView {
     state: PickerState,
-    scroll_offset: usize,
+    /// Interior-mutable so render(&self) can adjust scroll position.
+    scroll_offset: Cell<usize>,
 }
 
 impl SessionPickerView {
     pub fn new() -> Self {
         Self {
             state: PickerState::Loading,
-            scroll_offset: 0,
+            scroll_offset: Cell::new(0),
         }
     }
 
@@ -58,7 +61,7 @@ impl SessionPickerView {
                 resuming: false,
             };
         }
-        self.scroll_offset = 0;
+        self.scroll_offset.set(0);
     }
 
     pub fn set_error(&mut self, message: String) {
@@ -143,6 +146,16 @@ impl SessionPickerView {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
         let visible_height = area.height.saturating_sub(4) as usize;
 
+        // Clamp scroll_offset so cursor is always visible.
+        let mut scroll = self.scroll_offset.get();
+        if cursor >= scroll + visible_height {
+            scroll = cursor.saturating_sub(visible_height.saturating_sub(1));
+        }
+        if cursor < scroll {
+            scroll = cursor;
+        }
+        self.scroll_offset.set(scroll);
+
         let mut lines = vec![
             Line::from(vec![
                 Span::styled(
@@ -160,7 +173,7 @@ impl SessionPickerView {
         for (i, session) in sessions
             .iter()
             .enumerate()
-            .skip(self.scroll_offset)
+            .skip(scroll)
             .take(visible_height)
         {
             let is_selected = i == cursor;
@@ -290,9 +303,6 @@ impl View for SessionPickerView {
                     KeyCode::Up | KeyCode::Char('k') => {
                         if *cursor > 0 {
                             *cursor -= 1;
-                            if *cursor < self.scroll_offset {
-                                self.scroll_offset = *cursor;
-                            }
                         }
                         None
                     }
