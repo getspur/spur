@@ -12,6 +12,8 @@ Add a `SessionPickerView` to the TUI that lists resumable sessions from the ACP 
 
 Requires sub-project 4 (ACP Session Management) — specifically `list_sessions` and `load_session` on `AgentConnection`, and the `SessionInfo` re-export from `spur-acp`.
 
+**Note on orchestrator design:** This spec's `connect_brain` / `create_brain_session` / `load_brain_session` decomposition supersedes sub-project 4's proposed `resume_session_id` parameter on `spawn_brain_session`. Sub-project 4 should implement the decomposition directly (it serves both `--resume` and the picker). The picker then reuses these methods rather than refactoring them.
+
 ## Scope (v1)
 
 **Implement:**
@@ -89,6 +91,8 @@ Sessions (kiro-cli)
 
   ↑↓ navigate · Enter select · Esc back
 ```
+
+**Session count:** v1 shows all sessions returned by `list_sessions` in a scrollable list without pagination or limits. Agents typically return 10-50 sessions. For very long lists, the user can scroll or use `--resume <id>` directly. Filtering/search is deferred to v2.
 
 **Rationale:** The ACP `SessionInfo` struct has only 5 fields. Richer layouts (two-line rows, split panels) were evaluated but rejected — they display data that doesn't exist in the API (turns, cost, last message). The adaptive compact layout maximizes visible sessions (~12-15 in a 24-row terminal) while gracefully handling missing titles.
 
