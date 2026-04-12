@@ -202,13 +202,9 @@ impl View for SessionDetailView {
 
                 match se {
                     SessionEvent::TextDelta(text) => {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            self.react_trace.push(TraceEntry {
-                                kind: TraceKind::Think,
-                                text: trimmed.to_string(),
-                                timestamp: Self::now_stamp(),
-                            });
+                        if !text.is_empty() {
+                            self.react_trace
+                                .append_think(text, Self::now_stamp());
                         }
                     }
                     SessionEvent::ToolCallStart { name, input, .. } => {
@@ -306,18 +302,15 @@ impl View for SessionDetailView {
 
             SpurEvent::TurnComplete { session } => {
                 if session.0 == self.session_id.0 {
-                    self.react_trace.push(TraceEntry {
-                        kind: TraceKind::Think,
-                        text: "Turn complete — ready for input".to_string(),
-                        timestamp: Self::now_stamp(),
-                    });
+                    // No trace entry — the InputBar status indicator shows "ready".
+                    // A separator is enough to visually divide turns.
                 }
             }
 
             SpurEvent::BrainError { session, message } => {
                 if session.0 == self.session_id.0 {
                     self.react_trace.push(TraceEntry {
-                        kind: TraceKind::Think,
+                        kind: TraceKind::Observe,
                         text: format!("BRAIN ERROR: {}", message),
                         timestamp: Self::now_stamp(),
                     });
