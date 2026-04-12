@@ -528,7 +528,6 @@ impl Orchestrator {
                     "--output-format",
                     "stream-json",
                     "--verbose",
-                    "--bare",
                     "--include-partial-messages",
                     "--permission-mode",
                     "acceptEdits",
