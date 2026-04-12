@@ -92,6 +92,8 @@ pub struct NativeAcpConnection {
     thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Cached health status.
     health_status: AgentHealth,
+    /// Optional sender for interactive permission requests (forwarded to the TUI).
+    permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
 }
 
 impl NativeAcpConnection {
@@ -103,6 +105,7 @@ impl NativeAcpConnection {
         agent_name: impl Into<String>,
         command: impl Into<String>,
         extra_args: Vec<String>,
+        permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ) -> Self {
         Self {
             agent_name: agent_name.into(),
@@ -111,6 +114,7 @@ impl NativeAcpConnection {
             cmd_tx: None,
             thread_handle: None,
             health_status: AgentHealth::Unknown,
+            permission_tx,
         }
     }
 }
@@ -138,10 +142,11 @@ impl AgentConnection for NativeAcpConnection {
 
         // Spawn the dedicated thread that will own the !Send SDK connection.
         let thread_agent_name = agent_name.clone();
+        let permission_tx = self.permission_tx.clone();
         let handle = std::thread::Builder::new()
             .name(format!("acp-{}", agent_name))
             .spawn(move || {
-                acp_thread_main(thread_agent_name, command, extra_args, cmd_rx);
+                acp_thread_main(thread_agent_name, command, extra_args, cmd_rx, permission_tx);
             })
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -351,6 +356,7 @@ fn acp_thread_main(
     command: String,
     extra_args: Vec<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
+    permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
 ) {
     // Build a single-threaded runtime for this thread.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -443,6 +449,7 @@ fn acp_thread_main(
         let spur_client = SpurAcpClientDynamic {
             notification_tx: notification_tx_for_client,
             cwd: std::rc::Rc::new(std::cell::RefCell::new(PathBuf::from("."))),
+            permission_tx,
         };
         let cwd_ref = spur_client.cwd.clone();
 
@@ -567,6 +574,7 @@ fn acp_thread_main(
 struct SpurAcpClientDynamic {
     notification_tx: std::rc::Rc<std::cell::RefCell<mpsc::UnboundedSender<SessionNotification>>>,
     cwd: std::rc::Rc<std::cell::RefCell<PathBuf>>,
+    permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -575,6 +583,9 @@ impl Client for SpurAcpClientDynamic {
         &self,
         args: RequestPermissionRequest,
     ) -> agent_client_protocol::Result<RequestPermissionResponse> {
+        // TODO(task-3): implement interactive permission flow using self.permission_tx
+        let _perm_tx = &self.permission_tx;
+
         // Auto-approve: pick the first option.
         let option_id = args
             .options
