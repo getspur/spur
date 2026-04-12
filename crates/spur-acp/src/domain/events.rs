@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::types::{SessionEvent, SessionId};
+use agent_client_protocol::SessionNotification;
+use crate::types::SessionId;
 use crate::domain::delegation::DelegationStatus;
 
 /// Events emitted by the orchestrator for TUI/cost-tracker consumption.
@@ -11,7 +12,7 @@ pub enum SpurEvent {
     BrainSpawned { agent: String, session: SessionId },
     WorkerSpawned { agent: String, session: SessionId, worktree: PathBuf },
     SessionCompleted { session: SessionId, success: bool },
-    AgentOutput { session: SessionId, event: SessionEvent },
+    AgentNotification { session: SessionId, notification: SessionNotification },
     DelegationRequested { from: SessionId, to_agent: String, task: String },
     DelegationCompleted { worker_session: SessionId, status: DelegationStatus },
     ConflictDetected { files: Vec<PathBuf> },
