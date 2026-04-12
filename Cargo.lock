@@ -1044,10 +1044,12 @@ name = "spur-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "directories",
  "spur-acp",
  "spur-core",
+ "spur-cost",
  "spur-pm",
  "tokio",
  "toml",

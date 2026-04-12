@@ -128,4 +128,14 @@ impl CostTracker {
     pub fn session_detail(&self, id: &SessionId) -> Result<Option<SessionRecord>> {
         db::query_session(&self.conn, &id.0)
     }
+
+    /// Return the most recent sessions (up to `limit`).
+    pub fn recent_sessions(&self, limit: usize) -> Result<Vec<SessionRecord>> {
+        db::query_recent_sessions(&self.conn, limit)
+    }
+
+    /// Return all delegations where the given session is either the brain or the worker.
+    pub fn session_delegations(&self, id: &SessionId) -> Result<Vec<DelegationRecord>> {
+        db::query_delegations_for_session(&self.conn, &id.0)
+    }
 }

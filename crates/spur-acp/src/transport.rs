@@ -646,6 +646,303 @@ fn parse_session_event(msg: &Value) -> Option<SessionEvent> {
     }
 }
 
+// ─── StdioTransport ────────────────────────────────────────────────────
+
+/// Raw stdin/stdout transport for agents that support persistent interactive
+/// conversation but do NOT speak the ACP JSON-RPC protocol.
+///
+/// Prompts are delimited with marker lines; responses are collected line-by-line
+/// with a 2-second idle timeout used as the end-of-response heuristic.
+pub struct StdioTransport {
+    agent_name: String,
+    command: String,
+    args: Vec<String>,
+    child: Option<Child>,
+    stdin: Option<BufWriter<ChildStdin>>,
+    stdout_reader: Option<BufReader<ChildStdout>>,
+    health_status: AgentHealth,
+}
+
+impl StdioTransport {
+    pub fn new(agent_name: String, command: String, args: Vec<String>) -> Self {
+        Self {
+            agent_name,
+            command,
+            args,
+            child: None,
+            stdin: None,
+            stdout_reader: None,
+            health_status: AgentHealth::Unknown,
+        }
+    }
+
+    /// Spawn the child process with stdin/stdout piped.
+    async fn spawn_process(&mut self) -> anyhow::Result<()> {
+        tracing::debug!(
+            agent = %self.agent_name,
+            command = %self.command,
+            "Spawning stdio agent process"
+        );
+
+        let mut child = tokio::process::Command::new(&self.command)
+            .args(&self.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                self.health_status =
+                    AgentHealth::Error(format!("Failed to spawn process: {e}"));
+                anyhow::anyhow!(
+                    "Failed to spawn stdio agent '{}' ({}): {e}",
+                    self.agent_name,
+                    self.command
+                )
+            })?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to capture stdin for stdio agent '{}'",
+                self.agent_name
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to capture stdout for stdio agent '{}'",
+                self.agent_name
+            )
+        })?;
+
+        self.stdin = Some(BufWriter::new(stdin));
+        self.stdout_reader = Some(BufReader::new(stdout));
+        self.child = Some(child);
+
+        tracing::debug!(agent = %self.agent_name, "Stdio agent process spawned");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AgentTransport for StdioTransport {
+    async fn initialize(
+        &mut self,
+        _mcp_endpoint: Option<McpEndpoint>,
+    ) -> anyhow::Result<AgentCapabilities> {
+        // MCP endpoint is intentionally ignored — StdioTransport does not support MCP.
+        if _mcp_endpoint.is_some() {
+            tracing::debug!(
+                agent = %self.agent_name,
+                "MCP endpoint provided but StdioTransport does not support MCP passthrough; ignoring"
+            );
+        }
+
+        self.spawn_process().await?;
+
+        // No JSON-RPC handshake — the process started successfully, so we are ready.
+        self.health_status = AgentHealth::Ready;
+        tracing::debug!(
+            agent = %self.agent_name,
+            "Stdio agent initialized (no protocol handshake)"
+        );
+
+        Ok(AgentCapabilities {
+            name: Some(self.agent_name.clone()),
+            version: None,
+            supports_mcp: false,
+            supports_sessions: false,
+            supports_streaming: true,
+            raw: Value::Null,
+        })
+    }
+
+    async fn create_session(&mut self) -> anyhow::Result<SessionId> {
+        // StdioTransport has no concept of sessions — the process IS the session.
+        // Return a synthetic ID so the caller has something to reference.
+        Ok(SessionId::new())
+    }
+
+    async fn prompt(
+        &mut self,
+        session: SessionId,
+        prompt: Vec<PromptBlock>,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionEvent> + Send>>> {
+        // Concatenate all text blocks into a single prompt string.
+        let prompt_text: String = prompt
+            .iter()
+            .filter_map(|block| match block {
+                PromptBlock::Text { text } => Some(text.as_str()),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        tracing::debug!(
+            agent = %self.agent_name,
+            session = %session,
+            prompt_len = prompt_text.len(),
+            "Sending prompt to stdio agent"
+        );
+
+        // Write delimited prompt to stdin.
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("Stdio agent '{}' stdin not available", self.agent_name)
+        })?;
+
+        stdin.write_all(b"\n--- SPUR PROMPT ---\n").await?;
+        stdin.write_all(prompt_text.as_bytes()).await?;
+        stdin.write_all(b"\n--- END PROMPT ---\n").await?;
+        stdin.flush().await?;
+
+        // Take ownership of stdout reader so we can move it into the spawned task.
+        let stdout = self.stdout_reader.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Stdio agent '{}' stdout not available",
+                self.agent_name
+            )
+        })?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
+        let agent_name = self.agent_name.clone();
+        let session_clone = session.clone();
+
+        tokio::spawn(async move {
+            let mut stdout = stdout;
+            let idle_timeout = std::time::Duration::from_secs(2);
+
+            loop {
+                let mut line = String::new();
+                match tokio::time::timeout(idle_timeout, stdout.read_line(&mut line)).await {
+                    Ok(Ok(0)) => {
+                        // EOF — process closed stdout.
+                        let _ = tx
+                            .send(SessionEvent::Complete {
+                                session_id: session_clone,
+                            })
+                            .await;
+                        break;
+                    }
+                    Ok(Ok(_)) => {
+                        // Got a line — emit as TextDelta (preserving the content, trimming
+                        // the trailing newline only).
+                        let text = line.trim_end_matches('\n').to_string();
+                        if tx.send(SessionEvent::TextDelta(text)).await.is_err() {
+                            // Receiver dropped.
+                            break;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(
+                            agent = %agent_name,
+                            "Error reading from stdio agent stdout: {e}"
+                        );
+                        let _ = tx
+                            .send(SessionEvent::Error {
+                                code: -1,
+                                message: format!("IO error: {e}"),
+                            })
+                            .await;
+                        break;
+                    }
+                    Err(_) => {
+                        // Idle timeout — no output for 2 seconds, treat as end of response.
+                        tracing::debug!(
+                            agent = %agent_name,
+                            "Stdio agent idle for 2 seconds, treating as response complete"
+                        );
+                        let _ = tx
+                            .send(SessionEvent::Complete {
+                                session_id: session_clone,
+                            })
+                            .await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        let stream = unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        });
+        Ok(Box::pin(stream))
+    }
+
+    async fn cancel(&mut self, session: SessionId) -> anyhow::Result<()> {
+        // Send SIGTERM to the child process.
+        if let Some(ref child) = self.child {
+            if let Some(pid) = child.id() {
+                tracing::debug!(
+                    agent = %self.agent_name,
+                    session = %session,
+                    pid = pid,
+                    "Sending SIGTERM to stdio agent"
+                );
+                // Use the kill command to send SIGTERM without requiring the libc crate.
+                let _ = tokio::process::Command::new("kill")
+                    .args(["-s", "TERM", &pid.to_string()])
+                    .output()
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        tracing::debug!(agent = %self.agent_name, "Shutting down stdio agent");
+
+        // Close stdin to signal EOF to the child process.
+        self.stdin.take();
+
+        if let Some(ref mut child) = self.child {
+            // Wait up to 3 seconds for the process to exit gracefully.
+            match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await {
+                Ok(Ok(status)) => {
+                    tracing::debug!(
+                        agent = %self.agent_name,
+                        status = %status,
+                        "Stdio agent process exited"
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        agent = %self.agent_name,
+                        "Error waiting for stdio agent process: {e}"
+                    );
+                }
+                Err(_) => {
+                    // Timeout — send SIGKILL.
+                    tracing::debug!(
+                        agent = %self.agent_name,
+                        "Stdio agent did not exit within 3 seconds, sending SIGKILL"
+                    );
+                    if let Err(e) = child.kill().await {
+                        tracing::error!(
+                            agent = %self.agent_name,
+                            "Failed to kill stdio agent process: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
+        self.child.take();
+        self.stdout_reader.take();
+        self.health_status = AgentHealth::Unknown;
+
+        tracing::debug!(agent = %self.agent_name, "Stdio agent shutdown complete");
+        Ok(())
+    }
+
+    fn health(&self) -> AgentHealth {
+        if let Some(ref child) = self.child {
+            match child.id() {
+                Some(_) => self.health_status.clone(),
+                None => AgentHealth::Error("Stdio agent process has exited".into()),
+            }
+        } else {
+            self.health_status.clone()
+        }
+    }
+}
+
 // ─── CliWrapTransport ──────────────────────────────────────────────────
 
 /// Fallback transport: invokes agent CLI as a one-shot subprocess per task.

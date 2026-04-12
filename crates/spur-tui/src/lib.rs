@@ -1,2 +1,5 @@
-// Phase 2: TUI dashboard implementation
-// Subscribes to SpurEvent channel for live rendering
+pub mod app;
+pub mod events;
+pub mod ui;
+
+pub use app::run_tui;
