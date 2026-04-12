@@ -217,7 +217,7 @@ impl View for SessionDetailView {
                         }
                     }
                     SessionEvent::ToolCallStart { name, input, .. } => {
-                        let args = input.to_string();
+                        let args = format_tool_args(input);
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Act {
                                 tool: name.clone(),
@@ -228,7 +228,7 @@ impl View for SessionDetailView {
                         });
                     }
                     SessionEvent::ToolCallResult { output, .. } => {
-                        let text = output.to_string();
+                        let text = format_observe_output(output);
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Observe,
                             text,
@@ -388,4 +388,70 @@ impl View for SessionDetailView {
             &elapsed,
         );
     }
+}
+
+// ─── Formatting helpers ─────────────────────────────────────────────────
+
+/// Format tool call args for display. Extracts purpose or key args,
+/// falls back to truncated JSON.
+fn format_tool_args(input: &serde_json::Value) -> String {
+    if input.is_null() {
+        return String::new();
+    }
+    if let Some(obj) = input.as_object() {
+        if obj.is_empty() {
+            return String::new();
+        }
+        // Kiro includes __tool_use_purpose — use it if available
+        if let Some(purpose) = obj.get("__tool_use_purpose").and_then(|v| v.as_str()) {
+            return purpose.to_string();
+        }
+        // Try common meaningful keys
+        for key in &["path", "file", "command", "query", "url", "pattern"] {
+            if let Some(val) = obj.get(*key).and_then(|v| v.as_str()) {
+                return format!("{}: {}", key, val);
+            }
+        }
+    }
+    // Fallback: truncate JSON to single line
+    let s = input.to_string();
+    truncate_str(&s, 80)
+}
+
+/// Format tool result output for display. Truncates to 3 lines.
+fn format_observe_output(output: &serde_json::Value) -> String {
+    if output.is_null() {
+        return "[no output]".to_string();
+    }
+    // If it's a simple string, use directly
+    let s = if let Some(text) = output.as_str() {
+        text.to_string()
+    } else {
+        // Try to extract text from common wrapper patterns
+        // Pattern: {"items":[{"Text":"..."}]} or just stringify
+        output.to_string()
+    };
+    truncate_lines(&s, 3)
+}
+
+/// Truncate a string to max_len chars, respecting UTF-8 boundaries.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    let mut end = max_len;
+    while !s.is_char_boundary(end) && end > 0 {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
+/// Truncate text to max_lines, showing a count of remaining lines.
+fn truncate_lines(s: &str, max_lines: usize) -> String {
+    let total = s.lines().count();
+    if total <= max_lines {
+        return s.to_string();
+    }
+    let preview: String = s.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+    format!("{}\n... [{} more lines]", preview, total - max_lines)
 }
