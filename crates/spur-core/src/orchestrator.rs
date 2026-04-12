@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use tokio::sync::{broadcast, Semaphore};
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use spur_acp::config::SpurConfig;
@@ -42,6 +43,16 @@ pub struct RunResult {
     pub success: bool,
     pub pr_url: Option<String>,
     pub total_cost_usd: f64,
+}
+
+/// Holds the state of an active brain session.
+pub struct BrainSession {
+    pub connection: Box<dyn AgentConnection>,
+    pub acp_session_id: String,
+    pub spur_session_id: SessionId,
+    pub brain_name: String,
+    pub mcp_server: Arc<McpCallbackServer>,
+    pub delegation_handle: JoinHandle<()>,
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -456,6 +467,107 @@ impl Orchestrator {
     }
 
     // ─── Private helpers ─────────────────────────────────────────────
+
+    /// Spawn a brain agent session with MCP callback server and delegation handler.
+    pub async fn spawn_brain_session(
+        &mut self,
+        brain_override: Option<&str>,
+    ) -> Result<BrainSession> {
+        let session_id = SessionId::new();
+
+        // 1. Resolve brain agent.
+        let brain_name = brain_override
+            .unwrap_or(&self.config.brain.default)
+            .to_string();
+
+        let brain_config = self
+            .registry
+            .get(&brain_name)
+            .ok_or_else(|| anyhow!("Brain agent '{}' not found in registry", brain_name))?
+            .clone();
+
+        info!(brain = %brain_name, session = %session_id, "Spawning brain session");
+        self.emit(SpurEvent::BrainSpawned {
+            agent: brain_name.clone(),
+            session: session_id.clone(),
+        });
+
+        // 2. Start MCP callback server.
+        let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
+        let mut mcp_server = mcp_server;
+
+        let workers: Vec<WorkerInfo> = self
+            .registry
+            .worker_capable()
+            .iter()
+            .map(|c| WorkerInfo {
+                name: c.name.clone(),
+                description: c.capabilities.join(", "),
+                cost_tier: c.cost_tier,
+            })
+            .collect();
+        mcp_server.set_workers(workers);
+
+        let mcp_endpoint = mcp_server.endpoint();
+        let mcp_server = Arc::new(mcp_server);
+        let _mcp_handle = mcp_server
+            .clone()
+            .start()
+            .context("Failed to start MCP callback server")?;
+
+        // 3. Log session start.
+        if let Some(ref ct) = self.cost_tracker {
+            let _ = ct.start_session(
+                &session_id,
+                &brain_name,
+                "brain",
+                None,
+                "(interactive)",
+                self.config.project.as_ref().map(|p| p.name.as_str()),
+                None,
+            );
+        }
+
+        // 4. Spawn brain agent via AgentConnection.
+        let mut connection = self.create_connection(&brain_config);
+
+        let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+        connection
+            .initialize(init_request)
+            .await
+            .context("Failed to initialize brain agent")?;
+
+        debug!(brain = %brain_name, "Brain agent initialized");
+
+        let mcp_servers = vec![McpServer::Stdio(
+            McpServerStdio::new("spur-mcp", &mcp_endpoint.socket_path)
+                .args(Vec::new()),
+        )];
+
+        let session_response = connection
+            .new_session(self.repo_root.clone(), mcp_servers)
+            .await
+            .context("Failed to create brain session")?;
+
+        // 5. Spawn delegation handler.
+        let max_concurrent = self.config.worktree.max_concurrent;
+        let delegation_handle = tokio::spawn(Self::handle_delegations(
+            delegation_channel,
+            self.repo_root.clone(),
+            self.config.agents.entries.clone(),
+            max_concurrent,
+            self.event_tx.clone(),
+        ));
+
+        Ok(BrainSession {
+            connection,
+            acp_session_id: session_response.session_id.to_string(),
+            spur_session_id: session_id,
+            brain_name,
+            mcp_server,
+            delegation_handle,
+        })
+    }
 
     fn create_connection(
         &self,

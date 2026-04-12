@@ -1,3 +1,3 @@
 pub mod orchestrator;
 
-pub use orchestrator::{Orchestrator, RunOpts, RunResult};
+pub use orchestrator::{BrainSession, Orchestrator, RunOpts, RunResult};
