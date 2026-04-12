@@ -175,14 +175,8 @@ async fn main() -> Result<()> {
                                 } else {
                                     &s.id
                                 };
-                                let duration = match s.duration_seconds {
-                                    Some(d) => format!("{}m {:02}s", d / 60, d % 60),
-                                    None => "-".to_string(),
-                                };
-                                let cost = match s.estimated_cost_usd {
-                                    Some(c) => format!("${:.2}", c),
-                                    None => "-".to_string(),
-                                };
+                                let duration = s.duration_seconds.map(format_duration).unwrap_or_else(|| "-".into());
+                                let cost = s.estimated_cost_usd.map(|c| format!("${:.2}", c)).unwrap_or_else(|| "-".into());
                                 println!(
                                     "{:<14} {:<14} {:<9} {:<12} {:<12} {:>8}",
                                     short_id, s.agent, s.role, s.status, duration, cost,
@@ -207,16 +201,8 @@ async fn main() -> Result<()> {
                                     "Ended:    {}",
                                     s.ended_at.as_deref().unwrap_or("-")
                                 );
-                                let duration = match s.duration_seconds {
-                                    Some(d) => format!("{}m {:02}s", d / 60, d % 60),
-                                    None => "-".to_string(),
-                                };
-                                println!("Duration: {}", duration);
-                                let cost = match s.estimated_cost_usd {
-                                    Some(c) => format!("${:.2}", c),
-                                    None => "-".to_string(),
-                                };
-                                println!("Cost:     {}", cost);
+                                println!("Duration: {}", s.duration_seconds.map(format_duration).unwrap_or_else(|| "-".into()));
+                                println!("Cost:     {}", s.estimated_cost_usd.map(|c| format!("${:.2}", c)).unwrap_or_else(|| "-".into()));
                                 println!(
                                     "Task:     {}",
                                     s.task_summary.as_deref().unwrap_or("-")
@@ -233,7 +219,7 @@ async fn main() -> Result<()> {
                                                     chrono::DateTime::parse_from_rfc3339(comp),
                                                 ) {
                                                     let secs = (end - start).num_seconds();
-                                                    format!("{}m {:02}s", secs / 60, secs % 60)
+                                                    format_duration(secs)
                                                 } else {
                                                     "-".to_string()
                                                 }
@@ -340,7 +326,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Watch => {
-            println!("[spur] TUI dashboard (Phase 2)");
+            let orch = load_orchestrator(repo_root)?;
+            let event_rx = orch.subscribe();
+            spur_tui::run_tui(event_rx, None).await?;
             Ok(())
         }
     }
@@ -426,6 +414,10 @@ async fn cmd_agents(repo_root: PathBuf, command: Option<AgentsCommands>) -> Resu
         }
     }
     Ok(())
+}
+
+fn format_duration(secs: i64) -> String {
+    format!("{}m {:02}s", secs / 60, secs % 60)
 }
 
 fn load_config() -> Result<SpurConfig> {
