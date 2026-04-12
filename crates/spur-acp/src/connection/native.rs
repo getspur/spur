@@ -789,6 +789,90 @@ impl Client for SpurAcpClientDynamic {
         self.terminals.borrow_mut().insert(id_string, TerminalState { output, truncated, exit_rx, pid });
         Ok(CreateTerminalResponse::new(terminal_id))
     }
+
+    async fn terminal_output(
+        &self,
+        args: TerminalOutputRequest,
+    ) -> agent_client_protocol::Result<TerminalOutputResponse> {
+        let key = args.terminal_id.to_string();
+        let map = self.terminals.borrow();
+        let terminal = map.get(&key).ok_or_else(|| {
+            agent_client_protocol::Error::invalid_params().data(format!("Terminal '{}' not found", key))
+        })?;
+        let output = terminal.output.borrow().clone();
+        let truncated = terminal.truncated.get();
+        let exit_status = terminal.exit_rx.borrow().clone();
+        Ok(TerminalOutputResponse::new(output, truncated).exit_status(exit_status))
+    }
+
+    async fn wait_for_terminal_exit(
+        &self,
+        args: WaitForTerminalExitRequest,
+    ) -> agent_client_protocol::Result<WaitForTerminalExitResponse> {
+        let key = args.terminal_id.to_string();
+        let mut exit_rx = {
+            let map = self.terminals.borrow();
+            let terminal = map.get(&key).ok_or_else(|| {
+                agent_client_protocol::Error::invalid_params().data(format!("Terminal '{}' not found", key))
+            })?;
+            terminal.exit_rx.clone()
+        };
+        if let Some(status) = exit_rx.borrow().clone() {
+            return Ok(WaitForTerminalExitResponse::new(status));
+        }
+        loop {
+            match exit_rx.changed().await {
+                Ok(()) => {
+                    if let Some(status) = exit_rx.borrow().clone() {
+                        return Ok(WaitForTerminalExitResponse::new(status));
+                    }
+                }
+                Err(_) => {
+                    let status = exit_rx.borrow().clone().unwrap_or_else(TerminalExitStatus::new);
+                    return Ok(WaitForTerminalExitResponse::new(status));
+                }
+            }
+        }
+    }
+
+    async fn kill_terminal(
+        &self,
+        args: KillTerminalRequest,
+    ) -> agent_client_protocol::Result<KillTerminalResponse> {
+        let key = args.terminal_id.to_string();
+        let (pid, is_running) = {
+            let map = self.terminals.borrow();
+            let terminal = map.get(&key).ok_or_else(|| {
+                agent_client_protocol::Error::invalid_params().data(format!("Terminal '{}' not found", key))
+            })?;
+            let is_running = terminal.exit_rx.borrow().is_none();
+            (terminal.pid, is_running)
+        };
+        if is_running {
+            tracing::debug!(terminal = %key, pid = pid, "Killing terminal");
+            let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
+        Ok(KillTerminalResponse::new())
+    }
+
+    async fn release_terminal(
+        &self,
+        args: ReleaseTerminalRequest,
+    ) -> agent_client_protocol::Result<ReleaseTerminalResponse> {
+        let key = args.terminal_id.to_string();
+        let pid_to_kill = {
+            let map = self.terminals.borrow();
+            if let Some(terminal) = map.get(&key) {
+                if terminal.exit_rx.borrow().is_none() { Some(terminal.pid) } else { None }
+            } else { None }
+        };
+        if let Some(pid) = pid_to_kill {
+            tracing::debug!(terminal = %key, pid = pid, "Killing terminal on release");
+            let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
+        self.terminals.borrow_mut().remove(&key);
+        Ok(ReleaseTerminalResponse::new())
+    }
 }
 
 // ─── Permission helpers ─────────────────────────────────────────────────────
