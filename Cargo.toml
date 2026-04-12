@@ -46,6 +46,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
+tracing-appender = "0.2"
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }
