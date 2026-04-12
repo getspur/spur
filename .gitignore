@@ -1,3 +1,4 @@
 /target
 .spur/worktrees/
 *.db
+.idea/
