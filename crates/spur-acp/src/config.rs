@@ -41,7 +41,7 @@ fn default_cost_tier() -> CostTier {
 }
 
 /// Global SPUR configuration (from ~/.spur/config.toml + .spur/config.toml).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpurConfig {
     #[serde(default)]
     pub brain: BrainConfig,

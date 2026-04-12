@@ -1,4 +1,9 @@
+use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+use spur_acp::config::SpurConfig;
+use spur_core::{Orchestrator, RunOpts};
 
 #[derive(Parser)]
 #[command(name = "spur", about = "Multi-agent orchestrator — issue in, PR out")]
@@ -73,15 +78,9 @@ enum Commands {
 #[derive(Subcommand)]
 enum AgentsCommands {
     /// Register a custom agent
-    Add {
-        /// Path to agent binary
-        path: String,
-    },
+    Add { path: String },
     /// Remove an agent
-    Remove {
-        /// Agent name
-        name: String,
-    },
+    Remove { name: String },
     /// Health-check all agents
     Check,
 }
@@ -89,125 +88,254 @@ enum AgentsCommands {
 #[derive(Subcommand)]
 enum SessionsCommands {
     /// Show session detail
-    Show {
-        /// Session ID
-        id: String,
-    },
+    Show { id: String },
     /// Terminate a session
-    Kill {
-        /// Session ID
-        id: String,
-    },
+    Kill { id: String },
 }
 
 #[derive(Subcommand)]
 enum WorkflowCommands {
     /// Validate a TOML workflow definition
-    Validate {
-        /// Path to workflow file
-        file: String,
-    },
+    Validate { file: String },
     /// Execute a workflow
     Run {
-        /// Path to workflow file
         file: String,
-        /// Specific issue to trigger with
         #[arg(long)]
         issue: Option<String>,
     },
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
+    let repo_root = std::env::current_dir()?;
 
     match cli.command {
-        Commands::Init => {
-            println!("Scanning for agents...");
-            // TODO: scan $PATH, create ~/.spur/agents.toml
-            println!("SPUR initialized.");
-        }
-        Commands::Agents { command } => match command {
-            None => {
-                // TODO: list agents from registry
-                println!("No agents registered. Run `spur init` first.");
-            }
-            Some(AgentsCommands::Add { path }) => {
-                println!("Registering agent at: {path}");
-            }
-            Some(AgentsCommands::Remove { name }) => {
-                println!("Removing agent: {name}");
-            }
-            Some(AgentsCommands::Check) => {
-                println!("Health-checking all agents...");
-            }
-        },
+        Commands::Init => cmd_init(repo_root).await,
+        Commands::Agents { command } => cmd_agents(repo_root, command).await,
         Commands::Run {
             task,
             brain,
             issue,
             background,
         } => {
-            let brain_name = brain.as_deref().unwrap_or("kiro");
-            println!("[spur] Brain: {brain_name}");
-            if let Some(ref issue) = issue {
-                println!("[spur] Issue: {issue}");
+            let mut orch = load_orchestrator(repo_root)?;
+            let result = orch
+                .run_adhoc(
+                    &task,
+                    RunOpts {
+                        brain,
+                        issue,
+                        background,
+                    },
+                )
+                .await?;
+            println!(
+                "[spur] Session {} {} (${:.2})",
+                result.session_id,
+                if result.success { "completed" } else { "failed" },
+                result.total_cost_usd,
+            );
+            if let Some(url) = result.pr_url {
+                println!("[spur] PR: {url}");
             }
-            if background {
-                println!("[spur] Running in background...");
-            }
-            println!("[spur] Task: {task}");
-            // TODO: orchestrator.run_adhoc()
+            Ok(())
         }
         Commands::Exec { agent, task } => {
-            println!("[spur] Direct execution on: {agent}");
-            println!("[spur] Task: {task}");
-            // TODO: spawn agent, send task, stream output
+            let mut orch = load_orchestrator(repo_root)?;
+            let result = orch.exec_direct(&agent, &task).await?;
+            println!(
+                "[spur] Session {} {} (${:.2})",
+                result.session_id,
+                if result.success { "completed" } else { "failed" },
+                result.total_cost_usd,
+            );
+            Ok(())
         }
-        Commands::Sessions { command } => match command {
-            None => {
-                println!("No active sessions.");
+        Commands::Sessions { command } => {
+            match command {
+                None => println!("No active sessions."),
+                Some(SessionsCommands::Show { id }) => println!("Session: {id}"),
+                Some(SessionsCommands::Kill { id }) => println!("Killing session: {id}"),
             }
-            Some(SessionsCommands::Show { id }) => {
-                println!("Session: {id}");
-            }
-            Some(SessionsCommands::Kill { id }) => {
-                println!("Killing session: {id}");
-            }
-        },
-        Commands::Cost { week, by, export } => {
-            if week {
-                println!("Weekly cost breakdown:");
+            Ok(())
+        }
+        Commands::Cost { week, by, export: _ } => {
+            let orch = load_orchestrator(repo_root)?;
+            if let Some(ref ct) = orch.cost_tracker {
+                let summaries = if week {
+                    ct.week_summary()?
+                } else {
+                    ct.today_summary()?
+                };
+                if summaries.is_empty() {
+                    println!("No cost data recorded yet.");
+                } else {
+                    let total: f64 = summaries.iter().map(|s| s.total_cost_usd).sum();
+                    println!(
+                        "{:<15} {:>10} {:>8} {:>10}",
+                        "Agent", "Cost", "Sessions", "Duration"
+                    );
+                    println!("{}", "-".repeat(47));
+                    for s in &summaries {
+                        println!(
+                            "{:<15} ${:>9.2} {:>8} {:>8}m",
+                            s.agent,
+                            s.total_cost_usd,
+                            s.session_count,
+                            s.total_duration_seconds / 60,
+                        );
+                    }
+                    println!("{}", "-".repeat(47));
+                    println!("{:<15} ${:>9.2}", "Total", total);
+
+                    if let Some(ref dim) = by {
+                        if dim == "project" {
+                            println!("\nBy project:");
+                            for p in ct.by_project()? {
+                                println!("  {}: ${:.2} ({} sessions)", p.project, p.total_cost_usd, p.session_count);
+                            }
+                        }
+                    }
+                }
             } else {
-                println!("Today's cost summary:");
+                println!("Cost tracking not available.");
             }
-            if let Some(ref dim) = by {
-                println!("  Grouped by: {dim}");
-            }
-            if let Some(ref fmt) = export {
-                println!("  Exporting as: {fmt}");
-            }
+            Ok(())
         }
         Commands::Connect { service } => {
-            println!("Connecting to: {service}");
-        }
-        Commands::Workflow { command } => match command {
-            WorkflowCommands::Validate { file } => {
-                println!("Validating: {file}");
+            match service.as_str() {
+                "github" => {
+                    let mut adapter = spur_pm::GitHubAdapter::new(None);
+                    use spur_pm::PmAdapter;
+                    adapter.connect().await?;
+                    println!("[spur] Connected to GitHub: {}", adapter.repo.unwrap_or_default());
+                }
+                _ => println!("[spur] Unknown service: {service}. Supported: github"),
             }
-            WorkflowCommands::Run { file, issue } => {
-                println!("Running workflow: {file}");
-                if let Some(ref issue) = issue {
-                    println!("  With issue: {issue}");
+            Ok(())
+        }
+        Commands::Workflow { command } => {
+            match command {
+                WorkflowCommands::Validate { file } => {
+                    println!("[spur] Validating: {file} (Phase 3)");
+                }
+                WorkflowCommands::Run { file, issue: _ } => {
+                    println!("[spur] Running workflow: {file} (Phase 3)");
                 }
             }
-        },
+            Ok(())
+        }
         Commands::Watch => {
-            println!("TUI dashboard (Phase 2)");
+            println!("[spur] TUI dashboard (Phase 2)");
+            Ok(())
+        }
+    }
+}
+
+async fn cmd_init(repo_root: PathBuf) -> Result<()> {
+    println!("[spur] Scanning for agents...");
+    let config = SpurConfig::default();
+    let mut orch = Orchestrator::new(repo_root, config)?;
+    let found = orch.init_agents().await?;
+
+    if found.is_empty() {
+        println!("[spur] No agents found on $PATH.");
+        println!("[spur] Install one of: kiro-cli, claude, codex, gemini");
+    } else {
+        println!("[spur] Found {} agents:", found.len());
+        for name in &found {
+            println!("  - {name}");
         }
     }
 
+    // TODO: write agents.toml
+    println!("[spur] Initialized.");
     Ok(())
+}
+
+async fn cmd_agents(repo_root: PathBuf, command: Option<AgentsCommands>) -> Result<()> {
+    let config = load_config()?;
+    let mut orch = Orchestrator::new(repo_root, config)?;
+
+    match command {
+        None => {
+            let agents = orch.registry.list();
+            if agents.is_empty() {
+                println!("No agents registered. Run `spur init` first.");
+            } else {
+                println!(
+                    "{:<15} {:<10} {:<8} {:<8} {}",
+                    "Name", "Transport", "Role", "Cost", "Health"
+                );
+                println!("{}", "-".repeat(55));
+                for agent in agents {
+                    let health = orch.registry.health(&agent.name).cloned().unwrap_or(spur_acp::AgentHealth::Unknown);
+                    let health_str = match health {
+                        spur_acp::AgentHealth::Ready => "ready",
+                        spur_acp::AgentHealth::Unknown => "unknown",
+                        spur_acp::AgentHealth::Busy => "busy",
+                        spur_acp::AgentHealth::Error(_) => "error",
+                        spur_acp::AgentHealth::RateLimited { .. } => "rate-limited",
+                    };
+                    println!(
+                        "{:<15} {:<10} {:<8} {:<8} {}",
+                        agent.name,
+                        format!("{:?}", agent.transport),
+                        format!("{:?}", agent.role),
+                        format!("{:?}", agent.cost_tier),
+                        health_str,
+                    );
+                }
+            }
+        }
+        Some(AgentsCommands::Add { path }) => {
+            println!("[spur] Registering agent at: {path}");
+        }
+        Some(AgentsCommands::Remove { name }) => {
+            if orch.registry.remove(&name) {
+                println!("[spur] Removed agent: {name}");
+            } else {
+                println!("[spur] Agent not found: {name}");
+            }
+        }
+        Some(AgentsCommands::Check) => {
+            println!("[spur] Health-checking all agents...");
+            let results = orch.check_agents().await;
+            for (name, health) in results {
+                let status = match health {
+                    spur_acp::AgentHealth::Ready => "ready".to_string(),
+                    spur_acp::AgentHealth::Error(e) => format!("error: {e}"),
+                    other => format!("{:?}", other),
+                };
+                println!("  {name}: {status}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_config() -> Result<SpurConfig> {
+    // Try project config first, then user config.
+    let project_config = PathBuf::from(".spur/config.toml");
+    let user_config = directories::BaseDirs::new()
+        .map(|d| d.home_dir().join(".spur/config.toml"))
+        .unwrap_or_default();
+
+    if project_config.exists() {
+        let content = std::fs::read_to_string(&project_config)?;
+        Ok(toml::from_str(&content)?)
+    } else if user_config.exists() {
+        let content = std::fs::read_to_string(&user_config)?;
+        Ok(toml::from_str(&content)?)
+    } else {
+        Ok(SpurConfig::default())
+    }
+}
+
+fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
+    let config = load_config()?;
+    Orchestrator::new(repo_root, config)
 }
