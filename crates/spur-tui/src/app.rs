@@ -158,7 +158,7 @@ impl App {
 
             Action::NavigateTo(ViewId::Dashboard) => {
                 self.current_view = ViewId::Dashboard;
-                self.session_detail = None;
+                // session_detail kept alive (same as NavigateBack)
             }
 
             Action::NavigateBack => {
