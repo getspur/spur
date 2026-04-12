@@ -471,6 +471,28 @@ impl View for DashboardView {
                     kind: LogEntryKind::Info,
                 });
             }
+
+            SpurEvent::TurnComplete { session } => {
+                let prefix = self.prefix_for_session(&session.0);
+                self.set_agent_status_for_session(&session.0, "idle");
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix,
+                    message: "Turn complete".to_string(),
+                    kind: LogEntryKind::Info,
+                });
+            }
+
+            SpurEvent::BrainError { session, message } => {
+                let prefix = self.prefix_for_session(&session.0);
+                self.set_agent_status_for_session(&session.0, "error");
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix,
+                    message: format!("Brain error: {}", message),
+                    kind: LogEntryKind::Error,
+                });
+            }
         }
     }
 
