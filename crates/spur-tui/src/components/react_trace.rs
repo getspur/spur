@@ -1,8 +1,10 @@
+use std::cell::Cell;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
 
@@ -36,6 +38,10 @@ pub struct ReactTrace {
     scroll_offset: usize,
     is_following: bool,
     tick_counter: u8,
+    /// Cached total rendered lines from last render (interior mutability for &self render).
+    last_total_lines: Cell<usize>,
+    /// Cached visible height from last render.
+    last_visible_height: Cell<usize>,
 }
 
 impl ReactTrace {
@@ -45,6 +51,8 @@ impl ReactTrace {
             scroll_offset: 0,
             is_following: true,
             tick_counter: 0,
+            last_total_lines: Cell::new(0),
+            last_visible_height: Cell::new(20),
         }
     }
 
@@ -109,14 +117,49 @@ impl ReactTrace {
         }
     }
 
+    fn max_offset(&self) -> usize {
+        self.last_total_lines
+            .get()
+            .saturating_sub(self.last_visible_height.get())
+    }
+
     pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
         self.is_following = false;
     }
 
-    pub fn scroll_down(&mut self, visible_height: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
-        if self.scroll_offset >= self.entries.len().saturating_sub(visible_height) {
+    pub fn scroll_up_by(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.is_following = false;
+    }
+
+    pub fn scroll_down(&mut self) {
+        let max = self.max_offset();
+        self.scroll_offset = self.scroll_offset.saturating_add(1).min(max);
+        if self.scroll_offset >= max {
+            self.is_following = true;
+        }
+    }
+
+    pub fn scroll_down_by(&mut self, lines: usize) {
+        let max = self.max_offset();
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
+        if self.scroll_offset >= max {
+            self.is_following = true;
+        }
+    }
+
+    pub fn page_up(&mut self) {
+        let jump = self.last_visible_height.get().saturating_sub(2).max(1);
+        self.scroll_offset = self.scroll_offset.saturating_sub(jump);
+        self.is_following = false;
+    }
+
+    pub fn page_down(&mut self) {
+        let jump = self.last_visible_height.get().saturating_sub(2).max(1);
+        let max = self.max_offset();
+        self.scroll_offset = self.scroll_offset.saturating_add(jump).min(max);
+        if self.scroll_offset >= max {
             self.is_following = true;
         }
     }
@@ -127,7 +170,7 @@ impl ReactTrace {
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.entries.len().saturating_sub(1);
+        self.scroll_offset = self.max_offset();
         self.is_following = true;
     }
 
@@ -399,12 +442,46 @@ impl ReactTrace {
             lines.push(Line::from(""));
         }
 
+        // Compute rendered-line metrics for accurate scrolling.
+        let inner = block.inner(area);
+        let effective_width = inner.width;
+        let visible_height = inner.height as usize;
+        let total_lines: usize = lines
+            .iter()
+            .map(|line| {
+                let w = line.width() as u16;
+                if w == 0 || effective_width == 0 {
+                    1usize
+                } else {
+                    ((w + effective_width - 1) / effective_width) as usize
+                }
+            })
+            .sum();
+
+        self.last_total_lines.set(total_lines);
+        self.last_visible_height.set(visible_height);
+
+        // Clamp or pin scroll offset.
+        let max_offset = total_lines.saturating_sub(visible_height);
+        let offset = if self.is_following {
+            max_offset
+        } else {
+            self.scroll_offset.min(max_offset)
+        };
+
         let paragraph = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset as u16, 0));
+            .scroll((offset as u16, 0));
 
         frame.render_widget(paragraph, area);
+
+        // Scrollbar for position indicator.
+        if total_lines > visible_height {
+            let mut scrollbar_state = ScrollbarState::new(total_lines).position(offset);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+            frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        }
     }
 
     pub fn entry_count(&self) -> usize {
