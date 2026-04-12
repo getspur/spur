@@ -97,6 +97,13 @@ impl SessionDetailView {
 
     /// Replay conversation history from disk into the trace.
     pub fn replay_history(&mut self, entries: &[spur_acp::HistoryEntry]) {
+        // Header to distinguish replayed history from live conversation.
+        self.react_trace.push(TraceEntry {
+            kind: TraceKind::Think,
+            text: "--- Session history (replayed from disk) ---".to_string(),
+            timestamp: String::new(),
+        });
+
         for entry in entries {
             match entry.role.as_str() {
                 "user" => {
@@ -118,6 +125,13 @@ impl SessionDetailView {
                 _ => {}
             }
         }
+
+        // Footer separator before live session.
+        self.react_trace.push(TraceEntry {
+            kind: TraceKind::Think,
+            text: "--- End of history. New messages below ---".to_string(),
+            timestamp: String::new(),
+        });
     }
 
     pub fn resolve_pending_permissions(&mut self) {
