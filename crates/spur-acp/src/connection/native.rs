@@ -583,25 +583,45 @@ impl Client for SpurAcpClientDynamic {
         &self,
         args: RequestPermissionRequest,
     ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-        // TODO(task-3): implement interactive permission flow using self.permission_tx
-        let _perm_tx = &self.permission_tx;
+        let Some(ref perm_tx) = self.permission_tx else {
+            return auto_approve(&args);
+        };
 
-        // Auto-approve: pick the first option.
-        let option_id = args
-            .options
-            .first()
-            .map(|opt| opt.option_id.clone())
-            .unwrap_or_else(|| agent_client_protocol::PermissionOptionId::new("allow"));
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let request = crate::types::PermissionRequest {
+            args: args.clone(),
+            reply_tx,
+        };
+
+        if perm_tx.send(request).is_err() {
+            tracing::warn!("NativeAcpConnection: permission channel closed, auto-approving");
+            return auto_approve(&args);
+        }
 
         tracing::debug!(
             session = %args.session_id,
-            option = %option_id,
-            "NativeAcpConnection: auto-approving permission request"
+            "NativeAcpConnection: awaiting interactive permission response"
         );
 
-        Ok(RequestPermissionResponse::new(
-            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
-        ))
+        match tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx).await {
+            Ok(Ok(response)) => {
+                let option_id = agent_client_protocol::PermissionOptionId::new(response.option_id);
+                tracing::debug!(option = %option_id, "NativeAcpConnection: permission responded");
+                Ok(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Selected(
+                        SelectedPermissionOutcome::new(option_id),
+                    ),
+                ))
+            }
+            Ok(Err(_)) => {
+                tracing::debug!("NativeAcpConnection: permission denied (channel dropped)");
+                auto_deny(&args)
+            }
+            Err(_) => {
+                tracing::warn!("NativeAcpConnection: permission timed out (60s safety)");
+                auto_deny(&args)
+            }
+        }
     }
 
     async fn session_notification(
@@ -693,4 +713,32 @@ impl Client for SpurAcpClientDynamic {
 
         Ok(WriteTextFileResponse::new())
     }
+}
+
+// ─── Permission helpers ─────────────────────────────────────────────────────
+
+fn auto_approve(
+    args: &RequestPermissionRequest,
+) -> agent_client_protocol::Result<RequestPermissionResponse> {
+    let option_id = args
+        .options
+        .first()
+        .map(|o| o.option_id.clone())
+        .unwrap_or_else(|| agent_client_protocol::PermissionOptionId::new("allow"));
+    Ok(RequestPermissionResponse::new(
+        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
+    ))
+}
+
+fn auto_deny(
+    args: &RequestPermissionRequest,
+) -> agent_client_protocol::Result<RequestPermissionResponse> {
+    let option_id = args
+        .options
+        .last()
+        .map(|o| o.option_id.clone())
+        .unwrap_or_else(|| agent_client_protocol::PermissionOptionId::new("deny"));
+    Ok(RequestPermissionResponse::new(
+        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
+    ))
 }
