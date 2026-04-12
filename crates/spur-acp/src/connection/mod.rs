@@ -12,6 +12,9 @@
 pub mod cli_wrap_adapter;
 pub use cli_wrap_adapter::CliWrapAdapter;
 
+pub mod native;
+pub use native::NativeAcpConnection;
+
 pub mod stdio_adapter;
 pub use stdio_adapter::StdioAdapter;
 
