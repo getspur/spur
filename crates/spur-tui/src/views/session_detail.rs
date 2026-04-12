@@ -95,6 +95,18 @@ impl SessionDetailView {
         });
     }
 
+    pub fn push_permission(&mut self, description: &str, countdown: u8) {
+        self.react_trace.push(TraceEntry {
+            kind: TraceKind::Permission {
+                description: description.to_string(),
+                pending: true,
+                countdown,
+            },
+            text: String::new(),
+            timestamp: Self::now_stamp(),
+        });
+    }
+
 }
 
 impl View for SessionDetailView {
@@ -103,22 +115,20 @@ impl View for SessionDetailView {
         if self.react_trace.has_pending_permission() {
             match key.code {
                 KeyCode::Char('y') => {
-                    // Auto-approve (placeholder — actual permission handling is Phase 2)
-                    let _ = &self.session_id; // will wire to permission system later
-                    return None;
+                    return Some(Action::PermissionResponse {
+                        option_id: String::new(), // App resolves to first option
+                    });
                 }
                 KeyCode::Char('n') => {
-                    // Deny (placeholder — actual permission handling is Phase 2)
-                    let _ = &self.session_id;
-                    return None;
+                    return Some(Action::PermissionDenied);
                 }
                 KeyCode::Char('a') => {
-                    // Approve-all (placeholder — actual permission handling is Phase 2)
-                    let _ = &self.session_id;
-                    return None;
+                    return Some(Action::PermissionResponse {
+                        option_id: "always".to_string(), // App resolves to always-allow
+                    });
                 }
                 _ => {
-                    // Fall through to normal key handling for other keys.
+                    // Fall through to normal key handling
                 }
             }
         }

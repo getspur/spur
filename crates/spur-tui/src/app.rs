@@ -48,6 +48,7 @@ pub struct App {
     brain_name: Option<String>,
     /// User messages buffered before session_detail exists.
     pending_user_messages: Vec<String>,
+    pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
 }
 
 impl App {
@@ -63,6 +64,7 @@ impl App {
             brain_status: BrainStatus::Idle,
             brain_name: None,
             pending_user_messages: Vec::new(),
+            pending_permission: None,
         }
     }
 
@@ -268,6 +270,33 @@ impl App {
                 self.help_visible = false;
             }
 
+            Action::PermissionResponse { option_id } => {
+                if let Some((perm, _)) = self.pending_permission.take() {
+                    // Resolve option_id: empty = first option, "always" = always-allow option
+                    let resolved_id = if option_id.is_empty() {
+                        perm.args.options.first()
+                            .map(|o| o.option_id.to_string())
+                            .unwrap_or_else(|| "allow".to_string())
+                    } else if option_id == "always" {
+                        perm.args.options.iter()
+                            .find(|o| o.name.to_lowercase().contains("always"))
+                            .or(perm.args.options.first())
+                            .map(|o| o.option_id.to_string())
+                            .unwrap_or_else(|| "allow".to_string())
+                    } else {
+                        option_id
+                    };
+                    let _ = perm.reply_tx.send(spur_acp::types::PermissionResponse {
+                        option_id: resolved_id,
+                    });
+                }
+            }
+
+            Action::PermissionDenied => {
+                // Drop reply_tx (signals denial to ACP thread)
+                self.pending_permission.take();
+            }
+
             // Scroll actions are already handled inside the views' handle_key methods.
             Action::ScrollUp
             | Action::ScrollDown
@@ -276,6 +305,26 @@ impl App {
             | Action::CycleFocus
             | Action::Tick => {}
         }
+    }
+
+    fn handle_permission_request(&mut self, request: spur_acp::types::PermissionRequest) {
+        // Auto-deny any existing pending permission (drops old reply_tx)
+        self.pending_permission.take();
+
+        // Extract description from SDK args
+        let description = request.args.tool_call.fields.title
+            .clone()
+            .unwrap_or_else(|| "Tool call".to_string());
+
+        // Push permission entry to the active session's trace
+        if let Some(ref mut detail) = self.session_detail {
+            detail.push_permission(&description, 30);
+        }
+
+        // Store with deadline
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        self.pending_permission = Some((request, deadline));
+        self.dirty = true;
     }
 
     /// Push current brain status to both views' InputBars.
@@ -298,6 +347,13 @@ impl App {
 
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
+        if let Some((_, deadline)) = &self.pending_permission {
+            if std::time::Instant::now() >= *deadline {
+                self.pending_permission.take(); // drops reply_tx → auto-deny
+                self.dirty = true;
+            }
+        }
+
         // Only mark dirty for ticks when there are active agents (spinners animating)
         // or text batches to flush.
         match self.current_view {
@@ -341,6 +397,7 @@ impl App {
 pub async fn run_tui(
     event_rx: broadcast::Receiver<SpurEvent>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
+    mut perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
 ) -> anyhow::Result<()> {
     let mut terminal = tui::setup()?;
     let mut app = App::new(user_input_tx);
@@ -367,6 +424,14 @@ pub async fn run_tui(
             }
             _ = tick_interval.tick() => {
                 app.tick();
+            }
+            Some(perm) = async {
+                match perm_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                app.handle_permission_request(perm);
             }
         }
 
