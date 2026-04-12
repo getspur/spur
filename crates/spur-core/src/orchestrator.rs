@@ -523,11 +523,10 @@ impl Orchestrator {
                 "claude",
                 vec![
                     "-p",
-                    "--input-format",
-                    "stream-json",
                     "--output-format",
                     "stream-json",
                     "--verbose",
+                    "--bare",
                     "--include-partial-messages",
                     "--permission-mode",
                     "acceptEdits",

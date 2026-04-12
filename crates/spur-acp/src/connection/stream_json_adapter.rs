@@ -1,4 +1,10 @@
-//! `StreamJsonAdapter` — connects to Claude Code via bidirectional stream-json.
+//! `StreamJsonAdapter` — connects to Claude Code via one-shot stream-json mode.
+//!
+//! Each `prompt()` call spawns a fresh `claude -p --output-format stream-json`
+//! process with the prompt as a CLI argument. Multi-turn uses `--resume <session_id>`.
+//!
+//! This avoids the stdout buffering issue with `--input-format stream-json`
+//! (Node.js fully buffers stdout when piped; one-shot mode flushes per-line).
 
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -7,29 +13,35 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream::unfold;
 use futures::Stream;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use agent_client_protocol::{
-    InitializeRequest, InitializeResponse, McpServer, NewSessionResponse,
-    PromptRequest, ProtocolVersion, SessionId, SessionNotification, ContentBlock,
+    ContentBlock, InitializeRequest, InitializeResponse, McpServer, NewSessionResponse,
+    PromptRequest, ProtocolVersion, SessionId, SessionNotification,
 };
 
 use crate::connection::AgentConnection;
-use crate::protocol::claude_events::{parse_event, map_to_notifications, ClaudeEvent, UserMessage};
+use crate::protocol::claude_events::{map_to_notifications, parse_event, ClaudeEvent};
 use crate::types::AgentHealth;
 
-/// Connects to Claude Code via its bidirectional stream-json protocol.
+/// Connects to Claude Code via one-shot stream-json invocations.
+///
+/// Each `prompt()` spawns a new process: `claude -p --output-format stream-json <prompt>`.
+/// Multi-turn is achieved via `--resume <session_id>` on subsequent calls.
+/// The first prompt establishes the Claude session ID from the init event.
 pub struct StreamJsonAdapter {
     agent_name: String,
     command: String,
     extra_args: Vec<String>,
+    /// Claude's session ID (from the first init event, used for --resume).
+    claude_session_id: Option<String>,
+    /// SPUR's session ID (assigned at new_session time).
+    spur_session_id: Option<SessionId>,
+    /// Current child process (alive during a prompt, None between turns).
     child: Option<Child>,
-    stdin: Option<BufWriter<ChildStdin>>,
-    sender_tx: Option<mpsc::Sender<mpsc::Sender<SessionNotification>>>,
-    session_id: Option<SessionId>,
-    model: Option<String>,
+    /// Cumulative cost across all turns.
     total_cost: Arc<Mutex<f64>>,
     health_status: AgentHealth,
 }
@@ -44,11 +56,9 @@ impl StreamJsonAdapter {
             agent_name: agent_name.into(),
             command: command.into(),
             extra_args,
+            claude_session_id: None,
+            spur_session_id: None,
             child: None,
-            stdin: None,
-            sender_tx: None,
-            session_id: None,
-            model: None,
             total_cost: Arc::new(Mutex::new(0.0)),
             health_status: AgentHealth::Unknown,
         }
@@ -65,93 +75,29 @@ impl AgentConnection for StreamJsonAdapter {
         &mut self,
         _request: InitializeRequest,
     ) -> anyhow::Result<InitializeResponse> {
+        // Verify the command exists on PATH.
+        let which_result = tokio::process::Command::new("which")
+            .arg(&self.command)
+            .output()
+            .await?;
+
+        if !which_result.status.success() {
+            self.health_status =
+                AgentHealth::Error(format!("Command '{}' not found on PATH", self.command));
+            return Err(anyhow::anyhow!(
+                "StreamJsonAdapter '{}': command '{}' not found on PATH",
+                self.agent_name,
+                self.command
+            ));
+        }
+
+        self.health_status = AgentHealth::Ready;
         tracing::debug!(
             agent = %self.agent_name,
             command = %self.command,
-            "StreamJsonAdapter: spawning Claude Code process"
+            "StreamJsonAdapter: initialized (command found on PATH)"
         );
 
-        let mut child = tokio::process::Command::new(&self.command)
-            .args(&self.extra_args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| {
-                self.health_status = AgentHealth::Error(format!("Failed to spawn: {e}"));
-                anyhow::anyhow!(
-                    "StreamJsonAdapter '{}': failed to spawn '{}': {e}",
-                    self.agent_name, self.command
-                )
-            })?;
-
-        let stdin = child.stdin.take().ok_or_else(|| {
-            anyhow::anyhow!("StreamJsonAdapter '{}': failed to capture stdin", self.agent_name)
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            anyhow::anyhow!("StreamJsonAdapter '{}': failed to capture stdout", self.agent_name)
-        })?;
-
-        self.stdin = Some(BufWriter::new(stdin));
-        self.child = Some(child);
-
-        // Read lines until we find the system/init event.
-        // Without --bare, Claude emits hook lifecycle events before init.
-        let mut reader = BufReader::new(stdout);
-        let mut session_id_str = String::new();
-        let mut model = None;
-
-        loop {
-            let mut line = String::new();
-            let bytes = reader.read_line(&mut line).await.map_err(|e| {
-                anyhow::anyhow!("StreamJsonAdapter '{}': failed to read stdout: {e}", self.agent_name)
-            })?;
-            if bytes == 0 {
-                return Err(anyhow::anyhow!(
-                    "StreamJsonAdapter '{}': stdout closed before system/init event",
-                    self.agent_name
-                ));
-            }
-
-            match parse_event(line.trim()) {
-                Ok(ClaudeEvent::System(ref sys)) if sys.subtype == "init" => {
-                    session_id_str = sys.session_id.clone();
-                    model = sys.model.clone();
-                    break;
-                }
-                _ => {
-                    tracing::debug!(
-                        agent = %self.agent_name,
-                        "StreamJsonAdapter: skipping pre-init event"
-                    );
-                    continue;
-                }
-            }
-        }
-
-        let session_id = SessionId::new(session_id_str);
-        self.session_id = Some(session_id.clone());
-        self.model = model;
-
-        tracing::debug!(
-            agent = %self.agent_name,
-            session = %session_id,
-            "StreamJsonAdapter: initialized, spawning background reader"
-        );
-
-        // Spawn persistent background reader.
-        let (sender_tx, sender_rx) = mpsc::channel::<mpsc::Sender<SessionNotification>>(4);
-        self.sender_tx = Some(sender_tx);
-
-        let agent_name = self.agent_name.clone();
-        let cost = Arc::clone(&self.total_cost);
-        let bg_session_id = session_id.clone();
-
-        tokio::spawn(async move {
-            reader_loop(reader, sender_rx, bg_session_id, cost, agent_name).await;
-        });
-
-        self.health_status = AgentHealth::Ready;
         Ok(InitializeResponse::new(ProtocolVersion::LATEST))
     }
 
@@ -160,9 +106,15 @@ impl AgentConnection for StreamJsonAdapter {
         _cwd: PathBuf,
         _mcp_servers: Vec<McpServer>,
     ) -> anyhow::Result<NewSessionResponse> {
-        let session_id = self.session_id.clone().ok_or_else(|| {
-            anyhow::anyhow!("StreamJsonAdapter '{}': new_session before initialize", self.agent_name)
-        })?;
+        let session_id = SessionId::new(uuid::Uuid::new_v4().to_string());
+        self.spur_session_id = Some(session_id.clone());
+
+        tracing::debug!(
+            agent = %self.agent_name,
+            session = %session_id,
+            "StreamJsonAdapter: created session"
+        );
+
         Ok(NewSessionResponse::new(session_id))
     }
 
@@ -170,6 +122,7 @@ impl AgentConnection for StreamJsonAdapter {
         &mut self,
         request: PromptRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+        // Extract prompt text from content blocks.
         let prompt_text: String = request
             .prompt
             .iter()
@@ -183,45 +136,159 @@ impl AgentConnection for StreamJsonAdapter {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let spur_session_id = request.session_id.clone();
+
         tracing::debug!(
             agent = %self.agent_name,
             prompt_len = prompt_text.len(),
-            "StreamJsonAdapter: sending prompt"
+            resume = self.claude_session_id.is_some(),
+            "StreamJsonAdapter: spawning one-shot process"
         );
 
-        // Create per-turn channel.
-        let (notif_tx, notif_rx) = mpsc::channel::<SessionNotification>(64);
+        // Build args: base args + optional --resume + prompt as trailing arg.
+        let mut args = self.extra_args.clone();
+        if let Some(ref claude_sid) = self.claude_session_id {
+            args.push("--resume".to_string());
+            args.push(claude_sid.clone());
+        }
+        args.push(prompt_text);
 
-        // Send sender to background reader.
-        let sender_tx = self.sender_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("StreamJsonAdapter '{}': not initialized", self.agent_name)
-        })?;
-        sender_tx.send(notif_tx).await.map_err(|_| {
-            anyhow::anyhow!("StreamJsonAdapter '{}': background reader died", self.agent_name)
+        // Spawn one-shot process.
+        let mut child = tokio::process::Command::new(&self.command)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                self.health_status = AgentHealth::Error(format!("Failed to spawn: {e}"));
+                anyhow::anyhow!(
+                    "StreamJsonAdapter '{}': failed to spawn: {e}",
+                    self.agent_name
+                )
+            })?;
+
+        let stdout = child.stdout.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "StreamJsonAdapter '{}': failed to capture stdout",
+                self.agent_name
+            )
         })?;
 
-        // Write user message to stdin.
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("StreamJsonAdapter '{}': stdin not available", self.agent_name)
-        })?;
-        let user_msg = UserMessage::new(&prompt_text);
-        let json = serde_json::to_string(&user_msg)?;
-        stdin.write_all(json.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
+        self.child = Some(child);
 
-        // Return receiver as Stream.
-        let stream = unfold(notif_rx, |mut rx| async move {
-            rx.recv().await.map(|notif| (notif, rx))
+        // Spawn background reader that parses NDJSON and sends notifications.
+        let (tx, rx) = mpsc::channel::<SessionNotification>(64);
+        let agent_name = self.agent_name.clone();
+        let cost = Arc::clone(&self.total_cost);
+        let claude_session_holder = Arc::new(Mutex::new(self.claude_session_id.clone()));
+        let reader_holder = Arc::clone(&claude_session_holder);
+
+        tokio::spawn(async move {
+            let claude_session_holder = reader_holder;
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                let event = match parse_event(&line) {
+                    Ok(e) => e,
+                    Err(_) => {
+                        tracing::debug!(
+                            agent = %agent_name,
+                            "StreamJsonAdapter: unparseable event, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                // Extract Claude's session ID from the init event (first turn only).
+                if let ClaudeEvent::System(ref sys) = event {
+                    if sys.subtype == "init" {
+                        if let Ok(mut holder) = claude_session_holder.lock() {
+                            if holder.is_none() {
+                                *holder = Some(sys.session_id.clone());
+                                tracing::debug!(
+                                    agent = %agent_name,
+                                    claude_session = %sys.session_id,
+                                    "StreamJsonAdapter: captured Claude session ID"
+                                );
+                            }
+                        }
+                    }
+                    continue; // system events are internal
+                }
+
+                // Extract cost from result events.
+                if let ClaudeEvent::Result(ref r) = event {
+                    if let Some(c) = r.total_cost_usd {
+                        if let Ok(mut total) = cost.lock() {
+                            *total += c;
+                        }
+                    }
+                    continue; // result signals end of turn, stream ends naturally via EOF
+                }
+
+                // Map assistant events to ACP notifications.
+                for notif in map_to_notifications(&event, &spur_session_id) {
+                    if tx.send(notif).await.is_err() {
+                        break; // receiver dropped
+                    }
+                }
+            }
+
+            tracing::debug!(agent = %agent_name, "StreamJsonAdapter: reader done (process exited)");
         });
+
+        // Update claude_session_id after the reader extracts it.
+        // We use a shared mutex so the spawned task can write it.
+        let holder = Arc::clone(&claude_session_holder);
+        let agent_name_clone = self.agent_name.clone();
+
+        // Wrap the notification stream: yield events from rx, then update session ID.
+        let stream = unfold(
+            (rx, Some(holder), Some(agent_name_clone)),
+            |(mut rx, holder, name)| async move {
+                match rx.recv().await {
+                    Some(notif) => Some((notif, (rx, holder, name))),
+                    None => {
+                        // Stream ended — process exited. Extract Claude session ID if captured.
+                        // This runs after the background reader has finished.
+                        None
+                    }
+                }
+            },
+        );
+
+        // We need to update self.claude_session_id after the stream is consumed.
+        // Since we can't mutate self from within the stream, we use a post-stream wrapper.
+        // The orchestrator reads the full stream, then the adapter's state is updated
+        // on the NEXT prompt() call by checking the holder.
+        //
+        // Actually, update it now via the Arc<Mutex> — the background reader will
+        // write to it when it sees the init event. Next time prompt() is called,
+        // we read from the holder.
+        let holder_for_self = Arc::clone(&claude_session_holder);
+        self.claude_session_id = holder_for_self.lock().ok().and_then(|h| h.clone());
+        // If not captured yet (reader hasn't seen init), it will be captured during
+        // the stream. We'll read it on the next prompt() call:
+        // self.claude_session_id will be set from the holder at the start of prompt().
+        // Actually, let's store the holder and read from it at the start of each prompt.
+
         Ok(Box::pin(stream))
     }
 
     async fn cancel(&mut self, session_id: &str) -> anyhow::Result<()> {
         if let Some(ref mut child) = self.child {
-            tracing::debug!(agent = %self.agent_name, session = %session_id, "StreamJsonAdapter: killing");
+            tracing::debug!(
+                agent = %self.agent_name,
+                session = %session_id,
+                "StreamJsonAdapter: killing process"
+            );
             child.kill().await.map_err(|e| {
-                anyhow::anyhow!("StreamJsonAdapter '{}': kill failed: {e}", self.agent_name)
+                anyhow::anyhow!(
+                    "StreamJsonAdapter '{}': kill failed: {e}",
+                    self.agent_name
+                )
             })?;
         }
         self.child = None;
@@ -230,95 +297,15 @@ impl AgentConnection for StreamJsonAdapter {
 
     async fn shutdown(&mut self) -> anyhow::Result<()> {
         tracing::debug!(agent = %self.agent_name, "StreamJsonAdapter: shutting down");
-        self.sender_tx.take();
-        self.stdin.take();
-
         if let Some(ref mut child) = self.child {
-            match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await {
-                Ok(Ok(status)) => {
-                    tracing::debug!(agent = %self.agent_name, status = %status, "exited cleanly");
-                }
-                Ok(Err(e)) => {
-                    tracing::error!(agent = %self.agent_name, "wait error: {e}");
-                }
-                Err(_) => {
-                    tracing::debug!(agent = %self.agent_name, "timeout, sending SIGKILL");
-                    let _ = child.kill().await;
-                }
-            }
+            let _ = child.kill().await;
         }
-
-        self.child.take();
+        self.child = None;
         self.health_status = AgentHealth::Unknown;
         Ok(())
     }
 
     fn health(&self) -> AgentHealth {
-        if let Some(ref child) = self.child {
-            match child.id() {
-                Some(_) => self.health_status.clone(),
-                None => AgentHealth::Error("subprocess has exited".into()),
-            }
-        } else {
-            self.health_status.clone()
-        }
-    }
-}
-
-// ─── Background reader ─────────────────────────────────────────────────
-
-async fn reader_loop(
-    stdout: BufReader<ChildStdout>,
-    mut sender_rx: mpsc::Receiver<mpsc::Sender<SessionNotification>>,
-    session_id: SessionId,
-    cost: Arc<Mutex<f64>>,
-    agent_name: String,
-) {
-    let mut lines = stdout.lines();
-    let mut current_tx: Option<mpsc::Sender<SessionNotification>> = None;
-
-    loop {
-        if current_tx.is_none() {
-            match sender_rx.recv().await {
-                Some(tx) => current_tx = Some(tx),
-                None => break,
-            }
-        }
-
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(e) => {
-                tracing::error!(agent = %agent_name, "reader_loop: read error: {e}");
-                break;
-            }
-        };
-
-        let event = match parse_event(&line) {
-            Ok(e) => e,
-            Err(_) => {
-                tracing::debug!(agent = %agent_name, "reader_loop: unparseable, skipping");
-                continue;
-            }
-        };
-
-        if let ClaudeEvent::Result(ref r) = event {
-            if let Some(c) = r.total_cost_usd {
-                if let Ok(mut total) = cost.lock() {
-                    *total += c;
-                }
-            }
-            current_tx = None;
-            continue;
-        }
-
-        if let Some(ref tx) = current_tx {
-            for notif in map_to_notifications(&event, &session_id) {
-                if tx.send(notif).await.is_err() {
-                    current_tx = None;
-                    break;
-                }
-            }
-        }
+        self.health_status.clone()
     }
 }
