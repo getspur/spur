@@ -3,5 +3,5 @@ pub mod tools;
 
 pub use server::{McpCallbackServer, WorkerInfo};
 pub use tools::{
-    DelegationChannel, DelegationRequest, DelegationResponse, ToolDefinition, tools_list,
+    DelegationChannel, DelegationRequest, ToolDefinition, tools_list,
 };

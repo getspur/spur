@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use spur_acp::*;
 
-use crate::tools::{self, DelegationChannel, DelegationRequest, DelegationResponse};
+use crate::tools::{self, DelegationChannel, DelegationRequest};
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
@@ -98,8 +98,6 @@ pub struct McpCallbackServer {
     socket_path: PathBuf,
     /// Channel to send delegation requests to the orchestrator.
     delegation_tx: mpsc::Sender<DelegationRequest>,
-    /// Channel to receive delegation results from the orchestrator.
-    delegation_rx: Mutex<mpsc::Receiver<DelegationResponse>>,
     /// Available worker agents (set once at creation).
     workers: Vec<WorkerInfo>,
 }
@@ -112,21 +110,18 @@ impl McpCallbackServer {
     pub fn new(session_id: &SessionId) -> (Self, DelegationChannel) {
         let socket_path = PathBuf::from(format!("/tmp/spur-mcp-{session_id}.sock"));
 
-        // Server -> Orchestrator: delegation requests
+        // Server -> Orchestrator: delegation requests (each request carries
+        // its own oneshot sender for the response).
         let (req_tx, req_rx) = mpsc::channel::<DelegationRequest>(32);
-        // Orchestrator -> Server: delegation responses
-        let (resp_tx, resp_rx) = mpsc::channel::<DelegationResponse>(32);
 
         let server = Self {
             socket_path,
             delegation_tx: req_tx,
-            delegation_rx: Mutex::new(resp_rx),
             workers: Vec::new(),
         };
 
         let channel = DelegationChannel {
             request_rx: req_rx,
-            response_tx: resp_tx,
         };
 
         (server, channel)
@@ -326,25 +321,27 @@ impl McpCallbackServer {
             .unwrap_or_default();
 
         let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
 
         let delegation = DelegationRequest {
             id: request_id.clone(),
             agent: agent.clone(),
             task: task.clone(),
             context_files,
+            respond_to: tx,
         };
 
         info!(agent = %agent, request_id = %request_id, "Sending delegation request");
 
-        if let Err(e) = self.delegation_tx.send(delegation).await {
-            error!(error = %e, "Failed to send delegation request");
+        if let Err(_e) = self.delegation_tx.send(delegation).await {
+            error!("Failed to send delegation request");
             return JsonRpcResponse::internal_error(id, "Failed to send delegation request");
         }
 
-        // Wait for the matching response from the orchestrator.
-        match self.wait_for_response(&request_id).await {
-            Ok(response) => {
-                let result_json = match serde_json::to_value(&response.result) {
+        // Wait for the result on our dedicated oneshot channel.
+        match rx.await {
+            Ok(result) => {
+                let result_json = match serde_json::to_value(&result) {
                     Ok(v) => v,
                     Err(e) => {
                         return JsonRpcResponse::internal_error(
@@ -364,7 +361,10 @@ impl McpCallbackServer {
                     }),
                 )
             }
-            Err(e) => JsonRpcResponse::internal_error(id, format!("Delegation failed: {e}")),
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "Delegation cancelled or orchestrator disconnected",
+            ),
         }
     }
 
@@ -378,9 +378,9 @@ impl McpCallbackServer {
             return JsonRpcResponse::invalid_params(id, "'tasks' array must not be empty");
         }
 
-        let mut request_ids = Vec::with_capacity(tasks.len());
+        let mut receivers = Vec::with_capacity(tasks.len());
 
-        // Send all delegation requests.
+        // Send all delegation requests, each with its own oneshot channel.
         for task_obj in &tasks {
             let agent = match task_obj.get("agent").and_then(|v| v.as_str()) {
                 Some(a) => a.to_string(),
@@ -402,38 +402,40 @@ impl McpCallbackServer {
             };
 
             let request_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel();
 
             let delegation = DelegationRequest {
                 id: request_id.clone(),
                 agent: agent.clone(),
                 task,
                 context_files: Vec::new(),
+                respond_to: tx,
             };
 
             info!(agent = %agent, request_id = %request_id, "Sending parallel delegation request");
 
-            if let Err(e) = self.delegation_tx.send(delegation).await {
-                error!(error = %e, "Failed to send parallel delegation request");
+            if let Err(_e) = self.delegation_tx.send(delegation).await {
+                error!("Failed to send parallel delegation request");
                 return JsonRpcResponse::internal_error(
                     id,
                     "Failed to send delegation request",
                 );
             }
 
-            request_ids.push(request_id);
+            receivers.push((request_id, rx));
         }
 
-        // Wait for all responses.
-        let mut results = Vec::with_capacity(request_ids.len());
-        for request_id in &request_ids {
-            match self.wait_for_response(request_id).await {
-                Ok(response) => {
-                    results.push(serde_json::to_value(&response.result).unwrap_or(json!(null)));
+        // Wait for all responses — each on its own oneshot, no cross-talk.
+        let mut results = Vec::with_capacity(receivers.len());
+        for (request_id, rx) in receivers {
+            match rx.await {
+                Ok(result) => {
+                    results.push(serde_json::to_value(&result).unwrap_or(json!(null)));
                 }
-                Err(e) => {
+                Err(_) => {
                     results.push(json!({
                         "status": "Failed",
-                        "error": format!("Delegation {request_id} failed: {e}")
+                        "error": format!("Delegation {request_id} cancelled or orchestrator disconnected")
                     }));
                 }
             }
@@ -477,21 +479,22 @@ impl McpCallbackServer {
 
         // Forward to orchestrator as a delegation request with a special agent name.
         let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
             id: request_id.clone(),
             agent: "__pm_get_issue".into(),
             task: json!({ "source": source, "id": issue_id }).to_string(),
             context_files: Vec::new(),
+            respond_to: tx,
         };
 
-        if let Err(e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, format!("Failed to forward request: {e}"));
+        if let Err(_e) = self.delegation_tx.send(delegation).await {
+            return JsonRpcResponse::internal_error(id, "Failed to forward request");
         }
 
-        match self.wait_for_response(&request_id).await {
-            Ok(response) => {
-                let text = response
-                    .result
+        match rx.await {
+            Ok(result) => {
+                let text = result
                     .summary
                     .unwrap_or_else(|| "No issue data returned".into());
                 JsonRpcResponse::success(
@@ -501,7 +504,10 @@ impl McpCallbackServer {
                     }),
                 )
             }
-            Err(e) => JsonRpcResponse::internal_error(id, format!("get_issue failed: {e}")),
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "get_issue failed: orchestrator disconnected",
+            ),
         }
     }
 
@@ -521,6 +527,7 @@ impl McpCallbackServer {
             .map(String::from);
 
         let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
             id: request_id.clone(),
             agent: "__pm_update_issue".into(),
@@ -532,16 +539,16 @@ impl McpCallbackServer {
             })
             .to_string(),
             context_files: Vec::new(),
+            respond_to: tx,
         };
 
-        if let Err(e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, format!("Failed to forward request: {e}"));
+        if let Err(_e) = self.delegation_tx.send(delegation).await {
+            return JsonRpcResponse::internal_error(id, "Failed to forward request");
         }
 
-        match self.wait_for_response(&request_id).await {
-            Ok(response) => {
-                let text = response
-                    .result
+        match rx.await {
+            Ok(result) => {
+                let text = result
                     .summary
                     .unwrap_or_else(|| "Issue updated".into());
                 JsonRpcResponse::success(
@@ -551,7 +558,10 @@ impl McpCallbackServer {
                     }),
                 )
             }
-            Err(e) => JsonRpcResponse::internal_error(id, format!("update_issue failed: {e}")),
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "update_issue failed: orchestrator disconnected",
+            ),
         }
     }
 
@@ -570,6 +580,7 @@ impl McpCallbackServer {
         };
 
         let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
             id: request_id.clone(),
             agent: "__pm_create_pr".into(),
@@ -580,16 +591,16 @@ impl McpCallbackServer {
             })
             .to_string(),
             context_files: Vec::new(),
+            respond_to: tx,
         };
 
-        if let Err(e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, format!("Failed to forward request: {e}"));
+        if let Err(_e) = self.delegation_tx.send(delegation).await {
+            return JsonRpcResponse::internal_error(id, "Failed to forward request");
         }
 
-        match self.wait_for_response(&request_id).await {
-            Ok(response) => {
-                let text = response
-                    .result
+        match rx.await {
+            Ok(result) => {
+                let text = result
                     .summary
                     .unwrap_or_else(|| "PR created".into());
                 JsonRpcResponse::success(
@@ -599,7 +610,10 @@ impl McpCallbackServer {
                     }),
                 )
             }
-            Err(e) => JsonRpcResponse::internal_error(id, format!("create_pr failed: {e}")),
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "create_pr failed: orchestrator disconnected",
+            ),
         }
     }
 
@@ -611,17 +625,19 @@ impl McpCallbackServer {
             }
         };
 
-        // Fire-and-forget: send as a delegation request but don't wait for response.
+        // Fire-and-forget: create a oneshot but drop the receiver immediately.
         let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
             id: request_id,
             agent: "__progress".into(),
             task: message.clone(),
             context_files: Vec::new(),
+            respond_to: tx,
         };
 
-        if let Err(e) = self.delegation_tx.send(delegation).await {
-            warn!(error = %e, "Failed to send progress report");
+        if let Err(_e) = self.delegation_tx.send(delegation).await {
+            warn!("Failed to send progress report");
         }
 
         info!(message = %message, "Progress reported");
@@ -636,24 +652,26 @@ impl McpCallbackServer {
 
     async fn handle_get_session_cost(&self, id: Value) -> JsonRpcResponse {
         let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
             id: request_id.clone(),
             agent: "__session_cost".into(),
             task: String::new(),
             context_files: Vec::new(),
+            respond_to: tx,
         };
 
-        if let Err(e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, format!("Failed to forward request: {e}"));
+        if let Err(_e) = self.delegation_tx.send(delegation).await {
+            return JsonRpcResponse::internal_error(id, "Failed to forward request");
         }
 
-        match self.wait_for_response(&request_id).await {
-            Ok(response) => {
-                let text = response
-                    .result
+        match rx.await {
+            Ok(result) => {
+                let text = result
                     .summary
+                    .clone()
                     .unwrap_or_else(|| {
-                        json!({ "estimated_cost_usd": response.result.estimated_cost_usd })
+                        json!({ "estimated_cost_usd": result.estimated_cost_usd })
                             .to_string()
                     });
                 JsonRpcResponse::success(
@@ -663,38 +681,11 @@ impl McpCallbackServer {
                     }),
                 )
             }
-            Err(e) => {
-                JsonRpcResponse::internal_error(id, format!("get_session_cost failed: {e}"))
-            }
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "get_session_cost failed: orchestrator disconnected",
+            ),
         }
     }
 
-    // ─── Helpers ──────────────────────────────────────────────────────
-
-    /// Wait for a delegation response with the given request ID.
-    ///
-    /// Consumes responses from the channel until the matching one is found.
-    /// Non-matching responses are dropped with a warning (this should not
-    /// happen in normal operation since we process requests sequentially
-    /// per connection, but provides resilience).
-    async fn wait_for_response(&self, request_id: &str) -> Result<DelegationResponse> {
-        let mut rx = self.delegation_rx.lock().await;
-        loop {
-            match rx.recv().await {
-                Some(response) if response.id == request_id => {
-                    return Ok(response);
-                }
-                Some(other) => {
-                    warn!(
-                        expected = %request_id,
-                        got = %other.id,
-                        "Received out-of-order delegation response, dropping"
-                    );
-                }
-                None => {
-                    anyhow::bail!("Delegation response channel closed");
-                }
-            }
-        }
-    }
 }
