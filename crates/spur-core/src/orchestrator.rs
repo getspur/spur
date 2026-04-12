@@ -1,9 +1,11 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
-use tokio::sync::{broadcast, Semaphore};
+use futures::StreamExt;
+use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -53,6 +55,12 @@ pub struct BrainSession {
     pub brain_name: String,
     pub mcp_server: Arc<McpCallbackServer>,
     pub delegation_handle: JoinHandle<()>,
+}
+
+/// A user input message from the TUI.
+pub struct InteractiveInput {
+    pub text: String,
+    pub interrupt: bool,
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -243,7 +251,6 @@ impl Orchestrator {
         ));
 
         // Stream brain output.
-        use futures::StreamExt;
         while let Some(notification) = stream.next().await {
             // Convert SDK SessionNotification to spur SessionEvent for the event bus.
             let event = notification_to_session_event(&notification);
@@ -314,6 +321,124 @@ impl Orchestrator {
         })
     }
 
+    /// Run an interactive session: multi-turn loop that accepts user input
+    /// between brain turns. Used by `spur watch`.
+    pub async fn run_interactive(
+        mut self,
+        mut user_input_rx: mpsc::Receiver<InteractiveInput>,
+        brain_override: Option<String>,
+    ) -> Result<()> {
+        let mut brain: Option<BrainSession> = None;
+        let mut pending_messages: VecDeque<String> = VecDeque::new();
+
+        loop {
+            // ── Phase 2: Get next message (from queue or user) ──────────
+            let text = if let Some(msg) = pending_messages.pop_front() {
+                msg
+            } else {
+                match user_input_rx.recv().await {
+                    Some(input) => input.text,
+                    None => break, // TUI closed
+                }
+            };
+
+            // ── Lazy-spawn brain on first message (or after crash) ──────
+            if brain.is_none() {
+                match self
+                    .spawn_brain_session(brain_override.as_deref())
+                    .await
+                {
+                    Ok(b) => brain = Some(b),
+                    Err(e) => {
+                        error!(error = %e, "Failed to spawn brain");
+                        self.emit(SpurEvent::BrainError {
+                            session: SessionId::new(),
+                            message: e.to_string(),
+                        });
+                        continue;
+                    }
+                }
+            }
+            let b = brain.as_mut().unwrap();
+
+            // ── Send prompt ─────────────────────────────────────────────
+            let prompt_request = PromptRequest::new(
+                b.acp_session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new(text))],
+            );
+
+            let mut stream = match b.connection.prompt(prompt_request).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(error = %e, "Brain prompt failed");
+                    self.emit(SpurEvent::BrainError {
+                        session: b.spur_session_id.clone(),
+                        message: e.to_string(),
+                    });
+                    // Abort delegation handler, shutdown brain
+                    b.delegation_handle.abort();
+                    let _ = b.connection.shutdown().await;
+                    brain = None;
+                    continue;
+                }
+            };
+
+            // ── Phase 1: Stream output + check for interrupts ───────────
+            let mut cancel_deadline: Option<tokio::time::Instant> = None;
+
+            loop {
+                tokio::select! {
+                    item = stream.next() => {
+                        match item {
+                            Some(notification) => {
+                                let event = notification_to_session_event(&notification);
+                                self.emit(SpurEvent::AgentOutput {
+                                    session: b.spur_session_id.clone(),
+                                    event,
+                                });
+                            }
+                            None => break, // Turn complete
+                        }
+                    }
+                    Some(input) = user_input_rx.recv() => {
+                        if input.interrupt {
+                            let _ = b.connection.cancel(&b.acp_session_id).await;
+                            cancel_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_secs(5),
+                            );
+                        }
+                        pending_messages.push_back(input.text);
+                    }
+                    _ = async {
+                        match cancel_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => futures::future::pending().await,
+                        }
+                    } => {
+                        warn!("Cancel timeout — force-ending stream");
+                        break;
+                    }
+                }
+            }
+
+            // Emit turn complete
+            self.emit(SpurEvent::TurnComplete {
+                session: b.spur_session_id.clone(),
+            });
+        }
+
+        // ── Cleanup ─────────────────────────────────────────────────────
+        if let Some(mut b) = brain.take() {
+            b.delegation_handle.abort();
+            let _ = b.connection.shutdown().await;
+            let _ = b.mcp_server.shutdown();
+        }
+
+        info!("Interactive session ended");
+        Ok(())
+    }
+
     /// Execute a task directly on a single agent (no brain, no delegation).
     pub async fn exec_direct(
         &mut self,
@@ -364,7 +489,6 @@ impl Orchestrator {
         let mut stream = connection.prompt(prompt_request).await?;
 
         let mut success = true;
-        use futures::StreamExt;
         while let Some(notification) = stream.next().await {
             let event = notification_to_session_event(&notification);
             match &event {
@@ -885,7 +1009,6 @@ impl Orchestrator {
 
         match connection.prompt(prompt_request).await {
             Ok(mut stream) => {
-                use futures::StreamExt;
                 while let Some(notification) = stream.next().await {
                     let event = notification_to_session_event(&notification);
                     match event {
