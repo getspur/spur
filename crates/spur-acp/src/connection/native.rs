@@ -743,6 +743,52 @@ impl Client for SpurAcpClientDynamic {
 
         Ok(WriteTextFileResponse::new())
     }
+
+    async fn create_terminal(
+        &self,
+        args: CreateTerminalRequest,
+    ) -> agent_client_protocol::Result<CreateTerminalResponse> {
+        let cwd = args.cwd.clone().unwrap_or_else(|| self.cwd.borrow().clone());
+        let byte_limit = args.output_byte_limit.or(Some(10 * 1024 * 1024));
+
+        let mut cmd = tokio::process::Command::new(&args.command);
+        cmd.args(&args.args)
+            .current_dir(&cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for env_var in &args.env {
+            cmd.env(&env_var.name, &env_var.value);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| {
+            agent_client_protocol::Error::internal_error()
+                .data(format!("Failed to spawn '{}': {e}", args.command))
+        })?;
+        let pid = child.id().ok_or_else(|| {
+            agent_client_protocol::Error::internal_error().data("Failed to get process ID")
+        })?;
+        let child_stdout = child.stdout.take().ok_or_else(|| {
+            agent_client_protocol::Error::internal_error().data("Failed to capture stdout")
+        })?;
+        let child_stderr = child.stderr.take().ok_or_else(|| {
+            agent_client_protocol::Error::internal_error().data("Failed to capture stderr")
+        })?;
+
+        let output = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let truncated = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+
+        tokio::task::spawn_local(terminal_reader(
+            child_stdout, child_stderr, child,
+            output.clone(), truncated.clone(), byte_limit, exit_tx,
+        ));
+
+        let terminal_id = TerminalId::new(uuid::Uuid::new_v4().to_string());
+        let id_string = terminal_id.to_string();
+        tracing::debug!(terminal = %id_string, command = %args.command, pid = pid, "Terminal created");
+        self.terminals.borrow_mut().insert(id_string, TerminalState { output, truncated, exit_rx, pid });
+        Ok(CreateTerminalResponse::new(terminal_id))
+    }
 }
 
 // ─── Permission helpers ─────────────────────────────────────────────────────
