@@ -12,6 +12,9 @@
 pub mod cli_wrap_adapter;
 pub use cli_wrap_adapter::CliWrapAdapter;
 
+pub mod stdio_adapter;
+pub use stdio_adapter::StdioAdapter;
+
 use std::path::PathBuf;
 use std::pin::Pin;
 
