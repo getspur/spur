@@ -1323,6 +1323,7 @@ dependencies = [
  "crossterm",
  "futures",
  "ratatui",
+ "serde_json",
  "spur-acp",
  "spur-core",
  "tokio",

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_client_protocol::SessionNotification;
+use agent_client_protocol::{SessionNotification, SessionInfo};
 use crate::types::SessionId;
 use crate::domain::delegation::DelegationStatus;
 
@@ -25,4 +25,7 @@ pub enum SpurEvent {
     // ── Interactive loop events ──────────────────────────────────────
     TurnComplete { session: SessionId },
     BrainError { session: SessionId, message: String },
+    // ── Session picker events ───────────────────────────────────────
+    SessionsListed { agent: String, sessions: Vec<SessionInfo> },
+    SessionsListError { message: String },
 }

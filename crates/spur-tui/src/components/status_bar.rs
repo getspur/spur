@@ -19,8 +19,9 @@ impl StatusBar {
         elapsed: &str,
     ) {
         let hints = match view {
-            ViewId::Dashboard => " [i]nput [Enter]session [r]un [c]ost [?]help [q]uit",
+            ViewId::Dashboard => " [i]nput [Enter]session [s]essions [?]help [q]uit",
             ViewId::SessionDetail(_) => " [Enter]send [Esc]back [j/k]scroll [?]help",
+            ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
         };
 
         let line = Line::from(vec![

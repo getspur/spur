@@ -1,5 +1,6 @@
 pub mod dashboard;
 pub mod session_detail;
+pub mod session_picker;
 
 use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
