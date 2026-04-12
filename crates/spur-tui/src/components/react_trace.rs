@@ -47,6 +47,32 @@ impl ReactTrace {
         }
     }
 
+    /// Append text to the most recent THINK entry, or create a new one
+    /// if the last entry is not THINK. This prevents each TextDelta chunk
+    /// from creating a separate "🧠 THINK" block in the trace.
+    pub fn append_think(&mut self, text: &str, timestamp: String) {
+        if let Some(last) = self.entries.last_mut() {
+            if matches!(last.kind, TraceKind::Think) {
+                // Append to existing THINK entry
+                if !last.text.is_empty() {
+                    last.text.push_str(text);
+                } else {
+                    last.text = text.to_string();
+                }
+                if self.is_following {
+                    self.scroll_to_bottom();
+                }
+                return;
+            }
+        }
+        // No previous THINK entry — create a new one
+        self.push(TraceEntry {
+            kind: TraceKind::Think,
+            text: text.to_string(),
+            timestamp,
+        });
+    }
+
     /// Push a new trace entry, evicting oldest if over capacity, and
     /// auto-scroll to bottom when following.
     pub fn push(&mut self, entry: TraceEntry) {
