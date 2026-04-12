@@ -1,0 +1,3 @@
+/target
+.spur/worktrees/
+*.db
