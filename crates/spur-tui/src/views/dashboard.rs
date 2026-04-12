@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_acp::{DelegationStatus, SessionEvent, SpurEvent};
+use spur_acp::{DelegationStatus, SpurEvent};
 
 use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
@@ -142,6 +142,14 @@ impl DashboardView {
     /// Get the first session ID.
     fn first_session_id(&self) -> Option<String> {
         self.session_agent.keys().next().cloned()
+    }
+
+    pub fn scroll_activity_up(&mut self) {
+        self.activity_log.scroll_up();
+    }
+
+    pub fn scroll_activity_down(&mut self) {
+        self.activity_log.scroll_down(20);
     }
 
     /// Whether any agents are in an active (animating) state.
@@ -292,30 +300,17 @@ impl View for DashboardView {
                 self.handle_agent_spawned(agent.clone(), session.0.clone(), "worker");
             }
 
-            SpurEvent::AgentOutput {
-                session,
-                event: se,
-            } => {
+            SpurEvent::AgentNotification { session, notification } => {
                 let prefix = self.prefix_for_session(&session.0);
-                match se {
-                    SessionEvent::TextDelta(text) => {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            if self.verbose {
-                                self.activity_log.push(LogEntry {
-                                    timestamp: Self::now_stamp(),
-                                    prefix: prefix.clone(),
-                                    message: trimmed.to_string(),
-                                    kind: LogEntryKind::Think,
-                                });
-                            } else {
-                                // Accumulate in text_batch for batched flushing
-                                let entry = self
-                                    .text_batch
+                match &notification.update {
+                    spur_acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                        if let spur_acp::ContentBlock::Text(tc) = &chunk.content {
+                            let trimmed = tc.text.trim();
+                            if !trimmed.is_empty() {
+                                let entry = self.text_batch
                                     .entry(session.0.clone())
                                     .or_insert_with(|| (String::new(), Instant::now()));
                                 entry.0.push_str(trimmed);
-                                // Cap batch string to prevent unbounded growth
                                 if entry.0.len() > 200 {
                                     let mut start = entry.0.len() - 200;
                                     while !entry.0.is_char_boundary(start) {
@@ -327,76 +322,39 @@ impl View for DashboardView {
                             }
                         }
                     }
-                    SessionEvent::MessageDelta(text) => {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            // Agent messages use same batching as TextDelta
-                            // but flush with ✉ prefix for clarity
-                            let entry = self
-                                .text_batch
-                                .entry(session.0.clone())
-                                .or_insert_with(|| (String::new(), Instant::now()));
-                            entry.0.push_str(trimmed);
-                            if entry.0.len() > 200 {
-                                let start = entry.0.len() - 200;
-                                entry.0 = entry.0[start..].to_string();
+                    spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let spur_acp::ContentBlock::Text(tc) = &chunk.content {
+                            let trimmed = tc.text.trim();
+                            if !trimmed.is_empty() {
+                                let entry = self.text_batch
+                                    .entry(session.0.clone())
+                                    .or_insert_with(|| (String::new(), Instant::now()));
+                                entry.0.push_str(trimmed);
+                                if entry.0.len() > 200 {
+                                    let mut start = entry.0.len() - 200;
+                                    while !entry.0.is_char_boundary(start) {
+                                        start += 1;
+                                    }
+                                    entry.0 = entry.0[start..].to_string();
+                                }
+                                entry.1 = Instant::now();
                             }
-                            entry.1 = Instant::now();
                         }
                     }
-                    SessionEvent::ToolCallStart { name, .. } => {
+                    spur_acp::SessionUpdate::ToolCall(tc) => {
                         self.activity_log.push(LogEntry {
                             timestamp: Self::now_stamp(),
                             prefix,
-                            message: format!("\u{1f527} Tool: {}", name),
+                            message: format!("\u{1f527} Tool: {}", tc.title),
                             kind: LogEntryKind::Act,
                         });
                     }
-                    SessionEvent::ToolCallResult { .. } => {
+                    spur_acp::SessionUpdate::ToolCallUpdate(_) => {
                         // Not logged in dashboard (condensed view)
                     }
-                    SessionEvent::StatusUpdate(status) => {
-                        let status_str = format!("{:?}", status).to_lowercase();
-                        self.set_agent_status_for_session(&session.0, &status_str);
-                        self.activity_log.push(LogEntry {
-                            timestamp: Self::now_stamp(),
-                            prefix,
-                            message: format!("Status: {}", status_str),
-                            kind: LogEntryKind::Info,
-                        });
-                    }
-                    SessionEvent::Error { message, .. } => {
-                        self.set_agent_status_for_session(&session.0, "error");
-                        self.activity_log.push(LogEntry {
-                            timestamp: Self::now_stamp(),
-                            prefix,
-                            message: format!("Error: {}", message),
-                            kind: LogEntryKind::Error,
-                        });
-                    }
-                    SessionEvent::RateLimitHit { retry_after } => {
-                        self.set_agent_status_for_session(&session.0, "rate-limited");
-                        let msg = match retry_after {
-                            Some(d) => {
-                                format!("Rate limited (retry after {}s)", d.as_secs())
-                            }
-                            None => "Rate limited".to_string(),
-                        };
-                        self.activity_log.push(LogEntry {
-                            timestamp: Self::now_stamp(),
-                            prefix,
-                            message: msg,
-                            kind: LogEntryKind::Info,
-                        });
-                    }
-                    SessionEvent::Complete { .. } => {
-                        self.set_agent_status_for_session(&session.0, "done");
-                        self.activity_log.push(LogEntry {
-                            timestamp: Self::now_stamp(),
-                            prefix,
-                            message: "Session complete".to_string(),
-                            kind: LogEntryKind::Complete,
-                        });
+                    _ => {
+                        // Other variants -- update status
+                        self.set_agent_status_for_session(&session.0, "working");
                     }
                 }
             }
