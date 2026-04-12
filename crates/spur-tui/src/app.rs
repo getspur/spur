@@ -23,6 +23,16 @@ pub struct UserInput {
     pub interrupt: bool,
 }
 
+/// Tracks the brain agent's current state for status indicators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrainStatus {
+    Idle,
+    Thinking,
+    Streaming,
+    Ready,
+    Error(String),
+}
+
 // ─── App state ─────────────────────────────────────────────────────────
 
 pub struct App {
@@ -33,6 +43,8 @@ pub struct App {
     should_quit: bool,
     dirty: bool,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
+    brain_status: BrainStatus,
+    brain_name: Option<String>,
 }
 
 impl App {
@@ -45,6 +57,8 @@ impl App {
             should_quit: false,
             dirty: true, // initial render
             user_input_tx,
+            brain_status: BrainStatus::Idle,
+            brain_name: None,
         }
     }
 
@@ -86,10 +100,42 @@ impl App {
     /// Forward a SpurEvent to all views that need it.
     pub fn handle_spur_event(&mut self, event: SpurEvent) {
         self.dirty = true;
-        // Dashboard always receives events (it tracks all sessions).
-        self.dashboard.handle_spur_event(&event);
 
-        // Session detail receives events too (it filters internally by session).
+        // Track brain status transitions
+        match &event {
+            SpurEvent::BrainSpawned { agent, session } => {
+                self.brain_status = BrainStatus::Thinking;
+                self.brain_name = Some(agent.clone());
+
+                // Always replace SessionDetailView on BrainSpawned
+                self.session_detail = Some(SessionDetailView::new(
+                    session.clone(),
+                    agent.clone(),
+                    "brain".to_string(),
+                ));
+
+                // Auto-navigate from Dashboard
+                if matches!(self.current_view, ViewId::Dashboard) {
+                    self.current_view = ViewId::SessionDetail(session.clone());
+                }
+            }
+            SpurEvent::AgentOutput { session: _, .. } => {
+                // Transition Thinking → Streaming on first output
+                if self.brain_status == BrainStatus::Thinking {
+                    self.brain_status = BrainStatus::Streaming;
+                }
+            }
+            SpurEvent::TurnComplete { .. } => {
+                self.brain_status = BrainStatus::Ready;
+            }
+            SpurEvent::BrainError { message, .. } => {
+                self.brain_status = BrainStatus::Error(message.clone());
+            }
+            _ => {}
+        }
+
+        // Forward to views
+        self.dashboard.handle_spur_event(&event);
         if let Some(ref mut detail) = self.session_detail {
             detail.handle_spur_event(&event);
         }
@@ -103,21 +149,11 @@ impl App {
             }
 
             Action::NavigateTo(ViewId::SessionDetail(ref session_id)) => {
-                // Look up agent name and role from dashboard's session_agent map.
-                let (agent_name, role) = self
-                    .dashboard
-                    .agent_info_for_session(&session_id.0)
-                    .unwrap_or_else(|| {
-                        let short = &session_id.0[..8.min(session_id.0.len())];
-                        (short.to_string(), "unknown".to_string())
-                    });
-
-                self.session_detail = Some(SessionDetailView::new(
-                    session_id.clone(),
-                    agent_name,
-                    role,
-                ));
-                self.current_view = ViewId::SessionDetail(session_id.clone());
+                if self.session_detail.is_some() {
+                    // Just switch view — don't recreate. BrainSpawned is the only creator.
+                    self.current_view = ViewId::SessionDetail(session_id.clone());
+                }
+                // If no session_detail exists (no brain spawned), ignore.
             }
 
             Action::NavigateTo(ViewId::Dashboard) => {
@@ -127,7 +163,8 @@ impl App {
 
             Action::NavigateBack => {
                 self.current_view = ViewId::Dashboard;
-                self.session_detail = None;
+                // Note: session_detail is intentionally kept alive so it
+                // continues accumulating events while the Dashboard is shown.
             }
 
             Action::SendMessage {
@@ -135,13 +172,17 @@ impl App {
                 text,
                 interrupt,
             } => {
+                // Transition to Thinking when sending a message
+                if matches!(self.brain_status, BrainStatus::Ready | BrainStatus::Idle | BrainStatus::Error(_)) {
+                    self.brain_status = BrainStatus::Thinking;
+                }
+
                 if let Some(ref tx) = self.user_input_tx {
                     let input = UserInput {
                         session,
                         text,
                         interrupt,
                     };
-                    // Use try_send to avoid blocking the event loop.
                     let _ = tx.try_send(input);
                 }
             }
