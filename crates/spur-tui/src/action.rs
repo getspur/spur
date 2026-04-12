@@ -20,8 +20,18 @@ pub enum Action {
     ShowHelp,
     HideHelp,
     Tick,
-    PermissionResponse { option_id: String },
-    PermissionDenied,
+    PermissionGrant(PermissionChoice),
+}
+
+/// Which permission option the user selected.
+#[derive(Debug, Clone)]
+pub enum PermissionChoice {
+    /// [y] — select the first (allow) option
+    Allow,
+    /// [a] — select the always-allow option
+    AlwaysAllow,
+    /// [n] — deny (drop the reply channel)
+    Deny,
 }
 
 /// Identifies which view is active.

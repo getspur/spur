@@ -270,31 +270,35 @@ impl App {
                 self.help_visible = false;
             }
 
-            Action::PermissionResponse { option_id } => {
+            Action::PermissionGrant(choice) => {
+                use crate::action::PermissionChoice;
                 if let Some((perm, _)) = self.pending_permission.take() {
-                    // Resolve option_id: empty = first option, "always" = always-allow option
-                    let resolved_id = if option_id.is_empty() {
-                        perm.args.options.first()
-                            .map(|o| o.option_id.to_string())
-                            .unwrap_or_else(|| "allow".to_string())
-                    } else if option_id == "always" {
-                        perm.args.options.iter()
-                            .find(|o| o.name.to_lowercase().contains("always"))
-                            .or(perm.args.options.first())
-                            .map(|o| o.option_id.to_string())
-                            .unwrap_or_else(|| "allow".to_string())
-                    } else {
-                        option_id
-                    };
-                    let _ = perm.reply_tx.send(spur_acp::types::PermissionResponse {
-                        option_id: resolved_id,
-                    });
+                    match choice {
+                        PermissionChoice::Allow => {
+                            let id = perm.args.options.first()
+                                .map(|o| o.option_id.to_string())
+                                .unwrap_or_else(|| "allow".to_string());
+                            let _ = perm.reply_tx.send(spur_acp::types::PermissionResponse {
+                                option_id: id,
+                            });
+                        }
+                        PermissionChoice::AlwaysAllow => {
+                            let id = perm.args.options.iter()
+                                .find(|o| o.name.to_lowercase().contains("always"))
+                                .or(perm.args.options.first())
+                                .map(|o| o.option_id.to_string())
+                                .unwrap_or_else(|| "allow".to_string());
+                            let _ = perm.reply_tx.send(spur_acp::types::PermissionResponse {
+                                option_id: id,
+                            });
+                        }
+                        PermissionChoice::Deny => {
+                            // Drop reply_tx (signals denial to ACP thread)
+                            drop(perm);
+                        }
+                    }
                 }
-            }
-
-            Action::PermissionDenied => {
-                // Drop reply_tx (signals denial to ACP thread)
-                self.pending_permission.take();
+                self.clear_pending_permission_trace();
             }
 
             // Scroll actions are already handled inside the views' handle_key methods.
@@ -327,6 +331,13 @@ impl App {
         self.dirty = true;
     }
 
+    /// Mark all pending permission trace entries as resolved.
+    fn clear_pending_permission_trace(&mut self) {
+        if let Some(ref mut detail) = self.session_detail {
+            detail.resolve_pending_permissions();
+        }
+    }
+
     /// Push current brain status to both views' InputBars.
     fn sync_brain_status(&mut self) {
         let status_str = match &self.brain_status {
@@ -350,6 +361,7 @@ impl App {
         if let Some((_, deadline)) = &self.pending_permission {
             if std::time::Instant::now() >= *deadline {
                 self.pending_permission.take(); // drops reply_tx → auto-deny
+                self.clear_pending_permission_trace();
                 self.dirty = true;
             }
         }
