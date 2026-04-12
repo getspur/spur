@@ -62,8 +62,11 @@ pub enum AgentStatus {
 /// Events streamed back from an agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionEvent {
-    /// Incremental text output from the agent.
+    /// Incremental thinking text from the agent (internal reasoning).
     TextDelta(String),
+
+    /// Incremental message text from the agent (response to user).
+    MessageDelta(String),
 
     /// Agent started a tool call.
     ToolCallStart {

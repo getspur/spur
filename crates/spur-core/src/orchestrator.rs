@@ -256,7 +256,7 @@ impl Orchestrator {
             let event = notification_to_session_event(&notification);
 
             match &event {
-                SessionEvent::TextDelta(text) => {
+                SessionEvent::TextDelta(text) | SessionEvent::MessageDelta(text) => {
                     print!("{text}");
                 }
                 SessionEvent::ToolCallStart { name, .. } => {
@@ -500,7 +500,9 @@ impl Orchestrator {
         while let Some(notification) = stream.next().await {
             let event = notification_to_session_event(&notification);
             match &event {
-                SessionEvent::TextDelta(text) => print!("{text}"),
+                SessionEvent::TextDelta(text) | SessionEvent::MessageDelta(text) => {
+                    print!("{text}");
+                }
                 SessionEvent::Error { message, .. } => {
                     error!(message = %message, "Agent error");
                     success = false;
@@ -1020,7 +1022,8 @@ impl Orchestrator {
                 while let Some(notification) = stream.next().await {
                     let event = notification_to_session_event(&notification);
                     match event {
-                        SessionEvent::TextDelta(text) => {
+                        SessionEvent::TextDelta(text)
+                        | SessionEvent::MessageDelta(text) => {
                             output_text.push_str(&text);
                         }
                         SessionEvent::Error { message, .. } => {
@@ -1097,16 +1100,20 @@ impl Orchestrator {
 fn notification_to_session_event(notification: &SessionNotification) -> SessionEvent {
     match &notification.update {
         SessionUpdate::AgentMessageChunk(chunk) => {
-            // Extract text from the content block.
+            // Agent's RESPONSE to the user — render as chat message.
+            if let ContentBlock::Text(text_content) = &chunk.content {
+                SessionEvent::MessageDelta(text_content.text.clone())
+            } else {
+                SessionEvent::MessageDelta("[non-text content]".to_string())
+            }
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            // Agent's INTERNAL THINKING — render as dim reasoning.
             if let ContentBlock::Text(text_content) = &chunk.content {
                 SessionEvent::TextDelta(text_content.text.clone())
             } else {
-                // Non-text chunks become a generic text delta with a placeholder.
-                SessionEvent::TextDelta("[non-text content]".to_string())
+                SessionEvent::StatusUpdate(AgentStatus::Thinking)
             }
-        }
-        SessionUpdate::AgentThoughtChunk(_chunk) => {
-            SessionEvent::StatusUpdate(AgentStatus::Thinking)
         }
         SessionUpdate::ToolCall(tool_call) => SessionEvent::ToolCallStart {
             id: tool_call.tool_call_id.to_string(),

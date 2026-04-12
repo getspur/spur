@@ -12,6 +12,7 @@ use super::MAX_LOG_ENTRIES;
 #[derive(Debug, Clone)]
 pub enum TraceKind {
     Think,
+    AgentMessage { agent: String },
     Act { tool: String, args: String },
     Observe,
     Delegate { agent: String, task: String, status: String },
@@ -68,6 +69,27 @@ impl ReactTrace {
         // No previous THINK entry — create a new one
         self.push(TraceEntry {
             kind: TraceKind::Think,
+            text: text.to_string(),
+            timestamp,
+        });
+    }
+
+    /// Append text to the most recent AgentMessage entry, or create a new one.
+    /// Same accumulation pattern as append_think but for agent responses.
+    pub fn append_message(&mut self, text: &str, agent: &str, timestamp: String) {
+        if let Some(last) = self.entries.last_mut() {
+            if matches!(last.kind, TraceKind::AgentMessage { .. }) {
+                last.text.push_str(text);
+                if self.is_following {
+                    self.scroll_to_bottom();
+                }
+                return;
+            }
+        }
+        self.push(TraceEntry {
+            kind: TraceKind::AgentMessage {
+                agent: agent.to_string(),
+            },
             text: text.to_string(),
             timestamp,
         });
@@ -182,6 +204,29 @@ impl ReactTrace {
                             Span::styled(
                                 text_line.to_string(),
                                 Style::default().fg(Color::DarkGray),
+                            ),
+                        ]));
+                    }
+                }
+
+                TraceKind::AgentMessage { agent } => {
+                    // Header line: timestamp + "✉ agent_name"
+                    lines.push(Line::from(vec![
+                        ts_span.clone(),
+                        Span::styled(
+                            format!("✉ {}", agent),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    // Body lines indented 3 spaces, bright white
+                    for text_line in entry.text.lines() {
+                        lines.push(Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(
+                                text_line.to_string(),
+                                Style::default().fg(Color::White),
                             ),
                         ]));
                     }

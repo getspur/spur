@@ -207,6 +207,15 @@ impl View for SessionDetailView {
                                 .append_think(text, Self::now_stamp());
                         }
                     }
+                    SessionEvent::MessageDelta(text) => {
+                        if !text.is_empty() {
+                            self.react_trace.append_message(
+                                text,
+                                &self.agent_name,
+                                Self::now_stamp(),
+                            );
+                        }
+                    }
                     SessionEvent::ToolCallStart { name, input, .. } => {
                         let args = input.to_string();
                         self.react_trace.push(TraceEntry {

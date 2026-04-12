@@ -324,6 +324,23 @@ impl View for DashboardView {
                             }
                         }
                     }
+                    SessionEvent::MessageDelta(text) => {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            // Agent messages use same batching as TextDelta
+                            // but flush with ✉ prefix for clarity
+                            let entry = self
+                                .text_batch
+                                .entry(session.0.clone())
+                                .or_insert_with(|| (String::new(), Instant::now()));
+                            entry.0.push_str(trimmed);
+                            if entry.0.len() > 200 {
+                                let start = entry.0.len() - 200;
+                                entry.0 = entry.0[start..].to_string();
+                            }
+                            entry.1 = Instant::now();
+                        }
+                    }
                     SessionEvent::ToolCallStart { name, .. } => {
                         self.activity_log.push(LogEntry {
                             timestamp: Self::now_stamp(),
