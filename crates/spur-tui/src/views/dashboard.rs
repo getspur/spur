@@ -317,7 +317,10 @@ impl View for DashboardView {
                                 entry.0.push_str(trimmed);
                                 // Cap batch string to prevent unbounded growth
                                 if entry.0.len() > 200 {
-                                    let start = entry.0.len() - 200;
+                                    let mut start = entry.0.len() - 200;
+                                    while !entry.0.is_char_boundary(start) {
+                                        start += 1;
+                                    }
                                     entry.0 = entry.0[start..].to_string();
                                 }
                                 entry.1 = Instant::now();
@@ -596,7 +599,11 @@ impl View for DashboardView {
                 let prefix = self.prefix_for_session(&session_id);
                 // Take the last 50 chars for a condensed view
                 let display = if text.len() > 50 {
-                    format!("\u{25b8} ...{}", &text[text.len() - 50..])
+                    let mut start = text.len() - 50;
+                    while !text.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    format!("\u{25b8} ...{}", &text[start..])
                 } else {
                     format!("\u{25b8} {}", text)
                 };
