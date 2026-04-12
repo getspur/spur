@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_acp::{DelegationStatus, SessionEvent, SessionId, SpurEvent};
+use spur_acp::{DelegationStatus, SessionId, SpurEvent};
 
 use crate::action::{Action, ViewId};
 use crate::components::input_bar::InputBar;
@@ -42,6 +42,11 @@ impl SessionDetailView {
         }
     }
 
+    /// The session ID this view tracks.
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
     /// Current local time formatted as HH:MM:SS.
     fn now_stamp() -> String {
         crate::components::now_stamp()
@@ -63,6 +68,14 @@ impl SessionDetailView {
             other => Some(format!("[{}: {}]", self.agent_name, other)),
         };
         self.input_bar.set_status(label);
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.react_trace.scroll_up();
+    }
+
+    pub fn scroll_down(&mut self) {
+        self.react_trace.scroll_down();
     }
 
     /// Add a user message to the ReAct trace for instant feedback.
@@ -145,7 +158,7 @@ impl View for SessionDetailView {
                     self.input_bar.clear();
                     return match ch {
                         'j' => {
-                            self.react_trace.scroll_down(20);
+                            self.react_trace.scroll_down();
                             Some(Action::ScrollDown)
                         }
                         'k' => {
@@ -168,7 +181,20 @@ impl View for SessionDetailView {
             return None;
         }
 
-        // Priority 3: Non-editing keys when input_bar is empty → scroll/navigate.
+        // Priority 3: Non-editing keys → scroll/navigate.
+        // PageUp/PageDown work regardless of input bar state.
+        match key.code {
+            KeyCode::PageUp => {
+                self.react_trace.page_up();
+                return Some(Action::ScrollUp);
+            }
+            KeyCode::PageDown => {
+                self.react_trace.page_down();
+                return Some(Action::ScrollDown);
+            }
+            _ => {}
+        }
+
         if self.input_bar.is_empty() {
             match key.code {
                 KeyCode::Up => {
@@ -176,7 +202,7 @@ impl View for SessionDetailView {
                     return Some(Action::ScrollUp);
                 }
                 KeyCode::Down => {
-                    self.react_trace.scroll_down(20);
+                    self.react_trace.scroll_down();
                     return Some(Action::ScrollDown);
                 }
                 KeyCode::Esc => {
@@ -191,66 +217,60 @@ impl View for SessionDetailView {
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {
         match event {
-            SpurEvent::AgentOutput {
-                session,
-                event: se,
-            } => {
-                // Only process events for this session.
+            SpurEvent::AgentNotification { session, notification } => {
                 if session.0 != self.session_id.0 {
                     return;
                 }
-
-                match se {
-                    SessionEvent::TextDelta(text) => {
-                        if !text.is_empty() {
-                            self.react_trace
-                                .append_think(text, Self::now_stamp());
+                match &notification.update {
+                    spur_acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                        if let Some(text) = extract_text(chunk) {
+                            if !text.is_empty() {
+                                self.react_trace.append_think(text, Self::now_stamp());
+                            }
                         }
                     }
-                    SessionEvent::MessageDelta(text) => {
-                        if !text.is_empty() {
-                            self.react_trace.append_message(
-                                text,
-                                &self.agent_name,
-                                Self::now_stamp(),
-                            );
+                    spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let Some(text) = extract_text(chunk) {
+                            if !text.is_empty() {
+                                self.react_trace.append_message(text, &self.agent_name, Self::now_stamp());
+                            }
                         }
                     }
-                    SessionEvent::ToolCallStart { name, input, .. } => {
-                        let args = format_tool_args(input);
+                    spur_acp::SessionUpdate::ToolCall(tc) => {
+                        let args = format_tool_args(&tc.raw_input.clone().unwrap_or(serde_json::Value::Null));
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Act {
-                                tool: name.clone(),
+                                tool: tc.title.clone(),
                                 args,
                             },
                             text: String::new(),
                             timestamp: Self::now_stamp(),
                         });
                     }
-                    SessionEvent::ToolCallResult { output, .. } => {
-                        let text = format_observe_output(output);
+                    spur_acp::SessionUpdate::ToolCallUpdate(tcu) => {
+                        let output = tcu.fields.raw_output.clone().unwrap_or(serde_json::Value::Null);
+                        let text = format_observe_output(&output);
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Observe,
                             text,
                             timestamp: Self::now_stamp(),
                         });
                     }
-                    SessionEvent::Error { message, .. } => {
+                    spur_acp::SessionUpdate::Plan(plan) => {
+                        let text = plan.entries.iter().map(|e| {
+                            let marker = match &e.status {
+                                spur_acp::PlanEntryStatus::Completed => "[x]",
+                                spur_acp::PlanEntryStatus::InProgress => "[~]",
+                                _ => "[ ]",
+                            };
+                            format!("{} {}", marker, e.content)
+                        }).collect::<Vec<_>>().join("\n");
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Think,
-                            text: format!("ERROR: {}", message),
+                            text,
                             timestamp: Self::now_stamp(),
                         });
                     }
-                    SessionEvent::Complete { .. } => {
-                        self.react_trace.push(TraceEntry {
-                            kind: TraceKind::Think,
-                            text: "Session complete".to_string(),
-                            timestamp: Self::now_stamp(),
-                        });
-                    }
-                    // StatusUpdate and RateLimitHit are not mapped to trace entries
-                    // in the spec; ignore them here.
                     _ => {}
                 }
             }
@@ -392,6 +412,14 @@ impl View for SessionDetailView {
 
 // ─── Formatting helpers ─────────────────────────────────────────────────
 
+/// Extract the text content from a `ContentChunk`, if it contains text.
+fn extract_text(chunk: &spur_acp::ContentChunk) -> Option<&str> {
+    match &chunk.content {
+        spur_acp::ContentBlock::Text(tc) => Some(&tc.text),
+        _ => None,
+    }
+}
+
 /// Format tool call args for display. Extracts purpose or key args,
 /// falls back to truncated JSON.
 fn format_tool_args(input: &serde_json::Value) -> String {
@@ -424,14 +452,26 @@ fn format_observe_output(output: &serde_json::Value) -> String {
         return "[no output]".to_string();
     }
     // If it's a simple string, use directly
-    let s = if let Some(text) = output.as_str() {
-        text.to_string()
-    } else {
-        // Try to extract text from common wrapper patterns
-        // Pattern: {"items":[{"Text":"..."}]} or just stringify
-        output.to_string()
-    };
-    truncate_lines(&s, 3)
+    if let Some(text) = output.as_str() {
+        return truncate_lines(text, 3);
+    }
+    // Extract text from ACP wrapper: {"items":[{"Text":"..."}, ...]}
+    if let Some(items) = output.get("items").and_then(|v| v.as_array()) {
+        let texts: Vec<&str> = items
+            .iter()
+            .filter_map(|item| {
+                item.get("Text")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("text").and_then(|v| v.as_str()))
+            })
+            .collect();
+        if !texts.is_empty() {
+            let joined = texts.join("\n");
+            return truncate_lines(&joined, 3);
+        }
+    }
+    // Fallback: stringify JSON
+    truncate_lines(&output.to_string(), 3)
 }
 
 /// Truncate a string to max_len chars, respecting UTF-8 boundaries.

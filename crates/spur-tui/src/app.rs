@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode};
+use crossterm::event::{Event, KeyCode, MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::Frame;
 use tokio::sync::{broadcast, mpsc};
@@ -45,6 +45,8 @@ pub struct App {
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     brain_status: BrainStatus,
     brain_name: Option<String>,
+    /// User messages buffered before session_detail exists.
+    pending_user_messages: Vec<String>,
 }
 
 impl App {
@@ -59,42 +61,74 @@ impl App {
             user_input_tx,
             brain_status: BrainStatus::Idle,
             brain_name: None,
+            pending_user_messages: Vec::new(),
         }
     }
 
-    /// Dispatch a crossterm event (keyboard, resize, etc.) to the active view.
+    /// Dispatch a crossterm event (keyboard, resize, mouse, etc.) to the active view.
     pub fn handle_crossterm_event(&mut self, event: Event) {
-        if let Event::Key(key) = event {
-            // Help overlay intercepts ? (toggle) and Esc (close) before views.
-            if self.help_visible {
-                match key.code {
-                    KeyCode::Char('?') | KeyCode::Esc => {
-                        self.help_visible = false;
-                        return;
+        match event {
+            Event::Key(key) => {
+                // Help overlay intercepts ? (toggle) and Esc (close) before views.
+                if self.help_visible {
+                    match key.code {
+                        KeyCode::Char('?') | KeyCode::Esc => {
+                            self.help_visible = false;
+                            return;
+                        }
+                        _ => return, // swallow all keys while help is visible
                     }
-                    _ => return, // swallow all keys while help is visible
                 }
-            }
 
-            let action = match self.current_view {
-                ViewId::Dashboard => self.dashboard.handle_key(key),
+                let action = match self.current_view {
+                    ViewId::Dashboard => self.dashboard.handle_key(key),
+                    ViewId::SessionDetail(_) => {
+                        if let Some(ref mut detail) = self.session_detail {
+                            detail.handle_key(key)
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                if let Some(action) = action {
+                    self.process_action(action);
+                }
+                self.dirty = true;
+            }
+            Event::Mouse(mouse) => {
+                self.handle_mouse_event(mouse);
+            }
+            Event::Resize(_, _) => {
+                self.dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle mouse scroll events. Only scroll wheel is processed —
+    /// clicks and drags are ignored to avoid tmux/terminal conflicts.
+    fn handle_mouse_event(&mut self, event: MouseEvent) {
+        let up = match event.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
+            _ => return,
+        };
+        const SCROLL_LINES: usize = 3;
+        for _ in 0..SCROLL_LINES {
+            match self.current_view {
+                ViewId::Dashboard => {
+                    if up { self.dashboard.scroll_activity_up() }
+                    else { self.dashboard.scroll_activity_down() }
+                }
                 ViewId::SessionDetail(_) => {
                     if let Some(ref mut detail) = self.session_detail {
-                        detail.handle_key(key)
-                    } else {
-                        None
+                        if up { detail.scroll_up() } else { detail.scroll_down() }
                     }
                 }
-            };
-
-            if let Some(action) = action {
-                self.process_action(action);
             }
-            self.dirty = true;
         }
-        if let Event::Resize(_, _) = event {
-            self.dirty = true;
-        }
+        self.dirty = true;
     }
 
     /// Forward a SpurEvent to all views that need it.
@@ -107,19 +141,32 @@ impl App {
                 self.brain_status = BrainStatus::Thinking;
                 self.brain_name = Some(agent.clone());
 
-                // Always replace SessionDetailView on BrainSpawned
-                self.session_detail = Some(SessionDetailView::new(
-                    session.clone(),
-                    agent.clone(),
-                    "brain".to_string(),
-                ));
+                // Only create a new SessionDetailView if none exists or the
+                // session ID changed. Replacing unconditionally would wipe any
+                // user message that was just pushed to the trace.
+                let needs_new = match &self.session_detail {
+                    Some(detail) => detail.session_id() != session,
+                    None => true,
+                };
+                if needs_new {
+                    let mut view = SessionDetailView::new(
+                        session.clone(),
+                        agent.clone(),
+                        "brain".to_string(),
+                    );
+                    // Replay any user messages that were buffered before the view existed.
+                    for msg in self.pending_user_messages.drain(..) {
+                        view.push_user_message(&msg);
+                    }
+                    self.session_detail = Some(view);
+                }
 
                 // Auto-navigate from Dashboard
                 if matches!(self.current_view, ViewId::Dashboard) {
                     self.current_view = ViewId::SessionDetail(session.clone());
                 }
             }
-            SpurEvent::AgentOutput { session: _, .. } => {
+            SpurEvent::AgentNotification { session: _, .. } => {
                 // Transition Thinking → Streaming on first output
                 if self.brain_status == BrainStatus::Thinking {
                     self.brain_status = BrainStatus::Streaming;
@@ -180,9 +227,13 @@ impl App {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
-                // Add user message to Session Detail trace for instant feedback
+                // Add user message to Session Detail trace for instant feedback.
+                // If session_detail doesn't exist yet (first message before
+                // BrainSpawned), buffer it for replay when the view is created.
                 if let Some(ref mut detail) = self.session_detail {
                     detail.push_user_message(&text);
+                } else {
+                    self.pending_user_messages.push(text.clone());
                 }
 
                 if let Some(ref tx) = self.user_input_tx {
