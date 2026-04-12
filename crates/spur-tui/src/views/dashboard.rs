@@ -250,6 +250,10 @@ impl View for DashboardView {
                         self.input_bar.clear();
                         return Some(Action::ShowHelp);
                     }
+                    's' => {
+                        self.input_bar.clear();
+                        return Some(Action::RequestSessions);
+                    }
                     _ => {}
                 }
             }
@@ -526,6 +530,7 @@ impl View for DashboardView {
                     kind: LogEntryKind::Error,
                 });
             }
+            _ => {}
         }
     }
 
@@ -583,6 +588,11 @@ impl View for DashboardView {
                 Line::from(""),
                 Line::from(Span::styled(
                     "Type a task below to start",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Press [s] to browse sessions",
                     Style::default().fg(Color::DarkGray),
                 )),
             ];
