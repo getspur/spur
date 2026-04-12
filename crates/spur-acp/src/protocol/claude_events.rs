@@ -87,8 +87,14 @@ pub struct ResultEvent {
 #[derive(Debug, serde::Serialize)]
 pub struct UserMessage<'a> {
     #[serde(rename = "type")]
-    pub msg_type: &'a str,
+    msg_type: &'static str,
     pub content: &'a str,
+}
+
+impl<'a> UserMessage<'a> {
+    pub fn new(content: &'a str) -> Self {
+        Self { msg_type: "user", content }
+    }
 }
 
 // ─── Parsing ────────────────────────────────────────────────────────────
@@ -114,7 +120,7 @@ pub fn map_to_notifications(
             .message
             .content
             .iter()
-            .filter_map(|block| {
+            .map(|block| {
                 let update = match block {
                     AssistantContentBlock::Text { text } => {
                         let chunk =
@@ -148,7 +154,7 @@ pub fn map_to_notifications(
                         SessionUpdate::ToolCallUpdate(tcu)
                     }
                 };
-                Some(SessionNotification::new(session_id.clone(), update))
+                SessionNotification::new(session_id.clone(), update)
             })
             .collect(),
         ClaudeEvent::System(_) | ClaudeEvent::Result(_) => vec![],

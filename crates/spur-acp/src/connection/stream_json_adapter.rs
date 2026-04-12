@@ -196,7 +196,7 @@ impl AgentConnection for StreamJsonAdapter {
         let stdin = self.stdin.as_mut().ok_or_else(|| {
             anyhow::anyhow!("StreamJsonAdapter '{}': stdin not available", self.agent_name)
         })?;
-        let user_msg = UserMessage { msg_type: "user", content: &prompt_text };
+        let user_msg = UserMessage::new(&prompt_text);
         let json = serde_json::to_string(&user_msg)?;
         stdin.write_all(json.as_bytes()).await?;
         stdin.write_all(b"\n").await?;
