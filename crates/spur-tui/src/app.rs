@@ -109,21 +109,26 @@ impl App {
     /// Handle mouse scroll events. Only scroll wheel is processed —
     /// clicks and drags are ignored to avoid tmux/terminal conflicts.
     fn handle_mouse_event(&mut self, event: MouseEvent) {
-        let up = match event.kind {
-            MouseEventKind::ScrollUp => true,
-            MouseEventKind::ScrollDown => false,
+        let lines: usize = match event.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => 3,
             _ => return,
         };
-        const SCROLL_LINES: usize = 3;
-        for _ in 0..SCROLL_LINES {
-            match self.current_view {
-                ViewId::Dashboard => {
-                    if up { self.dashboard.scroll_activity_up() }
-                    else { self.dashboard.scroll_activity_down() }
+        let is_up = matches!(event.kind, MouseEventKind::ScrollUp);
+
+        match self.current_view {
+            ViewId::Dashboard => {
+                if is_up {
+                    self.dashboard.scroll_activity_up_by(lines);
+                } else {
+                    self.dashboard.scroll_activity_down_by(lines);
                 }
-                ViewId::SessionDetail(_) => {
-                    if let Some(ref mut detail) = self.session_detail {
-                        if up { detail.scroll_up() } else { detail.scroll_down() }
+            }
+            ViewId::SessionDetail(_) => {
+                if let Some(ref mut detail) = self.session_detail {
+                    if is_up {
+                        detail.scroll_up_by(lines);
+                    } else {
+                        detail.scroll_down_by(lines);
                     }
                 }
             }
