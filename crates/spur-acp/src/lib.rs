@@ -24,4 +24,5 @@ pub use agent_client_protocol::{
     Plan, PlanEntry, PlanEntryStatus, PlanEntryPriority,
     RequestPermissionRequest, PermissionOption, PermissionOptionId,
     PermissionOptionKind, RequestPermissionOutcome, SelectedPermissionOutcome,
+    SessionInfo, ListSessionsRequest, ListSessionsResponse,
 };
