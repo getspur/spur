@@ -13,6 +13,7 @@ pub struct InputBar {
     text: String,
     /// Cursor position as a byte index into `text`.
     cursor: usize,
+    status: Option<String>,
 }
 
 impl InputBar {
@@ -20,6 +21,7 @@ impl InputBar {
         Self {
             text: String::new(),
             cursor: 0,
+            status: None,
         }
     }
 
@@ -100,6 +102,11 @@ impl InputBar {
         self.cursor = 0;
     }
 
+    /// Set the status label shown before the prompt (e.g. "[kiro: ready]").
+    pub fn set_status(&mut self, status: Option<String>) {
+        self.status = status;
+    }
+
     /// Required render height based on text length.
     ///
     /// The returned value includes the border lines (top + bottom), so the
@@ -143,12 +150,23 @@ impl InputBar {
         let before = &self.text[..self.cursor];
         let after = &self.text[self.cursor..];
 
-        let line = Line::from(vec![
-            Span::raw("> "),
-            Span::raw(before),
-            Span::styled("█", Style::default().fg(Color::Green)),
-            Span::raw(after),
-        ]);
+        let mut spans = Vec::new();
+
+        // Status label (if set)
+        if let Some(ref status) = self.status {
+            spans.push(Span::styled(
+                format!("{} ", status),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        // Prompt + text + cursor
+        spans.push(Span::raw("> "));
+        spans.push(Span::raw(before));
+        spans.push(Span::styled("\u{2588}", Style::default().fg(Color::Green)));
+        spans.push(Span::raw(after));
+
+        let line = Line::from(spans);
 
         let paragraph = Paragraph::new(line).block(block);
         frame.render_widget(paragraph, area);
