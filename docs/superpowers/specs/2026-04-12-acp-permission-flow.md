@@ -12,23 +12,25 @@ Add a dedicated permission channel from the ACP thread to the TUI. When an agent
 
 ```
 main.rs creates (perm_tx, perm_rx)
-    │                          │
-    ▼                          ▼
-Orchestrator stores perm_tx    run_tui() polls perm_rx
+    │                                    │
+    ▼                                    ▼
+orch.run_interactive(perm_tx)            run_tui(perm_rx)
     │
-    ▼ clone per connection
-NativeAcpConnection
+    ▼ passed as parameter (not stored on Orchestrator)
+spawn_brain_session(perm_tx)
+    │
+    ▼ clone
+NativeAcpConnection::new(perm_tx)
     │
     ▼ passed to thread
-acp_thread_main()
+acp_thread_main(perm_tx)
     │
     ▼
 SpurAcpClientDynamic.request_permission():
-    1. Extract title + options from SDK args
-    2. Create oneshot::channel()
-    3. Send PermissionRequest { ..., reply_tx } via perm_tx
-    4. Await reply_rx with 60s timeout
-    5. Map response → SDK RequestPermissionResponse
+    1. Create oneshot::channel()
+    2. Send PermissionRequest { args (raw SDK), reply_tx } via perm_tx
+    3. Await reply_rx with 60s timeout
+    4. Map response → SDK RequestPermissionResponse
 ```
 
 ### Why a dedicated channel (not SpurEvent broadcast)
@@ -44,16 +46,13 @@ A single channel serves all agents (brain + workers). The `perm_tx` is cloned pe
 ```rust
 // spur-acp/src/types.rs
 
+/// Permission request sent from the ACP thread to the TUI via a dedicated channel.
+/// Carries the raw SDK type for full protocol access (consistent with Sub-project 1
+/// pass-through philosophy). If RequestPermissionRequest is not Send (unlikely —
+/// all fields are String/Value/Vec), fall back to extracted fields.
 pub struct PermissionRequest {
-    pub session_id: String,
-    pub tool_title: String,
-    pub options: Vec<PermissionOptionInfo>,
+    pub args: agent_client_protocol::RequestPermissionRequest,
     pub reply_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
-}
-
-pub struct PermissionOptionInfo {
-    pub id: String,
-    pub name: String,
 }
 
 pub struct PermissionResponse {
@@ -61,7 +60,7 @@ pub struct PermissionResponse {
 }
 ```
 
-Extracted fields rather than raw SDK types — the TUI only needs the title and option labels. This avoids coupling the TUI to SDK internals like `ToolCallUpdate` and `MaybeUndefined`.
+Re-export `RequestPermissionRequest` and `PermissionOption` from `spur-acp/src/lib.rs` so the TUI can access `args.tool_call`, `args.options`, etc. without adding `agent-client-protocol` to its Cargo.toml.
 
 ## ACP Thread Implementation
 
@@ -76,12 +75,7 @@ async fn request_permission(&self, args: RequestPermissionRequest) -> Result<Req
 
     let (reply_tx, reply_rx) = oneshot::channel();
     let request = PermissionRequest {
-        session_id: args.session_id.to_string(),
-        tool_title: args.tool_call.fields.title.clone().unwrap_or_default(),
-        options: args.options.iter().map(|o| PermissionOptionInfo {
-            id: o.option_id.to_string(),
-            name: o.name.clone(),
-        }).collect(),
+        args: args.clone(),  // pass raw SDK type through
         reply_tx,
     };
 
@@ -145,7 +139,7 @@ Some(perm) = perm_rx.recv() => {
 ```rust
 struct App {
     // ... existing fields ...
-    pending_permission: Option<PermissionRequest>,
+    pending_permission: Option<(PermissionRequest, Instant)>,  // request + deadline
 }
 ```
 
@@ -157,11 +151,17 @@ struct App {
 
 ### Key handling
 
-The existing placeholder code in `session_detail.rs` already handles [y]/[n]/[a] when `has_pending_permission()` is true. Wire these to return:
+The existing placeholder code in `session_detail.rs` already handles [y]/[n]/[a] when `has_pending_permission()` is true. Wire these to return Actions. The key-to-option mapping uses the SDK's `args.options` dynamically:
 
-- `[y]` → `Action::PermissionResponse { option_id }` using the first allow-like option
-- `[n]` → `Action::PermissionDenied`
-- `[a]` → `Action::PermissionResponse { option_id }` using the always-allow option (if available)
+- `[y]` → `Action::PermissionResponse { option_id }` using the **first** option (conventionally allow)
+- `[n]` → `Action::PermissionDenied` (drops `reply_tx`, ACP thread falls back to last/deny option)
+- `[a]` → `Action::PermissionResponse { option_id }` using the option with "always" in its name/id (if present; if not, same as [y])
+
+The TraceKind::Permission hint text is generated from actual option names:
+```
+⚠ PERMISSION: Edit file foo.rs
+   [y] Allow  [n] Deny  [a] Always Allow  (auto-deny in 28s)
+```
 
 ### process_action (App)
 
@@ -176,7 +176,16 @@ When `Action::PermissionDenied`:
 
 ## Timeout
 
-**TUI-side (primary):** The `ReactTrace::tick()` method already decrements `countdown` on pending permission entries. When countdown reaches 0, the App drops `pending_permission`, which drops `reply_tx`, signaling denial to the ACP thread.
+**TUI-side (authoritative):** App tracks the deadline via `Instant::now() + Duration::from_secs(30)` stored alongside the `PermissionRequest`. In `App::tick()`:
+```rust
+if let Some((_, deadline)) = &self.pending_permission {
+    if Instant::now() >= *deadline {
+        self.pending_permission.take();  // drops reply_tx → auto-deny
+        // Update trace entry to pending: false
+    }
+}
+```
+The `ReactTrace::tick()` countdown is **cosmetic only** — it shows seconds remaining to the user but does not control the actual timeout. The App's `Instant`-based timer is authoritative. This decouples rendering from logic.
 
 **ACP-side (safety net):** `tokio::time::timeout(60s)` on `reply_rx.await`. If TUI crashes or channel breaks, the ACP thread doesn't block forever. Falls back to the most restrictive option.
 
@@ -191,10 +200,11 @@ When `Action::PermissionDenied`:
 
 | File | Change |
 |------|--------|
-| `spur-acp/src/types.rs` | Add `PermissionRequest`, `PermissionOptionInfo`, `PermissionResponse` |
+| `spur-acp/src/types.rs` | Add `PermissionRequest`, `PermissionResponse` |
+| `spur-acp/src/lib.rs` | Re-export `RequestPermissionRequest`, `PermissionOption`, `PermissionOptionId` from SDK |
 | `spur-acp/src/connection/native.rs` | Add `permission_tx` field to `NativeAcpConnection` and `SpurAcpClientDynamic`. Replace auto-approve in `request_permission()` with channel send + await. Thread `permission_tx` through `acp_thread_main()`. |
-| `spur-core/src/orchestrator.rs` | Add `permission_tx: Option<mpsc::UnboundedSender<PermissionRequest>>` field. Pass clone to `NativeAcpConnection::new()`. |
-| `spur-tui/src/app.rs` | Add `pending_permission` field. Add `perm_rx` to event loop. Handle permission request arrival. Process `PermissionResponse`/`PermissionDenied` actions. Handle timeout (drop reply_tx on countdown=0). |
+| `spur-core/src/orchestrator.rs` | Add `permission_tx` parameter to `run_interactive()` and `spawn_brain_session()`. Pass to `NativeAcpConnection::new()`. No new field on Orchestrator — parameter flows through. |
+| `spur-tui/src/app.rs` | Add `pending_permission: Option<(PermissionRequest, Instant)>` field. Add `perm_rx` to event loop. Handle permission request arrival. Process `PermissionResponse`/`PermissionDenied` actions. Instant-based timeout in tick(). |
 | `spur-tui/src/views/session_detail.rs` | Wire [y]/[n]/[a] placeholder handlers to return `Action::PermissionResponse`/`PermissionDenied`. |
 | `spur-tui/src/action.rs` | Add `PermissionResponse { option_id: String }` and `PermissionDenied` variants. |
 | `spur-cli/src/main.rs` | Create `(perm_tx, perm_rx)` in Watch command. Pass `perm_tx` to orchestrator, `perm_rx` to `run_tui()`. |
