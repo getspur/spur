@@ -78,6 +78,14 @@ impl SessionDetailView {
         self.react_trace.scroll_down();
     }
 
+    pub fn scroll_up_by(&mut self, lines: usize) {
+        self.react_trace.scroll_up_by(lines);
+    }
+
+    pub fn scroll_down_by(&mut self, lines: usize) {
+        self.react_trace.scroll_down_by(lines);
+    }
+
     /// Add a user message to the ReAct trace for instant feedback.
     pub fn push_user_message(&mut self, text: &str) {
         self.react_trace.push(TraceEntry {
@@ -237,7 +245,8 @@ impl View for SessionDetailView {
                         }
                     }
                     spur_acp::SessionUpdate::ToolCall(tc) => {
-                        let args = format_tool_args(&tc.raw_input.clone().unwrap_or(serde_json::Value::Null));
+                        let null = serde_json::Value::Null;
+                        let args = format_tool_args(tc.raw_input.as_ref().unwrap_or(&null));
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Act {
                                 tool: tc.title.clone(),
@@ -248,8 +257,8 @@ impl View for SessionDetailView {
                         });
                     }
                     spur_acp::SessionUpdate::ToolCallUpdate(tcu) => {
-                        let output = tcu.fields.raw_output.clone().unwrap_or(serde_json::Value::Null);
-                        let text = format_observe_output(&output);
+                        let null = serde_json::Value::Null;
+                        let text = format_observe_output(tcu.fields.raw_output.as_ref().unwrap_or(&null));
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Observe,
                             text,
