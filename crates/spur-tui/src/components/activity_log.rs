@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{LogEntry, LogEntryKind, MAX_LOG_ENTRIES};
+use super::{LogEntry, LogEntryKind, MAX_LOG_ENTRIES, focused_border_style};
 
 pub struct ActivityLog {
     entries: Vec<LogEntry>,
@@ -66,12 +66,6 @@ impl ActivityLog {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let border_style = if self.focused {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
         let following_indicator = if self.is_following {
             " ▼ following "
         } else {
@@ -82,7 +76,7 @@ impl ActivityLog {
             .title(format!(" {} ", self.title))
             .title_bottom(following_indicator)
             .borders(Borders::ALL)
-            .border_style(border_style);
+            .border_style(focused_border_style(self.focused));
 
         let lines: Vec<Line> = self
             .entries

@@ -44,16 +44,14 @@ impl SessionDetailView {
 
     /// Current local time formatted as HH:MM:SS.
     fn now_stamp() -> String {
-        chrono::Local::now().format("%H:%M:%S").to_string()
+        crate::components::now_stamp()
     }
 
-    /// Format elapsed time since view was opened as "Xm Ys".
+    /// Format elapsed time since view was opened.
     fn elapsed(&self) -> String {
-        let secs = self.started_at.elapsed().as_secs();
-        let m = secs / 60;
-        let s = secs % 60;
-        format!("{}m {:02}s", m, s)
+        crate::components::format_elapsed(self.started_at)
     }
+
 }
 
 impl View for SessionDetailView {

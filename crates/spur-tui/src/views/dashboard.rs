@@ -60,7 +60,7 @@ impl DashboardView {
 
     /// Current local time formatted as HH:MM:SS.
     fn now_stamp() -> String {
-        chrono::Local::now().format("%H:%M:%S").to_string()
+        crate::components::now_stamp()
     }
 
     /// Build a prefix like "[brain:kiro]" from a session id.
@@ -148,6 +148,11 @@ impl DashboardView {
         self.session_agent.keys().next().cloned()
     }
 
+    /// Whether any agents are in an active (animating) state.
+    pub fn has_active_agents(&self) -> bool {
+        self.agents.iter().any(|a| matches!(a.status.as_str(), "working" | "spawned"))
+    }
+
     /// Look up the (agent_name, role) for a given session id.
     pub fn agent_info_for_session(&self, session_id: &str) -> Option<(String, String)> {
         self.session_agent
@@ -195,7 +200,10 @@ impl View for DashboardView {
                 self.nth_session_id(n)
                     .map(|sid| Action::NavigateTo(ViewId::SessionDetail(spur_acp::SessionId(sid))))
             }
-            KeyCode::Char('v') => Some(Action::ToggleVerbose),
+            KeyCode::Char('v') => {
+                self.verbose = !self.verbose;
+                Some(Action::ToggleVerbose)
+            }
             KeyCode::Char('i') => self
                 .first_session_id()
                 .map(|sid| Action::NavigateTo(ViewId::SessionDetail(spur_acp::SessionId(sid)))),
@@ -242,6 +250,11 @@ impl View for DashboardView {
                                     .entry(session.0.clone())
                                     .or_insert_with(|| (String::new(), Instant::now()));
                                 entry.0.push_str(trimmed);
+                                // Cap batch string to prevent unbounded growth
+                                if entry.0.len() > 200 {
+                                    let start = entry.0.len() - 200;
+                                    entry.0 = entry.0[start..].to_string();
+                                }
                                 entry.1 = Instant::now();
                             }
                         }
