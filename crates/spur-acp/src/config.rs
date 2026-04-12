@@ -76,14 +76,14 @@ impl Default for BrainConfig {
     fn default() -> Self {
         Self {
             default: default_brain(),
-            fallback: vec![],
+            fallback: vec!["kiro".to_string()],
             prompt: BrainPromptConfig::default(),
         }
     }
 }
 
 fn default_brain() -> String {
-    "kiro".to_string()
+    "claude-code".to_string()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
