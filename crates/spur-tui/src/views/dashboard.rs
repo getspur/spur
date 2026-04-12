@@ -138,13 +138,6 @@ impl DashboardView {
         format!("{}m {:02}s", m, s)
     }
 
-    /// Get the Nth session ID (1-indexed) from session_agent.
-    fn nth_session_id(&self, n: usize) -> Option<String> {
-        self.session_agent
-            .keys()
-            .nth(n.saturating_sub(1))
-            .cloned()
-    }
 
     /// Get the first session ID.
     fn first_session_id(&self) -> Option<String> {
