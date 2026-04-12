@@ -99,6 +99,9 @@ enum Commands {
         /// Override the brain agent (default from config)
         #[arg(long)]
         brain: Option<String>,
+        /// Show session picker on launch
+        #[arg(long)]
+        sessions: bool,
     },
 }
 
@@ -352,7 +355,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Watch { brain } => {
+        Commands::Watch { brain, sessions } => {
             let orch = load_orchestrator(repo_root)?;
             let event_rx = orch.subscribe();
 
@@ -390,7 +393,7 @@ async fn main() -> Result<()> {
             });
 
             // Run TUI with permission channel (blocks main task)
-            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), false).await?;
+            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), sessions).await?;
 
             // After TUI exits, abort orchestrator
             orch_handle.abort();
