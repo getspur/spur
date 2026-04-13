@@ -55,3 +55,49 @@ fn headings_preserve_bold_style() {
         "heading line must carry BOLD modifier — styles were dropped"
     );
 }
+
+#[test]
+fn closed_mermaid_fence_emits_new_fence_ref() {
+    let mut s = MarkdownStream::new();
+    s.append("# Plan\n\n```mermaid\nflowchart LR\nA-->B\n```\n\nMore text\n");
+    let fences = s.flush_now();
+    assert_eq!(fences.len(), 1, "expected exactly one fence");
+    let f = &fences[0];
+    assert!(f.code.contains("flowchart LR"));
+    assert!(f.code.contains("A-->B"));
+    let rendered_text: String = s.cached_lines_debug().join("\n");
+    assert!(
+        rendered_text.contains("mermaid"),
+        "expected placeholder mention of mermaid, got: {rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("A-->B"),
+        "mermaid source must not appear in rendered trace"
+    );
+}
+
+#[test]
+fn fence_emission_is_idempotent_across_flushes() {
+    let mut s = MarkdownStream::new();
+    s.append("```mermaid\nflowchart LR\nA-->B\n```\n");
+    let first = s.flush_now();
+    assert_eq!(first.len(), 1);
+    let second = s.flush_now();
+    assert_eq!(second.len(), 0, "re-flush must not re-emit existing fences");
+}
+
+#[test]
+fn open_fence_does_not_emit() {
+    let mut s = MarkdownStream::new();
+    s.append("```mermaid\nflowchart LR\nA-->B\n");
+    let fences = s.flush_now();
+    assert_eq!(fences.len(), 0, "open fence must not yield a fence ref");
+}
+
+#[test]
+fn non_mermaid_fences_are_ignored() {
+    let mut s = MarkdownStream::new();
+    s.append("```rust\nfn main() {}\n```\n");
+    let fences = s.flush_now();
+    assert_eq!(fences.len(), 0);
+}
