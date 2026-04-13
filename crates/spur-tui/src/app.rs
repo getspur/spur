@@ -78,6 +78,8 @@ pub struct App {
     pub(crate) mermaid_rx: tokio::sync::mpsc::UnboundedReceiver<Action>,
     #[cfg(feature = "markdown")]
     pub(crate) mermaid_tx: tokio::sync::mpsc::UnboundedSender<Action>,
+    #[cfg(feature = "markdown")]
+    pub(crate) mermaid_viewer: Option<crate::views::mermaid_viewer::MermaidViewerView>,
 }
 
 impl App {
@@ -113,6 +115,8 @@ impl App {
             mermaid_rx,
             #[cfg(feature = "markdown")]
             mermaid_tx,
+            #[cfg(feature = "markdown")]
+            mermaid_viewer: None,
         };
 
         if start_in_picker {
@@ -152,7 +156,27 @@ impl App {
                         self.session_picker.as_mut().and_then(|p| p.handle_key(key))
                     }
                     #[cfg(feature = "markdown")]
-                    ViewId::MermaidOverlay(_) => None,
+                    ViewId::MermaidOverlay(_) => {
+                        if let Some(viewer) = self.mermaid_viewer.as_mut() {
+                            match key.code {
+                                KeyCode::Char('[') | KeyCode::Char(']') => {
+                                    if let Some(detail) = self.session_detail.as_ref() {
+                                        let entries: Vec<_> = detail
+                                            .mermaid_registry
+                                            .iter()
+                                            .map(|(k, v)| (*k, v))
+                                            .collect();
+                                        viewer.cycle(&entries, key.code == KeyCode::Char(']'));
+                                        self.dirty = true;
+                                    }
+                                    None
+                                }
+                                _ => viewer.handle_key(key),
+                            }
+                        } else {
+                            None
+                        }
+                    }
                 };
 
                 if let Some(action) = action {
@@ -350,11 +374,21 @@ impl App {
             }
 
             #[cfg(feature = "markdown")]
-            Action::NavigateTo(ViewId::MermaidOverlay(_)) => {
-                // MermaidOverlay navigation is handled in Task 8.
+            Action::NavigateTo(ViewId::MermaidOverlay(ref session)) => {
+                use crate::views::mermaid_viewer::MermaidViewerView;
+                self.mermaid_viewer = Some(MermaidViewerView::new(session.clone()));
+                self.current_view = ViewId::MermaidOverlay(session.clone());
+                self.dirty = true;
             }
 
             Action::NavigateBack => {
+                #[cfg(feature = "markdown")]
+                if let ViewId::MermaidOverlay(ref session) = self.current_view {
+                    self.current_view = ViewId::SessionDetail(session.clone());
+                    self.mermaid_viewer = None;
+                    self.dirty = true;
+                    return;
+                }
                 self.current_view = ViewId::Dashboard;
                 // Note: session_detail is intentionally kept alive so it
                 // continues accumulating events while the Dashboard is shown.
@@ -693,10 +727,10 @@ impl App {
     }
 
     /// Render the active view, then overlay help if visible.
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        match self.current_view {
+        match self.current_view.clone() {
             ViewId::Dashboard => self.dashboard.render_with_lineage(frame, area, &self.lineage),
             ViewId::SessionDetail(_) => {
                 if let Some(ref detail) = self.session_detail {
@@ -707,8 +741,29 @@ impl App {
                 self.session_picker.as_ref().map(|p| p.render(frame, area));
             }
             #[cfg(feature = "markdown")]
-            ViewId::MermaidOverlay(_) => {
-                // MermaidOverlay rendering is handled in Task 8.
+            ViewId::MermaidOverlay(ref session) => {
+                let session_matches = self
+                    .session_detail
+                    .as_ref()
+                    .map(|d| d.session_id().0 == session.0)
+                    .unwrap_or(false);
+                if session_matches {
+                    // Collect entries while holding an immutable borrow of
+                    // session_detail. The borrow ends after this block so we
+                    // can then mutably borrow mermaid_viewer.
+                    let entries: Vec<(
+                        crate::components::mermaid::MermaidId,
+                        &crate::components::mermaid::MermaidState,
+                    )> = self
+                        .session_detail
+                        .as_ref()
+                        .map(|d| d.mermaid_registry.iter().map(|(k, v)| (*k, v)).collect())
+                        .unwrap_or_default();
+                    if let Some(viewer) = self.mermaid_viewer.as_mut() {
+                        viewer.set_available(&entries, self.mermaid_picker.as_ref());
+                        render_mermaid_overlay(frame, area, viewer);
+                    }
+                }
             }
         }
 
@@ -866,4 +921,55 @@ pub(crate) fn apply_session_update(
 
 fn to_wire_decision(d: &spur_core::ReviewDecision) -> spur_acp::ReviewDecision {
     d.clone()
+}
+
+#[cfg(feature = "markdown")]
+fn render_mermaid_overlay(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    viewer: &mut crate::views::mermaid_viewer::MermaidViewerView,
+) {
+    use ratatui::{
+        layout::{Constraint, Layout},
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::Paragraph,
+    };
+    use ratatui_image::{Resize, StatefulImage};
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " Mermaid Viewer ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+
+    if let Some(protocol) = viewer.protocol_mut() {
+        let widget = StatefulImage::default().resize(Resize::Fit(None));
+        frame.render_stateful_widget(widget, chunks[1], protocol);
+    } else {
+        frame.render_widget(
+            Paragraph::new(
+                "No diagram available yet. Wait for render to complete, or press q/Esc to return.",
+            )
+            .style(Style::default().fg(Color::DarkGray)),
+            chunks[1],
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " [/]: cycle · q/Esc: close ",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        chunks[2],
+    );
 }
