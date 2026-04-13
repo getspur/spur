@@ -1396,6 +1396,7 @@ dependencies = [
  "spur-core",
  "tokio",
  "tracing",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
