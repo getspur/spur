@@ -567,10 +567,12 @@ impl App {
                 });
             }
             #[cfg(feature = "markdown")]
-            Action::MermaidRenderCompleted { .. } => {
-                // Completion is handled by SessionDetailView in Task 8 via a
-                // session_detail accessor. For now the action terminates here;
-                // Task 8 will forward it to the focused SessionDetailView.
+            Action::MermaidRenderCompleted { session, ref_id, result } => {
+                if let Some(ref mut detail) = self.session_detail {
+                    if detail.session_id().0 == session.0 {
+                        detail.handle_mermaid_completed(ref_id, result);
+                    }
+                }
                 self.dirty = true;
             }
 
@@ -669,6 +671,17 @@ impl App {
                 if let Some(ref mut detail) = self.session_detail {
                     detail.tick();
                     self.dirty = true; // session detail always has activity
+                }
+                #[cfg(feature = "markdown")]
+                {
+                    let pending: Vec<Action> = self
+                        .session_detail
+                        .as_mut()
+                        .map(|d| d.take_pending_actions())
+                        .unwrap_or_default();
+                    for action in pending {
+                        self.process_action(action);
+                    }
                 }
             }
             ViewId::SessionPicker => {
