@@ -1392,18 +1392,34 @@ impl Orchestrator {
                 // `DelegationCompleted` was never emitted for the right
                 // session. v1 accepts that worker-hang detection is not
                 // automatic — separate concern, separate fix.
-                let result = Self::execute_delegation(
+                let (result, executor_id_opt) = Self::execute_delegation(
                     agent,
                     task,
                     context_files,
                     repo_root,
                     agent_configs,
-                    event_tx,
-                    review_sink,
+                    event_tx.clone(),
+                    review_sink.clone(),
                 )
                 .await;
 
-                let _ = respond_to.send(result);
+                if let Err(_returned_result) = respond_to.send(result) {
+                    // Brain's MCP tool call was cancelled — the oneshot
+                    // receiver was dropped before we could deliver the
+                    // result. If a review was still pending on this
+                    // delegation, emit an audit event so the lineage
+                    // projection records the abandonment rather than
+                    // leaving an orphaned review card indefinitely.
+                    if let Some(ref eid) = executor_id_opt {
+                        cleanup_cancelled_review(
+                            eid,
+                            "brain call cancelled",
+                            &event_tx,
+                            &review_sink,
+                        )
+                        .await;
+                    }
+                }
             });
         }
     }
@@ -1436,17 +1452,20 @@ impl Orchestrator {
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         event_tx: broadcast::Sender<SpurEvent>,
         review_sink: ReviewSink,
-    ) -> DelegationResult {
+    ) -> (DelegationResult, Option<ExecutorId>) {
         // Special agent names for PM operations (from MCP server).
         if agent.starts_with("__") {
-            return DelegationResult {
-                status: DelegationStatus::Failed {
-                    error: format!("PM operations not yet wired: {}", agent),
+            return (
+                DelegationResult {
+                    status: DelegationStatus::Failed {
+                        error: format!("PM operations not yet wired: {}", agent),
+                    },
+                    diff: None,
+                    summary: None,
+                    estimated_cost_usd: 0.0,
                 },
-                diff: None,
-                summary: None,
-                estimated_cost_usd: 0.0,
-            };
+                None,
+            );
         }
 
         let registry = AgentRegistry::load(agent_configs);
@@ -1454,14 +1473,17 @@ impl Orchestrator {
         let agent_config = match registry.get(&agent) {
             Some(c) => c.clone(),
             None => {
-                return DelegationResult {
-                    status: DelegationStatus::Failed {
-                        error: format!("Worker agent '{}' not found", agent),
+                return (
+                    DelegationResult {
+                        status: DelegationStatus::Failed {
+                            error: format!("Worker agent '{}' not found", agent),
+                        },
+                        diff: None,
+                        summary: None,
+                        estimated_cost_usd: 0.0,
                     },
-                    diff: None,
-                    summary: None,
-                    estimated_cost_usd: 0.0,
-                };
+                    None,
+                );
             }
         };
 
@@ -1506,15 +1528,18 @@ impl Orchestrator {
                     // DelegationCompleted is emitted (the worker
                     // session was named, even if no worker actually
                     // ran).
-                    return finalize(
-                        &event_tx,
-                        next_worker_session,
-                        DelegationStatus::Failed {
-                            error: setup_err.to_string(),
-                        },
-                        None,
-                        None,
-                        total_cost,
+                    return (
+                        finalize(
+                            &event_tx,
+                            next_worker_session,
+                            DelegationStatus::Failed {
+                                error: setup_err.to_string(),
+                            },
+                            None,
+                            None,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
                     );
                 }
             };
@@ -1538,13 +1563,16 @@ impl Orchestrator {
                     &outcome.worktree_path,
                 )
                 .await;
-                return finalize(
-                    &event_tx,
-                    outcome.worker_session,
-                    outcome.candidate_status,
-                    outcome.diff,
-                    outcome.summary,
-                    total_cost,
+                return (
+                    finalize(
+                        &event_tx,
+                        outcome.worker_session,
+                        outcome.candidate_status,
+                        outcome.diff,
+                        outcome.summary,
+                        total_cost,
+                    ),
+                    executor_id.clone(),
                 );
             }
 
@@ -1578,13 +1606,16 @@ impl Orchestrator {
                         &outcome.worktree_path,
                     )
                     .await;
-                    return finalize(
-                        &event_tx,
-                        outcome.worker_session,
-                        failed_status,
-                        outcome.diff,
-                        outcome.summary,
-                        total_cost,
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            failed_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
                     );
                 }
             };
@@ -1628,13 +1659,16 @@ impl Orchestrator {
                         &outcome.worktree_path,
                     )
                     .await;
-                    return finalize(
-                        &event_tx,
-                        outcome.worker_session,
-                        final_status,
-                        outcome.diff,
-                        outcome.summary,
-                        total_cost,
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
                     );
                 }
             };
@@ -1656,13 +1690,16 @@ impl Orchestrator {
                         &outcome.worktree_path,
                     )
                     .await;
-                    return finalize(
-                        &event_tx,
-                        outcome.worker_session,
-                        final_status,
-                        outcome.diff,
-                        outcome.summary,
-                        total_cost,
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
                     );
                 }
                 Some(ReviewDecision::Reject { reason }) => {
@@ -1681,13 +1718,16 @@ impl Orchestrator {
                         &outcome.worktree_path,
                     )
                     .await;
-                    return finalize(
-                        &event_tx,
-                        outcome.worker_session,
-                        final_status,
-                        outcome.diff,
-                        outcome.summary,
-                        total_cost,
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
                     );
                 }
                 Some(ReviewDecision::Modify { note }) => {
@@ -1706,13 +1746,16 @@ impl Orchestrator {
                         &outcome.worktree_path,
                     )
                     .await;
-                    return finalize(
-                        &event_tx,
-                        outcome.worker_session,
-                        final_status,
-                        outcome.diff,
-                        outcome.summary,
-                        total_cost,
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
                     );
                 }
                 Some(ReviewDecision::Retry { new_constraints }) => {
@@ -1751,13 +1794,16 @@ impl Orchestrator {
                             &outcome.worktree_path,
                         )
                         .await;
-                        return finalize(
-                            &event_tx,
-                            outcome.worker_session,
-                            final_status,
-                            outcome.diff,
-                            outcome.summary,
-                            total_cost,
+                        return (
+                            finalize(
+                                &event_tx,
+                                outcome.worker_session,
+                                final_status,
+                                outcome.diff,
+                                outcome.summary,
+                                total_cost,
+                            ),
+                            executor_id.clone(),
                         );
                     }
 
@@ -1822,18 +1868,45 @@ impl Orchestrator {
                         &outcome.worktree_path,
                     )
                     .await;
-                    return finalize(
-                        &event_tx,
-                        outcome.worker_session,
-                        final_status,
-                        outcome.diff,
-                        outcome.summary,
-                        total_cost,
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
                     );
                 }
             }
         }
     }
+}
+
+/// Emit `ExecutorReviewCancelled` and remove the sink entry.
+///
+/// Called from the brain-cancellation path — when `respond_to.send(result)`
+/// returns `Err`, the brain has gone away, and any pending review for
+/// this delegation must be recorded in the lineage projection as
+/// abandoned (otherwise the TUI shows an orphaned review card
+/// indefinitely).
+///
+/// Idempotent: if no review is registered, `review_sink.remove` is a
+/// no-op, and the event is still emitted so the lineage projection
+/// records the cancellation.
+pub async fn cleanup_cancelled_review(
+    executor_id: &ExecutorId,
+    reason: &str,
+    event_tx: &broadcast::Sender<SpurEvent>,
+    review_sink: &ReviewSink,
+) {
+    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+        id: executor_id.0.clone(),
+        reason: reason.to_string(),
+    }));
+    review_sink.remove(executor_id).await;
 }
 
 /// Returns `true` if the worktree should be preserved (not removed) for

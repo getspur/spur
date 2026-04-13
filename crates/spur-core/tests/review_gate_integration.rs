@@ -442,3 +442,45 @@ fn should_commit_worker_diff_matches_expected_variants() {
     }));
     assert!(!should_commit_worker_diff(&DelegationStatus::Timeout));
 }
+
+// ─── Task 12: brain-cancellation audit event ──────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn brain_cancellation_during_review_emits_review_cancelled() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+    use spur_core::orchestrator::cleanup_cancelled_review;
+    use tokio::sync::broadcast;
+
+    let sink = ReviewSink::new();
+    // Register a pending review so the helper has something to clean up.
+    let _rx = sink.register(ExecutorId::new("e1"), 1).await.unwrap();
+
+    let (tx, mut event_rx) = broadcast::channel::<SpurEvent>(8);
+
+    cleanup_cancelled_review(
+        &ExecutorId::new("e1"),
+        "brain call cancelled",
+        &tx,
+        &sink,
+    )
+    .await;
+
+    let ev = event_rx.recv().await.expect("event");
+    match ev.body {
+        SpurEventBody::ExecutorReviewCancelled { id, reason } => {
+            assert_eq!(id, "e1");
+            assert_eq!(reason, "brain call cancelled");
+        }
+        other => panic!("expected ExecutorReviewCancelled, got {:?}", other),
+    }
+
+    // Sink entry must be gone.
+    let stale = sink
+        .submit(
+            ExecutorId::new("e1"),
+            1,
+            spur_acp::ReviewDecision::Approve,
+        )
+        .await;
+    assert!(!stale, "sink entry must be removed by cleanup");
+}
