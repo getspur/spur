@@ -22,3 +22,8 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 directories = { workspace = true }
+
+[dev-dependencies]
+# `start_paused = true` on `#[tokio::test]` + `tokio::time::advance` require
+# the `test-util` feature.
+tokio = { version = "1", features = ["full", "test-util"] }

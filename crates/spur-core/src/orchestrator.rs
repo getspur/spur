@@ -13,7 +13,10 @@ use spur_acp::config::SpurConfig;
 use spur_acp::connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 use spur_acp::registry::AgentRegistry;
 use spur_acp::types::*;
-use spur_acp::{DelegationResult, DelegationStatus, SpurEvent, SpurEventBody};
+use spur_acp::{
+    DelegationResult, DelegationStatus, LifecycleState, ReviewKind, ReviewPayload, SpurEvent,
+    SpurEventBody, TimeoutFallback,
+};
 use spur_pm::Issue;
 
 use agent_client_protocol::{
@@ -1416,7 +1419,7 @@ impl Orchestrator {
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         event_tx: broadcast::Sender<SpurEvent>,
-        _review_sink: ReviewSink,
+        review_sink: ReviewSink,
     ) -> DelegationResult {
         // Special agent names for PM operations (from MCP server).
         if agent.starts_with("__") {
@@ -1619,7 +1622,7 @@ impl Orchestrator {
             Some(output_text)
         };
 
-        let status = if worker_success {
+        let candidate_status = if worker_success {
             DelegationStatus::Success
         } else {
             DelegationStatus::Failed {
@@ -1627,14 +1630,87 @@ impl Orchestrator {
             }
         };
 
+        // 6. Review gate (opt-in per agent policy).
+        //
+        // When `review_required == true`, pause between the worker's
+        // candidate status and `DelegationCompleted`: emit
+        // `ExecutorReviewRequested` + `ExecutorPhaseChanged { AwaitingReview }`,
+        // wait on `ReviewSink`, then shape the final `DelegationStatus`
+        // per the decision. Retry handling is deferred to Task 10.
+        let final_status = if agent_config.review.review_required {
+            // Align with the lineage adapter's convention:
+            // `ExecutorId::new(worker_session.0)`.
+            let executor_id = ExecutorId::new(worker_session.0.clone());
+
+            let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
+                id: executor_id.0.clone(),
+                phase: LifecycleState::AwaitingReview,
+            }));
+
+            let review_payload = ReviewPayload {
+                summary: summary.clone().unwrap_or_default(),
+                diff_summary: None,
+                pr_url: None,
+                error: None,
+            };
+            let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+                id: executor_id.0.clone(),
+                attempt_n: 1, // Task 10 will increment across retries.
+                kind: ReviewKind::Completion,
+                payload: review_payload,
+            }));
+
+            let resolved = run_gate_for_candidate(
+                executor_id.clone(),
+                1,
+                candidate_status.clone(),
+                agent_config.review.review_timeout,
+                agent_config.review.review_timeout_default.clone(),
+                review_sink.clone(),
+            )
+            .await;
+
+            // Emit ExecutorReviewResolved for terminal human decisions.
+            // TimedOut/Failed have no `ReviewDecision` analogue — the
+            // projection will clear `pending_review` on the next
+            // applicable event (e.g., a phase change to `Failed`, or
+            // `ExecutorReviewCancelled` from Task 12).
+            let decision_equiv = match &resolved {
+                DelegationStatus::Success => {
+                    Some(spur_acp::ReviewDecision::Approve)
+                }
+                DelegationStatus::Rejected { reason } => {
+                    Some(spur_acp::ReviewDecision::Reject {
+                        reason: reason.clone(),
+                    })
+                }
+                DelegationStatus::Modified { reviewer_note } => {
+                    Some(spur_acp::ReviewDecision::Modify {
+                        note: reviewer_note.clone(),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(decision) = decision_equiv {
+                let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
+                    id: executor_id.0.clone(),
+                    decision,
+                }));
+            }
+
+            resolved
+        } else {
+            candidate_status
+        };
+
         // Emit DelegationCompleted event.
         let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
             worker_session,
-            status: status.clone(),
+            status: final_status.clone(),
         }));
 
         DelegationResult {
-            status,
+            status: final_status,
             diff,
             summary,
             estimated_cost_usd: cost,
@@ -1674,5 +1750,89 @@ pub async fn review_dispatcher_loop(
             let _ = sink.submit(ExecutorId::new(executor_id), attempt_n, decision).await;
         }
         // All other variants: noop in this loop.
+    }
+}
+
+// ─── Review gate helper ───────────────────────────────────────────────
+
+/// Run the review gate on a candidate `DelegationStatus`. Returns the
+/// final status. Handles `Approve`/`Reject`/`Modify` as terminal
+/// decisions.
+///
+/// **Does NOT handle `Retry`** — if a `ReviewDecision::Retry` arrives,
+/// this function returns a `DelegationStatus::Failed` with an
+/// explanatory message. Task 10 wraps this helper in a retry loop that
+/// intercepts `Retry` decisions before they reach this function, so in
+/// practice this arm is unreachable once Task 10 is integrated; the
+/// explicit arm exists for safety if someone calls this helper
+/// directly without a wrapper.
+///
+/// On timeout: explicitly removes the sink entry (to prevent stale
+/// entries per the spec's error-handling "explicit-remove" contract)
+/// and returns `TimedOut { waited_for, fallback }`.
+///
+/// On register failure (already-registered double-register): returns
+/// `Failed` with an explanatory error.
+pub async fn run_gate_for_candidate(
+    executor_id: ExecutorId,
+    attempt_n: u32,
+    candidate_status: DelegationStatus,
+    review_timeout: std::time::Duration,
+    timeout_fallback: TimeoutFallback,
+    review_sink: ReviewSink,
+) -> DelegationStatus {
+    let rx = match review_sink.register(executor_id.clone(), attempt_n).await {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::error!(
+                executor_id = %executor_id.0,
+                error = %e,
+                "review_sink registration failed"
+            );
+            return DelegationStatus::Failed {
+                error: format!("review registration failed: {e}"),
+            };
+        }
+    };
+
+    tokio::select! {
+        recv_result = rx => {
+            match recv_result {
+                Ok(decision) => apply_decision_to_candidate(decision, candidate_status),
+                Err(_) => {
+                    // Sender dropped before sending — treat as timeout.
+                    review_sink.remove(&executor_id).await;
+                    DelegationStatus::TimedOut {
+                        waited_for: review_timeout,
+                        fallback: timeout_fallback,
+                    }
+                }
+            }
+        }
+        _ = tokio::time::sleep(review_timeout) => {
+            // Explicit-remove contract (spec error-handling section).
+            review_sink.remove(&executor_id).await;
+            DelegationStatus::TimedOut {
+                waited_for: review_timeout,
+                fallback: timeout_fallback,
+            }
+        }
+    }
+}
+
+fn apply_decision_to_candidate(
+    decision: spur_acp::ReviewDecision,
+    candidate: DelegationStatus,
+) -> DelegationStatus {
+    use spur_acp::ReviewDecision;
+    match decision {
+        ReviewDecision::Approve => candidate,
+        ReviewDecision::Reject { reason } => DelegationStatus::Rejected { reason },
+        ReviewDecision::Modify { note } => DelegationStatus::Modified { reviewer_note: note },
+        ReviewDecision::Retry { .. } => DelegationStatus::Failed {
+            error: "internal: Retry reached run_gate_for_candidate \
+                    (caller must wrap with retry loop)"
+                .into(),
+        },
     }
 }
