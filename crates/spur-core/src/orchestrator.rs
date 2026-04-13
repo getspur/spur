@@ -28,6 +28,9 @@ use spur_pm::adapter::PmAdapter;
 use spur_pm::GitHubAdapter;
 use spur_worktree::WorktreeManager;
 
+use crate::review_sink::ReviewSink;
+use crate::lineage::ExecutorId;
+
 // ─── Run options ─────────────────────────────────────────────────────
 
 /// Options for `spur run`.
@@ -66,6 +69,13 @@ pub enum InteractiveInput {
     /// Request `set_session_mode` on the active brain session. No-op if
     /// there is no active brain session.
     SetSessionMode { mode_id: String },
+    /// Submit a human review decision. Routed to the ReviewSink by the
+    /// dispatcher task, not handled inline in `run_interactive`.
+    SubmitReview {
+        executor_id: String,
+        attempt_n: u32,
+        decision: spur_acp::ReviewDecision,
+    },
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -77,6 +87,7 @@ pub struct Orchestrator {
     pub worktrees: WorktreeManager,
     pub cost_tracker: Option<CostTracker>,
     pub event_tx: broadcast::Sender<SpurEvent>,
+    pub review_sink: ReviewSink,  // Clone type, shares inner Arc<Mutex>
     repo_root: PathBuf,
 }
 
@@ -102,6 +113,7 @@ impl Orchestrator {
         };
 
         let (event_tx, _) = broadcast::channel(256);
+        let review_sink = ReviewSink::new();
 
         Ok(Self {
             registry,
@@ -109,6 +121,7 @@ impl Orchestrator {
             worktrees,
             cost_tracker,
             event_tx,
+            review_sink,
             repo_root,
         })
     }
@@ -668,6 +681,13 @@ impl Orchestrator {
                         session: b.spur_session_id.clone(),
                     }));
                 }
+
+                // ── SubmitReview ─────────────────────────────────────────
+                // Intentional no-op: spur-cli routes SubmitReview to the
+                // review_dispatcher_loop task, not to run_interactive. If
+                // it somehow arrives here (e.g., in tests that send directly
+                // to user_rx), we silently discard it to avoid double-routing.
+                InteractiveInput::SubmitReview { .. } => {}
             }
         }
 
@@ -1627,4 +1647,25 @@ fn shellexpand_tilde(path: &str) -> String {
 
 fn dirs_home() -> Option<String> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_string_lossy().to_string())
+}
+
+// ─── Review dispatcher ────────────────────────────────────────────────
+
+/// Dispatcher loop: forwards `SubmitReview` messages to the `ReviewSink`.
+/// All other `InteractiveInput` variants are ignored by this loop (they
+/// are consumed by `run_interactive`'s own loop, not this one).
+///
+/// This is spawned as a separate task so review-decision latency is
+/// decoupled from brain-turn I/O latency — see spec "Unit 3" for
+/// rationale.
+pub async fn review_dispatcher_loop(
+    mut rx: mpsc::Receiver<InteractiveInput>,
+    sink: ReviewSink,
+) {
+    while let Some(input) = rx.recv().await {
+        if let InteractiveInput::SubmitReview { executor_id, attempt_n, decision } = input {
+            let _ = sink.submit(ExecutorId::new(executor_id), attempt_n, decision).await;
+        }
+        // All other variants: noop in this loop.
+    }
 }
