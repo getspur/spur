@@ -36,12 +36,13 @@ use futures::Stream;
 use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::{
-    Agent, CancelNotification, Client, ClientSideConnection, InitializeRequest,
-    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    McpServer, NewSessionRequest, NewSessionResponse, PromptRequest,
-    ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, WriteTextFileRequest, WriteTextFileResponse,
+    Agent, AuthenticateRequest, AuthenticateResponse, CancelNotification, Client,
+    ClientSideConnection, InitializeRequest, InitializeResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest,
+    NewSessionResponse, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest,
+    SetSessionModeResponse, WriteTextFileRequest, WriteTextFileResponse,
     CreateTerminalRequest, CreateTerminalResponse,
     KillTerminalRequest, KillTerminalResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse,
@@ -85,6 +86,14 @@ enum AcpCommand {
     ListSessions {
         request: ListSessionsRequest,
         reply: oneshot::Sender<anyhow::Result<ListSessionsResponse>>,
+    },
+    SetSessionMode {
+        request: SetSessionModeRequest,
+        reply: oneshot::Sender<anyhow::Result<SetSessionModeResponse>>,
+    },
+    Authenticate {
+        request: AuthenticateRequest,
+        reply: oneshot::Sender<anyhow::Result<AuthenticateResponse>>,
     },
 }
 
@@ -445,6 +454,70 @@ impl AgentConnection for NativeAcpConnection {
             )
         })?
     }
+
+    // ─── set_session_mode ────────────────────────────────────────────────
+
+    async fn set_session_mode(
+        &mut self,
+        request: SetSessionModeRequest,
+    ) -> anyhow::Result<SetSessionModeResponse> {
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': not initialized",
+                self.agent_name
+            )
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx.send(AcpCommand::SetSessionMode {
+            request,
+            reply: reply_tx,
+        }).map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died",
+                self.agent_name
+            )
+        })?;
+
+        reply_rx.await.map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died during set_session_mode",
+                self.agent_name
+            )
+        })?
+    }
+
+    // ─── authenticate ────────────────────────────────────────────────────
+
+    async fn authenticate(
+        &mut self,
+        request: AuthenticateRequest,
+    ) -> anyhow::Result<AuthenticateResponse> {
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': not initialized",
+                self.agent_name
+            )
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx.send(AcpCommand::Authenticate {
+            request,
+            reply: reply_tx,
+        }).map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died",
+                self.agent_name
+            )
+        })?;
+
+        reply_rx.await.map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died during authenticate",
+                self.agent_name
+            )
+        })?
+    }
 }
 
 // ─── Dedicated ACP thread ───────────────────────────────────────────────────
@@ -762,6 +835,20 @@ fn acp_thread_main(
                     let _ = reply.send(result.map_err(|e| {
                         anyhow::anyhow!("NativeAcpConnection '{}': list_sessions failed: {e}", agent_name)
                     }));
+                }
+                AcpCommand::SetSessionMode { request, reply } => {
+                    let result = connection
+                        .set_session_mode(request)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("NativeAcpConnection '{}': set_session_mode failed: {e}", agent_name));
+                    let _ = reply.send(result);
+                }
+                AcpCommand::Authenticate { request, reply } => {
+                    let result = connection
+                        .authenticate(request)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("NativeAcpConnection '{}': authenticate failed: {e}", agent_name));
+                    let _ = reply.send(result);
                 }
             }
         }
