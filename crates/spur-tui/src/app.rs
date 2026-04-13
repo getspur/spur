@@ -524,7 +524,17 @@ impl App {
         match self.current_view {
             ViewId::Dashboard => {
                 self.dashboard.tick();
-                if self.dashboard.has_active_agents() {
+                // Mark dirty when executors are actively running (spinners animate)
+                use spur_core::LifecycleState;
+                let has_active = self.lineage.nodes().any(|n| {
+                    matches!(
+                        n.phase,
+                        LifecycleState::Running
+                            | LifecycleState::Spawning
+                            | LifecycleState::Resuming
+                    )
+                });
+                if has_active {
                     self.dirty = true;
                 }
             }
@@ -545,7 +555,7 @@ impl App {
         let area = frame.area();
 
         match self.current_view {
-            ViewId::Dashboard => self.dashboard.render(frame, area),
+            ViewId::Dashboard => self.dashboard.render_with_lineage(frame, area, &self.lineage),
             ViewId::SessionDetail(_) => {
                 if let Some(ref detail) = self.session_detail {
                     detail.render(frame, area);

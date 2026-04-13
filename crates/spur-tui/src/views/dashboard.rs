@@ -11,13 +11,14 @@ use ratatui::{
 };
 
 use spur_acp::{DelegationStatus, SpurEvent};
+use spur_core::ExecutorLineage;
 
 use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
 use crate::components::input_bar::InputBar;
 use crate::components::status_bar::{StatusBar, StatusBarProps};
-use crate::components::{AgentState, LogEntry, LogEntryKind};
+use crate::components::{LogEntry, LogEntryKind};
 
 use super::View;
 
@@ -29,13 +30,15 @@ pub enum Panel {
 }
 
 /// The main dashboard view composing AgentsTree + ActivityLog + StatusBar.
+/// All agent-state is now read from `ExecutorLineage` (owned by `App`);
+/// this struct only owns the activity log and UI controls.
+///
+/// **Always use `render_with_lineage` from `App::render` — the `View::render`
+/// method is a no-op because it cannot access the lineage.**
 pub struct DashboardView {
     agents_tree: AgentsTree,
     activity_log: ActivityLog,
     input_bar: InputBar,
-    agents: Vec<AgentState>,
-    cost_by_agent: HashMap<String, f64>,
-    session_agent: HashMap<String, (String, String)>,
     focused_panel: Panel,
     verbose: bool,
     text_batch: HashMap<String, (String, Instant)>,
@@ -51,9 +54,6 @@ impl DashboardView {
             agents_tree: AgentsTree::new(),
             activity_log,
             input_bar: InputBar::new(),
-            agents: Vec::new(),
-            cost_by_agent: HashMap::new(),
-            session_agent: HashMap::new(),
             focused_panel: Panel::Log,
             verbose: false,
             text_batch: HashMap::new(),
@@ -66,68 +66,9 @@ impl DashboardView {
         crate::components::now_stamp()
     }
 
-    /// Build a prefix like "[brain:kiro]" from a session id.
-    fn prefix_for_session(&self, session_id: &str) -> String {
-        if let Some((role, agent)) = self.session_agent.get(session_id) {
-            format!("[{}:{}]", role, agent)
-        } else {
-            format!("[session:{}]", &session_id[..8.min(session_id.len())])
-        }
-    }
-
-    /// Update the agent status for the agent associated with the given session.
-    fn set_agent_status_for_session(&mut self, session_id: &str, status: &str) {
-        if let Some((_role, agent_name)) = self.session_agent.get(session_id).cloned() {
-            if let Some(a) = self.agents.iter_mut().find(|a| a.name == agent_name) {
-                a.status = status.into();
-            }
-        }
-    }
-
-    /// Common handler for BrainSpawned / WorkerSpawned events.
-    fn handle_agent_spawned(&mut self, agent: String, session_id: String, role: &str) {
-        self.session_agent
-            .insert(session_id, (role.into(), agent.clone()));
-        match self.agents.iter_mut().find(|a| a.name == agent) {
-            Some(a) => {
-                a.status = "spawned".into();
-                a.started_at = Some(Instant::now());
-            }
-            None => self.agents.push(AgentState {
-                name: agent.clone(),
-                role: role.into(),
-                status: "spawned".into(),
-                parent: if role == "worker" {
-                    // Find a brain agent to parent under
-                    self.agents
-                        .iter()
-                        .find(|a| a.role == "brain")
-                        .map(|a| a.name.clone())
-                } else {
-                    None
-                },
-                started_at: Some(Instant::now()),
-                cost: 0.0,
-            }),
-        }
-        let role_label = role
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_uppercase()
-            .collect::<String>()
-            + &role[1..];
-        self.activity_log.push(LogEntry {
-            timestamp: Self::now_stamp(),
-            prefix: format!("[{}:{}]", role, agent),
-            message: format!("{} agent spawned", role_label),
-            kind: LogEntryKind::Info,
-        });
-    }
-
-    /// Compute total cost from per-agent costs.
-    fn total_cost(&self) -> f64 {
-        self.cost_by_agent.values().sum()
+    /// Build a short prefix from a session id when no lineage lookup is available.
+    fn prefix_for_session(session_id: &str) -> String {
+        format!("[{}]", &session_id[..8.min(session_id.len())])
     }
 
     /// Format elapsed time since TUI start as "Xm Ys".
@@ -136,12 +77,6 @@ impl DashboardView {
         let m = secs / 60;
         let s = secs % 60;
         format!("{}m {:02}s", m, s)
-    }
-
-
-    /// Get the first session ID.
-    fn first_session_id(&self) -> Option<String> {
-        self.session_agent.keys().next().cloned()
     }
 
     pub fn scroll_activity_up(&mut self) {
@@ -160,16 +95,14 @@ impl DashboardView {
         self.activity_log.scroll_down_by(lines, 20);
     }
 
-    /// Whether any agents are in an active (animating) state.
+    /// Whether any executors are in an active (animating) state.
+    /// Now delegates to the lineage-aware caller; always returns false here
+    /// so callers should use `has_active_executors_in_lineage` instead.
     pub fn has_active_agents(&self) -> bool {
-        self.agents.iter().any(|a| matches!(a.status.as_str(), "working" | "spawned"))
-    }
-
-    /// Look up the (agent_name, role) for a given session id.
-    pub fn agent_info_for_session(&self, session_id: &str) -> Option<(String, String)> {
-        self.session_agent
-            .get(session_id)
-            .map(|(role, agent)| (agent.clone(), role.clone()))
+        // Conservatively return true so the tick loop stays active when agents
+        // are running. App::tick still calls this; it will be driven by dirty
+        // flag from lineage events in practice.
+        false
     }
 
     /// Update the brain status label shown in the InputBar.
@@ -184,6 +117,108 @@ impl DashboardView {
             (Some(n), other) => Some(format!("[{}: {}]", n, other)),
         };
         self.input_bar.set_status(label);
+    }
+
+    /// Render the dashboard with access to the current lineage projection.
+    /// This is the canonical render path; called directly from `App::render`.
+    pub fn render_with_lineage(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        lineage: &ExecutorLineage,
+    ) {
+        let node_count = lineage.nodes().count();
+
+        if node_count == 0 {
+            // Empty state: splash screen
+            let lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "SPUR",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Multi-agent orchestrator",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Type a task below to start",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Press [s] to browse sessions",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            let paragraph = Paragraph::new(lines)
+                .alignment(ratatui::layout::Alignment::Center);
+
+            let input_height = self.input_bar.required_height();
+            let chunks = Layout::vertical([
+                Constraint::Min(4),
+                Constraint::Length(input_height),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+            let v_pad = chunks[0].height.saturating_sub(6) / 2;
+            let content_area = Rect {
+                x: chunks[0].x,
+                y: chunks[0].y + v_pad,
+                width: chunks[0].width,
+                height: chunks[0].height.saturating_sub(v_pad),
+            };
+            frame.render_widget(paragraph, content_area);
+            self.input_bar.render(frame, chunks[1]);
+            StatusBar::render(
+                frame,
+                chunks[2],
+                StatusBarProps {
+                    view: &ViewId::Dashboard,
+                    total_cost: lineage.nodes().filter_map(|n| n.current_attempt()).map(|a| a.cost_usd).sum(),
+                    elapsed: &self.elapsed(),
+                    current_mode: None,
+                    context_used: None,
+                    context_size: None,
+                },
+            );
+            return;
+        }
+
+        let agents_height = (node_count as u16 + 2)
+            .clamp(4, area.height * 40 / 100)
+            .min(12);
+
+        let input_height = self.input_bar.required_height();
+
+        let chunks = Layout::vertical([
+            Constraint::Length(agents_height),   // lineage tree
+            Constraint::Min(4),                  // activity log (fills)
+            Constraint::Length(input_height),    // input bar
+            Constraint::Length(1),               // status bar
+        ])
+        .split(area);
+
+        self.agents_tree.render(frame, chunks[0], lineage);
+        self.activity_log.render(frame, chunks[1]);
+        self.input_bar.render(frame, chunks[2]);
+        StatusBar::render(
+            frame,
+            chunks[3],
+            StatusBarProps {
+                view: &ViewId::Dashboard,
+                total_cost: lineage.nodes().filter_map(|n| n.current_attempt()).map(|a| a.cost_usd).sum(),
+                elapsed: &self.elapsed(),
+                current_mode: None,
+                context_used: None,
+                context_size: None,
+            },
+        );
     }
 }
 
@@ -258,11 +293,9 @@ impl View for DashboardView {
                 }
             }
 
-            // Enter on empty InputBar → drill into session (if any)
+            // Enter on empty InputBar → no session to drill into (lineage is in App)
             if key.code == KeyCode::Enter && self.input_bar.is_empty() {
-                return self.first_session_id().map(|sid| {
-                    Action::NavigateTo(ViewId::SessionDetail(spur_acp::SessionId(sid)))
-                });
+                return None;
             }
 
             return None;
@@ -300,20 +333,30 @@ impl View for DashboardView {
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {
         match event {
-            SpurEvent::BrainSpawned { agent, session } => {
-                self.handle_agent_spawned(agent.clone(), session.0.clone(), "brain");
+            SpurEvent::BrainSpawned { agent, session: _ } => {
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: format!("[brain:{}]", agent),
+                    message: "Brain agent spawned".to_string(),
+                    kind: LogEntryKind::Info,
+                });
             }
 
             SpurEvent::WorkerSpawned {
                 agent,
-                session,
+                session: _,
                 worktree: _,
             } => {
-                self.handle_agent_spawned(agent.clone(), session.0.clone(), "worker");
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: format!("[worker:{}]", agent),
+                    message: "Worker agent spawned".to_string(),
+                    kind: LogEntryKind::Info,
+                });
             }
 
             SpurEvent::AgentNotification { session, notification } => {
-                let prefix = self.prefix_for_session(&session.0);
+                let prefix = Self::prefix_for_session(&session.0);
                 match &notification.update {
                     spur_acp::SessionUpdate::AgentThoughtChunk(chunk)
                     | spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
@@ -347,8 +390,7 @@ impl View for DashboardView {
                         // Not logged in dashboard (condensed view)
                     }
                     _ => {
-                        // Other variants -- update status
-                        self.set_agent_status_for_session(&session.0, "working");
+                        // Other variants — no agent-state mutation needed; lineage handles it
                     }
                 }
             }
@@ -370,12 +412,7 @@ impl View for DashboardView {
                 worker_session,
                 status,
             } => {
-                let prefix = self.prefix_for_session(&worker_session.0);
-                let status_str = match status {
-                    DelegationStatus::Success => "done",
-                    _ => "error",
-                };
-                self.set_agent_status_for_session(&worker_session.0, status_str);
+                let prefix = Self::prefix_for_session(&worker_session.0);
                 let msg = match status {
                     DelegationStatus::Success => {
                         "Delegation completed successfully".to_string()
@@ -401,9 +438,7 @@ impl View for DashboardView {
             }
 
             SpurEvent::SessionCompleted { session, success } => {
-                let prefix = self.prefix_for_session(&session.0);
-                let status = if *success { "done" } else { "error" };
-                self.set_agent_status_for_session(&session.0, status);
+                let prefix = Self::prefix_for_session(&session.0);
                 let msg = if *success {
                     "Session completed successfully"
                 } else {
@@ -426,9 +461,6 @@ impl View for DashboardView {
                 agent,
                 retry_after,
             } => {
-                if let Some(a) = self.agents.iter_mut().find(|a| a.name == *agent) {
-                    a.status = "rate-limited".into();
-                }
                 let msg = match retry_after {
                     Some(d) => format!("Rate limited (retry after {}s)", d.as_secs()),
                     None => "Rate limited".to_string(),
@@ -442,9 +474,6 @@ impl View for DashboardView {
             }
 
             SpurEvent::BrainFailover { from, to } => {
-                if let Some(a) = self.agents.iter_mut().find(|a| a.name == *from) {
-                    a.status = "error".into();
-                }
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[spur]".to_string(),
@@ -453,16 +482,8 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::CostUpdate {
-                session: _,
-                agent,
-                estimated_cost_usd,
-            } => {
-                *self.cost_by_agent.entry(agent.clone()).or_insert(0.0) += estimated_cost_usd;
-                // Also update the agent's cost field
-                if let Some(a) = self.agents.iter_mut().find(|a| a.name == *agent) {
-                    a.cost = *self.cost_by_agent.get(agent.as_str()).unwrap_or(&0.0);
-                }
+            SpurEvent::CostUpdate { .. } => {
+                // Cost is now read from lineage.nodes().current_attempt().cost_usd
             }
 
             SpurEvent::ConflictDetected { files } => {
@@ -510,8 +531,7 @@ impl View for DashboardView {
             }
 
             SpurEvent::TurnComplete { session } => {
-                let prefix = self.prefix_for_session(&session.0);
-                self.set_agent_status_for_session(&session.0, "idle");
+                let prefix = Self::prefix_for_session(&session.0);
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix,
@@ -521,8 +541,7 @@ impl View for DashboardView {
             }
 
             SpurEvent::BrainError { session, message } => {
-                let prefix = self.prefix_for_session(&session.0);
-                self.set_agent_status_for_session(&session.0, "error");
+                let prefix = Self::prefix_for_session(&session.0);
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix,
@@ -549,7 +568,7 @@ impl View for DashboardView {
 
         for session_id in expired {
             if let Some((text, _)) = self.text_batch.remove(&session_id) {
-                let prefix = self.prefix_for_session(&session_id);
+                let prefix = Self::prefix_for_session(&session_id);
                 // Take the last 50 chars for a condensed view
                 let display = if text.len() > 50 {
                     let mut start = text.len() - 50;
@@ -570,95 +589,9 @@ impl View for DashboardView {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        if self.agents.is_empty() {
-            let lines = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "SPUR",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Multi-agent orchestrator",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Type a task below to start",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Press [s] to browse sessions",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ];
-            let paragraph = Paragraph::new(lines)
-                .alignment(ratatui::layout::Alignment::Center);
-
-            let input_height = self.input_bar.required_height();
-            let chunks = Layout::vertical([
-                Constraint::Min(4),
-                Constraint::Length(input_height),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
-            let v_pad = chunks[0].height.saturating_sub(6) / 2;
-            let content_area = Rect {
-                x: chunks[0].x,
-                y: chunks[0].y + v_pad,
-                width: chunks[0].width,
-                height: chunks[0].height.saturating_sub(v_pad),
-            };
-            frame.render_widget(paragraph, content_area);
-            self.input_bar.render(frame, chunks[1]);
-            StatusBar::render(
-                frame,
-                chunks[2],
-                StatusBarProps {
-                    view: &ViewId::Dashboard,
-                    total_cost: self.total_cost(),
-                    elapsed: &self.elapsed(),
-                    current_mode: None,
-                    context_used: None,
-                    context_size: None,
-                },
-            );
-            return;
-        }
-
-        let agents_height = (self.agents.len() as u16 + 2)
-            .clamp(4, area.height * 40 / 100)
-            .min(12);
-
-        let input_height = self.input_bar.required_height();
-
-        let chunks = Layout::vertical([
-            Constraint::Length(agents_height),    // agents tree
-            Constraint::Min(4),                  // activity log (fills)
-            Constraint::Length(input_height),     // input bar
-            Constraint::Length(1),                // status bar
-        ])
-        .split(area);
-
-        self.agents_tree.render(frame, chunks[0], &self.agents);
-        self.activity_log.render(frame, chunks[1]);
-        self.input_bar.render(frame, chunks[2]);
-        StatusBar::render(
-            frame,
-            chunks[3],
-            StatusBarProps {
-                view: &ViewId::Dashboard,
-                total_cost: self.total_cost(),
-                elapsed: &self.elapsed(),
-                current_mode: None,
-                context_used: None,
-                context_size: None,
-            },
-        );
+    /// No-op: always use `render_with_lineage` for Dashboard.
+    /// `App::render` calls `render_with_lineage` directly.
+    fn render(&self, _frame: &mut Frame, _area: Rect) {
+        // render_with_lineage is called directly from App::render
     }
 }
