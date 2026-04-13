@@ -4,26 +4,24 @@
 //! - JumpToReview must set detail tab to Review.
 //! - pending_reviews must return insertion order.
 
-use std::time::SystemTime;
-
 use spur_acp::{
-    ExecutorReviewKind, ExecutorReviewPayload, SessionId, SpurEvent,
+    ExecutorReviewKind, ExecutorReviewPayload, SessionId, SpurEvent, SpurEventBody,
 };
 use spur_core::{ExecutorId, ExecutorLineage};
 
 fn spawn(id: &str) -> SpurEvent {
-    SpurEvent::ExecutorSpawned {
+    SpurEvent::now(SpurEventBody::ExecutorSpawned {
         id: id.into(),
         parent_id: None,
         session_id: SessionId::new(),
         agent: id.into(),
         role: "Brain".into(),
         task_spec: String::new(),
-    }
+    })
 }
 
 fn review_req(id: &str) -> SpurEvent {
-    SpurEvent::ExecutorReviewRequested {
+    SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: id.into(),
         kind: ExecutorReviewKind::Completion,
         payload: ExecutorReviewPayload {
@@ -32,8 +30,7 @@ fn review_req(id: &str) -> SpurEvent {
             pr_url: None,
             error: None,
         },
-        requested_at: SystemTime::now(),
-    }
+    })
 }
 
 #[test]
@@ -64,10 +61,10 @@ fn pending_reviews_removes_resolved_entries() {
     l.apply(&spawn("b"));
     l.apply(&review_req("a"));
     l.apply(&review_req("b"));
-    l.apply(&SpurEvent::ExecutorReviewResolved {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
         id: "a".into(),
         decision: spur_acp::ExecutorReviewDecision::Approve,
-    });
+    }));
     let order = l.pending_reviews();
     assert_eq!(order, vec![ExecutorId::new("b")]);
 }
@@ -76,10 +73,10 @@ fn pending_reviews_removes_resolved_entries() {
 fn resolving_nonexistent_review_is_noop() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("a"));
-    l.apply(&SpurEvent::ExecutorReviewResolved {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
         id: "a".into(),
         decision: spur_acp::ExecutorReviewDecision::Approve,
-    });
+    }));
     // No panic; state unchanged
     assert_eq!(l.pending_reviews().len(), 0);
 }

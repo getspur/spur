@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::SystemTime;
 
-use spur_acp::SpurEvent;
+use spur_acp::{SpurEvent, SpurEventBody};
 
 use super::types::{
     Attempt, AttemptStatus, ExecutorId, ExecutorNode, LifecycleState, ReviewRequest, Role,
@@ -29,8 +29,8 @@ impl ExecutorLineage {
         // Try legacy adapter first (BrainSpawned, WorkerSpawned, etc.)
         super::adapter::apply_legacy(self, event);
 
-        match event {
-            SpurEvent::ExecutorSpawned {
+        match &event.body {
+            SpurEventBody::ExecutorSpawned {
                 id,
                 parent_id,
                 session_id,
@@ -79,7 +79,7 @@ impl ExecutorLineage {
                 }
             }
 
-            SpurEvent::ExecutorPhaseChanged { id, phase } => {
+            SpurEventBody::ExecutorPhaseChanged { id, phase } => {
                 let eid = ExecutorId::new(id);
                 if let Some(new_phase) = parse_phase(phase) {
                     if let Some(node) = self.nodes.get_mut(&eid) {
@@ -96,7 +96,7 @@ impl ExecutorLineage {
                 }
             }
 
-            SpurEvent::ExecutorArtifact { id, artifact } => {
+            SpurEventBody::ExecutorArtifact { id, artifact } => {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
                     let art = map_artifact(artifact);
@@ -108,11 +108,10 @@ impl ExecutorLineage {
                 }
             }
 
-            SpurEvent::ExecutorReviewRequested {
+            SpurEventBody::ExecutorReviewRequested {
                 id,
                 kind,
                 payload,
-                requested_at,
             } => {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
@@ -120,7 +119,8 @@ impl ExecutorLineage {
                     node.pending_review = Some(ReviewRequest {
                         kind: map_review_kind(kind),
                         payload: map_review_payload(payload),
-                        requested_at: *requested_at,
+                        // TODO H-Task 4: use event.occurred_at
+                        requested_at: SystemTime::now(),
                     });
                     if !self.pending_review_order.contains(&eid) {
                         self.pending_review_order.push_back(eid.clone());
@@ -130,7 +130,7 @@ impl ExecutorLineage {
                 }
             }
 
-            SpurEvent::ExecutorReviewResolved { id, decision: _ } => {
+            SpurEventBody::ExecutorReviewResolved { id, decision: _ } => {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
                     node.pending_review = None;
@@ -143,7 +143,7 @@ impl ExecutorLineage {
                 }
             }
 
-            SpurEvent::ExecutorRetryStarted {
+            SpurEventBody::ExecutorRetryStarted {
                 id,
                 attempt_n: _,
                 reason: _,

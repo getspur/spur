@@ -1,36 +1,36 @@
 //! Golden-text snapshot: confirm recursive traversal renders depth > 1.
 
-use spur_acp::{SessionId, SpurEvent};
+use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 use spur_core::ExecutorLineage;
 
 #[test]
 fn recursive_tree_renders_depth_two() {
     let mut lineage = ExecutorLineage::new();
     // brain -> worker -> sub-worker
-    lineage.apply(&SpurEvent::ExecutorSpawned {
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
         id: "b".into(),
         parent_id: None,
         session_id: SessionId("b".into()),
         agent: "kiro".into(),
         role: "Brain".into(),
         task_spec: "root".into(),
-    });
-    lineage.apply(&SpurEvent::ExecutorSpawned {
+    }));
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
         id: "w".into(),
         parent_id: Some("b".into()),
         session_id: SessionId("w".into()),
         agent: "worker".into(),
         role: "Executor".into(),
         task_spec: "child".into(),
-    });
-    lineage.apply(&SpurEvent::ExecutorSpawned {
+    }));
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
         id: "sw".into(),
         parent_id: Some("w".into()),
         session_id: SessionId("sw".into()),
         agent: "sub".into(),
         role: "SubExecutor".into(),
         task_spec: "grandchild".into(),
-    });
+    }));
 
     let lines = spur_tui::components::agents_tree::render_lineage_to_strings(&lineage, None);
 

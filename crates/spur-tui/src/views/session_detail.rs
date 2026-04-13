@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_acp::{DelegationStatus, SessionId, SpurEvent};
+use spur_acp::{DelegationStatus, SessionId, SpurEvent, SpurEventBody};
 
 use crate::action::{Action, ViewId};
 use crate::components::input_bar::InputBar;
@@ -310,8 +310,8 @@ impl View for SessionDetailView {
     }
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {
-        match event {
-            SpurEvent::AgentNotification { session, notification } => {
+        match &event.body {
+            SpurEventBody::AgentNotification { session, notification } => {
                 if session.0 != self.session_id.0 {
                     return;
                 }
@@ -389,7 +389,7 @@ impl View for SessionDetailView {
                 }
             }
 
-            SpurEvent::DelegationRequested {
+            SpurEventBody::DelegationRequested {
                 from,
                 to_agent,
                 task,
@@ -408,7 +408,7 @@ impl View for SessionDetailView {
                 });
             }
 
-            SpurEvent::DelegationCompleted {
+            SpurEventBody::DelegationCompleted {
                 worker_session,
                 status,
             } => {
@@ -433,7 +433,7 @@ impl View for SessionDetailView {
                 });
             }
 
-            SpurEvent::CostUpdate {
+            SpurEventBody::CostUpdate {
                 session,
                 estimated_cost_usd,
                 ..
@@ -443,14 +443,14 @@ impl View for SessionDetailView {
                 }
             }
 
-            SpurEvent::TurnComplete { session } => {
+            SpurEventBody::TurnComplete { session } => {
                 if session.0 == self.session_id.0 {
                     // No trace entry — the InputBar status indicator shows "ready".
                     // A separator is enough to visually divide turns.
                 }
             }
 
-            SpurEvent::BrainError { session, message } => {
+            SpurEventBody::BrainError { session, message } => {
                 if session.0 == self.session_id.0 {
                     self.react_trace.push(TraceEntry {
                         kind: TraceKind::Observe,
@@ -550,6 +550,8 @@ impl View for SessionDetailView {
             chunks[3],
             StatusBarProps {
                 view: &ViewId::SessionDetail(self.session_id.clone()),
+                running: 0,
+                pending_review: 0,
                 total_cost: self.cost,
                 elapsed: &elapsed,
                 current_mode: self.current_mode.as_deref(),

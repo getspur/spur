@@ -7,7 +7,7 @@
 
 use std::time::SystemTime;
 
-use spur_acp::{DelegationStatus, SpurEvent};
+use spur_acp::{DelegationStatus, SpurEvent, SpurEventBody};
 
 use super::projection::ExecutorLineage;
 use super::types::{
@@ -15,8 +15,8 @@ use super::types::{
 };
 
 pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
-    match event {
-        SpurEvent::BrainSpawned { agent, session } => {
+    match &event.body {
+        SpurEventBody::BrainSpawned { agent, session } => {
             let id = ExecutorId::new(session.0.clone());
             if lineage.node(&id).is_some() {
                 return;
@@ -34,7 +34,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             });
         }
 
-        SpurEvent::WorkerSpawned { agent, session, worktree: _ } => {
+        SpurEventBody::WorkerSpawned { agent, session, worktree: _ } => {
             let id = ExecutorId::new(session.0.clone());
             if lineage.node(&id).is_some() {
                 return;
@@ -62,7 +62,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             }
         }
 
-        SpurEvent::DelegationRequested { from: _, to_agent, task } => {
+        SpurEventBody::DelegationRequested { from: _, to_agent, task } => {
             // Populate the task_spec of the most recent Executor owned by the
             // worker name, if empty.
             //
@@ -86,7 +86,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             }
         }
 
-        SpurEvent::DelegationCompleted { worker_session, status } => {
+        SpurEventBody::DelegationCompleted { worker_session, status } => {
             let id = ExecutorId::new(worker_session.0.clone());
             if let Some(n) = lineage.node_mut_public(&id) {
                 let (phase, attempt_status, error) = match status {
@@ -104,7 +104,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             }
         }
 
-        SpurEvent::SessionCompleted { session, success } => {
+        SpurEventBody::SessionCompleted { session, success } => {
             let id = ExecutorId::new(session.0.clone());
             if let Some(n) = lineage.node_mut_public(&id) {
                 n.phase = if *success { LifecycleState::Succeeded } else { LifecycleState::Failed };
@@ -115,7 +115,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             }
         }
 
-        SpurEvent::CostUpdate { session, agent: _, estimated_cost_usd } => {
+        SpurEventBody::CostUpdate { session, agent: _, estimated_cost_usd } => {
             let id = ExecutorId::new(session.0.clone());
             if let Some(n) = lineage.node_mut_public(&id) {
                 if let Some(a) = n.current_attempt_mut() {

@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_acp::{DelegationStatus, SpurEvent};
+use spur_acp::{DelegationStatus, SpurEvent, SpurEventBody};
 use spur_core::{ExecutorId, ExecutorLineage};
 
 use crate::action::{Action, ViewId};
@@ -443,8 +443,8 @@ impl View for DashboardView {
     }
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {
-        match event {
-            SpurEvent::BrainSpawned { agent, session: _ } => {
+        match &event.body {
+            SpurEventBody::BrainSpawned { agent, session: _ } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: format!("[brain:{}]", agent),
@@ -453,7 +453,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::WorkerSpawned {
+            SpurEventBody::WorkerSpawned {
                 agent,
                 session: _,
                 worktree: _,
@@ -466,7 +466,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::AgentNotification { session, notification } => {
+            SpurEventBody::AgentNotification { session, notification } => {
                 let prefix = Self::prefix_for_session(&session.0);
                 match &notification.update {
                     spur_acp::SessionUpdate::AgentThoughtChunk(chunk)
@@ -506,7 +506,7 @@ impl View for DashboardView {
                 }
             }
 
-            SpurEvent::DelegationRequested {
+            SpurEventBody::DelegationRequested {
                 from: _,
                 to_agent,
                 task,
@@ -519,7 +519,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::DelegationCompleted {
+            SpurEventBody::DelegationCompleted {
                 worker_session,
                 status,
             } => {
@@ -548,7 +548,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::SessionCompleted { session, success } => {
+            SpurEventBody::SessionCompleted { session, success } => {
                 let prefix = Self::prefix_for_session(&session.0);
                 let msg = if *success {
                     "Session completed successfully"
@@ -568,7 +568,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::RateLimitDetected {
+            SpurEventBody::RateLimitDetected {
                 agent,
                 retry_after,
             } => {
@@ -584,7 +584,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::BrainFailover { from, to } => {
+            SpurEventBody::BrainFailover { from, to } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[spur]".to_string(),
@@ -593,11 +593,11 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::CostUpdate { .. } => {
+            SpurEventBody::CostUpdate { .. } => {
                 // Cost is now read from lineage.nodes().current_attempt().cost_usd
             }
 
-            SpurEvent::ConflictDetected { files } => {
+            SpurEventBody::ConflictDetected { files } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[spur]".to_string(),
@@ -614,7 +614,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::IssueReceived { source, id } => {
+            SpurEventBody::IssueReceived { source, id } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".to_string(),
@@ -623,7 +623,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::PrCreated { url } => {
+            SpurEventBody::PrCreated { url } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[spur]".to_string(),
@@ -632,7 +632,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::IssueUpdated { source, id, status } => {
+            SpurEventBody::IssueUpdated { source, id, status } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".to_string(),
@@ -641,7 +641,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::TurnComplete { session } => {
+            SpurEventBody::TurnComplete { session } => {
                 let prefix = Self::prefix_for_session(&session.0);
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
@@ -651,7 +651,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEvent::BrainError { session, message } => {
+            SpurEventBody::BrainError { session, message } => {
                 let prefix = Self::prefix_for_session(&session.0);
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),

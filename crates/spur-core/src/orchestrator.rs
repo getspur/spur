@@ -13,7 +13,7 @@ use spur_acp::config::SpurConfig;
 use spur_acp::connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 use spur_acp::registry::AgentRegistry;
 use spur_acp::types::*;
-use spur_acp::{DelegationResult, DelegationStatus, SpurEvent};
+use spur_acp::{DelegationResult, DelegationStatus, SpurEvent, SpurEventBody};
 use spur_pm::Issue;
 
 use agent_client_protocol::{
@@ -159,19 +159,19 @@ impl Orchestrator {
             .clone();
 
         info!(brain = %brain_name, session = %session_id, "Starting ad-hoc run");
-        self.emit(SpurEvent::BrainSpawned {
+        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
             agent: brain_name.clone(),
             session: session_id.clone(),
-        });
+        }));
 
         // 2. Optionally fetch issue context.
         let issue_context = if let Some(ref issue_ref) = opts.issue {
             match self.fetch_issue_context(issue_ref).await {
                 Ok(issue) => {
-                    self.emit(SpurEvent::IssueReceived {
+                    self.emit(SpurEvent::now(SpurEventBody::IssueReceived {
                         source: format!("{:?}", issue.source),
                         id: issue.id.clone(),
-                    });
+                    }));
                     Some(issue)
                 }
                 Err(e) => {
@@ -292,10 +292,10 @@ impl Orchestrator {
                 _ => {}
             }
 
-            self.emit(SpurEvent::AgentNotification {
+            self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
                 session: session_id.clone(),
                 notification,
-            });
+            }));
         }
 
         // 9. Clean up.
@@ -313,10 +313,10 @@ impl Orchestrator {
 
         let total_cost = spur_cost::estimator::estimate_cost(brain_config.cost_tier, duration);
 
-        self.emit(SpurEvent::SessionCompleted {
+        self.emit(SpurEvent::now(SpurEventBody::SessionCompleted {
             session: session_id.clone(),
             success,
-        });
+        }));
 
         println!();
         info!(
@@ -373,9 +373,9 @@ impl Orchestrator {
                                 Ok(pair) => pair,
                                 Err(e) => {
                                     error!(error = %e, "Failed to connect brain for list_sessions");
-                                    self.emit(SpurEvent::SessionsListError {
+                                    self.emit(SpurEvent::now(SpurEventBody::SessionsListError {
                                         message: e.to_string(),
-                                    });
+                                    }));
                                     continue;
                                 }
                             }
@@ -398,16 +398,16 @@ impl Orchestrator {
 
                     match sessions_result {
                         Ok(sessions) => {
-                            self.emit(SpurEvent::SessionsListed {
+                            self.emit(SpurEvent::now(SpurEventBody::SessionsListed {
                                 agent: brain_name.clone(),
                                 sessions,
-                            });
+                            }));
                         }
                         Err(e) => {
                             error!(error = %e, "list_sessions failed (no fallback available)");
-                            self.emit(SpurEvent::SessionsListError {
+                            self.emit(SpurEvent::now(SpurEventBody::SessionsListError {
                                 message: e.to_string(),
-                            });
+                            }));
                         }
                     }
 
@@ -428,10 +428,10 @@ impl Orchestrator {
                                 Ok(pair) => pair,
                                 Err(e) => {
                                     error!(error = %e, "Failed to connect brain for resume");
-                                    self.emit(SpurEvent::BrainError {
+                                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                         session: SessionId::new(),
                                         message: e.to_string(),
-                                    });
+                                    }));
                                     continue;
                                 }
                             }
@@ -450,10 +450,10 @@ impl Orchestrator {
                             let mut history_count = 0usize;
                             while let Some(notification) = history_stream.next().await {
                                 history_count += 1;
-                                self.emit(SpurEvent::AgentNotification {
+                                self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
                                     session: spur_id.clone(),
                                     notification,
-                                });
+                                }));
                             }
 
                             // If no history came from the agent (new_session fallback),
@@ -462,22 +462,22 @@ impl Orchestrator {
                                 let entries = Self::read_session_history_from_disk(&original_session_id);
                                 if !entries.is_empty() {
                                     info!(count = entries.len(), "Replaying conversation history from disk");
-                                    self.emit(SpurEvent::SessionHistory {
+                                    self.emit(SpurEvent::now(SpurEventBody::SessionHistory {
                                         session: spur_id.clone(),
                                         entries,
-                                    });
+                                    }));
                                 }
                             }
 
                             brain = Some(session);
-                            self.emit(SpurEvent::TurnComplete { session: spur_id });
+                            self.emit(SpurEvent::now(SpurEventBody::TurnComplete { session: spur_id }));
                         }
                         Err(e) => {
                             error!(error = %e, "Failed to load brain session");
-                            self.emit(SpurEvent::BrainError {
+                            self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                 session: SessionId::new(),
                                 message: e.to_string(),
-                            });
+                            }));
                         }
                     }
                 }
@@ -533,15 +533,15 @@ impl Orchestrator {
                             Err(e) => {
                                 error!(error = %e, "Failed to spawn brain");
                                 if Self::is_auth_required_error(&e) {
-                                    self.emit(SpurEvent::AuthRequired {
+                                    self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
                                         session: SessionId(String::new()),
                                         message: Self::auth_required_banner(),
-                                    });
+                                    }));
                                 } else {
-                                    self.emit(SpurEvent::BrainError {
+                                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                         session: SessionId::new(),
                                         message: e.to_string(),
-                                    });
+                                    }));
                                 }
                                 continue;
                             }
@@ -561,15 +561,15 @@ impl Orchestrator {
                         Err(e) => {
                             error!(error = %e, "Brain prompt failed");
                             if Self::is_auth_required_error(&e) {
-                                self.emit(SpurEvent::AuthRequired {
+                                self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
                                     session: b.spur_session_id.clone(),
                                     message: Self::auth_required_banner(),
-                                });
+                                }));
                             } else {
-                                self.emit(SpurEvent::BrainError {
+                                self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                     session: b.spur_session_id.clone(),
                                     message: e.to_string(),
-                                });
+                                }));
                             }
                             b.delegation_handle.abort();
                             let _ = b.connection.shutdown().await;
@@ -617,10 +617,10 @@ impl Orchestrator {
                                             session = %b.spur_session_id,
                                             "orchestrator emitting AgentNotification"
                                         );
-                                        self.emit(SpurEvent::AgentNotification {
+                                        self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
                                             session: b.spur_session_id.clone(),
                                             notification,
-                                        });
+                                        }));
                                     }
                                     None => break, // Turn complete
                                 }
@@ -664,9 +664,9 @@ impl Orchestrator {
                     }
 
                     // Emit turn complete
-                    self.emit(SpurEvent::TurnComplete {
+                    self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
                         session: b.spur_session_id.clone(),
-                    });
+                    }));
                 }
             }
         }
@@ -891,10 +891,10 @@ impl Orchestrator {
         let session_id = SessionId::new();
 
         info!(brain = %brain_name, session = %session_id, "Creating brain session");
-        self.emit(SpurEvent::BrainSpawned {
+        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
             agent: brain_name.clone(),
             session: session_id.clone(),
-        });
+        }));
 
         // Start MCP callback server.
         let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
@@ -976,10 +976,10 @@ impl Orchestrator {
         let session_id = SessionId::new();
 
         info!(brain = %brain_name, session = %session_id, acp_session = %acp_session_id, "Loading brain session");
-        self.emit(SpurEvent::BrainSpawned {
+        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
             agent: brain_name.clone(),
             session: session_id.clone(),
-        });
+        }));
 
         // Start MCP callback server.
         let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
@@ -1421,11 +1421,11 @@ impl Orchestrator {
         let worker_session = SessionId::new();
 
         // Emit DelegationRequested event.
-        let _ = event_tx.send(SpurEvent::DelegationRequested {
+        let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationRequested {
             from: worker_session.clone(),
             to_agent: agent.clone(),
             task: task.clone(),
-        });
+        }));
 
         let start = Instant::now();
 
@@ -1504,11 +1504,11 @@ impl Orchestrator {
         }
 
         // Emit WorkerSpawned event.
-        let _ = event_tx.send(SpurEvent::WorkerSpawned {
+        let _ = event_tx.send(SpurEvent::now(SpurEventBody::WorkerSpawned {
             agent: agent.clone(),
             session: worker_session.clone(),
             worktree: worktree_info.path.clone(),
-        });
+        }));
 
         // Workers get no MCP servers (per spec).
         let session_response = match connection
@@ -1600,10 +1600,10 @@ impl Orchestrator {
         };
 
         // Emit DelegationCompleted event.
-        let _ = event_tx.send(SpurEvent::DelegationCompleted {
+        let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
             worker_session,
             status: status.clone(),
-        });
+        }));
 
         DelegationResult {
             status,

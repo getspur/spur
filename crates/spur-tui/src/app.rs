@@ -6,7 +6,7 @@ use ratatui::Frame;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 
-use spur_acp::{SessionId, SpurEvent};
+use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 use spur_core::ExecutorLineage;
 
 use crate::action::{Action, ViewId};
@@ -190,20 +190,20 @@ impl App {
         self.dirty = true;
 
         // Handle session list responses before forwarding to views
-        match &event {
-            SpurEvent::SessionsListed { agent, sessions } => {
+        match &event.body {
+            SpurEventBody::SessionsListed { agent, sessions } => {
                 if let Some(ref mut picker) = self.session_picker {
                     picker.set_sessions(agent.clone(), sessions.clone());
                 }
                 return;
             }
-            SpurEvent::SessionsListError { message } => {
+            SpurEventBody::SessionsListError { message } => {
                 if let Some(ref mut picker) = self.session_picker {
                     picker.set_error(message.clone());
                 }
                 return;
             }
-            SpurEvent::AuthRequired { session, message } => {
+            SpurEventBody::AuthRequired { session, message } => {
                 if let Some(ref mut detail) = self.session_detail {
                     // Apply when the event matches the focused session OR when
                     // the event carries a sentinel/empty session id (spawn-side
@@ -225,7 +225,7 @@ impl App {
                 }
                 return;
             }
-            SpurEvent::SessionHistory { ref entries, .. } => {
+            SpurEventBody::SessionHistory { entries, .. } => {
                 tracing::info!(
                     entry_count = entries.len(),
                     has_session_detail = self.session_detail.is_some(),
@@ -246,8 +246,8 @@ impl App {
         }
 
         // Track brain status transitions
-        match &event {
-            SpurEvent::BrainSpawned { agent, session } => {
+        match &event.body {
+            SpurEventBody::BrainSpawned { agent, session } => {
                 self.brain_status = BrainStatus::Thinking;
                 self.brain_name = Some(agent.clone());
 
@@ -276,16 +276,16 @@ impl App {
                     self.current_view = ViewId::SessionDetail(session.clone());
                 }
             }
-            SpurEvent::AgentNotification { session: _, .. } => {
+            SpurEventBody::AgentNotification { session: _, .. } => {
                 // Transition Thinking → Streaming on first output
                 if self.brain_status == BrainStatus::Thinking {
                     self.brain_status = BrainStatus::Streaming;
                 }
             }
-            SpurEvent::TurnComplete { .. } => {
+            SpurEventBody::TurnComplete { .. } => {
                 self.brain_status = BrainStatus::Ready;
             }
-            SpurEvent::BrainError { message, .. } => {
+            SpurEventBody::BrainError { message, .. } => {
                 self.brain_status = BrainStatus::Error(message.clone());
             }
             _ => {}
@@ -516,10 +516,10 @@ impl App {
                 // Optimistically reflect the resolution locally so the UI
                 // updates immediately without waiting for the authoritative
                 // event to round-trip.
-                self.lineage.apply(&spur_acp::SpurEvent::ExecutorReviewResolved {
+                self.lineage.apply(&spur_acp::SpurEvent::now(spur_acp::SpurEventBody::ExecutorReviewResolved {
                     id: executor_id,
                     decision: to_wire_decision(&decision),
-                });
+                }));
             }
 
             // Scroll actions are already handled inside the views' handle_key methods.
