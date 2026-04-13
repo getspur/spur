@@ -171,6 +171,8 @@ async fn modify_decision_produces_modified_status() {
 
 #[tokio::test(start_paused = true)]
 async fn retry_then_approve_produces_success() {
+    // 2 Retrys then Approve. With max_review_retries = 3 and `>` check:
+    // attempts 1 (Retry→2), 2 (Retry→3), 3 (Approve). Final status: Success.
     use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
     use spur_core::{orchestrator::run_gate_with_retries, ExecutorId, ReviewSink};
     use std::time::Duration;
@@ -228,11 +230,15 @@ async fn retry_then_approve_produces_success() {
 async fn retry_limit_exceeded_produces_failed() {
     use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
     use spur_core::{orchestrator::run_gate_with_retries, ExecutorId, ReviewSink};
+    use std::sync::Arc;
     use std::time::Duration;
 
     let sink = ReviewSink::new();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ReviewDecision>(8);
-    for i in 0..4 {
+    // Send 3 Retrys with max_review_retries = 2. Expected: first 2 bump
+    // attempt_n (1→2, 2→3), and the 3rd Retry (arriving at attempt_n=3)
+    // fails with "retry limit exceeded after 2 attempts".
+    for i in 0..3 {
         tx.send(ReviewDecision::Retry {
             new_constraints: format!("try {}", i + 1),
         })
@@ -241,8 +247,11 @@ async fn retry_limit_exceeded_produces_failed() {
     }
     drop(tx);
 
+    let attempts_consumed = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let attempts_for_task = Arc::clone(&attempts_consumed);
+
     let sink_for_task = sink.clone();
-    tokio::spawn(async move {
+    let dispatcher = tokio::spawn(async move {
         let mut attempt = 1u32;
         while let Some(d) = rx.recv().await {
             loop {
@@ -251,6 +260,7 @@ async fn retry_limit_exceeded_produces_failed() {
                     .submit(ExecutorId::new("e1"), attempt, d.clone())
                     .await
                 {
+                    attempts_for_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     break;
                 }
             }
@@ -263,17 +273,28 @@ async fn retry_limit_exceeded_produces_failed() {
         DelegationStatus::Success,
         Duration::from_secs(60),
         TimeoutFallback::Reject { reason: "t".into() },
-        3,
+        2, // max_review_retries
         sink,
     )
     .await;
+
     match final_status {
         DelegationStatus::Failed { error } => {
             assert!(error.contains("retry limit exceeded"), "got: {}", error);
-            assert!(error.contains("3"), "got: {}", error);
+            assert!(error.contains("2"), "got: {}", error);
         }
         other => panic!("expected Failed, got {:?}", other),
     }
+
+    // Wait for the dispatcher task to finish consuming. All 3 Retry
+    // submits must have been routed: 2 that bumped attempt_n and the
+    // 3rd that triggered the limit-exceeded failure.
+    dispatcher.await.unwrap();
+    assert_eq!(
+        attempts_consumed.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "all 3 Retry decisions should have been consumed (2 bumps + 1 fail)"
+    );
 }
 
 #[tokio::test]

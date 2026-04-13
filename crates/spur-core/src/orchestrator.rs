@@ -1625,7 +1625,11 @@ impl Orchestrator {
                     };
                 }
                 Some(ReviewDecision::Retry { new_constraints }) => {
-                    if attempt_n >= agent_config.review.max_review_retries {
+                    // `>` (not `>=`): spec's "Retry × 4 when
+                    // max_review_retries = 3 produces Failed" means 3
+                    // retries are allowed (attempts bump 1→2→3→4), and
+                    // the 4th Retry decision fails.
+                    if attempt_n > agent_config.review.max_review_retries {
                         let final_status = DelegationStatus::Failed {
                             error: format!(
                                 "retry limit exceeded after {} attempts",
@@ -2102,7 +2106,8 @@ pub async fn run_gate_with_retries(
                 return DelegationStatus::Modified { reviewer_note: note }
             }
             Some(ReviewDecision::Retry { .. }) => {
-                if attempt_n >= max_review_retries {
+                // `>` (not `>=`): see execute_delegation for rationale.
+                if attempt_n > max_review_retries {
                     return DelegationStatus::Failed {
                         error: format!(
                             "retry limit exceeded after {} attempts",
