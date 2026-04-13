@@ -378,6 +378,10 @@ async fn main() -> Result<()> {
             // Spawn the review dispatcher task.
             tokio::spawn(spur_core::review_dispatcher_loop(dispatch_rx, review_sink_for_dispatcher));
 
+            // Retain a copy of the brain override before it is moved into the
+            // orchestrator spawn below, so the auto-resume block can inspect it.
+            let brain_for_resume = brain.clone();
+
             // Spawn interactive orchestrator (moves orch). `mut` so we can
             // `&mut orch_handle` inside a timeout for graceful shutdown below.
             let mut orch_handle = tokio::spawn(async move {
@@ -436,20 +440,35 @@ async fn main() -> Result<()> {
             let meta = spur_tui::session_metadata::SessionMetadataStore::load(&metadata_path);
 
             let force_picker = sessions && !dashboard;
-            let auto_resume_id = if dashboard || sessions {
+
+            // Auto-resume is driven by the ACP session id (the agent-authoritative
+            // id), not the SPUR in-process id. We also gate on the stored brain
+            // matching the launch-time `--brain` override to avoid handing a
+            // claude-owned session id to kiro (and vice versa).
+            let auto_resume: Option<(String, String)> = if dashboard || sessions {
                 None
             } else {
-                meta.metadata().last_active_session_id.clone()
+                match meta.last_active_acp() {
+                    Some((acp, stored_brain)) => match brain_for_resume.as_deref() {
+                        Some(requested) if requested != stored_brain => {
+                            tracing::info!(
+                                requested = requested,
+                                stored = %stored_brain,
+                                "auto-resume skipped: brain override mismatches stored brain"
+                            );
+                            None
+                        }
+                        _ => Some((acp, stored_brain)),
+                    },
+                    None => None,
+                }
             };
 
-            if let Some(sid) = auto_resume_id {
-                // Queue a ResumeSession before TUI starts. The translator
-                // task above will forward it to the orchestrator, which emits
-                // BrainSpawned; the App then attaches the resume banner.
+            if let Some((acp_id, _stored_brain)) = auto_resume {
                 let resume_tx = tui_tx.clone();
                 tokio::spawn(async move {
                     let _ = resume_tx
-                        .send(spur_tui::UserInput::ResumeSession { session_id: sid })
+                        .send(spur_tui::UserInput::ResumeSession { session_id: acp_id })
                         .await;
                 });
             }
