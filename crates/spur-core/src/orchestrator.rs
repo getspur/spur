@@ -60,7 +60,7 @@ pub struct BrainSession {
 
 /// A user input message from the TUI.
 pub enum InteractiveInput {
-    Message { text: String, interrupt: bool },
+    Message { blocks: Vec<ContentBlock>, interrupt: bool },
     ListSessions,
     ResumeSession { session_id: String },
     /// Request `set_session_mode` on the active brain session. No-op if
@@ -506,12 +506,14 @@ impl Orchestrator {
                 }
 
                 // ── Message ─────────────────────────────────────────────
-                InteractiveInput::Message { text, interrupt } => {
+                InteractiveInput::Message { blocks, interrupt } => {
                     // Flatten interrupt messages (they were queued during streaming).
-                    let text = if interrupt {
-                        text.strip_prefix('!').unwrap_or(&text).to_string()
+                    // When interrupt is true, the user typed `!…`; strip the leading
+                    // bang from the *first* text block so downstream agents don't see it.
+                    let blocks = if interrupt {
+                        strip_bang_prefix(blocks)
                     } else {
-                        text
+                        blocks
                     };
 
                     // ── Lazy-spawn brain on first message (or after crash) ──
@@ -552,7 +554,7 @@ impl Orchestrator {
                     // ── Send prompt ─────────────────────────────────────
                     let prompt_request = PromptRequest::new(
                         b.acp_session_id.clone(),
-                        vec![ContentBlock::Text(TextContent::new(text))],
+                        blocks,
                     );
 
                     let prompt_started_at = std::time::Instant::now();
@@ -627,7 +629,7 @@ impl Orchestrator {
                             }
                             Some(queued) = user_input_rx.recv() => {
                                 match queued {
-                                    InteractiveInput::Message { text: msg_text, interrupt: msg_interrupt } => {
+                                    InteractiveInput::Message { blocks: msg_blocks, interrupt: msg_interrupt } => {
                                         if msg_interrupt {
                                             let _ = b.connection.cancel(&b.acp_session_id).await;
                                             cancel_deadline = Some(
@@ -635,13 +637,13 @@ impl Orchestrator {
                                                     + std::time::Duration::from_secs(5),
                                             );
                                         }
-                                        let queued_text = if msg_interrupt {
-                                            msg_text.strip_prefix('!').unwrap_or(&msg_text).to_string()
+                                        let queued_blocks = if msg_interrupt {
+                                            strip_bang_prefix(msg_blocks)
                                         } else {
-                                            msg_text
+                                            msg_blocks
                                         };
                                         pending_messages.push_back(InteractiveInput::Message {
-                                            text: queued_text,
+                                            blocks: queued_blocks,
                                             interrupt: false,
                                         });
                                     }
@@ -1626,4 +1628,20 @@ fn shellexpand_tilde(path: &str) -> String {
 
 fn dirs_home() -> Option<String> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_string_lossy().to_string())
+}
+
+/// Strip a leading `!` from the first text block in `blocks`, if any.
+///
+/// The TUI forwards interrupt commands (`!stop`) as a text block with a
+/// leading bang. We strip it once here before forwarding to the agent so
+/// the agent sees clean prompt text.
+fn strip_bang_prefix(mut blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+    if let Some(first) = blocks.first_mut() {
+        if let ContentBlock::Text(tc) = first {
+            if tc.text.starts_with('!') {
+                tc.text = tc.text.strip_prefix('!').unwrap_or(&tc.text).to_string();
+            }
+        }
+    }
+    blocks
 }

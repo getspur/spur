@@ -378,8 +378,8 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
                     let converted = match input {
-                        spur_tui::UserInput::Message { text, interrupt, .. } => {
-                            spur_core::InteractiveInput::Message { text, interrupt }
+                        spur_tui::UserInput::Message { blocks, interrupt, .. } => {
+                            spur_core::InteractiveInput::Message { blocks, interrupt }
                         }
                         spur_tui::UserInput::ListSessions => {
                             spur_core::InteractiveInput::ListSessions

@@ -306,7 +306,9 @@ impl View for DashboardView {
                 // Text submitted — send as message
                 return Some(Action::SendMessage {
                     session: spur_acp::SessionId::new(),
-                    text,
+                    blocks: vec![spur_acp::ContentBlock::Text(
+                        spur_acp::TextContent::new(text),
+                    )],
                     interrupt,
                 });
             }

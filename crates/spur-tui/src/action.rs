@@ -8,7 +8,7 @@ pub enum Action {
     NavigateBack,
     SendMessage {
         session: SessionId,
-        text: String,
+        blocks: Vec<spur_acp::ContentBlock>,
         interrupt: bool,
     },
     ToggleVerbose,
@@ -28,6 +28,13 @@ pub enum Action {
     /// Cycle the active Claude session between `default` and `plan` mode.
     /// Dispatched by `Alt-m` in `SessionDetailView`.
     TogglePlanMode,
+    /// Invoke the kiro vendor extension `_kiro.dev/commands/execute`.
+    /// Full plumbing in Task 11; this task adds a stub handler in `app.rs`.
+    KiroExecute {
+        session: SessionId,
+        command: String,
+        args: serde_json::Value,
+    },
     /// Move tree selection down one row.
     SelectNext,
     /// Move tree selection up one row.

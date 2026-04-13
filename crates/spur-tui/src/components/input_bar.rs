@@ -7,6 +7,17 @@ use ratatui::{
     Frame,
 };
 
+/// A protected byte range inside `InputBar::text` representing an atomic
+/// token (today: a resource mention). Full edit semantics land in Task 12;
+/// this task only stubs the field so `SubmitRouter` can consume it.
+#[derive(Debug, Clone)]
+pub struct ProtectedRange {
+    pub start: usize,
+    pub end: usize,
+    pub uri: String,
+    pub name: String,
+}
+
 /// A text input widget for chatting with the brain agent.
 pub struct InputBar {
     /// Current input text.
@@ -14,6 +25,12 @@ pub struct InputBar {
     /// Cursor position as a byte index into `text`.
     cursor: usize,
     status: Option<String>,
+    /// Sorted, non-overlapping protected ranges representing atomic tokens
+    /// (e.g. resource mentions). Always empty in v1 until Task 12 lands.
+    protected_ranges: Vec<ProtectedRange>,
+    /// Capture of the most recent Enter-submit: `(text, ranges, interrupt)`.
+    /// Populated on Enter, consumed via `take_submit_capture()`.
+    submit_capture: Option<(String, Vec<ProtectedRange>, bool)>,
 }
 
 impl InputBar {
@@ -22,6 +39,8 @@ impl InputBar {
             text: String::new(),
             cursor: 0,
             status: None,
+            protected_ranges: Vec::new(),
+            submit_capture: None,
         }
     }
 
@@ -79,6 +98,8 @@ impl InputBar {
                 }
                 let submitted = self.text.clone();
                 let interrupt = submitted.starts_with('!');
+                let ranges = self.protected_ranges.clone();
+                self.submit_capture = Some((submitted.clone(), ranges, interrupt));
                 self.clear();
                 Some((submitted, interrupt))
             }
@@ -101,10 +122,22 @@ impl InputBar {
         self.text.is_empty()
     }
 
-    /// Reset text and cursor.
+    /// Reset text and cursor. Also clears `protected_ranges`. Does not
+    /// reset `submit_capture` — that is consumed via `take_submit_capture`.
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.protected_ranges.clear();
+    }
+
+    /// Sorted, non-overlapping protected ranges. Empty in v1 until Task 12 lands.
+    pub fn protected_ranges(&self) -> &[ProtectedRange] {
+        &self.protected_ranges
+    }
+
+    /// Take and reset the most recent Enter-submit capture.
+    pub fn take_submit_capture(&mut self) -> Option<(String, Vec<ProtectedRange>, bool)> {
+        self.submit_capture.take()
     }
 
     /// Replace `text` and cursor wholesale. Panics if `cursor > text.len()` or

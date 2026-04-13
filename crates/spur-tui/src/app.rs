@@ -23,7 +23,7 @@ use crate::views::View;
 pub enum UserInput {
     Message {
         session: SessionId,
-        text: String,
+        blocks: Vec<spur_acp::ContentBlock>,
         interrupt: bool,
     },
     ListSessions,
@@ -333,7 +333,7 @@ impl App {
 
             Action::SendMessage {
                 session,
-                text,
+                blocks,
                 interrupt,
             } => {
                 // Transition to Thinking when sending a message
@@ -341,8 +341,11 @@ impl App {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
+                let preview = crate::commands::submit_router::blocks_preview(&blocks);
+
                 tracing::info!(
-                    text_len = text.len(),
+                    text_len = preview.len(),
+                    block_count = blocks.len(),
                     has_session_detail = self.session_detail.is_some(),
                     view = ?self.current_view,
                     brain_status = ?self.brain_status,
@@ -353,26 +356,36 @@ impl App {
                 // If session_detail doesn't exist yet (first message before
                 // BrainSpawned), buffer it for replay when the view is created.
                 if let Some(ref mut detail) = self.session_detail {
-                    detail.push_user_message(&text);
+                    detail.push_user_message(&preview);
                     tracing::info!(
                         entries = detail.trace_entry_count(),
                         "SendMessage: pushed to session_detail"
                     );
                 } else {
                     tracing::warn!("SendMessage: session_detail is None, buffering");
-                    self.pending_user_messages.push(text.clone());
+                    self.pending_user_messages.push(preview.clone());
                 }
 
                 if let Some(ref tx) = self.user_input_tx {
                     let input = UserInput::Message {
                         session,
-                        text,
+                        blocks,
                         interrupt,
                     };
                     let _ = tx.try_send(input);
                 }
 
                 self.sync_brain_status();
+            }
+
+            Action::KiroExecute { session: _, command, args: _ } => {
+                // Stub handler — real plumbing lands in Task 11.
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.push_system_note(format!(
+                        "\u{27e8}kiro\u{27e9} /{} queued (handler pending)",
+                        command
+                    ));
+                }
             }
 
             Action::RequestSessions => {
