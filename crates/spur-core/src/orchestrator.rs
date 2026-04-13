@@ -525,6 +525,8 @@ impl Orchestrator {
                                             spur_acp::SessionUpdate::ToolCall(_) => "tool_call",
                                             spur_acp::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
                                             spur_acp::SessionUpdate::Plan(_) => "plan",
+                                            spur_acp::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
+                                            spur_acp::SessionUpdate::CurrentModeUpdate(_) => "current_mode_update",
                                             _ => "other",
                                         };
                                         let text_len = match &notification.update {
