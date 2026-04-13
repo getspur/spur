@@ -93,3 +93,17 @@ fn executor_review_requested_carries_attempt_n() {
     assert_eq!(j["body"]["ExecutorReviewRequested"]["attempt_n"], 2);
     let _back: SpurEvent = serde_json::from_value(j).expect("round-trip");
 }
+
+#[test]
+fn executor_review_cancelled_round_trips() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+    let body = SpurEventBody::ExecutorReviewCancelled {
+        id: "exec-1".into(),
+        reason: "brain call cancelled".into(),
+    };
+    let event = SpurEvent::now(body);
+    let j = serde_json::to_string(&event).expect("serialize");
+    let _back: SpurEvent = serde_json::from_str(&j).expect("round-trip");
+    assert!(j.contains("ExecutorReviewCancelled"));
+    assert!(j.contains("brain call cancelled"));
+}
