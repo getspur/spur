@@ -4,6 +4,7 @@ use std::time::Duration;
 fn roundtrip(status: &DelegationStatus) {
     let json = serde_json::to_string(status).expect("serialize");
     let back: DelegationStatus = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(*status, back, "value mismatch after deserialization");
     let json2 = serde_json::to_string(&back).expect("re-serialize");
     assert_eq!(json, json2, "round-trip mismatch");
 }

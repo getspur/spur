@@ -524,23 +524,25 @@ impl View for DashboardView {
                 status,
             } => {
                 let prefix = Self::prefix_for_session(&worker_session.0);
-                let msg = match status {
-                    DelegationStatus::Success => {
-                        "Delegation completed successfully".to_string()
-                    }
-                    DelegationStatus::Failed { error } => {
-                        format!("Delegation failed: {}", error)
-                    }
-                    DelegationStatus::Conflict { files } => {
-                        format!("Delegation conflict in {} files", files.len())
-                    }
-                    DelegationStatus::Timeout => "Delegation timed out".to_string(),
+                let (msg, kind) = match status {
+                    DelegationStatus::Success => (
+                        "Delegation completed successfully".to_string(),
+                        LogEntryKind::Complete,
+                    ),
+                    DelegationStatus::Failed { error } => (
+                        format!("Delegation failed: {}", error),
+                        LogEntryKind::Error,
+                    ),
+                    DelegationStatus::Conflict { files } => (
+                        format!("Delegation conflict in {} files", files.len()),
+                        LogEntryKind::Error,
+                    ),
+                    DelegationStatus::Timeout => (
+                        "Delegation timed out".to_string(),
+                        LogEntryKind::Error,
+                    ),
                     // Temporary fall-through — replaced in Task 11 with variant-specific rendering.
-                    _ => { /* handled in Task 11 */ "Delegation completed".to_string() }
-                };
-                let kind = match status {
-                    DelegationStatus::Success => LogEntryKind::Complete,
-                    _ => LogEntryKind::Error,
+                    _ => ("Delegation completed".to_string(), LogEntryKind::Error),
                 };
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
