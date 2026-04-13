@@ -27,6 +27,18 @@ pub struct SessionDetailView {
     input_bar: InputBar,
     cost: f64,
     started_at: Instant,
+    /// Current session mode id (e.g. "plan", "default"). Populated from
+    /// `SessionUpdate::CurrentModeUpdate`.
+    pub current_mode: Option<String>,
+    /// Commands advertised by the agent. Populated from
+    /// `SessionUpdate::AvailableCommandsUpdate`. Not yet wired to UI.
+    pub available_commands: Vec<String>,
+    /// Tokens currently used in the agent's context window. Populated from
+    /// `SessionUpdate::UsageUpdate`.
+    pub context_used: Option<u64>,
+    /// Total context window size in tokens. Populated from
+    /// `SessionUpdate::UsageUpdate`.
+    pub context_size: Option<u64>,
 }
 
 impl SessionDetailView {
@@ -39,6 +51,10 @@ impl SessionDetailView {
             input_bar: InputBar::new(),
             cost: 0.0,
             started_at: Instant::now(),
+            current_mode: None,
+            available_commands: Vec::new(),
+            context_used: None,
+            context_size: None,
         }
     }
 
@@ -282,6 +298,11 @@ impl View for SessionDetailView {
                 if session.0 != self.session_id.0 {
                     return;
                 }
+                // Read-only mirror of session-scoped state (mode, usage,
+                // available commands). Handled before the trace-rendering
+                // match so we always capture it regardless of whether a
+                // display arm fires below.
+                crate::app::apply_session_update(self, &notification.update);
                 match &notification.update {
                     spur_acp::SessionUpdate::AgentThoughtChunk(chunk) => {
                         if let Some(text) = extract_text(chunk) {
@@ -482,6 +503,9 @@ impl View for SessionDetailView {
             &ViewId::SessionDetail(self.session_id.clone()),
             self.cost,
             &elapsed,
+            self.current_mode.as_deref(),
+            self.context_used,
+            self.context_size,
         );
     }
 }
