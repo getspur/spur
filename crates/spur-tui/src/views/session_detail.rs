@@ -162,6 +162,27 @@ impl SessionDetailView {
         })
     }
 
+    /// Synchronously flush the current InputBar text to a `SaveDraft` action
+    /// regardless of whether the 500ms debounce has elapsed. Returns `None` if
+    /// the draft is unchanged since the last persist (no-op). Callers must
+    /// apply the returned action **same-tick** at user-intent boundaries
+    /// (opening the picker, quit-confirm proceed, brain respawn with a
+    /// different session id) so metadata reflects the latest on-screen text
+    /// before any code reads it (e.g., the confirm-switch banner decision).
+    pub fn force_save_draft(&mut self) -> Option<Action> {
+        let current = self.input_bar.text().to_string();
+        if current == self.last_persisted_draft {
+            self.last_draft_change_at = None;
+            return None;
+        }
+        self.last_persisted_draft = current.clone();
+        self.last_draft_change_at = None;
+        Some(Action::SaveDraft {
+            session_id: self.session_id.0.clone(),
+            draft: current,
+        })
+    }
+
     /// Pre-fill the InputBar with a previously-saved draft. Empty string = no-op.
     /// Also marks the draft as persisted so the next debounce tick doesn't
     /// re-save the same text.

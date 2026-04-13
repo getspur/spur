@@ -170,6 +170,9 @@ impl App {
                 if self.quit_confirm_visible {
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                            // Flush any unsent draft to disk before we exit so
+                            // the next `spur watch` restores the latest text.
+                            self.force_flush_active_draft();
                             self.quit_confirm_visible = false;
                             self.should_quit = true;
                         }
@@ -361,6 +364,12 @@ impl App {
                     None => true,
                 };
                 if needs_new {
+                    // Defensive: if we're replacing an existing detail whose
+                    // session id differs (agent-side session change / brain
+                    // respawn), flush its unsent draft first so it's
+                    // recoverable under the old id rather than vanishing with
+                    // the old view.
+                    self.force_flush_active_draft();
                     let mut view = SessionDetailView::new(
                         session.clone(),
                         agent.clone(),
@@ -601,6 +610,11 @@ impl App {
             }
 
             Action::RequestSessions => {
+                // Flush any unsent typing in the active SessionDetail into
+                // metadata *before* the picker reads metadata to decide the
+                // confirm-switch banner. Bypasses the 500ms debounce so text
+                // typed within the debounce window is not lost on switch.
+                self.force_flush_active_draft();
                 // Retain the picker across opens so cursor + filter survive navigation.
                 if self.session_picker.is_none() {
                     self.session_picker = Some(SessionPickerView::new());
@@ -664,14 +678,7 @@ impl App {
             }
 
             Action::SaveDraft { session_id, draft } => {
-                let entry = self.metadata_store.entry_mut(&session_id);
-                if entry.draft != draft {
-                    entry.draft = draft;
-                    if let Err(e) = self.metadata_store.save() {
-                        tracing::warn!(error = %e, "failed to persist draft");
-                    }
-                }
-                // Don't set self.dirty — this is a disk write, no UI change.
+                self.apply_save_draft(session_id, draft);
             }
 
             Action::RefreshSessions => {
@@ -887,6 +894,34 @@ impl App {
     fn clear_pending_permission_trace(&mut self) {
         if let Some(ref mut detail) = self.session_detail {
             detail.resolve_pending_permissions();
+        }
+    }
+
+    /// Persist a draft to metadata. Callable both from the `Action::SaveDraft`
+    /// handler (debounced tick path) and same-tick from exit-session boundaries
+    /// via `force_flush_active_draft`.
+    fn apply_save_draft(&mut self, session_id: String, draft: String) {
+        let entry = self.metadata_store.entry_mut(&session_id);
+        if entry.draft != draft {
+            entry.draft = draft;
+            if let Err(e) = self.metadata_store.save() {
+                tracing::warn!(error = %e, "failed to persist draft");
+            }
+        }
+    }
+
+    /// Synchronously flush the active SessionDetailView's unsent InputBar text
+    /// to metadata, bypassing the 500ms debounce. Call at user-intent "exit
+    /// session" boundaries (opening the picker, quit-confirm proceed, brain
+    /// respawn for a different session id) so metadata reflects the latest
+    /// on-screen text before anything reads it. No-op when no detail is active
+    /// or the draft is unchanged since the last persist.
+    fn force_flush_active_draft(&mut self) {
+        let Some(detail) = self.session_detail.as_mut() else {
+            return;
+        };
+        if let Some(Action::SaveDraft { session_id, draft }) = detail.force_save_draft() {
+            self.apply_save_draft(session_id, draft);
         }
     }
 
