@@ -201,9 +201,13 @@ impl SessionDetailView {
 
     /// Install the graphics `Picker` used to build inline mermaid protocols.
     /// Called by `App` once after view construction. Cheap clone of a small value.
+    /// Also forwards the capability bit into `ReactTrace` so new per-entry
+    /// streams render ```mermaid fences as plain code in text mode.
     #[cfg(feature = "markdown")]
     pub fn set_render_picker(&mut self, picker: Option<ratatui_image::picker::Picker>) {
+        let enabled = picker.is_some();
         self.render_picker = picker;
+        self.react_trace.set_mermaid_enabled(enabled);
     }
 
     /// Drop every cached inline `StatefulProtocol` so they are rebuilt at
@@ -559,7 +563,10 @@ impl SessionDetailView {
         }
 
         #[cfg(feature = "markdown")]
-        if matches!(key.code, KeyCode::Char('v')) && key.modifiers.contains(KeyModifiers::ALT) {
+        if matches!(key.code, KeyCode::Char('v'))
+            && key.modifiers.contains(KeyModifiers::ALT)
+            && self.render_picker.is_some()
+        {
             return Some(Action::NavigateTo(ViewId::MermaidOverlay(self.session_id.clone())));
         }
 
@@ -1009,7 +1016,7 @@ impl View for SessionDetailView {
     fn render(&self, frame: &mut Frame, area: Rect) {
         debug_assert!(
             false,
-            "SessionDetailView::render called via trait \u2014 use render_with_lineage instead"
+            "SessionDetailView::render called via trait \u{2014} use render_with_lineage instead"
         );
         self.render_inner(frame, area, None);
     }
@@ -1306,6 +1313,42 @@ mod invalidate_protocols_tests {
             view.mermaid_registry.get(&MermaidId(1))
         {
             assert!(inline_protocol.borrow().is_none(), "slot should remain None after invalidate");
+        }
+    }
+
+    #[test]
+    fn alt_v_is_inert_when_render_picker_is_none() {
+        use crate::action::Action;
+        use crate::views::session_detail::ViewId;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut view = test_view();
+        view.set_render_picker(None);
+
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        let action = <SessionDetailView as crate::views::View>::handle_key(&mut view, key);
+
+        assert!(
+            !matches!(action, Some(Action::NavigateTo(ViewId::MermaidOverlay(_)))),
+            "Alt-v must not navigate to mermaid overlay when picker is None, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn alt_v_opens_overlay_when_render_picker_is_some() {
+        use crate::action::Action;
+        use crate::views::session_detail::ViewId;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut view = test_view();
+        view.set_render_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        let action = <SessionDetailView as crate::views::View>::handle_key(&mut view, key);
+
+        match action {
+            Some(Action::NavigateTo(ViewId::MermaidOverlay(_))) => {}
+            other => panic!("expected NavigateTo(MermaidOverlay), got {other:?}"),
         }
     }
 }
