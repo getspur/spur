@@ -205,10 +205,12 @@ CREATE TABLE IF NOT EXISTS observations (
 CREATE TABLE IF NOT EXISTS entities (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
-    entity_type   TEXT NOT NULL,
+    entity_type   TEXT NOT NULL,  -- concept, file, function, agent, etc.
     properties    TEXT,           -- JSON for extensible metadata
     first_seen_at TEXT NOT NULL,
     last_seen_at  TEXT NOT NULL,
+    valid_at      TEXT,           -- temporal validity: when this fact became true
+    invalid_at    TEXT,           -- temporal validity: when this fact was superseded (NULL = current)
     mention_count INTEGER NOT NULL DEFAULT 1
 );
 
@@ -219,7 +221,9 @@ CREATE TABLE IF NOT EXISTS relationships (
     rel_type      TEXT NOT NULL,
     weight        REAL NOT NULL DEFAULT 1.0,
     session_id    TEXT,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    valid_at      TEXT,           -- temporal validity window
+    invalid_at    TEXT
 );
 
 -- DuckPGQ property graph (view over tables, zero data duplication)
@@ -233,6 +237,18 @@ CREATE PROPERTY GRAPH knowledge_graph
     );
 ```
 
+**Entity resolution** (informed by Graphiti/Mem0 patterns): On entity write, resolve against existing entities before inserting:
+1. Exact name match → update existing entity (bump mention_count, update last_seen_at)
+2. Case-insensitive match → merge with existing
+3. Phase 3 upgrade: embedding-based resolution for semantic deduplication ("JWT" = "JSON Web Token")
+
+**Temporal validity** (informed by Zep architecture): Entities and relationships have `valid_at`/`invalid_at` windows. When a fact changes (e.g., "auth uses JWT" → "auth uses OAuth"), the old entity is invalidated (not deleted), preserving history. Enables "what was true at time T" queries.
+
+**Graph analytics** (from DuckPGQ): Built-in functions available on the property graph:
+- `pagerank(knowledge_graph, entities, relationships)` — identify most important entities
+- `weakly_connected_component(...)` — find clusters of related concepts
+- `local_clustering_coefficient(...)` — measure entity interconnectedness
+
 ### Phase 3 Storage (Vector Embeddings)
 
 Lance datasets managed by the `lancedb` Rust crate, queryable via DuckDB's Lance extension:
@@ -242,6 +258,32 @@ Lance datasets managed by the `lancedb` Rust crate, queryable via DuckDB's Lance
 | `decision_embeddings.lance` | decision.id | model-dependent | Embedding of action + reasoning |
 | `observation_embeddings.lance` | observation.id | model-dependent | Embedding of content |
 | `entity_embeddings.lance` | entity.id | model-dependent | Embedding of entity name + context |
+
+**Async/sync design note**: LanceDB's Rust crate is async (`connect().execute().await`), while DuckDB is sync. Phase 3 adds *separate* async methods for vector operations alongside existing sync methods — no breaking changes to Phase 1-2 API. The orchestrator (which is async/tokio) can `.await` vector operations directly.
+
+**Hybrid Graph RAG** (informed by GraphDuck pattern): Phase 3's unified query combines vector similarity + graph traversal using Reciprocal Rank Fusion (RRF) in a single SQL expression:
+
+```sql
+WITH vector_hits AS (
+    SELECT id, action, reasoning, score
+    FROM lance_vector_search('decision_embeddings.lance', ?embedding, 20)
+),
+graph_context AS (
+    FROM GRAPH_TABLE(knowledge_graph
+        MATCH (src:entities)-[r:relationships]->{1,2}(dst:entities)
+        WHERE src.name IN (SELECT keyword FROM extracted_keywords)
+        COLUMNS (dst.name AS entity, dst.entity_type, r.rel_type, r.weight)
+    )
+),
+ranked AS (
+    SELECT v.id, v.action,
+           1.0 / (60.0 + v.vector_rank) + 1.0 / (60.0 + g.graph_rank) AS rrf_score
+    FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC) AS vector_rank FROM vector_hits) v
+    LEFT JOIN (SELECT *, ROW_NUMBER() OVER (ORDER BY weight DESC) AS graph_rank FROM graph_context) g
+    ON v.action ILIKE '%' || g.entity || '%'
+)
+SELECT * FROM ranked ORDER BY rrf_score DESC LIMIT 10;
+```
 
 ## API Surface
 
@@ -488,3 +530,19 @@ SELECT * FROM similar s LEFT JOIN related r ON r.decision_id = s.id;
 | DuckDB single-writer constraint | None | Orchestrator is naturally the single writer; workers report via ACP |
 | Unbounded knowledge graph growth | None | ~18M entities/year at aggressive usage; DuckDB handles 100M+ trivially |
 | Build complexity (C dependency) | Low | `bundled` feature compiles from source; same pattern as rusqlite |
+| LanceDB async vs DuckDB sync | Low | Separate async methods for vector ops in Phase 3; no breaking changes |
+
+## Industry References
+
+Designs and patterns that informed this spec:
+
+| Reference | What We Took | Link |
+|-----------|-------------|------|
+| **Graphiti/Zep** — Temporal Knowledge Graph for Agent Memory | Three-tier episode→entity→community architecture; temporal fact validity (valid_at/invalid_at); entity resolution on write | [github.com/getzep/graphiti](https://github.com/getzep/graphiti), [arxiv.org/abs/2501.13956](https://arxiv.org/abs/2501.13956) |
+| **Mem0** — Graph Memory for AI Agents | Parallel vector+graph writes; entity extraction pipeline; dual-store architecture validation | [docs.mem0.ai/open-source/features/graph-memory](https://docs.mem0.ai/open-source/features/graph-memory) |
+| **MCP DuckDB Knowledge Graph Memory Server** | DuckDB-native entity/observation/relation schema; MCP tool exposure pattern | [github.com/IzumiSy/mcp-duckdb-memory-server](https://github.com/IzumiSy/mcp-duckdb-memory-server) |
+| **GraphDuck** — DuckDB for Embedded AI Agents and Graphs | Episodic/semantic/procedural memory ontology; Hybrid Graph RAG with RRF; graph modeling in pure SQL | [leanpub.com/graphduck](https://leanpub.com/graphduck) |
+| **MotherDuck Blog** — Structured Memory Management for AI Agents | DuckDB table design for agent memory; separate tables with retention policies | [motherduck.com/blog/streamlining-ai-agents-duckdb-rag-solutions](https://motherduck.com/blog/streamlining-ai-agents-duckdb-rag-solutions/) |
+| **DuckPGQ** — SQL/PGQ for DuckDB | Property graph syntax; graph analytics (PageRank, clustering, connected components) | [duckpgq.org](https://duckpgq.org/) |
+| **LanceDB Rust Crate** — Native Rust Vector Search | Arrow-based schema, async API patterns, auto-indexing | [docs.rs/lancedb](https://docs.rs/lancedb/latest/lancedb/) |
+| **DuckDB Rust Client** — duckdb-rs | Connection API, extension loading via SQL, query_map patterns | [duckdb.org/docs/current/clients/rust](https://duckdb.org/docs/current/clients/rust) |
