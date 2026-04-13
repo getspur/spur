@@ -132,22 +132,34 @@ pub(crate) fn compute_inline_height_rows(
     raw.clamp(6, 20) as u16
 }
 
-/// Build the `(MermaidId -> row height)` map consumed by
-/// `build_virtual_rows_with_heights`. Only `Ready` states produce entries;
-/// Pending / Rendering / Error states are omitted so the virtual-row
-/// flattener falls back to the single-row placeholder.
+/// Per-fence render state consumed by `build_virtual_rows`. Encodes the
+/// Pending / Error / Ready distinction so the virtual-row flattener can
+/// emit the right placeholder without access to the full registry.
 #[cfg(feature = "markdown")]
-fn compute_heights(
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FenceRender {
+    Pending,
+    Error,
+    Ready(u16),
+}
+
+#[cfg(feature = "markdown")]
+fn compute_fence_states(
     ctx: &RenderContext<'_>,
-) -> std::collections::HashMap<crate::components::mermaid::MermaidId, u16> {
+) -> std::collections::HashMap<crate::components::mermaid::MermaidId, FenceRender> {
     use crate::components::mermaid::MermaidState;
-    let mut heights = std::collections::HashMap::new();
+    let mut out = std::collections::HashMap::new();
     for (id, state) in ctx.mermaid_registry.iter() {
-        if let MermaidState::Ready { image, .. } = state {
-            heights.insert(*id, compute_inline_height_rows(image.as_ref(), ctx.picker));
-        }
+        let r = match state {
+            MermaidState::Ready { image, .. } => {
+                FenceRender::Ready(compute_inline_height_rows(image.as_ref(), ctx.picker))
+            }
+            MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
+            MermaidState::Error { .. } => FenceRender::Error,
+        };
+        out.insert(*id, r);
     }
-    heights
+    out
 }
 
 /// Render the inline image for a `Ready` diagram into `rect`. Returns true
@@ -753,16 +765,16 @@ impl ReactTrace {
     /// Items-aware virtual row builder. Walks entries directly, and for
     /// `AgentMessage` entries iterates the markdown stream's items so
     /// `StreamItem::Fence(id)` can be expanded into N `ImageRow` entries
-    /// when `heights[id] > 0`, or fall back to a single Text placeholder
-    /// row otherwise.
+    /// when the fence is `Ready(h)`, or fall back to a state-aware single-row
+    /// placeholder (⏳ Pending, ⚠ Error, 📊 default) otherwise.
     ///
     /// Duplicates some entry-kind rendering logic with `build_display_lines`;
-    /// Task 6 consolidates.
+    /// future work can consolidate.
     #[cfg(feature = "markdown")]
     pub(crate) fn build_virtual_rows_with_heights(
         &self,
         effective_width: u16,
-        heights: &std::collections::HashMap<crate::components::mermaid::MermaidId, u16>,
+        states: &std::collections::HashMap<crate::components::mermaid::MermaidId, FenceRender>,
     ) -> Vec<VirtualRow> {
         use crate::components::markdown_stream::StreamItem;
 
@@ -855,27 +867,37 @@ impl ReactTrace {
                                         }
                                     }
                                     StreamItem::Fence(id) => {
-                                        let h = heights.get(id).copied().unwrap_or(0);
-                                        if h > 0 {
-                                            for r in 0..h {
-                                                rows.push(VirtualRow::ImageRow {
-                                                    id: *id,
-                                                    row_within: r,
-                                                    total_rows: h,
-                                                });
+                                        match states.get(id).copied() {
+                                            Some(FenceRender::Ready(h)) if h > 0 => {
+                                                for r in 0..h {
+                                                    rows.push(VirtualRow::ImageRow {
+                                                        id: *id,
+                                                        row_within: r,
+                                                        total_rows: h,
+                                                    });
+                                                }
                                             }
-                                        } else {
-                                            let placeholder = format!(
-                                                "   [📊 mermaid #{} · press Alt-v to view]",
-                                                id.0
-                                            );
-                                            let line = Line::from(Span::styled(
-                                                placeholder,
-                                                Style::default()
-                                                    .fg(Color::Magenta)
-                                                    .add_modifier(Modifier::BOLD),
-                                            ));
-                                            push_wrapped(&mut rows, line);
+                                            Some(FenceRender::Error) => {
+                                                let line = Line::from(Span::styled(
+                                                    format!("   [⚠ mermaid #{} error · Alt-v to view]", id.0),
+                                                    Style::default()
+                                                        .fg(Color::Yellow)
+                                                        .add_modifier(Modifier::BOLD),
+                                                ));
+                                                push_wrapped(&mut rows, line);
+                                            }
+                                            // Pending, Rendering (not dispatched yet),
+                                            // or an unknown/zero-height Ready all render
+                                            // as the ⏳ placeholder.
+                                            _ => {
+                                                let line = Line::from(Span::styled(
+                                                    format!("   [⏳ mermaid #{} rendering…]", id.0),
+                                                    Style::default()
+                                                        .fg(Color::DarkGray)
+                                                        .add_modifier(Modifier::DIM),
+                                                ));
+                                                push_wrapped(&mut rows, line);
+                                            }
                                         }
                                     }
                                 }
@@ -1203,8 +1225,8 @@ impl ReactTrace {
         let visible_height = inner.height as usize;
 
         // Build heights map from registry (Ready states only).
-        let heights = compute_heights(ctx);
-        let rows = self.build_virtual_rows_with_heights(effective_width, &heights);
+        let states = compute_fence_states(ctx);
+        let rows = self.build_virtual_rows_with_heights(effective_width, &states);
 
         let total = rows.len();
         self.last_total_lines.set(total);
@@ -1303,9 +1325,9 @@ impl ReactTrace {
         effective_width: u16,
         visible_height: usize,
         offset: usize,
-        heights: &std::collections::HashMap<crate::components::mermaid::MermaidId, u16>,
+        states: &std::collections::HashMap<crate::components::mermaid::MermaidId, FenceRender>,
     ) -> Vec<Segment> {
-        let rows = self.build_virtual_rows_with_heights(effective_width, heights);
+        let rows = self.build_virtual_rows_with_heights(effective_width, states);
         let end = (offset + visible_height).min(rows.len());
         segment_visible_rows(&rows, offset, end)
     }
@@ -1510,10 +1532,11 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         use std::collections::HashMap;
-        let mut heights: HashMap<crate::components::mermaid::MermaidId, u16> = HashMap::new();
-        heights.insert(crate::components::mermaid::MermaidId(0), 12);
+        let mut states: HashMap<crate::components::mermaid::MermaidId, FenceRender> =
+            HashMap::new();
+        states.insert(crate::components::mermaid::MermaidId(0), FenceRender::Ready(12));
 
-        let rows = trace.build_virtual_rows_with_heights(60, &heights);
+        let rows = trace.build_virtual_rows_with_heights(60, &states);
 
         let image_rows: Vec<_> = rows
             .iter()
@@ -1564,10 +1587,10 @@ mod virtual_row_tests {
         use crate::components::markdown_stream::StateLookup;
         let _ = trace.force_flush_all(&StateLookup::empty());
 
-        let mut heights = std::collections::HashMap::new();
-        heights.insert(crate::components::mermaid::MermaidId(0), 8u16);
+        let mut states = std::collections::HashMap::new();
+        states.insert(crate::components::mermaid::MermaidId(0), FenceRender::Ready(8));
 
-        let segments = trace.render_plan_for_test(80, 40, 0, &heights);
+        let segments = trace.render_plan_for_test(80, 40, 0, &states);
 
         let image_segs: Vec<_> = segments
             .iter()
@@ -1598,13 +1621,13 @@ mod virtual_row_tests {
         use crate::components::markdown_stream::StateLookup;
         let _ = trace.force_flush_all(&StateLookup::empty());
 
-        let mut heights = std::collections::HashMap::new();
-        heights.insert(crate::components::mermaid::MermaidId(0), 10u16);
+        let mut states = std::collections::HashMap::new();
+        states.insert(crate::components::mermaid::MermaidId(0), FenceRender::Ready(10));
 
         // Iterate offsets; some must produce a partial image (run_len < total).
         let mut saw_partial = false;
         for offset in 0..20 {
-            let segs = trace.render_plan_for_test(80, 6, offset, &heights);
+            let segs = trace.render_plan_for_test(80, 6, offset, &states);
             if segs.iter().any(|s| matches!(
                 s,
                 Segment::Image { total_rows, run_len, .. } if run_len < total_rows
