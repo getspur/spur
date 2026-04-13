@@ -12,7 +12,7 @@ impl HelpOverlay {
     pub fn render(frame: &mut Frame, area: Rect) {
         // Center a 66x30 popup to accommodate the expanded key listing.
         let width = 66u16.min(area.width.saturating_sub(4));
-        let height = 30u16.min(area.height.saturating_sub(4));
+        let height = 34u16.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(width)) / 2;
         let y = (area.height.saturating_sub(height)) / 2;
         let popup_area = Rect::new(x, y, width, height);
@@ -65,6 +65,17 @@ impl HelpOverlay {
             Line::from("  ! + Enter          Interrupt & send"),
             Line::from("  Esc                Back to Dashboard"),
             Line::from("  y / n / a          Permission: yes/no/always"),
+            Line::from("  Alt-m              Toggle plan mode"),
+            Line::from("  Alt-v              Open mermaid diagram viewer"),
+            Line::from(""),
+            Line::from(Span::styled(
+                " Mermaid Viewer (overlay)",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  [ / ]              Cycle diagrams"),
+            Line::from("  q / Esc            Close overlay"),
             Line::from(""),
             Line::from(Span::styled(
                 " Press ? or Esc to close",
