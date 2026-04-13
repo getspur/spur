@@ -59,12 +59,12 @@ pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
     //   cur_start          — index into `flat` where current output line begins
     //   i                  — current cursor
     //   cur_width          — display width of flat[cur_start..i]
-    //   break_end_exclusive, break_continuation_start — if set, the most
-    //     recent whitespace run since cur_start. Emit up to break_end
-    //     (dropping trailing whitespace) and continue from break_continuation.
+    //   break_end_exclusive   — set to Some(i) on is_ws && !in_ws (entering
+    //     whitespace); the exclusive upper bound for the line being emitted.
+    //   break_continuation_start — set to Some(i) on !is_ws && in_ws (exiting
+    //     whitespace); where the next line begins after the break.
+    //   Both are cleared to None after each break or reset.
     //   in_ws              — are we currently in a whitespace run?
-    //   ws_run_pre_start   — index just before the current whitespace run
-    //     started, used to set break_end_exclusive on ws→non-ws transition.
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut cur_start: usize = 0;
     let mut i: usize = 0;
@@ -72,7 +72,6 @@ pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
     let mut break_end_exclusive: Option<usize> = None;
     let mut break_continuation_start: Option<usize> = None;
     let mut in_ws: bool = false;
-    let mut ws_run_pre_start: usize = 0;
 
     while i < flat.len() {
         let (_, c) = flat[i];
@@ -81,12 +80,17 @@ pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
 
         // Detect whitespace-run transitions BEFORE committing `c`.
         if is_ws && !in_ws {
-            ws_run_pre_start = i;
+            // Entering whitespace — the word boundary is right here at i.
+            // Record break_end_exclusive eagerly so that any overflow that
+            // fires during this whitespace run uses the correct boundary,
+            // not a stale value from a prior run.
+            break_end_exclusive = Some(i);
+            // Continuation will be determined when the run ends; clear it so
+            // a mid-run overflow falls through to char-break (correct).
+            break_continuation_start = None;
             in_ws = true;
         } else if !is_ws && in_ws {
-            // Ended the whitespace run at `i` — record the break points:
-            // emit line up through ws_run_pre_start (exclusive), continue from i.
-            break_end_exclusive = Some(ws_run_pre_start);
+            // Ending whitespace — the continuation starts here at i.
             break_continuation_start = Some(i);
             in_ws = false;
         }
@@ -96,6 +100,11 @@ pub fn wrap_line_to_width(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
             // Must break.
             let (emit_end, next_start) = match (break_end_exclusive, break_continuation_start) {
                 (Some(end), Some(cont)) if end > cur_start && cont > cur_start => (end, cont),
+                // Overflow fired mid-whitespace-run: break_end_exclusive is set
+                // (the word boundary just entered) but break_continuation_start
+                // is not yet set (the run hasn't ended). Emit up to break_end
+                // and let the skip loop consume the remaining whitespace.
+                (Some(end), None) if end > cur_start => (end, end),
                 _ => {
                     // No usable word break since `cur_start`. Char-break fallback.
                     (i, i)
@@ -267,19 +276,32 @@ mod tests {
         for part in &out {
             assert!(w(part) <= 7);
         }
-        let first_spans = &out[0].spans;
-        assert_eq!(first_spans[0].content, "red_");
-        assert_eq!(first_spans[0].style, red);
-        let mut found_blue = false;
+        // Collect every output character with its style, then verify that
+        // characters originally in the red span carry Red style and
+        // characters originally in the blue span carry Blue style.
+        let mut red_chars_found = String::new();
+        let mut blue_chars_found = String::new();
         for part in &out {
             for span in &part.spans {
-                if span.content.chars().any(|c| c == 'b' || c == 'w' || c == 'h') {
-                    assert_eq!(span.style, blue);
-                    found_blue = true;
+                for c in span.content.chars() {
+                    if span.style == red {
+                        red_chars_found.push(c);
+                    } else if span.style == blue {
+                        blue_chars_found.push(c);
+                    } else {
+                        panic!("unexpected style {:?} on char {:?}", span.style, c);
+                    }
                 }
             }
         }
-        assert!(found_blue);
+        // All four chars of "red_" must appear with Red style.
+        assert_eq!(red_chars_found, "red_");
+        // All non-whitespace chars of "blue words here" must appear with
+        // Blue style. Whitespace at break points is intentionally dropped,
+        // so we check non-whitespace parity.
+        let expected_blue: String = "blue words here".chars().filter(|c| !c.is_whitespace()).collect();
+        let actual_blue: String = blue_chars_found.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(actual_blue, expected_blue);
     }
 
     #[test]
@@ -340,5 +362,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn overflow_inside_whitespace_run_uses_current_run_not_prior() {
+        // "aaa bbb ccc" (11 cols) at width=9 should break at the space between
+        // "bbb" and "ccc", yielding ["aaa bbb", "ccc"] (2 rows).
+        //
+        // Bug: the second space char (position 7) triggers overflow while the
+        // state machine is still inside the whitespace run. break_end_exclusive
+        // is stale from the "aaa"/"bbb" boundary, so it emits "aaa" and
+        // continues with "bbb ccc" → 2 rows still but wrong break. Also, for
+        // "aaa bbb  ccc" (12 cols, two spaces) at width=8, the same bug forces
+        // 3 rows rather than 2.
+        let line = Line::from("aaa bbb ccc".to_string());
+        let out = wrap_line_to_width(&line, 9);
+        assert_eq!(out.len(), 2, "expected 2 rows at width=9");
+        assert_eq!(out[0].to_string(), "aaa bbb");
+        assert_eq!(out[1].to_string(), "ccc");
+
+        // Double-space variant:
+        let line2 = Line::from("aaa bbb  ccc".to_string());
+        let out2 = wrap_line_to_width(&line2, 8);
+        assert_eq!(out2.len(), 2, "expected 2 rows at width=8");
+        assert_eq!(out2[0].to_string(), "aaa bbb");
+        assert_eq!(out2[1].to_string(), "ccc");
     }
 }
