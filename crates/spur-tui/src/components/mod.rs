@@ -12,6 +12,7 @@ pub mod mermaid;
 #[cfg(feature = "markdown")]
 pub mod markdown_stream;
 pub mod react_trace;
+pub mod resume_banner;
 pub mod review_card;
 pub mod session_preview;
 pub mod status_bar;
