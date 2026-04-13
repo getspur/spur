@@ -18,7 +18,17 @@ pub enum TraceKind {
     AgentMessage { agent: String },
     Act { tool: String, args: String },
     Observe,
-    Delegate { agent: String, task: String, status: String },
+    Delegate {
+        agent: String,
+        task: String,
+        status: String,
+        /// UUID from spur-mcp; matches the brain's delegate_to_worker call.
+        /// Some once `DelegationRequested` is consumed.
+        request_id: Option<String>,
+        /// The spawned executor; Some after `DelegationDispatched` arrives.
+        /// Used by render path to embed an inline executor card.
+        executor_id: Option<String>,
+    },
     UserMessage,
     Permission { description: String, pending: bool, countdown: u8 },
 }
@@ -511,7 +521,7 @@ impl ReactTrace {
     /// before wrapping. Shared between `render` and `build_virtual_rows`.
     ///
     /// All returned lines have `'static` content.
-    fn build_display_lines(&self, spinner_frame: &str) -> Vec<Line<'static>> {
+    fn build_display_lines(&self, spinner_frame: &str, lineage: Option<&spur_core::lineage::projection::ExecutorLineage>) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         for entry in &self.entries {
@@ -660,7 +670,7 @@ impl ReactTrace {
                     }
                 }
 
-                TraceKind::Delegate { agent, task, status } => {
+                TraceKind::Delegate { agent, task, status, request_id: _, executor_id } => {
                     // Header line: timestamp + "→ DELEGATE to {agent}"
                     lines.push(Line::from(vec![
                         ts_span.clone(),
@@ -693,6 +703,18 @@ impl ReactTrace {
                             status_text,
                             Style::default().fg(Color::Cyan),
                         )]));
+                    }
+                    // After the bare status lines, embed the live executor card
+                    // if we can correlate to a lineage node.
+                    if let (Some(eid), Some(lin)) = (executor_id.as_ref(), lineage) {
+                        let card_lines = crate::components::inline_executor_card::render_card(
+                            lin,
+                            &spur_core::ExecutorId(eid.clone()),
+                            /* focused = */ false,
+                        );
+                        for line in card_lines {
+                            lines.push(line);
+                        }
                     }
                 }
 
@@ -786,6 +808,7 @@ impl ReactTrace {
             crate::components::mermaid::MermaidId,
             crate::components::mermaid::FenceRender,
         >,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) -> Vec<VirtualRow> {
         use crate::components::markdown_stream::StreamItem;
 
@@ -1009,7 +1032,7 @@ impl ReactTrace {
                     }
                 }
 
-                TraceKind::Delegate { agent, task, status } => {
+                TraceKind::Delegate { agent, task, status, request_id: _, executor_id } => {
                     push_wrapped(
                         &mut rows,
                         Line::from(vec![
@@ -1050,6 +1073,17 @@ impl ReactTrace {
                                 Style::default().fg(Color::Cyan),
                             )]),
                         );
+                    }
+                    // Splice inline executor card if we can correlate to a lineage node.
+                    if let (Some(eid), Some(lin)) = (executor_id.as_ref(), lineage) {
+                        let card_lines = crate::components::inline_executor_card::render_card(
+                            lin,
+                            &spur_core::ExecutorId(eid.clone()),
+                            /* focused = */ false,
+                        );
+                        for line in card_lines {
+                            push_wrapped(&mut rows, line);
+                        }
                     }
                 }
 
@@ -1144,7 +1178,7 @@ impl ReactTrace {
     ///
     /// Non-markdown path. For markdown-enabled sessions, callers should use
     /// `render_with_ctx` which supports inline image segments.
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&self, frame: &mut Frame, area: Rect, lineage: Option<&spur_core::lineage::projection::ExecutorLineage>) {
         let following_indicator = if self.is_following {
             " ▼ following "
         } else {
@@ -1160,7 +1194,7 @@ impl ReactTrace {
         let spinner_frame = SPINNER_FRAMES
             [(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
 
-        let lines = self.build_display_lines(spinner_frame);
+        let lines = self.build_display_lines(spinner_frame, lineage);
 
         // Pre-wrap every built Line to the inner width so the Paragraph
         // renders row-exact and scroll offsets are exact visual rows.
@@ -1215,6 +1249,7 @@ impl ReactTrace {
         frame: &mut Frame,
         area: Rect,
         ctx: &RenderContext<'_>,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) {
         use crate::components::mermaid::MermaidState;
 
@@ -1237,7 +1272,7 @@ impl ReactTrace {
         let visible_height = inner.height as usize;
 
         let states = compute_fence_states(ctx, effective_width);
-        let rows = self.build_virtual_rows(effective_width, &states);
+        let rows = self.build_virtual_rows(effective_width, &states, lineage);
 
         let total = rows.len();
         self.last_total_lines.set(total);
@@ -1319,6 +1354,35 @@ impl ReactTrace {
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Expose the trace entries as a slice for testing and inspection.
+    pub fn entries(&self) -> &[TraceEntry] {
+        &self.entries
+    }
+
+    /// Locate the most recent `Delegate` entry whose `request_id` matches
+    /// the given UUID and attach the `executor_id`. No-op if not found
+    /// (event arrived for an entry not in this trace, or out of order).
+    pub fn attach_executor_id(&mut self, request_id: &str, executor_id: &str) {
+        for entry in self.entries.iter_mut().rev() {
+            if let TraceKind::Delegate {
+                request_id: Some(rid),
+                executor_id: slot @ None,
+                ..
+            } = &mut entry.kind
+            {
+                if rid == request_id {
+                    *slot = Some(executor_id.to_string());
+                    return;
+                }
+            }
+        }
+        tracing::debug!(
+            request_id = %request_id,
+            executor_id = %executor_id,
+            "DelegationDispatched arrived but no matching Delegate entry"
+        );
+    }
 }
 
 impl Default for ReactTrace {
@@ -1341,7 +1405,7 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
     ) -> Vec<Segment> {
-        let rows = self.build_virtual_rows(effective_width, states);
+        let rows = self.build_virtual_rows(effective_width, states, None);
         let end = (offset + visible_height).min(rows.len());
         segment_visible_rows(&rows, offset, end)
     }
@@ -1418,7 +1482,7 @@ impl ReactTrace {
                     }
                 }
 
-                TraceKind::Delegate { agent, task, status } => {
+                TraceKind::Delegate { agent, task, status, request_id: _, executor_id: _ } => {
                     lines.push(format!("{} → DELEGATE to {}", entry.timestamp, agent));
                     if !task.is_empty() {
                         lines.push(format!("   {}", task));
@@ -1526,7 +1590,7 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         let total = trace
-            .build_virtual_rows(60, &std::collections::HashMap::new())
+            .build_virtual_rows(60, &std::collections::HashMap::new(), None)
             .len();
         // Header (1) + 3 body lines + blank separator (1) = 5
         assert_eq!(total, 5, "unexpected virtual row count: {total}");
@@ -1551,7 +1615,7 @@ mod virtual_row_tests {
             HashMap::new();
         states.insert(crate::components::mermaid::MermaidId(0), FenceRender::Ready(12));
 
-        let rows = trace.build_virtual_rows(60, &states);
+        let rows = trace.build_virtual_rows(60, &states, None);
 
         let image_rows: Vec<_> = rows
             .iter()
@@ -1582,7 +1646,7 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         let empty = std::collections::HashMap::new();
-        let rows = trace.build_virtual_rows(60, &empty);
+        let rows = trace.build_virtual_rows(60, &empty, None);
 
         let image_rows = rows
             .iter()

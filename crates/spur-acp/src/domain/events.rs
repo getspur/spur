@@ -36,7 +36,13 @@ pub struct DiffSummary {
 /// Artifact kinds emitted by an executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Artifact {
-    Diff(DiffSummary),
+    Diff {
+        summary: DiffSummary,
+        /// Raw unified-diff text retained for pager display.
+        /// `None` means the emitter didn't have the text available
+        /// (e.g., replay of a pre-Task-14 event, or synthetic artifact).
+        text: Option<String>,
+    },
     PrUrl(String),
     FileList(Vec<PathBuf>),
     Text(String),
@@ -101,7 +107,36 @@ pub enum SpurEventBody {
         method: String,
         params: serde_json::Value,
     },
-    DelegationRequested { from: SessionId, to_agent: String, task: String },
+    DelegationRequested {
+        /// **Currently populated with the worker session**, not the brain session —
+        /// pre-existing limitation: the brain session id is not threaded into
+        /// the orchestrator. To be corrected alongside `DelegationDispatched.from`
+        /// in the follow-up task that wires the brain session through.
+        from: SessionId,
+        to_agent: String,
+        task: String,
+        /// UUID matching the spur-mcp `DelegationRequest.id`. Surfaced so
+        /// the brain conversation can correlate with the spawned executor
+        /// via `DelegationDispatched`.
+        request_id: String,
+    },
+    /// Emitted immediately after the orchestrator spawns an executor
+    /// for a brain delegation. Lets the brain-side session_detail
+    /// view correlate its `DelegationRequested` trace entry with the
+    /// new executor node so an inline executor card can render.
+    DelegationDispatched {
+        /// **Currently populated with the worker session**, not the brain session —
+        /// the brain session is not yet threaded into the orchestrator's delegation
+        /// path. Will become the brain session once the brain-side session id is
+        /// plumbed through `DelegationRequest` (follow-up task; see Task 4+ of the
+        /// close-feedback-loop plan).
+        from: SessionId,
+        /// Matches the `request_id` on `DelegationRequested` /
+        /// `DelegationRequest.id` (UUID).
+        request_id: String,
+        /// The executor node now spawned for this delegation.
+        executor_id: String,
+    },
     DelegationCompleted { worker_session: SessionId, status: DelegationStatus },
     ConflictDetected { files: Vec<PathBuf> },
     RateLimitDetected { agent: String, retry_after: Option<Duration> },

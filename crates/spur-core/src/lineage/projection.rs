@@ -99,6 +99,13 @@ impl ExecutorLineage {
                     phase: LifecycleState::Spawning,
                     attempts: vec![attempt],
                     pending_review: None,
+                    last_event_at: None,
+                    tool_call_count: 0,
+                    latest_tool_call: None,
+                    files_touched_count: 0,
+                    latest_diff_summary: None,
+                    latest_diff_text: None,
+                    last_error: None,
                 };
                 match parent {
                     Some(p) => {
@@ -130,10 +137,15 @@ impl ExecutorLineage {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
                     node.phase = *phase;
+                    node.last_event_at = Some(event.occurred_at);
                     if let Some(status) = terminal_attempt_status(*phase) {
                         if let Some(a) = node.current_attempt_mut() {
                             a.ended_at = Some(event.occurred_at);
                             a.status = status;
+                            // Copy error to top-level for quick render access.
+                            if a.error.is_some() {
+                                node.last_error = a.error.clone();
+                            }
                         }
                     }
                 } else {
@@ -144,8 +156,14 @@ impl ExecutorLineage {
             SpurEventBody::ExecutorArtifact { id, artifact } => {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
+                    node.last_event_at = Some(event.occurred_at);
                     if let Some(a) = node.current_attempt_mut() {
                         a.artifacts.push(artifact.clone());
+                    }
+                    if let spur_acp::Artifact::Diff { summary, text } = artifact {
+                        node.files_touched_count = summary.files_changed;
+                        node.latest_diff_summary = Some(summary.clone());
+                        node.latest_diff_text = text.clone();
                     }
                 } else {
                     self.buffer_orphan(eid, event.clone());
@@ -161,6 +179,7 @@ impl ExecutorLineage {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
                     node.phase = LifecycleState::AwaitingReview;
+                    node.last_event_at = Some(event.occurred_at);
                     node.pending_review = Some(ReviewRequest {
                         kind: kind.clone(),
                         payload: payload.clone(),
@@ -179,6 +198,7 @@ impl ExecutorLineage {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
                     node.pending_review = None;
+                    node.last_event_at = Some(event.occurred_at);
                     // Phase stays `AwaitingReview` until a subsequent
                     // PhaseChanged or RetryStarted moves it. Orchestrator owns
                     // that transition.
@@ -192,6 +212,7 @@ impl ExecutorLineage {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
                     node.pending_review = None;
+                    node.last_event_at = Some(event.occurred_at);
                     self.pending_review_order.retain(|x| x != &eid);
                     tracing::info!(
                         executor_id = %id,
@@ -231,6 +252,7 @@ impl ExecutorLineage {
                     };
                     node.attempts.push(new_attempt);
                     node.phase = LifecycleState::Running;
+                    node.last_event_at = Some(event.occurred_at);
                 } else {
                     self.buffer_orphan(eid, event.clone());
                 }
