@@ -8,7 +8,7 @@ license.workspace = true
 
 [features]
 default = ["markdown"]
-markdown = ["dep:tui-markdown", "dep:ratatui-core", "dep:mermaid-rs-renderer", "dep:image", "dep:ratatui-image", "dep:resvg"]
+markdown = ["dep:tui-markdown", "dep:ratatui-core", "dep:mermaid-rs-renderer", "dep:image", "dep:ratatui-image", "dep:resvg", "dep:pulldown-cmark"]
 
 [dependencies]
 spur-acp = { workspace = true }
@@ -30,6 +30,7 @@ mermaid-rs-renderer = { version = "0.2", default-features = false, features = ["
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 ratatui-image = { version = "10", default-features = false, features = ["tokio", "chafa-dyn"], optional = true }
 resvg = { version = "0.46", optional = true }
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
 agent-client-protocol = { workspace = true }
