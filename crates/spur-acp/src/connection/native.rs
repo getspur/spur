@@ -981,44 +981,43 @@ fn acp_thread_main(
                     // Update cwd to match the loaded session's cwd.
                     *cwd_ref.borrow_mut() = request.cwd.clone();
 
-                    // Create a fresh notification channel for the load_session history stream.
+                    // Install a fresh notification channel before calling
+                    // load_session so historical notifications delivered via
+                    // Client::session_notification land in `tx`. The receiver
+                    // `rx` buffers (unbounded) until we hand it to the caller.
                     let (tx, rx) = mpsc::unbounded_channel::<SessionNotification>();
                     *notification_tx.borrow_mut() = tx;
 
-                    // Send the receiver back immediately.
-                    let _ = reply.send(Ok(rx));
-
-                    // Call load_session — this delivers historical notifications via the
-                    // Client::session_notification callback while it runs.
                     let agent_name_load = agent_name.clone();
                     let session_id_for_probe = request.session_id.clone();
-                    let _load_result = connection.load_session(request).await;
-                    match &_load_result {
+                    let load_result = connection.load_session(request).await;
+
+                    // Swap notification_tx to a dead channel regardless of
+                    // outcome — history streaming is over.
+                    let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
+                    *notification_tx.borrow_mut() = dead_tx;
+
+                    match load_result {
                         Ok(_) => {
                             tracing::debug!(
                                 agent = %agent_name_load,
+                                session = %session_id_for_probe,
                                 "NativeAcpConnection: load_session completed"
                             );
+                            let _ = reply.send(Ok(rx));
                         }
                         Err(e) => {
                             tracing::warn!(
                                 agent = %agent_name_load,
+                                session = %session_id_for_probe,
                                 "NativeAcpConnection: load_session failed: {e}"
                             );
+                            let _ = reply.send(Err(anyhow::anyhow!(
+                                "NativeAcpConnection '{}': load_session failed: {e}",
+                                agent_name_load
+                            )));
                         }
                     }
-
-                    // Signal stream completion.
-                    tracing::debug!(
-                        streaming_probe = true,
-                        site = "B_dead_tx_swap",
-                        which = "load_session_end",
-                        agent = %agent_name_load,
-                        session = %session_id_for_probe,
-                        "notification_tx -> dead_tx (load_session returned)"
-                    );
-                    let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
-                    *notification_tx.borrow_mut() = dead_tx;
                 }
                 AcpCommand::ListSessions { request, reply } => {
                     let result = connection.list_sessions(request).await;
