@@ -15,6 +15,7 @@ use ratatui_image::picker::Picker;
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
 use crate::components::quit_confirm::QuitConfirmDialog;
+use crate::session_metadata::SessionMetadataStore;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
 use crate::views::session_detail::SessionDetailView;
@@ -94,12 +95,18 @@ pub struct App {
     pub(crate) mermaid_tx: tokio::sync::mpsc::UnboundedSender<Action>,
     #[cfg(feature = "markdown")]
     pub(crate) mermaid_viewer: Option<crate::views::mermaid_viewer::MermaidViewerView>,
+    metadata_store: SessionMetadataStore,
 }
 
 impl App {
     pub fn new(user_input_tx: Option<mpsc::Sender<UserInput>>, start_in_picker: bool) -> Self {
+        let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
+        let metadata_store = SessionMetadataStore::load(&metadata_path);
+
         let (current_view, session_picker) = if start_in_picker {
-            (ViewId::SessionPicker, Some(SessionPickerView::new()))
+            let mut picker = SessionPickerView::new();
+            picker.set_metadata(metadata_store.metadata().clone());
+            (ViewId::SessionPicker, Some(picker))
         } else {
             (ViewId::Dashboard, None)
         };
@@ -132,6 +139,7 @@ impl App {
             mermaid_tx,
             #[cfg(feature = "markdown")]
             mermaid_viewer: None,
+            metadata_store,
         };
 
         if start_in_picker {
@@ -503,7 +511,9 @@ impl App {
             }
 
             Action::RequestSessions => {
-                self.session_picker = Some(SessionPickerView::new());
+                let mut picker = SessionPickerView::new();
+                picker.set_metadata(self.metadata_store.metadata().clone());
+                self.session_picker = Some(picker);
                 self.current_view = ViewId::SessionPicker;
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ListSessions);
