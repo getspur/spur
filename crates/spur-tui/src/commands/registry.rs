@@ -96,6 +96,16 @@ fn agent_entry(handle: &str, c: &AvailableCommand) -> CommandEntry {
         Some(AvailableCommandInput::Unstructured(u)) => Some(u.hint.clone()),
         _ => None,
     };
+    let dispatch = if handle == "kiro" {
+        Dispatch::KiroExecute {
+            command: c.name.clone(),
+            args: serde_json::json!({}),
+        }
+    } else {
+        Dispatch::PromptText {
+            normalized: format!("/{}", c.name),
+        }
+    };
     CommandEntry {
         name: c.name.clone(),
         description: c.description.clone(),
@@ -103,8 +113,6 @@ fn agent_entry(handle: &str, c: &AvailableCommand) -> CommandEntry {
         source: CommandSource::Agent {
             handle: handle.to_string(),
         },
-        dispatch: Dispatch::PromptText {
-            normalized: format!("/{}", c.name),
-        },
+        dispatch,
     }
 }

@@ -633,6 +633,34 @@ impl View for SessionDetailView {
                 }
             }
 
+            SpurEventBody::AgentExtNotification { session, method, params } => {
+                if session.0 != self.session_id.0 {
+                    return;
+                }
+                if method == "_kiro.dev/commands/available" {
+                    if let Some(cmds) = params
+                        .get("availableCommands")
+                        .and_then(|v| v.as_array())
+                    {
+                        let parsed: Vec<spur_acp::AvailableCommand> = cmds
+                            .iter()
+                            .filter_map(|c| {
+                                serde_json::from_value::<spur_acp::AvailableCommand>(
+                                    c.clone(),
+                                )
+                                .ok()
+                            })
+                            .collect();
+                        self.command_registry.set_agent_commands("kiro", parsed);
+                    }
+                } else if method == "_spur.dev/kiro/execute/response" {
+                    self.push_system_note(format!(
+                        "\u{27e8}kiro\u{27e9} response: {}",
+                        params
+                    ));
+                }
+            }
+
             // All other event types are not relevant to this session view.
             _ => {}
         }

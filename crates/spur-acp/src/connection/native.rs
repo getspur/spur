@@ -37,8 +37,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::{
     Agent, AuthenticateRequest, AuthenticateResponse, CancelNotification, Client,
-    ClientSideConnection, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest,
+    ClientSideConnection, ExtNotification, ExtRequest, ExtResponse, InitializeRequest,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    McpServer, NewSessionRequest,
     NewSessionResponse, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest,
@@ -51,7 +52,7 @@ use agent_client_protocol::{
     TerminalExitStatus, TerminalId,
 };
 
-use crate::connection::AgentConnection;
+use crate::connection::{AgentConnection, ExtNotificationPayload};
 use crate::types::AgentHealth;
 
 // ─── Commands sent to the dedicated ACP thread ──────────────────────────────
@@ -95,6 +96,10 @@ enum AcpCommand {
         request: AuthenticateRequest,
         reply: oneshot::Sender<anyhow::Result<AuthenticateResponse>>,
     },
+    ExtMethod {
+        request: ExtRequest,
+        reply: oneshot::Sender<anyhow::Result<ExtResponse>>,
+    },
 }
 
 // ─── NativeAcpConnection ────────────────────────────────────────────────────
@@ -122,6 +127,11 @@ pub struct NativeAcpConnection {
     health_status: AgentHealth,
     /// Optional sender for interactive permission requests (forwarded to the TUI).
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
+    /// Receiver for vendor-extension notifications. Filled at construction,
+    /// taken once by the orchestrator via `take_ext_notification_rx`.
+    ext_notification_rx: Option<mpsc::UnboundedReceiver<ExtNotificationPayload>>,
+    /// Paired sender for `ext_notification_rx`, cloned into the ACP thread.
+    ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
 }
 
 /// Compute the path where the ACP subprocess's stderr should be written.
@@ -150,6 +160,7 @@ impl NativeAcpConnection {
         extra_args: Vec<String>,
         permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ) -> Self {
+        let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtNotificationPayload>();
         Self {
             agent_name: agent_name.into(),
             command: command.into(),
@@ -158,6 +169,8 @@ impl NativeAcpConnection {
             thread_handle: None,
             health_status: AgentHealth::Unknown,
             permission_tx,
+            ext_notification_rx: Some(ext_rx),
+            ext_notification_tx: ext_tx,
         }
     }
 }
@@ -186,10 +199,18 @@ impl AgentConnection for NativeAcpConnection {
         // Spawn the dedicated thread that will own the !Send SDK connection.
         let thread_agent_name = agent_name.clone();
         let permission_tx = self.permission_tx.clone();
+        let ext_tx = self.ext_notification_tx.clone();
         let handle = std::thread::Builder::new()
             .name(format!("acp-{}", agent_name))
             .spawn(move || {
-                acp_thread_main(thread_agent_name, command, extra_args, cmd_rx, permission_tx);
+                acp_thread_main(
+                    thread_agent_name,
+                    command,
+                    extra_args,
+                    cmd_rx,
+                    permission_tx,
+                    ext_tx,
+                );
             })
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -518,6 +539,59 @@ impl AgentConnection for NativeAcpConnection {
             )
         })?
     }
+
+    // ─── call_ext ────────────────────────────────────────────────────────
+
+    async fn call_ext(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': not initialized",
+                self.agent_name
+            )
+        })?;
+
+        // The ACP SDK re-prepends `_` when serializing `ExtRequest::method`
+        // to the wire, so strip a single leading `_` here if present.
+        let sdk_method = method.strip_prefix('_').unwrap_or(method).to_string();
+
+        let raw: Box<serde_json::value::RawValue> =
+            serde_json::value::to_raw_value(&params)?;
+        let raw_arc: std::sync::Arc<serde_json::value::RawValue> = raw.into();
+        let request = ExtRequest::new(sdk_method, raw_arc);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx
+            .send(AcpCommand::ExtMethod {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "NativeAcpConnection '{}': ACP thread died",
+                    self.agent_name
+                )
+            })?;
+
+        let response: ExtResponse = reply_rx.await.map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died during ext_method",
+                self.agent_name
+            )
+        })??;
+
+        let value: serde_json::Value = serde_json::from_str(response.0.get())?;
+        Ok(value)
+    }
+
+    fn take_ext_notification_rx(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<ExtNotificationPayload>> {
+        self.ext_notification_rx.take()
+    }
 }
 
 // ─── Dedicated ACP thread ───────────────────────────────────────────────────
@@ -533,6 +607,7 @@ fn acp_thread_main(
     extra_args: Vec<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
+    ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
 ) {
     // Build a single-threaded runtime for this thread.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -661,6 +736,7 @@ fn acp_thread_main(
             cwd: std::rc::Rc::new(std::cell::RefCell::new(PathBuf::from("."))),
             permission_tx,
             terminals: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
+            ext_notification_tx: ext_notification_tx.clone(),
         };
         let cwd_ref = spur_client.cwd.clone();
         let terminals_ref = spur_client.terminals.clone();
@@ -850,6 +926,13 @@ fn acp_thread_main(
                         .map_err(|e| anyhow::anyhow!("NativeAcpConnection '{}': authenticate failed: {e}", agent_name));
                     let _ = reply.send(result);
                 }
+                AcpCommand::ExtMethod { request, reply } => {
+                    let result = connection
+                        .ext_method(request)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("NativeAcpConnection '{}': ext_method failed: {e}", agent_name));
+                    let _ = reply.send(result);
+                }
             }
         }
 
@@ -877,6 +960,10 @@ struct SpurAcpClientDynamic {
     cwd: std::rc::Rc<std::cell::RefCell<PathBuf>>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     terminals: std::rc::Rc<std::cell::RefCell<HashMap<String, TerminalState>>>,
+    /// Sender for vendor-extension notifications. Cloned from the
+    /// `NativeAcpConnection` so the orchestrator can pump them as
+    /// `SpurEventBody::AgentExtNotification`.
+    ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -951,6 +1038,26 @@ impl Client for SpurAcpClientDynamic {
             send_result = send_result_str,
             "ACP session_notification"
         );
+        Ok(())
+    }
+
+    async fn ext_notification(
+        &self,
+        args: ExtNotification,
+    ) -> agent_client_protocol::Result<()> {
+        // The SDK already stripped the leading `_` from the wire method, so
+        // reattach it when reporting upward so consumers see the full
+        // `_foo.dev/...` form.
+        let method = format!("_{}", args.method);
+        let params: serde_json::Value = serde_json::from_str(args.params.get())
+            .unwrap_or(serde_json::Value::Null);
+        tracing::debug!(
+            method = %method,
+            "NativeAcpConnection: ext_notification"
+        );
+        let _ = self
+            .ext_notification_tx
+            .send(ExtNotificationPayload { method, params });
         Ok(())
     }
 

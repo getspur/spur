@@ -70,3 +70,43 @@ fn usage_update_sets_context() {
     assert_eq!(s.context_used, Some(42));
     assert_eq!(s.context_size, Some(200_000));
 }
+
+#[test]
+fn kiro_available_notification_populates_registry() {
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+    use spur_tui::views::View;
+
+    let sid = SessionId("kiro-test-session".to_string());
+    let mut view = spur_tui::views::session_detail::SessionDetailView::new(
+        sid.clone(),
+        "kiro".to_string(),
+        "brain".to_string(),
+    );
+
+    let params = serde_json::json!({
+        "sessionId": sid.0,
+        "availableCommands": [
+            { "name": "context", "description": "manage context" }
+        ]
+    });
+    let ev = SpurEvent::now(SpurEventBody::AgentExtNotification {
+        session: sid,
+        method: "_kiro.dev/commands/available".to_string(),
+        params,
+    });
+    view.handle_spur_event(&ev);
+
+    let entries = view.command_registry().list();
+    assert!(
+        entries.iter().any(|e| e.name == "context"
+            && matches!(
+                &e.source,
+                spur_tui::commands::CommandSource::Agent { handle } if handle == "kiro"
+            )),
+        "context not populated as kiro agent command: {:?}",
+        entries
+            .iter()
+            .map(|e| (e.name.clone(), e.source.clone()))
+            .collect::<Vec<_>>()
+    );
+}

@@ -92,6 +92,15 @@ pub enum SpurEventBody {
     WorkerSpawned { agent: String, session: SessionId, worktree: PathBuf },
     SessionCompleted { session: SessionId, success: bool },
     AgentNotification { session: SessionId, notification: SessionNotification },
+    /// Vendor-extension notification received from the agent side.
+    /// Routing by `method` name is the receiver's responsibility.
+    /// `method` is the wire form (e.g. `"_kiro.dev/commands/available"`),
+    /// with the leading `_` preserved for reader convenience.
+    AgentExtNotification {
+        session: SessionId,
+        method: String,
+        params: serde_json::Value,
+    },
     DelegationRequested { from: SessionId, to_agent: String, task: String },
     DelegationCompleted { worker_session: SessionId, status: DelegationStatus },
     ConflictDetected { files: Vec<PathBuf> },
