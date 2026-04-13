@@ -29,6 +29,8 @@ pub use agent_client_protocol::{
     PermissionOptionKind, RequestPermissionOutcome, SelectedPermissionOutcome,
     SessionInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     AuthenticateRequest, AuthenticateResponse, AuthMethodId,
-    AvailableCommandsUpdate, CurrentModeUpdate, SessionModeId,
+    AvailableCommandsUpdate, AvailableCommand, AvailableCommandInput,
+    UnstructuredCommandInput,
+    CurrentModeUpdate, SessionModeId,
     SetSessionModeRequest, SetSessionModeResponse, UsageUpdate,
 };

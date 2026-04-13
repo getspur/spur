@@ -27,7 +27,36 @@ fn available_commands_update_stores_names() {
     let notif = SessionNotification::new(nid(), update);
     let mut s = spur_tui::test_support::new_session_state();
     spur_tui::test_support::apply_notification(&mut s, &notif);
-    assert_eq!(s.available_commands, vec!["compact".to_string()]);
+    assert_eq!(s.available_commands.len(), 1);
+    assert_eq!(s.available_commands[0].name, "compact");
+}
+
+#[test]
+fn available_commands_update_preserves_hint() {
+    use spur_acp::{
+        AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+        SessionUpdate, UnstructuredCommandInput,
+    };
+
+    let mut view = spur_tui::test_support::new_session_state();
+
+    let cmd = AvailableCommand::new("compact", "compact history").input(
+        AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("[threshold]")),
+    );
+    let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![cmd]));
+
+    spur_tui::app::apply_session_update(&mut view, &update);
+
+    let got = view.available_commands();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].name, "compact");
+    assert_eq!(got[0].description, "compact history");
+    match got[0].input.as_ref() {
+        Some(AvailableCommandInput::Unstructured(u)) => {
+            assert_eq!(u.hint, "[threshold]");
+        }
+        other => panic!("expected Unstructured hint, got {:?}", other),
+    }
 }
 
 #[test]

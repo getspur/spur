@@ -32,7 +32,7 @@ pub struct SessionDetailView {
     pub current_mode: Option<String>,
     /// Commands advertised by the agent. Populated from
     /// `SessionUpdate::AvailableCommandsUpdate`. Not yet wired to UI.
-    pub available_commands: Vec<String>,
+    pub available_commands: Vec<spur_acp::AvailableCommand>,
     /// Tokens currently used in the agent's context window. Populated from
     /// `SessionUpdate::UsageUpdate`.
     pub context_used: Option<u64>,
@@ -70,6 +70,12 @@ impl SessionDetailView {
     /// Number of entries in the trace (for debug logging).
     pub fn trace_entry_count(&self) -> usize {
         self.react_trace.entry_count()
+    }
+
+    /// Commands advertised by the agent via
+    /// `SessionUpdate::AvailableCommandsUpdate`.
+    pub fn available_commands(&self) -> &[spur_acp::AvailableCommand] {
+        &self.available_commands
     }
 
     /// Current local time formatted as HH:MM:SS.
