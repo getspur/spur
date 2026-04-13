@@ -37,10 +37,8 @@ pub struct TraceEntry {
 }
 
 /// A flattened unit of rendered output: one visual row per variant.
-/// Task 3 scope: every row is `Text`. Task 4 will add image-row expansion.
 #[cfg(feature = "markdown")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields consumed by Task 6 (inline render migration).
 pub(crate) enum VirtualRow {
     Text(Line<'static>),
     ImageRow {
@@ -48,6 +46,147 @@ pub(crate) enum VirtualRow {
         row_within: u16,
         total_rows: u16,
     },
+}
+
+/// Borrowed context passed to `render_with_ctx` so the render walker can
+/// consult the mermaid registry and build `StatefulProtocol`s lazily.
+#[cfg(feature = "markdown")]
+pub struct RenderContext<'a> {
+    pub mermaid_registry: &'a std::collections::HashMap<
+        crate::components::mermaid::MermaidId,
+        crate::components::mermaid::MermaidState,
+    >,
+    pub picker: Option<&'a ratatui_image::picker::Picker>,
+}
+
+/// One output batch produced by `segment_visible_rows`. Holds indices into
+/// the virtual-row slice, not Rects — Rect computation happens at render.
+#[cfg(feature = "markdown")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Segment {
+    Text {
+        start: usize,
+        len: usize,
+    },
+    Image {
+        id: crate::components::mermaid::MermaidId,
+        total_rows: u16,
+        first_row_within: u16,
+        run_len: u16,
+    },
+}
+
+/// Group contiguous virtual rows into render batches. Only rows in
+/// `[start_idx, end_idx)` are considered.
+#[cfg(feature = "markdown")]
+pub(crate) fn segment_visible_rows(
+    rows: &[VirtualRow],
+    start_idx: usize,
+    end_idx: usize,
+) -> Vec<Segment> {
+    let mut out: Vec<Segment> = Vec::new();
+    let mut i = start_idx;
+    while i < end_idx {
+        match &rows[i] {
+            VirtualRow::Text(_) => {
+                let start = i;
+                while i < end_idx && matches!(rows[i], VirtualRow::Text(_)) {
+                    i += 1;
+                }
+                out.push(Segment::Text { start, len: i - start });
+            }
+            VirtualRow::ImageRow { id, row_within, total_rows } => {
+                let run_id = *id;
+                let run_total = *total_rows;
+                let first_within = *row_within;
+                let start = i;
+                while i < end_idx {
+                    if let VirtualRow::ImageRow { id: id2, .. } = &rows[i] {
+                        if *id2 == run_id {
+                            i += 1;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                out.push(Segment::Image {
+                    id: run_id,
+                    total_rows: run_total,
+                    first_row_within: first_within,
+                    run_len: (i - start) as u16,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Compute inline pixel-height row count for a diagram image. Clamped to
+/// `[6, 20]` rows. Uses `picker.font_size().1` as cell pixel height; falls
+/// back to 16 px when no picker is available.
+#[cfg(feature = "markdown")]
+pub(crate) fn compute_inline_height_rows(
+    image: &image::DynamicImage,
+    picker: Option<&ratatui_image::picker::Picker>,
+) -> u16 {
+    let cell_h_px = picker
+        .map(|p| p.font_size().1 as u32)
+        .filter(|h| *h > 0)
+        .unwrap_or(16);
+    let raw = image.height().div_ceil(cell_h_px);
+    raw.clamp(6, 20) as u16
+}
+
+/// Build the `(MermaidId -> row height)` map consumed by
+/// `build_virtual_rows_with_heights`. Only `Ready` states produce entries;
+/// Pending / Rendering / Error states are omitted so the virtual-row
+/// flattener falls back to the single-row placeholder.
+#[cfg(feature = "markdown")]
+fn compute_heights(
+    ctx: &RenderContext<'_>,
+) -> std::collections::HashMap<crate::components::mermaid::MermaidId, u16> {
+    use crate::components::mermaid::MermaidState;
+    let mut heights = std::collections::HashMap::new();
+    for (id, state) in ctx.mermaid_registry.iter() {
+        if let MermaidState::Ready { image, .. } = state {
+            heights.insert(*id, compute_inline_height_rows(image, ctx.picker));
+        }
+    }
+    heights
+}
+
+/// Render the inline image for a `Ready` diagram into `rect`. Returns true
+/// if the image widget was rendered; false if the caller should fall back
+/// to a text placeholder.
+#[cfg(feature = "markdown")]
+fn render_inline_image(
+    frame: &mut Frame,
+    rect: Rect,
+    id: crate::components::mermaid::MermaidId,
+    ctx: &RenderContext<'_>,
+) -> bool {
+    use crate::components::mermaid::MermaidState;
+    use ratatui_image::{Resize, StatefulImage};
+
+    let Some(MermaidState::Ready { image, inline_protocol }) =
+        ctx.mermaid_registry.get(&id)
+    else {
+        return false;
+    };
+    let Some(picker) = ctx.picker else {
+        return false;
+    };
+
+    let mut slot = inline_protocol.borrow_mut();
+    if slot.is_none() {
+        *slot = Some(picker.new_resize_protocol(image.clone()));
+    }
+    let Some(proto) = slot.as_mut() else {
+        return false;
+    };
+    let widget = StatefulImage::default().resize(Resize::Fit(None));
+    frame.render_stateful_widget(widget, rect, proto);
+    true
 }
 
 /// Spinner frames for delegation animation.
@@ -981,6 +1120,9 @@ impl ReactTrace {
     }
 
     /// Render the full ReAct trace into the given frame area.
+    ///
+    /// Non-markdown path. For markdown-enabled sessions, callers should use
+    /// `render_with_ctx` which supports inline image segments.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let following_indicator = if self.is_following {
             " ▼ following "
@@ -1040,6 +1182,120 @@ impl ReactTrace {
         }
     }
 
+    /// Render the trace with markdown + inline mermaid support.
+    ///
+    /// Walks virtual rows, batching contiguous text rows into `Paragraph`
+    /// Rects and contiguous `ImageRow` runs per diagram into `StatefulImage`
+    /// Rects. Partial-image runs (scrolled so the diagram is cropped) render
+    /// as a single-row placeholder instead — the v1 graceful-clip policy.
+    #[cfg(feature = "markdown")]
+    pub fn render_with_ctx(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        ctx: &RenderContext<'_>,
+    ) {
+        use crate::components::mermaid::MermaidState;
+
+        let following_indicator = if self.is_following {
+            " ▼ following "
+        } else {
+            ""
+        };
+
+        let block = Block::default()
+            .title(" Session ")
+            .title_bottom(following_indicator)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let effective_width = inner.width;
+        let visible_height = inner.height as usize;
+
+        // Build heights map from registry (Ready states only).
+        let heights = compute_heights(ctx);
+        let rows = self.build_virtual_rows_with_heights(effective_width, &heights);
+
+        let total = rows.len();
+        self.last_total_lines.set(total);
+        self.last_visible_height.set(visible_height);
+
+        let max_offset = total.saturating_sub(visible_height);
+        let offset = if self.is_following {
+            max_offset
+        } else {
+            self.scroll_offset.min(max_offset)
+        };
+
+        let visible_end = (offset + visible_height).min(total);
+        let segments = segment_visible_rows(&rows, offset, visible_end);
+
+        // Walk segments and render into sub-Rects of `inner`.
+        let mut y: u16 = inner.y;
+        for seg in segments {
+            match seg {
+                Segment::Text { start, len } => {
+                    let height = len as u16;
+                    let rect = Rect { x: inner.x, y, width: inner.width, height };
+                    let lines: Vec<Line<'static>> = rows[start..start + len]
+                        .iter()
+                        .map(|r| match r {
+                            VirtualRow::Text(l) => l.clone(),
+                            // Should not happen — segmenter groups by kind.
+                            VirtualRow::ImageRow { .. } => Line::from(""),
+                        })
+                        .collect();
+                    frame.render_widget(Paragraph::new(lines), rect);
+                    y += height;
+                }
+                Segment::Image { id, total_rows, first_row_within, run_len } => {
+                    let rect = Rect { x: inner.x, y, width: inner.width, height: run_len };
+                    let fully_visible =
+                        first_row_within == 0 && run_len == total_rows;
+
+                    let drew_image = if fully_visible {
+                        render_inline_image(frame, rect, id, ctx)
+                    } else {
+                        false
+                    };
+
+                    if !drew_image {
+                        let msg = if !fully_visible {
+                            format!("   [📊 mermaid #{} · scroll to align · Alt-v to zoom]", id.0)
+                        } else if !matches!(
+                            ctx.mermaid_registry.get(&id),
+                            Some(MermaidState::Ready { .. })
+                        ) {
+                            format!("   [📊 mermaid #{} · not ready]", id.0)
+                        } else {
+                            format!("   [📊 mermaid #{} · no graphics protocol]", id.0)
+                        };
+                        let line = Line::from(Span::styled(
+                            msg,
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        frame.render_widget(Paragraph::new(vec![line]), rect);
+                    }
+                    y += run_len;
+                }
+            }
+        }
+
+        // Scrollbar — same math as non-markdown path.
+        if total > visible_height {
+            let mut scrollbar_state = ScrollbarState::new(total)
+                .position(offset)
+                .viewport_content_length(visible_height);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+            frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        }
+    }
+
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -1063,6 +1319,21 @@ impl ReactTrace {
         heights: &std::collections::HashMap<crate::components::mermaid::MermaidId, u16>,
     ) -> Vec<VirtualRow> {
         self.build_virtual_rows_with_heights(effective_width, heights)
+    }
+
+    /// Test helper: compute the render segmentation without a real frame.
+    /// Mirrors what `render_with_ctx` computes internally. Returns the
+    /// segments for the visible slice `[offset, offset + visible_height)`.
+    pub(crate) fn render_plan_for_test(
+        &self,
+        effective_width: u16,
+        visible_height: usize,
+        offset: usize,
+        heights: &std::collections::HashMap<crate::components::mermaid::MermaidId, u16>,
+    ) -> Vec<Segment> {
+        let rows = self.build_virtual_rows_with_heights(effective_width, heights);
+        let end = (offset + visible_height).min(rows.len());
+        segment_visible_rows(&rows, offset, end)
     }
 }
 
@@ -1304,5 +1575,68 @@ mod virtual_row_tests {
             .filter(|r| matches!(r, VirtualRow::ImageRow { .. }))
             .count();
         assert_eq!(image_rows, 0, "should fall back to Text placeholder");
+    }
+
+    #[test]
+    fn render_plan_groups_contiguous_text_and_images() {
+        let mut trace = ReactTrace::new();
+        trace.append_message(
+            "Before text line\n\n```mermaid\ngraph\n```\n\nAfter text line\n",
+            "claude",
+            "10:00".to_string(),
+        );
+        use crate::components::markdown_stream::StateLookup;
+        let _ = trace.force_flush_all(&StateLookup::empty());
+
+        let mut heights = std::collections::HashMap::new();
+        heights.insert(crate::components::mermaid::MermaidId(0), 8u16);
+
+        let segments = trace.render_plan_for_test(80, 40, 0, &heights);
+
+        let image_segs: Vec<_> = segments
+            .iter()
+            .filter(|s| matches!(s, Segment::Image { .. }))
+            .collect();
+        assert_eq!(image_segs.len(), 1, "expected exactly one image segment: {segments:?}");
+        if let Segment::Image { total_rows, first_row_within, run_len, .. } = image_segs[0] {
+            assert_eq!(*total_rows, 8);
+            assert_eq!(*first_row_within, 0);
+            assert_eq!(*run_len, 8);
+        }
+
+        let text_count = segments
+            .iter()
+            .filter(|s| matches!(s, Segment::Text { .. }))
+            .count();
+        assert!(text_count >= 2, "expected >=2 text segments: {segments:?}");
+    }
+
+    #[test]
+    fn render_plan_partial_image_marks_partial_visibility() {
+        let mut trace = ReactTrace::new();
+        trace.append_message(
+            "L1\nL2\nL3\nL4\n\n```mermaid\ngraph\n```\n",
+            "claude",
+            "10:00".to_string(),
+        );
+        use crate::components::markdown_stream::StateLookup;
+        let _ = trace.force_flush_all(&StateLookup::empty());
+
+        let mut heights = std::collections::HashMap::new();
+        heights.insert(crate::components::mermaid::MermaidId(0), 10u16);
+
+        // Iterate offsets; some must produce a partial image (run_len < total).
+        let mut saw_partial = false;
+        for offset in 0..20 {
+            let segs = trace.render_plan_for_test(80, 6, offset, &heights);
+            if segs.iter().any(|s| matches!(
+                s,
+                Segment::Image { total_rows, run_len, .. } if run_len < total_rows
+            )) {
+                saw_partial = true;
+                break;
+            }
+        }
+        assert!(saw_partial, "expected some offset to produce partial image segment");
     }
 }
