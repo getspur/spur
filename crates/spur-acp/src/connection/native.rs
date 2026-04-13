@@ -27,6 +27,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::AsyncReadExt;
 
@@ -132,6 +133,11 @@ pub struct NativeAcpConnection {
     ext_notification_rx: Option<mpsc::UnboundedReceiver<ExtNotificationPayload>>,
     /// Paired sender for `ext_notification_rx`, cloned into the ACP thread.
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    /// Process-group id of the spawned child (equal to its pid because we spawn
+    /// with `process_group(0)`). Populated by the ACP thread after spawn, read
+    /// by the graceful shutdown path and the `Drop` safety net to kill the
+    /// entire descendant tree via `killpg`.
+    child_pgid: Arc<Mutex<Option<i32>>>,
 }
 
 /// Compute the path where the ACP subprocess's stderr should be written.
@@ -171,6 +177,45 @@ impl NativeAcpConnection {
             permission_tx,
             ext_notification_rx: Some(ext_rx),
             ext_notification_tx: ext_tx,
+            child_pgid: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+/// Send `signal` (e.g. `"TERM"`, `"KILL"`) to the process group `pgid` via the
+/// `kill(1)` CLI. Mirrors the existing terminal-cleanup pattern in this file;
+/// keeps us off of a `libc` dependency.
+///
+/// stdout/stderr are redirected to `/dev/null` so benign races (ESRCH on a
+/// already-reaped group, EPERM on a recycled pgid) don't leak to the user's
+/// terminal after TUI teardown.
+fn killpg(pgid: i32, signal: &str) {
+    let _ = std::process::Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(format!("-{pgid}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+impl Drop for NativeAcpConnection {
+    fn drop(&mut self) {
+        // Safety net for panics, runtime teardown, or `tokio::task::abort()`
+        // paths that skipped `shutdown()`. Synchronous SIGKILL of the process
+        // group catches the agent subprocess AND its descendants (claude-
+        // agent-acp spawns `node`, which can spawn further children).
+        //
+        // Skip when `shutdown()` has already run — it takes `cmd_tx`, so a
+        // `None` here means graceful teardown succeeded and the pgid is
+        // already gone. Re-killing a reaped (possibly recycled) pgid is how
+        // we leaked `kill: -NNNN: Operation not permitted` to the terminal.
+        if self.cmd_tx.is_none() {
+            return;
+        }
+        if let Ok(guard) = self.child_pgid.lock() {
+            if let Some(pgid) = *guard {
+                killpg(pgid, "KILL");
+            }
         }
     }
 }
@@ -200,6 +245,7 @@ impl AgentConnection for NativeAcpConnection {
         let thread_agent_name = agent_name.clone();
         let permission_tx = self.permission_tx.clone();
         let ext_tx = self.ext_notification_tx.clone();
+        let child_pgid = self.child_pgid.clone();
         let handle = std::thread::Builder::new()
             .name(format!("acp-{}", agent_name))
             .spawn(move || {
@@ -210,6 +256,7 @@ impl AgentConnection for NativeAcpConnection {
                     cmd_rx,
                     permission_tx,
                     ext_tx,
+                    child_pgid,
                 );
             })
             .map_err(|e| {
@@ -608,6 +655,7 @@ fn acp_thread_main(
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    child_pgid: Arc<Mutex<Option<i32>>>,
 ) {
     // Build a single-threaded runtime for this thread.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -676,12 +724,18 @@ fn acp_thread_main(
             }
         };
 
-        let child_result = tokio::process::Command::new(&command)
-            .args(&extra_args)
+        let mut cmd = tokio::process::Command::new(&command);
+        cmd.args(&extra_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(stderr_cfg)
-            .spawn();
+            .stderr(stderr_cfg);
+        // Put the child (and its descendants, e.g. the `node` tree beneath
+        // `claude-agent-acp`) in its own process group so shutdown can reap
+        // the whole tree with `killpg`. Without this, grandchildren orphan
+        // to init when spur exits.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let child_result = cmd.spawn();
 
         let mut child = match child_result {
             Ok(c) => c,
@@ -694,6 +748,15 @@ fn acp_thread_main(
                 return;
             }
         };
+
+        // Record the pgid (= child pid under `process_group(0)`) so the
+        // `Drop` safety net and the graceful shutdown arm can reach the
+        // entire process group.
+        if let Some(pid) = child.id() {
+            if let Ok(mut guard) = child_pgid.lock() {
+                *guard = Some(pid as i32);
+            }
+        }
 
         let child_stdin = match child.stdin.take() {
             Some(s) => s,
@@ -858,8 +921,59 @@ fn acp_thread_main(
                                 .status();
                         }
                     }
-                    // Kill the child process.
-                    let _ = child.kill().await;
+
+                    // ACP has no explicit shutdown RPC; the protocol's graceful
+                    // exit contract is "close stdin → agent sees EOF → agent
+                    // exits cleanly". Dropping `connection` closes the stdin
+                    // writer (owned by the SDK's `ClientSideConnection`).
+                    drop(connection);
+
+                    // Give the agent a short window to exit on its own. This
+                    // also lets its descendants (e.g. `node` under
+                    // `claude-agent-acp`) shut down gracefully and flush.
+                    let graceful = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        child.wait(),
+                    )
+                    .await;
+
+                    let pgid = child_pgid.lock().ok().and_then(|g| *g);
+
+                    match graceful {
+                        Ok(Ok(status)) => {
+                            tracing::debug!(
+                                agent = %agent_name,
+                                ?status,
+                                "NativeAcpConnection: agent exited gracefully after stdin close"
+                            );
+                            // Belt-and-suspenders: the agent may have orphaned
+                            // descendants that don't watch stdin. Send SIGTERM
+                            // to the group; ESRCH on an already-empty group is
+                            // silenced by `killpg`.
+                            if let Some(pgid) = pgid {
+                                killpg(pgid, "TERM");
+                            }
+                        }
+                        _ => {
+                            tracing::warn!(
+                                agent = %agent_name,
+                                "NativeAcpConnection: agent did not exit within 2s of stdin close; escalating"
+                            );
+                            if let Some(pgid) = pgid {
+                                killpg(pgid, "TERM");
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                killpg(pgid, "KILL");
+                            }
+                            let _ = child.kill().await;
+                        }
+                    }
+
+                    // Mark pgid consumed so `Drop` won't re-kill a reaped or
+                    // recycled group id.
+                    if let Ok(mut guard) = child_pgid.lock() {
+                        *guard = None;
+                    }
+
                     let _ = reply.send(Ok(()));
                     break;
                 }

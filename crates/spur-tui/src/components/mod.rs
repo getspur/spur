@@ -5,6 +5,7 @@ pub mod completion_popup;
 pub mod completion_trigger;
 pub mod help_overlay;
 pub mod input_bar;
+pub mod quit_confirm;
 pub mod line_wrap;
 #[cfg(feature = "markdown")]
 pub mod mermaid;

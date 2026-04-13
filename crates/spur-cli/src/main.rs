@@ -367,7 +367,7 @@ async fn main() -> Result<()> {
             let (user_tx, user_rx) = tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
 
             // Spawn interactive orchestrator with permission channel (moves ownership)
-            let orch_handle = tokio::spawn(async move {
+            let mut orch_handle = tokio::spawn(async move {
                 if let Err(e) = orch.run_interactive(user_rx, brain, Some(perm_tx)).await {
                     tracing::error!(error = %e, "Interactive session error");
                 }
@@ -407,8 +407,22 @@ async fn main() -> Result<()> {
             // Run TUI with permission channel (blocks main task)
             spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), sessions).await?;
 
-            // After TUI exits, abort orchestrator
-            orch_handle.abort();
+            // TUI exited — its `user_input_tx` is dropped, which causes the
+            // wrapper task above to exit, which drops `user_tx`, which causes
+            // `run_interactive`'s `user_input_rx.recv()` to return `None` and
+            // the orchestrator's cleanup path (`connection.shutdown()` →
+            // `killpg` on the agent's pgid) to run.
+            //
+            // Wait up to 5s for that graceful chain to finish; if it doesn't,
+            // abort the task — `Drop for NativeAcpConnection` will still
+            // SIGKILL the process group, preventing zombie descendants.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut orch_handle).await {
+                Ok(_) => tracing::info!("orchestrator shut down gracefully"),
+                Err(_) => {
+                    tracing::warn!("orchestrator shutdown timed out after 5s; aborting");
+                    orch_handle.abort();
+                }
+            }
             Ok(())
         }
     }
