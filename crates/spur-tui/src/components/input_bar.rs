@@ -91,6 +91,11 @@ impl InputBar {
         &self.text
     }
 
+    /// Current cursor byte offset in `text`.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     /// Whether the input buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
@@ -100,6 +105,15 @@ impl InputBar {
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+    }
+
+    /// Replace `text` and cursor wholesale. Panics if `cursor > text.len()` or
+    /// the cursor is not on a UTF-8 char boundary.
+    pub fn set_text(&mut self, text: String, cursor: usize) {
+        assert!(cursor <= text.len(), "cursor past end");
+        assert!(text.is_char_boundary(cursor), "cursor off UTF-8 boundary");
+        self.text = text;
+        self.cursor = cursor;
     }
 
     /// Set the status label shown before the prompt (e.g. "[kiro: ready]").
