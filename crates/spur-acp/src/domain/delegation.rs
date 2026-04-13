@@ -7,7 +7,7 @@ use std::time::Duration;
 /// `Rejected` is reserved for human-issued rejections arriving via the
 /// review gate. System-applied timeouts use `TimedOut` so the brain can
 /// distinguish actionable feedback from "nobody reviewed in time."
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum DelegationStatus {
     // Pre-existing worker-level variants.
@@ -57,6 +57,11 @@ pub struct DelegationResult {
     pub estimated_cost_usd: f64,
 }
 
+/// Serializes `Duration` as whole seconds (`u64`).
+///
+/// Sub-second precision is intentionally discarded — `waited_for` is
+/// derived from `review_timeout`, a config value in whole seconds. Do
+/// not use this module for durations where sub-second precision matters.
 mod duration_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
