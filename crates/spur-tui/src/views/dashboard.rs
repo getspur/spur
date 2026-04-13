@@ -583,6 +583,7 @@ impl View for DashboardView {
                 from: _,
                 to_agent,
                 task,
+                request_id: _,
             } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
