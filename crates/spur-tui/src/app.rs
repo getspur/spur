@@ -14,6 +14,7 @@ use ratatui_image::picker::Picker;
 
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
+use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
 use crate::views::session_detail::SessionDetailView;
@@ -69,6 +70,9 @@ pub struct App {
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
     help_visible: bool,
+    /// Shown when the user requests quit while a brain is attached. While
+    /// visible, all input is captured by the dialog.
+    quit_confirm_visible: bool,
     should_quit: bool,
     dirty: bool,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
@@ -108,6 +112,7 @@ impl App {
             session_detail: None,
             session_picker,
             help_visible: false,
+            quit_confirm_visible: false,
             should_quit: false,
             dirty: true, // initial render
             user_input_tx,
@@ -139,6 +144,22 @@ impl App {
     pub fn handle_crossterm_event(&mut self, event: Event) {
         match event {
             Event::Key(key) => {
+                // Quit-confirm dialog takes priority: it captures every key.
+                if self.quit_confirm_visible {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                            self.quit_confirm_visible = false;
+                            self.should_quit = true;
+                        }
+                        _ => {
+                            // Anything else (n/N/Esc/q/…) cancels the quit.
+                            self.quit_confirm_visible = false;
+                        }
+                    }
+                    self.dirty = true;
+                    return;
+                }
+
                 // Help overlay intercepts ? (toggle) and Esc (close) before views.
                 if self.help_visible {
                     match key.code {
@@ -361,7 +382,14 @@ impl App {
     fn process_action(&mut self, action: Action) {
         match action {
             Action::Quit => {
-                self.should_quit = true;
+                // If a brain is attached, show the confirmation dialog so
+                // the user is aware the agent subprocess will be terminated.
+                // Otherwise exit immediately — nothing at risk.
+                if self.brain_name.is_some() {
+                    self.quit_confirm_visible = true;
+                } else {
+                    self.should_quit = true;
+                }
             }
 
             Action::NavigateTo(ViewId::SessionDetail(ref session_id)) => {
@@ -814,6 +842,11 @@ impl App {
 
         if self.help_visible {
             HelpOverlay::render(frame, area);
+        }
+
+        if self.quit_confirm_visible {
+            let brain = self.brain_name.as_deref().unwrap_or("(unknown)");
+            QuitConfirmDialog::render(frame, area, brain);
         }
     }
 }
