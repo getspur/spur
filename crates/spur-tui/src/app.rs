@@ -755,7 +755,19 @@ impl App {
                 self.session_picker.as_mut().map(|p| p.tick());
             }
             #[cfg(feature = "markdown")]
-            ViewId::MermaidOverlay(_) => {}
+            ViewId::MermaidOverlay(_) => {
+                // The underlying session detail continues receiving
+                // AgentMessageChunks while the overlay is open. Tick it so
+                // debounced flushes and fence dispatches don't stall.
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.tick();
+                    let pending = detail.take_pending_actions();
+                    for action in pending {
+                        self.process_action(action);
+                    }
+                    self.dirty = true;
+                }
+            }
         }
     }
 

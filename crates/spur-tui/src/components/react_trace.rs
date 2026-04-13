@@ -257,12 +257,18 @@ impl ReactTrace {
     /// Drain any mermaid fences detected during the last debounce window.
     /// Returns (entry_index, FenceRef) pairs. Empty if the `markdown` feature
     /// is disabled.
+    ///
+    /// `states` is passed through to the per-entry `maybe_flush` call so that
+    /// rebuilt placeholders can reflect error vs pending state.
     #[cfg(feature = "markdown")]
-    pub fn drain_fence_dispatches(&mut self) -> Vec<(usize, super::markdown_stream::FenceRef)> {
+    pub fn drain_fence_dispatches(
+        &mut self,
+        states: &super::markdown_stream::StateLookup<'_>,
+    ) -> Vec<(usize, super::markdown_stream::FenceRef)> {
         let mut out = Vec::new();
         for (idx, entry) in self.entries.iter_mut().enumerate() {
             if let Some(stream) = entry.markdown.as_mut() {
-                for fence in stream.maybe_flush() {
+                for fence in stream.maybe_flush(states) {
                     out.push((idx, fence));
                 }
             }
@@ -273,6 +279,19 @@ impl ReactTrace {
     #[cfg(not(feature = "markdown"))]
     pub fn drain_fence_dispatches(&mut self) -> Vec<(usize, ())> {
         Vec::new()
+    }
+
+    /// Mark every `AgentMessage` markdown stream as dirty so that the next
+    /// `drain_fence_dispatches` / `maybe_flush` rebuilds all placeholders.
+    /// Called when external state changes (e.g. a mermaid render error arrives)
+    /// so the cached lines are refreshed even though the raw text is unchanged.
+    #[cfg(feature = "markdown")]
+    pub fn mark_all_streams_dirty(&mut self) {
+        for entry in &mut self.entries {
+            if let Some(stream) = entry.markdown.as_mut() {
+                stream.mark_dirty_now();
+            }
+        }
     }
 
     /// Returns true if any entry has a pending permission request.
