@@ -22,3 +22,10 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 directories = { workspace = true }
 agent-client-protocol = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[example]]
+name = "compat_spike"
+path = "examples/compat_spike.rs"
