@@ -26,6 +26,14 @@ pub struct SessionEntry {
     pub pinned: bool,
     #[serde(default)]
     pub archived: bool,
+    /// Agent-authoritative ACP session id. `None` for entries written
+    /// before this field was introduced (migrated silently via serde default).
+    #[serde(default)]
+    pub acp_session_id: Option<String>,
+    /// Brain agent that owns `acp_session_id`. Used at resume time to
+    /// avoid sending an ACP id to a different agent.
+    #[serde(default)]
+    pub brain_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -36,6 +44,15 @@ pub struct SessionMetadata {
     pub last_active_session_id: Option<String>,
     #[serde(default)]
     pub last_active_at: Option<String>,
+    /// Mirror of the most recent `AgentSessionReady.acp_session_id`.
+    /// Passed to `UserInput::ResumeSession` at next launch.
+    #[serde(default)]
+    pub last_active_acp_session_id: Option<String>,
+    /// Mirror of the most recent `AgentSessionReady.brain`. Used to
+    /// skip auto-resume when the launch-time `--brain` override does
+    /// not match (avoids sending a claude id to kiro, etc.).
+    #[serde(default)]
+    pub last_active_brain: Option<String>,
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionEntry>,
 }
