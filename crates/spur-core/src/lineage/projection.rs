@@ -1,3 +1,25 @@
+//! Executor lineage projection.
+//!
+//! ## Load-bearing invariant: replay-purity
+//!
+//! `ExecutorLineage::apply` is a **pure function** of the `SpurEvent` stream.
+//! Feeding the same events in the same order to two fresh projections always
+//! produces byte-for-byte identical state — including `started_at`, `ended_at`,
+//! `cost_usd`, and every other field.
+//!
+//! Two rules enforce this:
+//! 1. Never call `SystemTime::now()` inside `apply` or `apply_legacy` or
+//!    helpers they transitively call. Timestamps come from `event.occurred_at`.
+//! 2. Never depend on `HashMap` iteration order for observable output. Use
+//!    `Vec`/`VecDeque` when order matters (e.g., `pending_review_order`).
+//!
+//! ## Idempotency
+//!
+//! Every event arm is idempotent — applying the same event twice produces
+//! the same state as applying it once. Exception: `SpurEventBody::CostUpdate`
+//! is deliberately additive (two updates accumulate). Tests enforce both
+//! invariants.
+
 use std::collections::{HashMap, VecDeque};
 
 use spur_acp::{SpurEvent, SpurEventBody};
