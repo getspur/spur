@@ -12,7 +12,7 @@ use ratatui::{
 use spur_acp::{SessionInfo, SpurEvent};
 
 use crate::action::{Action, ViewId};
-use crate::components::status_bar::StatusBar;
+use crate::components::status_bar::{StatusBar, StatusBarProps};
 
 use super::View;
 
@@ -134,12 +134,14 @@ impl SessionPickerView {
         StatusBar::render(
             frame,
             chunks[1],
-            &ViewId::SessionPicker,
-            0.0,
-            "0m 00s",
-            None,
-            None,
-            None,
+            StatusBarProps {
+                view: &ViewId::SessionPicker,
+                total_cost: 0.0,
+                elapsed: "0m 00s",
+                current_mode: None,
+                context_used: None,
+                context_size: None,
+            },
         );
     }
 
@@ -233,12 +235,14 @@ impl SessionPickerView {
         StatusBar::render(
             frame,
             chunks[1],
-            &ViewId::SessionPicker,
-            0.0,
-            "0m 00s",
-            None,
-            None,
-            None,
+            StatusBarProps {
+                view: &ViewId::SessionPicker,
+                total_cost: 0.0,
+                elapsed: "0m 00s",
+                current_mode: None,
+                context_used: None,
+                context_size: None,
+            },
         );
     }
 
@@ -276,12 +280,14 @@ impl SessionPickerView {
         StatusBar::render(
             frame,
             chunks[1],
-            &ViewId::SessionPicker,
-            0.0,
-            "0m 00s",
-            None,
-            None,
-            None,
+            StatusBarProps {
+                view: &ViewId::SessionPicker,
+                total_cost: 0.0,
+                elapsed: "0m 00s",
+                current_mode: None,
+                context_used: None,
+                context_size: None,
+            },
         );
     }
 
@@ -313,12 +319,14 @@ impl SessionPickerView {
         StatusBar::render(
             frame,
             chunks[1],
-            &ViewId::SessionPicker,
-            0.0,
-            "0m 00s",
-            None,
-            None,
-            None,
+            StatusBarProps {
+                view: &ViewId::SessionPicker,
+                total_cost: 0.0,
+                elapsed: "0m 00s",
+                current_mode: None,
+                context_used: None,
+                context_size: None,
+            },
         );
     }
 }

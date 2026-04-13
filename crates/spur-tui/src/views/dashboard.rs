@@ -16,7 +16,7 @@ use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
 use crate::components::input_bar::InputBar;
-use crate::components::status_bar::StatusBar;
+use crate::components::status_bar::{StatusBar, StatusBarProps};
 use crate::components::{AgentState, LogEntry, LogEntryKind};
 
 use super::View;
@@ -619,12 +619,14 @@ impl View for DashboardView {
             StatusBar::render(
                 frame,
                 chunks[2],
-                &ViewId::Dashboard,
-                self.total_cost(),
-                &self.elapsed(),
-                None,
-                None,
-                None,
+                StatusBarProps {
+                    view: &ViewId::Dashboard,
+                    total_cost: self.total_cost(),
+                    elapsed: &self.elapsed(),
+                    current_mode: None,
+                    context_used: None,
+                    context_size: None,
+                },
             );
             return;
         }
@@ -649,12 +651,14 @@ impl View for DashboardView {
         StatusBar::render(
             frame,
             chunks[3],
-            &ViewId::Dashboard,
-            self.total_cost(),
-            &self.elapsed(),
-            None,
-            None,
-            None,
+            StatusBarProps {
+                view: &ViewId::Dashboard,
+                total_cost: self.total_cost(),
+                elapsed: &self.elapsed(),
+                current_mode: None,
+                context_used: None,
+                context_size: None,
+            },
         );
     }
 }
