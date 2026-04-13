@@ -529,7 +529,14 @@ pub async fn run_tui(
                     Ok(spur_event) => {
                         app.handle_spur_event(spur_event);
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            streaming_probe = true,
+                            site = "E_broadcast_lag",
+                            lagged_n = n,
+                            "TUI broadcast receiver lagged — events dropped"
+                        );
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
                         app.should_quit = true;
                     }
