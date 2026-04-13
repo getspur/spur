@@ -555,11 +555,18 @@ pub async fn run_tui(
             }
         }
 
+        // Count how many events feed into each render. H1' detection.
+        let mut spur_drained: u32 = 0;
+        let mut crossterm_drained: u32 = 0;
+
         // Phase 2: Drain all remaining crossterm events (non-blocking).
         // This collapses bursts of mouse scroll events into one render pass.
         loop {
             match timeout(Duration::ZERO, event_stream.next()).await {
-                Ok(Some(Ok(ev))) => app.handle_crossterm_event(ev),
+                Ok(Some(Ok(ev))) => {
+                    crossterm_drained += 1;
+                    app.handle_crossterm_event(ev);
+                }
                 _ => break,
             }
         }
@@ -567,14 +574,34 @@ pub async fn run_tui(
         // Phase 3: Drain all remaining spur events (non-blocking).
         loop {
             match event_rx.try_recv() {
-                Ok(spur_event) => app.handle_spur_event(spur_event),
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Ok(spur_event) => {
+                    spur_drained += 1;
+                    app.handle_spur_event(spur_event);
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        streaming_probe = true,
+                        site = "E_broadcast_lag",
+                        lagged_n = n,
+                        "TUI broadcast receiver lagged (drain phase) — events dropped"
+                    );
+                    continue;
+                }
                 Err(_) => break,
             }
         }
 
         // Phase 4: Single render pass.
         if app.dirty {
+            if spur_drained > 0 || crossterm_drained > 0 {
+                tracing::debug!(
+                    streaming_probe = true,
+                    site = "F_frame_drain",
+                    spur_drained = spur_drained,
+                    crossterm_drained = crossterm_drained,
+                    "rendering frame"
+                );
+            }
             terminal.draw(|f| app.render(f))?;
             app.dirty = false;
         }
