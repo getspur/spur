@@ -154,6 +154,21 @@ impl DashboardView {
     ) {
         let node_count = lineage.nodes().count();
 
+        // Compute aggregates once for both empty and non-empty paths.
+        let running = lineage
+            .nodes()
+            .filter(|n| matches!(
+                n.phase,
+                spur_core::LifecycleState::Running | spur_core::LifecycleState::Spawning,
+            ))
+            .count();
+        let pending_review = lineage.pending_reviews().len();
+        let total_cost: f64 = lineage
+            .nodes()
+            .map(|n| n.current_attempt().map(|a| a.cost_usd).unwrap_or(0.0))
+            .sum();
+        let elapsed = self.elapsed();
+
         if node_count == 0 {
             // Empty state: splash screen
             let lines = vec![
@@ -205,8 +220,10 @@ impl DashboardView {
                 chunks[2],
                 StatusBarProps {
                     view: &ViewId::Dashboard,
-                    total_cost: lineage.nodes().filter_map(|n| n.current_attempt()).map(|a| a.cost_usd).sum(),
-                    elapsed: &self.elapsed(),
+                    running,
+                    pending_review,
+                    total_cost,
+                    elapsed: &elapsed,
                     current_mode: None,
                     context_used: None,
                     context_size: None,
@@ -248,8 +265,10 @@ impl DashboardView {
             chunks[3],
             StatusBarProps {
                 view: &ViewId::Dashboard,
-                total_cost: lineage.nodes().filter_map(|n| n.current_attempt()).map(|a| a.cost_usd).sum(),
-                elapsed: &self.elapsed(),
+                running,
+                pending_review,
+                total_cost,
+                elapsed: &elapsed,
                 current_mode: None,
                 context_used: None,
                 context_size: None,
