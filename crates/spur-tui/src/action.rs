@@ -26,10 +26,6 @@ pub enum Action {
     /// Cycle the active Claude session between `default` and `plan` mode.
     /// Dispatched by `Alt-m` in `SessionDetailView`.
     TogglePlanMode,
-    /// The orchestrator reported that the current session requires
-    /// authentication. Surfaced as a dismissable banner by
-    /// `SessionDetailView`. The string is the user-facing message.
-    AuthRequired(String),
 }
 
 /// Which permission option the user selected.

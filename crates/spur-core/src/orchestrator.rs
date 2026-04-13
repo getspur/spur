@@ -127,7 +127,6 @@ impl Orchestrator {
     fn is_auth_required_error(e: &anyhow::Error) -> bool {
         let msg = e.to_string().to_lowercase();
         msg.contains("authrequired")
-            || msg.contains("authentication required")
             || msg.contains("auth_required")
             || msg.contains("please run /login")
             || msg.contains("run `/login`")
@@ -488,7 +487,13 @@ impl Orchestrator {
                             ),
                         );
                         if let Err(e) = b.connection.set_session_mode(req).await {
-                            warn!(error = %e, mode_id = %mode_id, "set_session_mode failed");
+                            warn!(
+                                brain = %b.brain_name,
+                                session_id = %b.spur_session_id,
+                                mode_id = %mode_id,
+                                error = %e,
+                                "set_session_mode failed"
+                            );
                         }
                     } else {
                         warn!(mode_id = %mode_id, "SetSessionMode received but no active brain session");
@@ -524,7 +529,7 @@ impl Orchestrator {
                                 error!(error = %e, "Failed to spawn brain");
                                 if Self::is_auth_required_error(&e) {
                                     self.emit(SpurEvent::AuthRequired {
-                                        session: SessionId::new(),
+                                        session: SessionId(String::new()),
                                         message: Self::auth_required_banner(),
                                     });
                                 } else {

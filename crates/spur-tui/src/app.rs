@@ -192,14 +192,24 @@ impl App {
                 return;
             }
             SpurEvent::AuthRequired { session, message } => {
-                // Only surface the banner if the event is for the currently-
-                // displayed session (or we have no session_detail yet — in
-                // which case the event is dropped; the next session spawn
-                // will hit the same error and re-emit).
                 if let Some(ref mut detail) = self.session_detail {
-                    if detail.session_id().0 == session.0 {
+                    // Apply when the event matches the focused session OR when
+                    // the event carries a sentinel/empty session id (spawn-side
+                    // failures that happen before a session id is allocated).
+                    let matches_focused = session.0 == detail.session_id().0;
+                    let is_sentinel = session.0.is_empty()
+                        || session.0 == "00000000-0000-0000-0000-000000000000";
+                    if matches_focused || is_sentinel {
                         detail.auth_error = Some(message.clone());
+                    } else {
+                        tracing::trace!(
+                            event_session = %session.0,
+                            focused_session = %detail.session_id().0,
+                            "AuthRequired for non-focused session; dropping"
+                        );
                     }
+                } else {
+                    tracing::trace!("AuthRequired received but no session_detail focused");
                 }
                 return;
             }
@@ -388,12 +398,6 @@ impl App {
                 // reconcile if the agent rejects the mode id.
                 if let Some(ref mut detail) = self.session_detail {
                     detail.current_mode = Some(next.to_string());
-                }
-            }
-
-            Action::AuthRequired(message) => {
-                if let Some(ref mut detail) = self.session_detail {
-                    detail.auth_error = Some(message);
                 }
             }
 
