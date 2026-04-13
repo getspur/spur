@@ -437,8 +437,13 @@ impl View for SessionDetailView {
                     DelegationStatus::Failed { .. } => "failed",
                     DelegationStatus::Conflict { .. } => "conflict",
                     DelegationStatus::Timeout => "timeout",
-                    // Temporary fall-through — replaced in Task 11 with variant-specific rendering.
-                    _ => { /* handled in Task 11 */ "completed" }
+                    DelegationStatus::Rejected { .. } => "rejected",
+                    DelegationStatus::Modified { .. } => "modified",
+                    DelegationStatus::TimedOut { .. } => "timed out",
+                    _ => {
+                        tracing::warn!("unknown DelegationStatus variant in session_detail status string — update needed");
+                        "unknown"
+                    }
                 };
                 // This is a best-effort update; walk entries in reverse to find
                 // the most recent active delegation.
