@@ -526,6 +526,13 @@ impl App {
                 }
             }
 
+            Action::NewSessionRequested => {
+                // Stub until Task 15 (BUG-2 fix) adds NewSessionWithMessage plumbing.
+                // For now, dismiss picker by navigating to Dashboard.
+                self.current_view = ViewId::Dashboard;
+                self.dirty = true;
+            }
+
             Action::TogglePlanMode => {
                 // Cycle between "plan" and "default". If mode is unknown, assume
                 // we're in "default" and jump to "plan".

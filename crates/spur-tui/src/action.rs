@@ -25,6 +25,8 @@ pub enum Action {
     PermissionGrant(PermissionChoice),
     RequestSessions,
     ResumeSession { session_id: String },
+    /// User requested spawning a new session from the picker.
+    NewSessionRequested,
     /// Cycle the active Claude session between `default` and `plan` mode.
     /// Dispatched by `Alt-m` in `SessionDetailView`.
     TogglePlanMode,
