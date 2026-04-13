@@ -64,7 +64,7 @@ All new deps are scoped to `crates/spur-tui/Cargo.toml`. No workspace dependency
 
 ### 4.4 MSRV
 
-Workspace Rust version bumps **1.75 → 1.85**. Required because `mermaid-rs-renderer` is edition-2024. Rust 1.85 stabilized Feb 2025 (14 months old as of 2026-04-13); the bump is routine. Alternative shell-out path (invoking `mmdr` as a subprocess) was evaluated and rejected — it trades a trivial build-time policy change for perpetual operational cost (PATH dependency, subprocess plumbing, CLI-contract coupling).
+Workspace Rust version bumps **1.75 → 1.88**. Although `mermaid-rs-renderer` (edition-2024) requires 1.85, transitive dependencies impose a higher floor: `image` v0.25.10 requires MSRV 1.88, `ratatui-image` v10.0.6 requires MSRV 1.86, and `tui-markdown` v0.3.7 requires MSRV 1.86. Setting workspace MSRV to 1.88 reflects the actual minimum Rust version needed to build and prevents contributor build failures. Rust 1.88 is 14 months old as of 2026-04-13; the bump is routine. Alternative shell-out path (invoking `mmdr` as a subprocess) was evaluated and rejected — it trades a trivial build-time policy change for perpetual operational cost (PATH dependency, subprocess plumbing, CLI-contract coupling).
 
 ### 4.5 Cargo feature gate
 
@@ -112,7 +112,7 @@ digraph arch {
 | `crates/spur-tui/src/app.rs` (modify) | On `MermaidRenderRequest`: spawn `tokio::task::spawn_blocking`, route result back as `Action::MermaidRenderCompleted`. |
 | `crates/spur-tui/src/components/help_overlay.rs` (modify) | Document `v`, `[`, `]` bindings. |
 | `crates/spur-tui/Cargo.toml` (modify) | Add `tui-markdown`, `mermaid-rs-renderer` (no-default-features, features=["png"]), `image`, `ratatui-image` (features=["tokio","chafa-dyn"]); declare `markdown` feature default-on. |
-| `Cargo.toml` (workspace, modify) | `rust-version = "1.85"`. |
+| `Cargo.toml` (workspace, modify) | `rust-version = "1.88"`. |
 
 ### 5.3 Data flow
 
@@ -162,7 +162,7 @@ digraph arch {
 
 - **`tui-markdown` coverage gaps (tables, links).** If usage reveals link-heavy LLM output, add a custom pulldown-cmark event → Line mapper as an optional fallback renderer. The `markdown_stream.rs` interface accommodates swapping renderers without touching callers.
 - **`Picker::from_query_stdio` timing.** The picker queries the terminal synchronously at startup; must run once, early, before the alternate screen is committed to avoid flicker. Place the call next to the existing terminal-init code.
-- **MSRV bump downstream.** If a contributor's toolchain is pinned below 1.85 the build fails. Mitigated by `markdown` Cargo feature (default-on; can disable for slim builds).
+- **MSRV bump downstream.** If a contributor's toolchain is pinned below 1.88 the build fails (driven by transitive deps `image`, `ratatui-image`, `tui-markdown`). Mitigated by `markdown` Cargo feature (default-on; can disable for slim builds).
 - **mmdr panics on edge-case diagrams.** Treemd explicitly guards with `catch_unwind`. We will do the same, attributing the defensive pattern to treemd in a code comment.
 
 ## 8. Out-of-scope follow-ups (v2+)
