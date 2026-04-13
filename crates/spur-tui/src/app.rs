@@ -519,14 +519,20 @@ pub async fn run_tui(
     let mut event_rx = event_rx;
 
     loop {
+        // Count how many events feed into each render. H1' detection.
+        let mut spur_drained: u32 = 0;
+        let mut crossterm_drained: u32 = 0;
+
         // Phase 1: Wait for at least one event (async yield point).
         tokio::select! {
             Some(Ok(crossterm_event)) = event_stream.next() => {
+                crossterm_drained += 1;
                 app.handle_crossterm_event(crossterm_event);
             }
             result = event_rx.recv() => {
                 match result {
                     Ok(spur_event) => {
+                        spur_drained += 1;
                         app.handle_spur_event(spur_event);
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -554,10 +560,6 @@ pub async fn run_tui(
                 app.handle_permission_request(perm);
             }
         }
-
-        // Count how many events feed into each render. H1' detection.
-        let mut spur_drained: u32 = 0;
-        let mut crossterm_drained: u32 = 0;
 
         // Phase 2: Drain all remaining crossterm events (non-blocking).
         // This collapses bursts of mouse scroll events into one render pass.
