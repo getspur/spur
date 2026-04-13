@@ -22,6 +22,13 @@ impl SpurLocalSource {
                 dispatch: Dispatch::SpurLocal(Action::TogglePlanMode),
             },
             CommandEntry {
+                name: "sessions".into(),
+                description: "Open session picker".into(),
+                hint: None,
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::RequestSessions),
+            },
+            CommandEntry {
                 name: "cost".into(),
                 description: "Show current session cost".into(),
                 hint: None,

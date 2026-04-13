@@ -145,3 +145,24 @@ pub fn blocks_preview(blocks: &[ContentBlock]) -> String {
 pub fn blocks_to_text(blocks: &[ContentBlock]) -> String {
     blocks_preview(blocks)
 }
+
+#[cfg(test)]
+mod sessions_slash_tests {
+    use super::*;
+    use crate::commands::registry::CommandRegistry;
+
+    fn build_registry_for_test() -> CommandRegistry {
+        CommandRegistry::new()
+    }
+
+    #[test]
+    fn slash_sessions_routes_to_request_sessions() {
+        let registry = build_registry_for_test();
+
+        let decision = route("/sessions", &[], &registry, false);
+        match decision {
+            SubmitDecision::Local { action: Action::RequestSessions } => {}
+            other => panic!("expected Local {{ action: RequestSessions }}, got {:?}", other),
+        }
+    }
+}
