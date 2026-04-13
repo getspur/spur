@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use spur_acp::SpurEvent;
 
 use super::types::{
-    Attempt, AttemptStatus, ExecutorId, ExecutorNode, LifecycleState, Role,
+    Attempt, AttemptStatus, ExecutorId, ExecutorNode, LifecycleState, ReviewRequest, Role,
 };
 
 const MAX_ORPHAN_BUFFER_PER_EXEC: usize = 128;
@@ -90,6 +90,73 @@ impl ExecutorLineage {
                     } else {
                         self.buffer_orphan(eid, event.clone());
                     }
+                }
+            }
+
+            SpurEvent::ExecutorArtifact { id, artifact } => {
+                let eid = ExecutorId::new(id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    let art = map_artifact(artifact);
+                    if let Some(a) = node.current_attempt_mut() {
+                        a.artifacts.push(art);
+                    }
+                } else {
+                    self.buffer_orphan(eid, event.clone());
+                }
+            }
+
+            SpurEvent::ExecutorReviewRequested {
+                id,
+                kind,
+                payload,
+                requested_at,
+            } => {
+                let eid = ExecutorId::new(id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    node.phase = LifecycleState::AwaitingReview;
+                    node.pending_review = Some(ReviewRequest {
+                        kind: map_review_kind(kind),
+                        payload: map_review_payload(payload),
+                        requested_at: *requested_at,
+                    });
+                } else {
+                    self.buffer_orphan(eid, event.clone());
+                }
+            }
+
+            SpurEvent::ExecutorReviewResolved { id, decision: _ } => {
+                let eid = ExecutorId::new(id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    node.pending_review = None;
+                    // Phase stays `AwaitingReview` until a subsequent
+                    // PhaseChanged or RetryStarted moves it. Orchestrator owns
+                    // that transition.
+                } else {
+                    self.buffer_orphan(eid, event.clone());
+                }
+            }
+
+            SpurEvent::ExecutorRetryStarted {
+                id,
+                attempt_n: _,
+                reason: _,
+                new_session_id,
+            } => {
+                let eid = ExecutorId::new(id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    let new_attempt = Attempt {
+                        session_id: new_session_id.clone(),
+                        started_at: SystemTime::now(),
+                        ended_at: None,
+                        status: AttemptStatus::Running,
+                        cost_usd: 0.0,
+                        artifacts: Vec::new(),
+                        error: None,
+                    };
+                    node.attempts.push(new_attempt);
+                    node.phase = LifecycleState::Running;
+                } else {
+                    self.buffer_orphan(eid, event.clone());
                 }
             }
 
@@ -184,5 +251,47 @@ fn terminal_attempt_status(p: LifecycleState) -> Option<AttemptStatus> {
         LifecycleState::Failed => Some(AttemptStatus::Failed),
         LifecycleState::Cancelled => Some(AttemptStatus::Cancelled),
         _ => None,
+    }
+}
+
+fn map_artifact(p: &spur_acp::ExecutorArtifactPayload) -> super::types::Artifact {
+    use spur_acp::ExecutorArtifactPayload as S;
+    use super::types::{Artifact, DiffSummary};
+    match p {
+        S::Diff(d) => Artifact::Diff(DiffSummary {
+            files_changed: d.files_changed,
+            insertions: d.insertions,
+            deletions: d.deletions,
+            files: d.files.clone(),
+        }),
+        S::PrUrl(u) => Artifact::PrUrl(u.clone()),
+        S::FileList(f) => Artifact::FileList(f.clone()),
+        S::Text(t) => Artifact::Text(t.clone()),
+    }
+}
+
+fn map_review_kind(k: &spur_acp::ExecutorReviewKind) -> super::types::ReviewKind {
+    use spur_acp::ExecutorReviewKind as S;
+    use super::types::ReviewKind;
+    match k {
+        S::Completion => ReviewKind::Completion,
+        S::Failure => ReviewKind::Failure,
+        S::Conflict => ReviewKind::Conflict,
+        S::Checkpoint => ReviewKind::Checkpoint,
+    }
+}
+
+fn map_review_payload(p: &spur_acp::ExecutorReviewPayload) -> super::types::ReviewPayload {
+    use super::types::{DiffSummary, ReviewPayload};
+    ReviewPayload {
+        summary: p.summary.clone(),
+        diff_summary: p.diff_summary.as_ref().map(|d| DiffSummary {
+            files_changed: d.files_changed,
+            insertions: d.insertions,
+            deletions: d.deletions,
+            files: d.files.clone(),
+        }),
+        pr_url: p.pr_url.clone(),
+        error: p.error.clone(),
     }
 }
