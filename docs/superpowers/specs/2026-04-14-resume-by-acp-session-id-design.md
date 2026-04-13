@@ -108,14 +108,25 @@ New accessors:
 
 On `SpurEventBody::AgentSessionReady`:
 - `metadata_store.set_acp_mapping(session.0, acp_session_id, brain)`.
-- If `session.0` equals the current `last_active_session_id`, mirror
-  `acp_session_id`/`brain` into the top-level fields.
+- **Unconditionally** set top-level `last_active_session_id = session.0`,
+  `last_active_acp_session_id = Some(acp_session_id)`,
+  `last_active_brain = Some(brain)`. Rationale: this event is the
+  signal that "this session is now the newest live target to resume."
+  Gating on a match against the prior `last_active_session_id` drops
+  the mapping if the user quits before `TurnComplete` (e.g. agent slow,
+  user impatient) — next launch sees stale top-level pointers and
+  skips resume.
 - Persist.
 
-`TurnComplete` handling unchanged in intent — continues setting
-`last_active_session_id` (SPUR) and `last_active_at`, and mirrors
-`last_active_acp_session_id` + `last_active_brain` from the matching
-entry on the same save.
+`TurnComplete` handling unchanged — continues setting `last_active_at`.
+Top-level SPUR/ACP/brain pointers are already correct from
+`AgentSessionReady`.
+
+Additionally, if `resumed == true`, forward the event to the active
+`SessionDetailView` so it can show a one-time toast / banner line
+("Resumed from prior conversation"). When `resumed == false`, no toast.
+This is the named consumer for the `resumed` field — remove the field
+if this consumer is cut.
 
 ### Main.rs resume path (spur-cli)
 
@@ -134,11 +145,26 @@ Skip resume if:
 
 Otherwise: `UserInput::ResumeSession { session_id: acp_id }`.
 
-### Regression test for Fix #1
+### Testing
 
-In `crates/spur-acp`, add a mock-agent test that returns an error from
-`session/load` and asserts `NativeAcpConnection::load_session` returns
-`Err`. This pins the behavior that was silently broken.
+1. **Fix #1 regression** (spur-acp): mock agent returning `-32002`
+   on `session/load` → assert `NativeAcpConnection::load_session`
+   returns `Err`. Pins the behavior that was silently broken.
+2. **Metadata schema roundtrip** (spur-tui): read a v0 JSON fixture,
+   save, re-read as v1; assert entries preserved and new fields
+   default to `None`. Also roundtrip a v1 file with `acp_session_id`
+   and `brain_name` populated.
+3. **Orchestrator event emission** (spur-core): unit test that
+   `create_brain_session` emits `AgentSessionReady { resumed: false }`
+   and `load_brain_session` emits one with `resumed: true` on load Ok,
+   `resumed: false` on fallback to `new_session`.
+4. **TUI handler** (spur-tui): feed `AgentSessionReady` into App;
+   assert metadata_store entry.acp_session_id populated and top-level
+   `last_active_acp_session_id`/`last_active_brain` updated.
+5. **Resume path** (spur-cli or integration): v1 metadata with
+   `last_active_acp_session_id` + matching brain → assert
+   `UserInput::ResumeSession { session_id: <acp_id> }` is sent.
+   Brain override mismatch → assert no ResumeSession sent.
 
 ## Scope boundaries
 
