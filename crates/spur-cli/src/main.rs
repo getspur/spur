@@ -387,6 +387,9 @@ async fn main() -> Result<()> {
                         spur_tui::UserInput::ResumeSession { session_id } => {
                             spur_core::InteractiveInput::ResumeSession { session_id }
                         }
+                        spur_tui::UserInput::SetSessionMode { mode_id } => {
+                            spur_core::InteractiveInput::SetSessionMode { mode_id }
+                        }
                     };
                     let _ = user_tx.send(converted).await;
                 }

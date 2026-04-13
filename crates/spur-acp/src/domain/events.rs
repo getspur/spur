@@ -70,6 +70,11 @@ pub enum SpurEvent {
     // ── Interactive loop events ──────────────────────────────────────
     TurnComplete { session: SessionId },
     BrainError { session: SessionId, message: String },
+    /// The agent subprocess reported that authentication is required
+    /// (e.g. `authRequired` error code, "/login" prompt). The TUI renders
+    /// this as a dismissable banner instructing the user to run
+    /// `claude /login` externally.
+    AuthRequired { session: SessionId, message: String },
     // ── Executor lineage events ────────────────────────────────────
     ExecutorSpawned {
         id: String,

@@ -25,7 +25,7 @@ impl StatusBar {
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         let hints = match props.view {
             ViewId::Dashboard => " [i]nput [Enter]session [s]essions [?]help [q]uit",
-            ViewId::SessionDetail(_) => " [Enter]send [Esc]back [j/k]scroll [?]help",
+            ViewId::SessionDetail(_) => " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [?]help",
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
         };
 
