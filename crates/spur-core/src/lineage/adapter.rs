@@ -29,7 +29,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 role: Role::Brain,
                 task_spec: String::new(),
                 phase: LifecycleState::Running,
-                attempts: vec![fresh_attempt(session.clone())],
+                attempts: vec![fresh_attempt(session.clone(), event.occurred_at)],
                 pending_review: None,
             });
         }
@@ -53,7 +53,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 role: Role::Executor,
                 task_spec: String::new(),
                 phase: LifecycleState::Running,
-                attempts: vec![fresh_attempt(session.clone())],
+                attempts: vec![fresh_attempt(session.clone(), event.occurred_at)],
                 pending_review: None,
             };
             match parent {
@@ -97,7 +97,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 };
                 n.phase = phase;
                 if let Some(a) = n.current_attempt_mut() {
-                    a.ended_at = Some(SystemTime::now());
+                    a.ended_at = Some(event.occurred_at);
                     a.status = attempt_status;
                     a.error = error;
                 }
@@ -109,7 +109,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             if let Some(n) = lineage.node_mut_public(&id) {
                 n.phase = if *success { LifecycleState::Succeeded } else { LifecycleState::Failed };
                 if let Some(a) = n.current_attempt_mut() {
-                    a.ended_at = Some(SystemTime::now());
+                    a.ended_at = Some(event.occurred_at);
                     a.status = if *success { AttemptStatus::Succeeded } else { AttemptStatus::Failed };
                 }
             }
@@ -128,10 +128,10 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
     }
 }
 
-fn fresh_attempt(session: spur_acp::SessionId) -> Attempt {
+fn fresh_attempt(session: spur_acp::SessionId, started_at: SystemTime) -> Attempt {
     Attempt {
         session_id: session,
-        started_at: SystemTime::now(),
+        started_at,
         ended_at: None,
         status: AttemptStatus::Running,
         cost_usd: 0.0,

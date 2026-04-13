@@ -44,7 +44,7 @@ impl ExecutorLineage {
                 let parent = parent_id.as_ref().map(ExecutorId::new);
                 let attempt = Attempt {
                     session_id: session_id.clone(),
-                    started_at: SystemTime::now(),
+                    started_at: event.occurred_at,
                     ended_at: None,
                     status: AttemptStatus::Running,
                     cost_usd: 0.0,
@@ -86,7 +86,7 @@ impl ExecutorLineage {
                     node.phase = *phase;
                     if let Some(status) = terminal_attempt_status(*phase) {
                         if let Some(a) = node.current_attempt_mut() {
-                            a.ended_at = Some(SystemTime::now());  // task-4 TODO
+                            a.ended_at = Some(event.occurred_at);
                             a.status = status;
                         }
                     }
@@ -117,8 +117,7 @@ impl ExecutorLineage {
                     node.pending_review = Some(ReviewRequest {
                         kind: kind.clone(),
                         payload: payload.clone(),
-                        // TODO H-Task 4: use event.occurred_at
-                        requested_at: SystemTime::now(),
+                        requested_at: event.occurred_at,
                     });
                     if !self.pending_review_order.contains(&eid) {
                         self.pending_review_order.push_back(eid.clone());
@@ -151,7 +150,7 @@ impl ExecutorLineage {
                 if let Some(node) = self.nodes.get_mut(&eid) {
                     let new_attempt = Attempt {
                         session_id: new_session_id.clone(),
-                        started_at: SystemTime::now(),
+                        started_at: event.occurred_at,
                         ended_at: None,
                         status: AttemptStatus::Running,
                         cost_usd: 0.0,
