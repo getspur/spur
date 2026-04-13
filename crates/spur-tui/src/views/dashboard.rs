@@ -34,8 +34,9 @@ pub enum Panel {
 /// All agent-state is now read from `ExecutorLineage` (owned by `App`);
 /// this struct only owns the activity log and UI controls.
 ///
-/// **Always use `render_with_lineage` from `App::render` — the `View::render`
-/// method is a no-op because it cannot access the lineage.**
+/// Dashboard rendering flows through `render_with_lineage` so the detail
+/// pane can access the event-sourced projection owned by `App`. The
+/// `View::render` method is a no-op — `App::render` dispatches directly.
 pub struct DashboardView {
     agents_tree: AgentsTree,
     activity_log: ActivityLog,
@@ -118,16 +119,6 @@ impl DashboardView {
 
     pub fn scroll_activity_down_by(&mut self, lines: usize) {
         self.activity_log.scroll_down_by(lines, 20);
-    }
-
-    /// Whether any executors are in an active (animating) state.
-    /// Now delegates to the lineage-aware caller; always returns false here
-    /// so callers should use `has_active_executors_in_lineage` instead.
-    pub fn has_active_agents(&self) -> bool {
-        // Conservatively return true so the tick loop stays active when agents
-        // are running. App::tick still calls this; it will be driven by dirty
-        // flag from lineage events in practice.
-        false
     }
 
     /// Update the brain status label shown in the InputBar.
@@ -440,7 +431,7 @@ impl View for DashboardView {
                         .set_focused(self.focused_panel == Panel::Log);
                     return Some(Action::CycleFocus);
                 }
-                KeyCode::Esc if self.focused_panel == Panel::Agents && self.focused_node.is_some() => {
+                KeyCode::Esc if self.focused_node.is_some() => {
                     return Some(Action::UnfocusNode);
                 }
                 KeyCode::Esc => return Some(Action::Quit),
@@ -677,10 +668,10 @@ impl View for DashboardView {
         self.tick_and_report_flush();
     }
 
-    /// No-op: always use `render_with_lineage` for Dashboard.
-    /// `App::render` calls `render_with_lineage` directly.
     fn render(&self, _frame: &mut Frame, _area: Rect) {
-        // render_with_lineage is called directly from App::render
+        // SAFETY: Dashboard always renders via `render_with_lineage`. This
+        // trait method is kept to satisfy `View` but should never be called.
+        debug_assert!(false, "DashboardView::render called via trait — use render_with_lineage");
     }
 }
 
