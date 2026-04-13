@@ -140,6 +140,32 @@ impl SessionMetadataStore {
         to_remove
     }
 
+    /// Persist the `(spur_id → acp_id, brain)` mapping on the per-entry
+    /// record AND unconditionally promote to the top-level `last_active_*`
+    /// pointers. See design doc: `AgentSessionReady` is the "newest live
+    /// target to resume" signal, so mirroring is always correct.
+    pub fn set_acp_mapping(&mut self, spur_id: &str, acp_id: &str, brain: &str) {
+        let entry = self
+            .metadata
+            .sessions
+            .entry(spur_id.to_string())
+            .or_default();
+        entry.acp_session_id = Some(acp_id.to_string());
+        entry.brain_name = Some(brain.to_string());
+
+        self.metadata.last_active_session_id = Some(spur_id.to_string());
+        self.metadata.last_active_acp_session_id = Some(acp_id.to_string());
+        self.metadata.last_active_brain = Some(brain.to_string());
+    }
+
+    /// Return the top-level `(acp_session_id, brain_name)` pair if both
+    /// are populated. Used by `spur-cli watch` at startup.
+    pub fn last_active_acp(&self) -> Option<(String, String)> {
+        let acp = self.metadata.last_active_acp_session_id.clone()?;
+        let brain = self.metadata.last_active_brain.clone()?;
+        Some((acp, brain))
+    }
+
     /// Atomic save: write to `path.tmp`, then rename to `path`. Creates parent
     /// directory if missing. Survives process crashes and partial writes via
     /// POSIX rename semantics (macOS/Linux). Does not guarantee durability
@@ -162,5 +188,57 @@ impl SessionMetadataStore {
             )
         })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod acp_mapping_tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn set_acp_mapping_populates_entry_and_top_level() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut store = SessionMetadataStore::load(tmp.path());
+
+        store.set_acp_mapping("spur-abc", "acp-xyz", "claude-code-acp");
+
+        let entry = store.entry("spur-abc").expect("entry created");
+        assert_eq!(entry.acp_session_id.as_deref(), Some("acp-xyz"));
+        assert_eq!(entry.brain_name.as_deref(), Some("claude-code-acp"));
+
+        let (acp, brain) = store.last_active_acp().expect("top-level populated");
+        assert_eq!(acp, "acp-xyz");
+        assert_eq!(brain, "claude-code-acp");
+    }
+
+    #[test]
+    fn last_active_acp_returns_none_when_absent() {
+        let tmp = NamedTempFile::new().unwrap();
+        let store = SessionMetadataStore::load(tmp.path());
+        assert!(store.last_active_acp().is_none());
+    }
+
+    #[test]
+    fn roundtrip_preserves_acp_mapping() {
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut store = SessionMetadataStore::load(tmp.path());
+            store.set_acp_mapping("spur-1", "acp-1", "brain-a");
+            store.save().unwrap();
+        }
+        let reloaded = SessionMetadataStore::load(tmp.path());
+        assert_eq!(
+            reloaded.entry("spur-1").and_then(|e| e.acp_session_id.clone()),
+            Some("acp-1".into())
+        );
+        assert_eq!(
+            reloaded.metadata().last_active_acp_session_id.as_deref(),
+            Some("acp-1")
+        );
+        assert_eq!(
+            reloaded.metadata().last_active_brain.as_deref(),
+            Some("brain-a")
+        );
     }
 }
