@@ -68,6 +68,29 @@ impl DashboardView {
     }
 
     /// Current local time formatted as HH:MM:SS.
+    /// Render the one-line empty-state hint above the InputBar when no brain
+    /// is attached and the user hasn't started typing. No-op otherwise.
+    fn render_empty_state_hint(&self, frame: &mut Frame, area: Rect, input_bar_area: Rect) {
+        if self.input_bar.has_status() || !self.input_bar.text().is_empty() {
+            return;
+        }
+        let hint_y = input_bar_area.y.saturating_sub(1);
+        if hint_y < area.y {
+            return;
+        }
+        let hint_area = Rect {
+            x: input_bar_area.x,
+            y: hint_y,
+            width: input_bar_area.width,
+            height: 1,
+        };
+        let hint = Paragraph::new(Span::styled(
+            " Type to start a new session \u{00b7} s for sessions \u{00b7} ? for help",
+            Style::default().fg(Color::DarkGray),
+        ));
+        frame.render_widget(hint, hint_area);
+    }
+
     fn now_stamp() -> String {
         crate::components::now_stamp()
     }
@@ -211,23 +234,7 @@ impl DashboardView {
             };
             frame.render_widget(paragraph, content_area);
             let input_bar_area = chunks[1];
-            // Empty-state hint shown only when no brain has spawned and user hasn't typed.
-            if !self.input_bar.has_status() && self.input_bar.text().is_empty() {
-                let hint_y = input_bar_area.y.saturating_sub(1);
-                if hint_y >= area.y {
-                    let hint_area = ratatui::layout::Rect {
-                        x: input_bar_area.x,
-                        y: hint_y,
-                        width: input_bar_area.width,
-                        height: 1,
-                    };
-                    let hint = ratatui::widgets::Paragraph::new(ratatui::text::Span::styled(
-                        " Type to start a new session \u{00b7} s for sessions \u{00b7} ? for help",
-                        ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
-                    ));
-                    frame.render_widget(hint, hint_area);
-                }
-            }
+            self.render_empty_state_hint(frame, area, input_bar_area);
             self.input_bar.render(frame, input_bar_area);
             StatusBar::render(
                 frame,
@@ -274,23 +281,7 @@ impl DashboardView {
             }
         }
         let input_bar_area = chunks[2];
-        // Empty-state hint shown only when no brain has spawned and user hasn't typed.
-        if !self.input_bar.has_status() && self.input_bar.text().is_empty() {
-            let hint_y = input_bar_area.y.saturating_sub(1);
-            if hint_y >= area.y {
-                let hint_area = ratatui::layout::Rect {
-                    x: input_bar_area.x,
-                    y: hint_y,
-                    width: input_bar_area.width,
-                    height: 1,
-                };
-                let hint = ratatui::widgets::Paragraph::new(ratatui::text::Span::styled(
-                    " Type to start a new session \u{00b7} s for sessions \u{00b7} ? for help",
-                    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
-                ));
-                frame.render_widget(hint, hint_area);
-            }
-        }
+        self.render_empty_state_hint(frame, area, input_bar_area);
         self.input_bar.render(frame, input_bar_area);
         StatusBar::render(
             frame,
