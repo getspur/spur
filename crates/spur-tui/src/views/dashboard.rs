@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use spur_acp::{DelegationStatus, SpurEvent};
-use spur_core::ExecutorLineage;
+use spur_core::{ExecutorId, ExecutorLineage};
 
 use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
@@ -40,6 +40,7 @@ pub struct DashboardView {
     activity_log: ActivityLog,
     input_bar: InputBar,
     focused_panel: Panel,
+    focused_node: Option<ExecutorId>,
     verbose: bool,
     text_batch: HashMap<String, (String, Instant)>,
     start_time: Instant,
@@ -55,6 +56,7 @@ impl DashboardView {
             activity_log,
             input_bar: InputBar::new(),
             focused_panel: Panel::Log,
+            focused_node: None,
             verbose: false,
             text_batch: HashMap::new(),
             start_time: Instant::now(),
@@ -77,6 +79,18 @@ impl DashboardView {
         let m = secs / 60;
         let s = secs % 60;
         format!("{}m {:02}s", m, s)
+    }
+
+    pub fn agents_tree_mut(&mut self) -> &mut AgentsTree {
+        &mut self.agents_tree
+    }
+
+    pub fn set_focused_node(&mut self, id: Option<ExecutorId>) {
+        self.focused_node = id;
+    }
+
+    pub fn focused_node(&self) -> Option<&ExecutorId> {
+        self.focused_node.as_ref()
     }
 
     pub fn scroll_activity_up(&mut self) {
@@ -252,15 +266,31 @@ impl View for DashboardView {
             if self.input_bar.text().len() == 1 {
                 let ch = self.input_bar.text().chars().next().unwrap();
                 match ch {
+                    'j' if self.focused_panel == Panel::Agents => {
+                        self.input_bar.clear();
+                        return Some(Action::SelectNext);
+                    }
                     'j' => {
                         self.input_bar.clear();
                         self.activity_log.scroll_down(20);
                         return Some(Action::ScrollDown);
                     }
+                    'k' if self.focused_panel == Panel::Agents => {
+                        self.input_bar.clear();
+                        return Some(Action::SelectPrev);
+                    }
                     'k' => {
                         self.input_bar.clear();
                         self.activity_log.scroll_up();
                         return Some(Action::ScrollUp);
+                    }
+                    'r' => {
+                        self.input_bar.clear();
+                        return Some(Action::JumpToReview);
+                    }
+                    'c' if self.focused_panel == Panel::Agents => {
+                        self.input_bar.clear();
+                        return Some(Action::ToggleCollapse);
                     }
                     'g' => {
                         self.input_bar.clear();
@@ -293,8 +323,11 @@ impl View for DashboardView {
                 }
             }
 
-            // Enter on empty InputBar → no session to drill into (lineage is in App)
+            // Enter on empty InputBar: FocusNode if agents panel is focused, else no-op
             if key.code == KeyCode::Enter && self.input_bar.is_empty() {
+                if self.focused_panel == Panel::Agents {
+                    return Some(Action::FocusNode);
+                }
                 return None;
             }
 
@@ -322,6 +355,9 @@ impl View for DashboardView {
                     self.activity_log
                         .set_focused(self.focused_panel == Panel::Log);
                     return Some(Action::CycleFocus);
+                }
+                KeyCode::Esc if self.focused_panel == Panel::Agents && self.focused_node.is_some() => {
+                    return Some(Action::UnfocusNode);
                 }
                 KeyCode::Esc => return Some(Action::Quit),
                 _ => {}

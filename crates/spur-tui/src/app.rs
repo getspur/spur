@@ -454,6 +454,38 @@ impl App {
                 self.clear_pending_permission_trace();
             }
 
+            Action::SelectNext => {
+                self.dashboard.agents_tree_mut().select_next(&self.lineage);
+            }
+            Action::SelectPrev => {
+                self.dashboard.agents_tree_mut().select_prev(&self.lineage);
+            }
+            Action::FocusNode => {
+                let selected = self.dashboard.agents_tree_mut().selected().cloned();
+                if let Some(id) = selected {
+                    self.dashboard.set_focused_node(Some(id));
+                }
+            }
+            Action::UnfocusNode => {
+                self.dashboard.set_focused_node(None);
+            }
+            Action::JumpToReview => {
+                let next = self.lineage.pending_reviews().into_iter().next();
+                if let Some(id) = next {
+                    self.dashboard.agents_tree_mut().set_selected(Some(id.clone()));
+                    self.dashboard.set_focused_node(Some(id));
+                }
+            }
+            Action::ToggleCollapse => {
+                let selected = self.dashboard.agents_tree_mut().selected().cloned();
+                if let Some(id) = selected {
+                    self.dashboard.agents_tree_mut().toggle_collapsed(&id);
+                }
+            }
+            Action::SubmitReview { .. } => {
+                // handled in Task 10
+            }
+
             // Scroll actions are already handled inside the views' handle_key methods.
             Action::ScrollUp
             | Action::ScrollDown
