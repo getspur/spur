@@ -32,3 +32,22 @@ fn executor_review_resolved_roundtrips() {
     let round: SpurEvent = serde_json::from_str(&json).unwrap();
     assert!(matches!(round, SpurEvent::ExecutorReviewResolved { .. }));
 }
+
+#[test]
+fn executor_review_requested_roundtrips() {
+    use std::time::SystemTime;
+    let ev = SpurEvent::ExecutorReviewRequested {
+        id: "exec-1".into(),
+        kind: ExecutorReviewKind::Completion,
+        payload: ExecutorReviewPayload {
+            summary: "done".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+        },
+        requested_at: SystemTime::now(),
+    };
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(round, SpurEvent::ExecutorReviewRequested { .. }));
+}
