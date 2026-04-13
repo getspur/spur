@@ -80,13 +80,48 @@ impl SessionPickerView {
         self.scroll_offset.set(0);
     }
 
+    fn highlighted_session_id(&self) -> Option<String> {
+        let PickerState::Populated {
+            sessions,
+            cursor,
+            filter,
+            ..
+        } = &self.state
+        else {
+            return None;
+        };
+        if *cursor == 0 {
+            return None;
+        }
+        let indices = Self::filtered_indices(sessions, filter, &self.metadata);
+        let real_idx = indices.get(*cursor - 1).copied()?;
+        Some(sessions[real_idx].session_id.0.as_ref().to_string())
+    }
+
     fn filtered_indices(
         sessions: &[SessionInfo],
         filter: &str,
         metadata: &SessionMetadata,
     ) -> Vec<usize> {
         if filter.is_empty() {
-            return (0..sessions.len()).collect();
+            let mut all: Vec<usize> = (0..sessions.len()).collect();
+            all.sort_by(|&a, &b| {
+                let ea = metadata.sessions.get(sessions[a].session_id.0.as_ref());
+                let eb = metadata.sessions.get(sessions[b].session_id.0.as_ref());
+                let pa = ea.map(|e| e.pinned).unwrap_or(false);
+                let pb = eb.map(|e| e.pinned).unwrap_or(false);
+                match (pa, pb) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => {
+                        // recency desc via updated_at (newest first)
+                        let ta = sessions[a].updated_at.as_deref().unwrap_or("");
+                        let tb = sessions[b].updated_at.as_deref().unwrap_or("");
+                        tb.cmp(ta)
+                    }
+                }
+            });
+            return all;
         }
         use nucleo_matcher::{
             pattern::{CaseMatching, Normalization, Pattern},
@@ -355,15 +390,33 @@ impl SessionPickerView {
                 Style::default().fg(Color::Cyan)
             };
 
-            lines.push(Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(short_id, id_style),
-                Span::styled(" \u{00b7} ", Style::default().fg(Color::DarkGray)),
-                Span::styled(display, style),
-                Span::styled(suffix, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::styled(time_str, Style::default().fg(Color::DarkGray)),
-            ]));
+            let pinned = self
+                .metadata
+                .sessions
+                .get(session.session_id.0.as_ref())
+                .map(|e| e.pinned)
+                .unwrap_or(false);
+            let mut spans: Vec<Span> = Vec::with_capacity(8);
+            spans.push(Span::styled(prefix, style));
+            if pinned {
+                spans.push(Span::styled(
+                    "\u{2b50} ",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            spans.push(Span::styled(short_id, id_style));
+            spans.push(Span::styled(
+                " \u{00b7} ",
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::styled(display, style));
+            spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                time_str,
+                Style::default().fg(Color::DarkGray),
+            ));
+            lines.push(Line::from(spans));
         }
 
         let chunks = Layout::vertical([
@@ -440,6 +493,8 @@ impl SessionPickerView {
 
 impl View for SessionPickerView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Compute once — needed by list-mode p/R/d arms before we split-borrow.
+        let hl_session_id = self.highlighted_session_id();
         // Split-borrow self so we can reach `metadata` while also mutably
         // borrowing `state`.
         let SessionPickerView {
@@ -522,6 +577,8 @@ impl View for SessionPickerView {
                                 Some(Action::NavigateTo(ViewId::Dashboard))
                             }
                         }
+                        KeyCode::Char('p') => hl_session_id
+                            .map(|session_id| Action::ToggleSessionPin { session_id }),
                         _ => None,
                     }
                 }

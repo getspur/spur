@@ -105,3 +105,26 @@ fn esc_in_list_with_no_filter_navigates_back() {
     let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(action, Some(Action::NavigateTo(_))));
 }
+
+#[test]
+fn p_key_emits_toggle_pin_for_highlighted_session() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "x"), session("a2", "y")]);
+    // Move cursor to first real session (index 1, [+ New] is at 0).
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let action = picker.handle_key(key('p'));
+    match action {
+        Some(Action::ToggleSessionPin { session_id }) => {
+            assert_eq!(session_id, "a1");
+        }
+        other => panic!("expected ToggleSessionPin, got {other:?}"),
+    }
+}
+
+#[test]
+fn p_key_on_new_session_row_is_noop() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    let action = picker.handle_key(key('p'));
+    assert!(action.is_none());
+}
