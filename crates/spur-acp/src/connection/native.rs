@@ -776,7 +776,27 @@ impl Client for SpurAcpClientDynamic {
         &self,
         args: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
-        let _ = self.notification_tx.borrow().send(args);
+        let variant = session_update_variant_name(&args.update);
+        let text_len = match &args.update {
+            agent_client_protocol::SessionUpdate::AgentMessageChunk(c)
+            | agent_client_protocol::SessionUpdate::AgentThoughtChunk(c)
+            | agent_client_protocol::SessionUpdate::UserMessageChunk(c) => {
+                content_chunk_text_len(c)
+            }
+            _ => 0,
+        };
+        let session = args.session_id.to_string();
+        let send_result = self.notification_tx.borrow().send(args);
+        let send_result_str = if send_result.is_ok() { "ok" } else { "err" };
+        tracing::debug!(
+            streaming_probe = true,
+            site = "A_session_notification",
+            variant = variant,
+            text_len = text_len,
+            session = %session,
+            send_result = send_result_str,
+            "ACP session_notification"
+        );
         Ok(())
     }
 
@@ -990,6 +1010,33 @@ impl Client for SpurAcpClientDynamic {
         }
         self.terminals.borrow_mut().remove(&key);
         Ok(ReleaseTerminalResponse::new())
+    }
+}
+
+// ─── Diagnostic helpers (streaming probes) ──────────────────────────────────
+
+/// Short static name for each SessionUpdate discriminant.
+/// Used by diagnostic logging only; keep lowercase snake_case.
+fn session_update_variant_name(u: &agent_client_protocol::SessionUpdate) -> &'static str {
+    use agent_client_protocol::SessionUpdate::*;
+    match u {
+        AgentThoughtChunk(_) => "agent_thought_chunk",
+        AgentMessageChunk(_) => "agent_message_chunk",
+        UserMessageChunk(_) => "user_message_chunk",
+        ToolCall(_) => "tool_call",
+        ToolCallUpdate(_) => "tool_call_update",
+        Plan(_) => "plan",
+        AvailableCommandsUpdate(_) => "available_commands_update",
+        CurrentModeUpdate(_) => "current_mode_update",
+        _ => "other",
+    }
+}
+
+/// Return the text length of a content chunk, or 0 if non-text.
+fn content_chunk_text_len(chunk: &agent_client_protocol::ContentChunk) -> usize {
+    match &chunk.content {
+        agent_client_protocol::ContentBlock::Text(tc) => tc.text.len(),
+        _ => 0,
     }
 }
 
