@@ -93,14 +93,37 @@ impl SessionPickerView {
         self.show_archived
     }
 
+    pub fn cursor(&self) -> usize {
+        match &self.state {
+            PickerState::Populated { cursor, .. } => *cursor,
+            _ => 0,
+        }
+    }
+
+    pub fn filter(&self) -> String {
+        match &self.state {
+            PickerState::Populated { filter, .. } => filter.clone(),
+            _ => String::new(),
+        }
+    }
+
     pub fn set_sessions(&mut self, agent: String, sessions: Vec<SessionInfo>) {
+        let (prev_cursor, prev_filter) = match &self.state {
+            PickerState::Populated { cursor, filter, .. } => (*cursor, filter.clone()),
+            _ => (0, String::new()),
+        };
+        // Clamp cursor to new session list length (cursor max is sessions.len();
+        // 0 = [+ New] row, 1..=len = sessions).
+        let max_cursor = sessions.len();
+        let clamped_cursor = prev_cursor.min(max_cursor);
+
         self.state = PickerState::Populated {
             agent,
             sessions,
-            cursor: 0,
+            cursor: clamped_cursor,
             resuming: false,
             search_focused: false,
-            filter: String::new(),
+            filter: prev_filter,
         };
         self.scroll_offset.set(0);
     }
