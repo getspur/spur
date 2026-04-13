@@ -324,6 +324,31 @@ fn child_spawn_before_parent_spawn_attaches_on_parent_arrival() {
 }
 
 #[test]
+fn attempt_n_mismatch_still_appends_attempt() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "w".into(),
+        parent_id: None,
+        session_id: SessionId("s1".into()),
+        agent: "w".into(),
+        role: Role::Brain,
+        task_spec: "".into(),
+    }));
+    // Skip to attempt 5 — orchestrator dropped retry events 2..4.
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorRetryStarted {
+        id: "w".into(),
+        attempt_n: 5,
+        reason: "drop".into(),
+        new_session_id: SessionId("s5".into()),
+    }));
+
+    let n = l.node(&ExecutorId::new("w")).unwrap();
+    // Still appends — validation is observability-only.
+    assert_eq!(n.attempts.len(), 2, "retry appends even on mismatch");
+    assert_eq!(n.phase, LifecycleState::Running);
+}
+
+#[test]
 fn orphan_replay_does_not_retrigger_legacy_adapter() {
     // Buffer a child-orphan phase change, then trigger spawn. Legacy adapter
     // must NOT fire on the replay (today's apply_legacy is a no-op for
