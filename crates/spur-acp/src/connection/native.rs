@@ -629,6 +629,13 @@ fn acp_thread_main(
                     // gets replaced on the next prompt call (or dropped on
                     // shutdown), which will close the stream for the consumer.
                     // We explicitly drop the current sender to signal completion.
+                    tracing::debug!(
+                        streaming_probe = true,
+                        site = "B_dead_tx_swap",
+                        which = "prompt_end",
+                        agent = %agent_name_prompt,
+                        "notification_tx → dead_tx (prompt returned)"
+                    );
                     let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
                     *notification_tx.borrow_mut() = dead_tx;
                 }
@@ -687,6 +694,13 @@ fn acp_thread_main(
                     }
 
                     // Signal stream completion.
+                    tracing::debug!(
+                        streaming_probe = true,
+                        site = "B_dead_tx_swap",
+                        which = "load_session_end",
+                        agent = %agent_name_load,
+                        "notification_tx → dead_tx (load_session returned)"
+                    );
                     let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
                     *notification_tx.borrow_mut() = dead_tx;
                 }
