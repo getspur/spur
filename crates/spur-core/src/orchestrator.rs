@@ -494,6 +494,7 @@ impl Orchestrator {
                         vec![ContentBlock::Text(TextContent::new(text))],
                     );
 
+                    let prompt_started_at = std::time::Instant::now();
                     let mut stream = match b.connection.prompt(prompt_request).await {
                         Ok(s) => s,
                         Err(e) => {
@@ -517,6 +518,35 @@ impl Orchestrator {
                             item = stream.next() => {
                                 match item {
                                     Some(notification) => {
+                                        let variant = match &notification.update {
+                                            spur_acp::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+                                            spur_acp::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+                                            spur_acp::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+                                            spur_acp::SessionUpdate::ToolCall(_) => "tool_call",
+                                            spur_acp::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+                                            spur_acp::SessionUpdate::Plan(_) => "plan",
+                                            _ => "other",
+                                        };
+                                        let text_len = match &notification.update {
+                                            spur_acp::SessionUpdate::AgentMessageChunk(c)
+                                            | spur_acp::SessionUpdate::AgentThoughtChunk(c)
+                                            | spur_acp::SessionUpdate::UserMessageChunk(c) => {
+                                                match &c.content {
+                                                    spur_acp::ContentBlock::Text(tc) => tc.text.len(),
+                                                    _ => 0,
+                                                }
+                                            }
+                                            _ => 0,
+                                        };
+                                        tracing::debug!(
+                                            streaming_probe = true,
+                                            site = "C_orchestrator_emit",
+                                            variant = variant,
+                                            text_len = text_len,
+                                            since_prompt_ms = prompt_started_at.elapsed().as_millis() as u64,
+                                            session = %b.spur_session_id,
+                                            "orchestrator emitting AgentNotification"
+                                        );
                                         self.emit(SpurEvent::AgentNotification {
                                             session: b.spur_session_id.clone(),
                                             notification,
