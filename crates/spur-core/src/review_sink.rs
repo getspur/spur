@@ -9,10 +9,22 @@ use crate::ExecutorId;
 /// Routes TUI `ReviewDecision`s back to the orchestrator task that is
 /// awaiting one for a specific `(executor_id, attempt_n)`.
 ///
+/// **Ordering invariant**: the orchestrator MUST call `register` and
+/// receive an `oneshot::Receiver` BEFORE emitting
+/// `ExecutorReviewRequested`. This guarantees the TUI's
+/// `SubmitReview` response can always find the matching sender. A
+/// `SubmitReview` that arrives with no registered entry (late after
+/// timeout, late after brain-cancel) is dropped with a debug log —
+/// this is an expected race, not an error.
+///
 /// Internally a map `ExecutorId → (attempt_n, oneshot::Sender)`. The
-/// attempt_n guard prevents a stale decision (e.g., for a superseded
+/// attempt_n guard prevents a stale decision (for a superseded
 /// attempt) from delivering to the sender registered for the next
 /// attempt.
+///
+/// `ReviewSink` is a newtype over `Arc<Mutex<_>>`; `Clone` is cheap
+/// and yields another handle to the same sink.
+#[derive(Clone)]
 pub struct ReviewSink {
     inner: Arc<Mutex<HashMap<ExecutorId, (u32, oneshot::Sender<ReviewDecision>)>>>,
 }
@@ -42,6 +54,13 @@ impl ReviewSink {
 
     /// Submit a decision. Returns true if routed, false if dropped
     /// (unknown executor_id or attempt_n mismatch).
+    ///
+    /// The "unknown executor_id" path is logged at `debug!` because it
+    /// fires on legitimate races (timeout-then-late-submit,
+    /// brain-cancel-then-late-submit). The "attempt_n mismatch" path is
+    /// logged at `warn!` because it indicates a TUI sent a decision for
+    /// a superseded attempt — the operator likely clicked on a stale
+    /// review card.
     pub async fn submit(
         &self,
         executor_id: ExecutorId,
@@ -49,42 +68,33 @@ impl ReviewSink {
         decision: ReviewDecision,
     ) -> bool {
         let mut map = self.inner.lock().await;
-        match map.get(&executor_id) {
-            Some((stored, _)) if *stored != attempt_n => {
-                tracing::warn!(
-                    executor_id = %executor_id.0,
-                    got = attempt_n,
-                    expected = *stored,
-                    "review decision dropped — attempt_n mismatch"
-                );
-                false
-            }
-            Some(_) => {
-                // attempt_n matches — pop and send.
-                let (_, tx) = map.remove(&executor_id).expect("checked above");
-                tx.send(decision).is_ok()
-            }
+        let stored = match map.get(&executor_id) {
+            Some((n, _)) => *n,
             None => {
-                tracing::warn!(
+                tracing::debug!(
                     executor_id = %executor_id.0,
                     "review decision dropped — no pending review registered"
                 );
-                false
+                return false;
             }
+        };
+        if stored != attempt_n {
+            tracing::warn!(
+                executor_id = %executor_id.0,
+                got = attempt_n,
+                expected = stored,
+                "review decision dropped — attempt_n mismatch"
+            );
+            return false;
         }
+        let (_, tx) = map.remove(&executor_id).expect("present per check above");
+        tx.send(decision).is_ok()
     }
 
     /// Explicitly remove a pending review (used by timeout and
     /// brain-cancellation paths to avoid stale entries).
     pub async fn remove(&self, executor_id: &ExecutorId) {
         self.inner.lock().await.remove(executor_id);
-    }
-
-    pub fn share(&self) -> Arc<Self> {
-        // `ReviewSink` itself holds an `Arc<Mutex<_>>`; callers clone via Arc.
-        Arc::new(Self {
-            inner: Arc::clone(&self.inner),
-        })
     }
 }
 
