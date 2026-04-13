@@ -1,8 +1,15 @@
 //! `.spur/session_metadata.json` — persistent per-session metadata.
 //!
 //! Tracks title overrides, drafts, pin/archive state, and last-active pointer
-//! for auto-resume. Writes are atomic (tmp-rename) to survive crashes.
+//! for auto-resume. Writes are atomic (tmp-rename) to survive process crashes
+//! and partial writes.
+//!
+//! Note: this relies on POSIX rename semantics (macOS/Linux) and guards only
+//! against process crashes and partial writes. Durability across power loss
+//! is not guaranteed — that would require `fsync` on the tmp file and on the
+//! parent directory after rename.
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -84,16 +91,26 @@ impl SessionMetadataStore {
     }
 
     /// Atomic save: write to `path.tmp`, then rename to `path`. Creates parent
-    /// directory if missing.
-    pub fn save(&self) -> std::io::Result<()> {
+    /// directory if missing. Survives process crashes and partial writes via
+    /// POSIX rename semantics (macOS/Linux). Does not guarantee durability
+    /// across power loss (no `fsync` on tmp file or parent directory).
+    pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent directory {}", parent.display()))?;
         }
         let json = serde_json::to_string_pretty(&self.metadata)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .context("serializing session metadata to JSON")?;
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &self.path)?;
+        std::fs::write(&tmp, json)
+            .with_context(|| format!("writing tmp metadata file {}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.path).with_context(|| {
+            format!(
+                "renaming {} -> {}",
+                tmp.display(),
+                self.path.display()
+            )
+        })?;
         Ok(())
     }
 }
