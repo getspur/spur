@@ -22,7 +22,7 @@ pub struct FenceRef {
 }
 
 /// Accumulated-text markdown renderer.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MarkdownStream {
     raw_text: String,
     dirty_since: Option<Instant>,
