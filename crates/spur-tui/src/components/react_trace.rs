@@ -4,10 +4,11 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
+use super::line_wrap::wrap_line_to_width;
 use super::MAX_LOG_ENTRIES;
 
 /// What kind of ReAct trace step this entry represents.
@@ -479,22 +480,18 @@ impl ReactTrace {
             lines.push(Line::from(""));
         }
 
-        // Compute rendered-line metrics for accurate scrolling.
+        // Pre-wrap every built Line to the inner width so the Paragraph
+        // renders row-exact and scroll offsets are exact visual rows.
         let inner = block.inner(area);
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
-        let total_lines: usize = lines
-            .iter()
-            .map(|line| {
-                let w = line.width() as u16;
-                if w == 0 || effective_width == 0 {
-                    1usize
-                } else {
-                    ((w + effective_width - 1) / effective_width) as usize
-                }
-            })
-            .sum();
 
+        let wrapped: Vec<Line> = lines
+            .into_iter()
+            .flat_map(|l| wrap_line_to_width(&l, effective_width))
+            .collect();
+
+        let total_lines = wrapped.len();
         self.last_total_lines.set(total_lines);
         self.last_visible_height.set(visible_height);
 
@@ -506,16 +503,19 @@ impl ReactTrace {
             self.scroll_offset.min(max_offset)
         };
 
-        let paragraph = Paragraph::new(lines)
+        // Paragraph renders each pre-wrapped Line as one visual row. No
+        // `.wrap()` — we already sized every Line to `effective_width`.
+        let paragraph = Paragraph::new(wrapped)
             .block(block)
-            .wrap(Wrap { trim: false })
             .scroll((offset as u16, 0));
 
         frame.render_widget(paragraph, area);
 
-        // Scrollbar for position indicator.
+        // Scrollbar: proportional thumb via viewport_content_length.
         if total_lines > visible_height {
-            let mut scrollbar_state = ScrollbarState::new(total_lines).position(offset);
+            let mut scrollbar_state = ScrollbarState::new(total_lines)
+                .position(offset)
+                .viewport_content_length(visible_height);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
             frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
         }
