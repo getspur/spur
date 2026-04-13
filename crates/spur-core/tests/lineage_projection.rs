@@ -263,6 +263,7 @@ fn replay_equals_live() {
             from: SessionId("b".into()),
             to_agent: "w1".into(),
             task: "task-1".into(),
+            request_id: "req-1".into(),
         }),
         SpurEvent::now(SpurEventBody::CostUpdate {
             session: SessionId("w1".into()),

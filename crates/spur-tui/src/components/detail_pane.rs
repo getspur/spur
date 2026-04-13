@@ -108,9 +108,9 @@ impl DetailPane {
         for attempt in &node.attempts {
             for a in &attempt.artifacts {
                 out.push(match a {
-                    Artifact::Diff(d) => Line::from(format!(
+                    Artifact::Diff { summary, .. } => Line::from(format!(
                         "diff: {} files, +{} -{}",
-                        d.files_changed, d.insertions, d.deletions
+                        summary.files_changed, summary.insertions, summary.deletions
                     )),
                     Artifact::PrUrl(u) => Line::from(format!("pr: {}", u)),
                     Artifact::FileList(f) => Line::from(format!("files: {}", f.len())),
