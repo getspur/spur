@@ -6,6 +6,8 @@ pub mod input_bar;
 pub mod line_wrap;
 #[cfg(feature = "markdown")]
 pub mod mermaid;
+#[cfg(feature = "markdown")]
+pub mod markdown_stream;
 pub mod react_trace;
 pub mod review_card;
 pub mod status_bar;
