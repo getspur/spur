@@ -89,6 +89,11 @@ impl DashboardView {
         &mut self.agents_tree
     }
 
+    /// Read-only access to the activity log. Intended for tests.
+    pub fn activity_log(&self) -> &ActivityLog {
+        &self.activity_log
+    }
+
     pub fn set_focused_node(&mut self, id: Option<ExecutorId>) {
         self.focused_node = id;
     }
@@ -571,8 +576,26 @@ impl View for DashboardView {
                         "Delegation timed out".to_string(),
                         LogEntryKind::Error,
                     ),
-                    // Temporary fall-through — replaced in Task 11 with variant-specific rendering.
-                    _ => ("Delegation completed".to_string(), LogEntryKind::Error),
+                    DelegationStatus::Rejected { reason } => (
+                        format!("Delegation rejected: {}", reason),
+                        LogEntryKind::Error,
+                    ),
+                    DelegationStatus::Modified { reviewer_note } => (
+                        format!("Delegation modified: {}", reviewer_note),
+                        LogEntryKind::Complete,
+                    ),
+                    DelegationStatus::TimedOut { waited_for, fallback } => (
+                        format!(
+                            "Delegation review timed out after {}s (fallback: {:?})",
+                            waited_for.as_secs(),
+                            fallback
+                        ),
+                        LogEntryKind::Error,
+                    ),
+                    _ => {
+                        tracing::warn!("unknown DelegationStatus variant in dashboard activity log — update needed");
+                        ("Delegation completed".to_string(), LogEntryKind::Error)
+                    }
                 };
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
