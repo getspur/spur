@@ -66,26 +66,157 @@ All reads go through DuckDB SQL. Structured writes go through DuckDB. Embedding 
 
 ## Architecture
 
+### System Overview
+
+```mermaid
+graph TB
+    subgraph "Spur Orchestrator"
+        ORCH[Orchestrator]
+        BRAIN[Brain Agent<br/><i>External LLM via ACP</i>]
+        WORKERS[Worker Agents<br/><i>Isolated in Worktrees</i>]
+        MCP[spur-mcp<br/><i>MCP Callback Server</i>]
+    end
+
+    subgraph "spur-context ContextEngine"
+        ENGINE[ContextEngine]
+
+        subgraph "Phase 1: DuckDB Core"
+            DUCK[(DuckDB)]
+            DEC[decisions]
+            OBS[observations]
+        end
+
+        subgraph "Phase 2: DuckPGQ Extension"
+            PGQ[SQL/PGQ Engine]
+            ENT[entities]
+            REL[relationships]
+            PG[Property Graph View<br/><i>knowledge_graph</i>]
+            ANALYTICS[Graph Analytics<br/><i>PageRank, Clustering,<br/>Connected Components</i>]
+        end
+
+        subgraph "Phase 3: Lance + LanceDB"
+            LANCE_EXT[Lance DuckDB Extension<br/><i>SQL table functions</i>]
+            LANCE_RS[lancedb Rust crate<br/><i>native write path</i>]
+            DEC_EMB[decision_embeddings.lance]
+            OBS_EMB[observation_embeddings.lance]
+            ENT_EMB[entity_embeddings.lance]
+        end
+    end
+
+    subgraph "spur-cost existing"
+        COST[CostTracker]
+        SQLITE[(SQLite)]
+        SESSIONS[sessions]
+        DELEG[delegation_log]
+    end
+
+    ORCH -->|"record_decision()"| ENGINE
+    ORCH -->|"assemble_context()"| ENGINE
+    ORCH -->|"start_session()"| COST
+    ORCH -->|"prompt + context"| BRAIN
+    BRAIN -->|"DelegationRequest"| MCP
+    MCP -->|"DelegationResult"| ORCH
+    ORCH -->|"spawn in worktree"| WORKERS
+    WORKERS -->|"results via ACP"| ORCH
+    ORCH -->|"record_observation()"| ENGINE
+
+    ENGINE --- DUCK
+    DUCK --- DEC
+    DUCK --- OBS
+    DUCK --- PGQ
+    PGQ --- ENT
+    PGQ --- REL
+    PGQ --- PG
+    PG --- ANALYTICS
+    DUCK --- LANCE_EXT
+    LANCE_RS -->|"write embeddings"| DEC_EMB
+    LANCE_RS -->|"write embeddings"| OBS_EMB
+    LANCE_RS -->|"write embeddings"| ENT_EMB
+    LANCE_EXT -->|"read via SQL"| DEC_EMB
+    LANCE_EXT -->|"read via SQL"| OBS_EMB
+    LANCE_EXT -->|"read via SQL"| ENT_EMB
+
+    COST --- SQLITE
+    SQLITE --- SESSIONS
+    SQLITE --- DELEG
+
+    DEC -.->|"session_id"| SESSIONS
+    OBS -.->|"decision_id"| DEC
+    REL -.->|"source/target"| ENT
 ```
-Orchestrator
-  │
-  ├── cost_tracker: Option<CostTracker>   (existing, SQLite)
-  │
-  └── context: Option<ContextEngine>      (new, DuckDB)
-        │
-        ├── DuckDB Core
-        │   ├── decisions table
-        │   └── observations table
-        │
-        ├── DuckPGQ Extension (Phase 2)
-        │   ├── entities table
-        │   ├── relationships table
-        │   └── property graph view
-        │
-        └── Lance Extension + lancedb crate (Phase 3)
-            ├── decision_embeddings.lance
-            ├── observation_embeddings.lance
-            └── entity_embeddings.lance
+
+### Write Path
+
+```mermaid
+sequenceDiagram
+    participant B as Brain Agent
+    participant O as Orchestrator
+    participant CE as ContextEngine
+    participant CT as CostTracker
+    participant W as Worker Agent
+
+    Note over O: Session starts
+    O->>CT: start_session(id, agent, task)
+    O->>CE: assemble_context(project, keywords, 5)
+    CE-->>O: Vec ContextItem
+    O->>B: PromptRequest (task + historical context)
+
+    Note over B: Brain reasons, decides to delegate
+    B->>O: DelegationRequest(task, agent)
+    O->>CE: record_decision(session_id, agent, action)
+    CE-->>O: decision_id
+    O->>CT: log_delegation(brain, worker, task)
+
+    O->>W: Spawn in worktree
+    Note over W: Worker executes task
+
+    W-->>O: DelegationResult(status, artifacts)
+    O->>CE: record_observation(session_id, decision_id, content, artifacts)
+    O->>CE: update_decision_outcome(decision_id, success)
+    O->>CT: update_delegation_end(id, status, diff_stats)
+
+    Note over O: Session ends
+    O->>CT: end_session(id, status, duration, cost)
+```
+
+### Read Path — Context Assembly
+
+```mermaid
+flowchart LR
+    subgraph "Input"
+        TASK[Current Task<br/><i>Fix auth regression</i>]
+        PROJ[Project ID]
+    end
+
+    subgraph "Phase 1: Keyword + Recency"
+        KW[Extract Keywords<br/><i>auth, regression, fix</i>]
+        Q1["SELECT FROM decisions<br/>WHERE project = ?<br/>AND action ILIKE auth<br/>ORDER BY created_at DESC"]
+        J1["LEFT JOIN observations<br/>ON decision_id"]
+    end
+
+    subgraph "Phase 2: + Graph"
+        Q2["GRAPH_TABLE knowledge_graph<br/>MATCH src-r-1..3-dst<br/>WHERE src.name = auth"]
+        MERGE1[Merge graph entities<br/>with decision results]
+    end
+
+    subgraph "Phase 3: + Vector"
+        EMB[Embed task description]
+        Q3["lance_vector_search<br/>decision_embeddings<br/>embedding, top 20"]
+        RRF["Reciprocal Rank Fusion<br/>1/(60+vec_rank) +<br/>1/(60+graph_rank)"]
+    end
+
+    subgraph "Output"
+        CTX["Vec ContextItem<br/><i>Top 5 ranked results</i>"]
+        PROMPT["Historical Context<br/>- Session S-42: ...<br/>- Session S-38: ..."]
+    end
+
+    TASK --> KW --> Q1 --> J1 --> CTX
+    PROJ --> Q1
+    J1 --> MERGE1
+    Q2 --> MERGE1 --> CTX
+    TASK --> EMB --> Q3 --> RRF
+    MERGE1 --> RRF --> CTX
+    CTX --> PROMPT
 ```
 
 ### Concurrency Model
@@ -141,6 +272,58 @@ The orchestrator determines relevant context using three signals combined:
 
 ## Crate Structure
 
+### Module Architecture
+
+```mermaid
+graph TD
+    subgraph "spur-context crate"
+        LIB["lib.rs<br/><i>pub mod + re-exports</i>"]
+
+        subgraph "Phase 1"
+            ENGINE["engine.rs<br/><i>ContextEngine struct<br/>open, lifecycle</i>"]
+            DB["db.rs<br/><i>Schema DDL<br/>write fns, query fns</i>"]
+            TYPES["types.rs<br/><i>Decision, Observation<br/>ContextItem</i>"]
+        end
+
+        subgraph "Phase 2"
+            GRAPH["graph.rs<br/><i>Property graph def<br/>traversal queries<br/>graph analytics</i>"]
+        end
+
+        subgraph "Phase 3"
+            VECTOR["vector.rs<br/><i>Lance dataset mgmt<br/>embedding write/read<br/>hybrid search</i>"]
+        end
+    end
+
+    subgraph "Dependencies"
+        DUCKDB["duckdb crate<br/><i>bundled C FFI</i>"]
+        LANCEDB["lancedb crate<br/><i>native Rust</i>"]
+        ARROW["arrow crate<br/><i>RecordBatch, Schema</i>"]
+        DUCKPGQ_EXT["DuckPGQ extension<br/><i>loaded via SQL</i>"]
+        LANCE_EXT["Lance extension<br/><i>loaded via SQL</i>"]
+    end
+
+    subgraph "Consumers"
+        CORE["spur-core<br/><i>Orchestrator</i>"]
+        MCP_CRATE["spur-mcp<br/><i>MCP tools Phase 2+</i>"]
+    end
+
+    LIB --> ENGINE
+    LIB --> DB
+    LIB --> TYPES
+    LIB --> GRAPH
+    LIB --> VECTOR
+
+    ENGINE --> DUCKDB
+    ENGINE -->|"Phase 2"| DUCKPGQ_EXT
+    ENGINE -->|"Phase 3"| LANCE_EXT
+    VECTOR --> LANCEDB
+    VECTOR --> ARROW
+    GRAPH --> DUCKDB
+
+    CORE -->|"Option ContextEngine"| LIB
+    MCP_CRATE -->|"Phase 2+ tools"| LIB
+```
+
 ### Phase 1 (Relational Foundation)
 
 ```
@@ -167,6 +350,61 @@ crates/spur-context/
 ```
 
 ## Data Model
+
+### Entity Relationship Diagram
+
+```mermaid
+erDiagram
+    decisions {
+        TEXT id PK
+        TEXT session_id FK
+        TEXT agent
+        TEXT action
+        TEXT reasoning
+        TEXT created_at
+        TEXT outcome
+    }
+
+    observations {
+        TEXT id PK
+        TEXT session_id FK
+        TEXT decision_id FK
+        TEXT agent
+        TEXT content
+        TEXT artifacts_json
+        TEXT created_at
+    }
+
+    entities {
+        TEXT id PK
+        TEXT name
+        TEXT entity_type
+        TEXT properties
+        TEXT first_seen_at
+        TEXT last_seen_at
+        TEXT valid_at
+        TEXT invalid_at
+        INTEGER mention_count
+    }
+
+    relationships {
+        TEXT id PK
+        TEXT source_entity FK
+        TEXT target_entity FK
+        TEXT rel_type
+        REAL weight
+        TEXT session_id FK
+        TEXT created_at
+        TEXT valid_at
+        TEXT invalid_at
+    }
+
+    decisions ||--o{ observations : "produces"
+    decisions }o--|| sessions_spur_cost : "session_id"
+    entities ||--o{ relationships : "source"
+    entities ||--o{ relationships : "target"
+    observations }o..o{ entities : "extracted from"
+```
 
 ### Phase 1 Schema
 
@@ -418,6 +656,37 @@ impl ContextEngine {
 ```
 
 ## Phased Delivery
+
+```mermaid
+gantt
+    title spur-context Phased Delivery
+    dateFormat X
+    axisFormat %s
+
+    section Phase 1 Relational
+    DuckDB Core + decisions/observations tables    :done, p1a, 0, 1
+    ContextEngine API CRUD + search                :done, p1b, 1, 2
+    Context Assembly keyword + recency             :done, p1c, 2, 3
+    Orchestrator integration                       :done, p1d, 3, 4
+    Validation DuckDB Rust crate in CI             :milestone, p1m, 4, 4
+
+    section Phase 2 Graph
+    entities + relationships tables                :p2a, 5, 6
+    DuckPGQ extension + property graph             :p2b, 6, 7
+    Entity extraction pipeline                     :p2c, 7, 8
+    Entity resolution exact + fuzzy                :p2d, 8, 9
+    Graph traversal queries                        :p2e, 9, 10
+    MCP tools recall_context search_knowledge      :p2f, 10, 11
+    Validation extension loads graphs persist      :milestone, p2m, 11, 11
+
+    section Phase 3 Vector
+    lancedb crate + Lance datasets                 :p3a, 12, 13
+    Embedding write path async                     :p3b, 13, 14
+    Lance DuckDB extension + SQL search            :p3c, 14, 15
+    Hybrid Graph RAG with RRF                      :p3d, 15, 16
+    Embedding-based entity resolution              :p3e, 16, 17
+    Validation cross-format read write             :milestone, p3m, 17, 17
+```
 
 | Phase | Scope | DuckDB Feature | Fallback | Validation Gate |
 |-------|-------|----------------|----------|-----------------|
