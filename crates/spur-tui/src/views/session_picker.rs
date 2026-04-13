@@ -38,6 +38,8 @@ enum PickerState {
         sessions: Vec<SessionInfo>,
         cursor: usize,
         resuming: bool,
+        search_focused: bool,
+        filter: String,
     },
     Error {
         message: String,
@@ -72,8 +74,63 @@ impl SessionPickerView {
             sessions,
             cursor: 0,
             resuming: false,
+            search_focused: false,
+            filter: String::new(),
         };
         self.scroll_offset.set(0);
+    }
+
+    fn filtered_indices(
+        sessions: &[SessionInfo],
+        filter: &str,
+        metadata: &SessionMetadata,
+    ) -> Vec<usize> {
+        if filter.is_empty() {
+            return (0..sessions.len()).collect();
+        }
+        use nucleo_matcher::{
+            pattern::{CaseMatching, Normalization, Pattern},
+            Matcher,
+        };
+        let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+        let pattern = Pattern::parse(filter, CaseMatching::Ignore, Normalization::Smart);
+        let mut scored: Vec<(u32, usize)> = sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let title = Self::resolved_title(s, metadata, false);
+                let cwd = s.cwd.display().to_string();
+                let id = s.session_id.0.as_ref();
+                let haystack = format!("{title} {cwd} {id}");
+                let score = pattern.score(
+                    nucleo_matcher::Utf32Str::new(&haystack, &mut Vec::new()),
+                    &mut matcher,
+                )?;
+                Some((score, i))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().map(|(_, i)| i).collect()
+    }
+
+    pub fn visible_session_count(&self) -> usize {
+        match &self.state {
+            PickerState::Populated {
+                sessions, filter, ..
+            } => Self::filtered_indices(sessions, filter, &self.metadata).len(),
+            _ => 0,
+        }
+    }
+
+    pub fn visible_session_at(&self, idx: usize) -> Option<&SessionInfo> {
+        match &self.state {
+            PickerState::Populated {
+                sessions, filter, ..
+            } => Self::filtered_indices(sessions, filter, &self.metadata)
+                .get(idx)
+                .and_then(|&i| sessions.get(i)),
+            _ => None,
+        }
     }
 
     pub fn set_error(&mut self, message: String) {
@@ -188,14 +245,18 @@ impl SessionPickerView {
         sessions: &[SessionInfo],
         cursor: usize,
         resuming: bool,
+        search_focused: bool,
+        filter: &str,
     ) {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
         let visible_height = area.height.saturating_sub(4) as usize;
 
+        let indices = Self::filtered_indices(sessions, filter, &self.metadata);
+
         // Clamp scroll_offset so cursor is always visible.
         // `cursor` indexes a virtual list where 0 = [+ New session] row and
-        // 1..=sessions.len() are real sessions. We scroll the real sessions;
-        // the [+ New session] row is always visible as the first entry.
+        // 1..=filtered.len() are real (visible) sessions. We scroll the real
+        // sessions; the [+ New session] row is always visible as the first entry.
         let mut scroll = self.scroll_offset.get();
         let session_cursor = cursor.saturating_sub(1);
         if cursor >= 1 && session_cursor >= scroll + visible_height {
@@ -215,6 +276,17 @@ impl SessionPickerView {
                 Span::styled(
                     format!("({})", agent),
                     Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Search  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}{}", filter, if search_focused { "_" } else { "" }),
+                    Style::default().fg(if search_focused {
+                        Color::Cyan
+                    } else {
+                        Color::Gray
+                    }),
                 ),
             ]),
             Line::from(""),
@@ -248,13 +320,10 @@ impl SessionPickerView {
             Style::default().fg(Color::DarkGray),
         )));
 
-        for (i, session) in sessions
-            .iter()
-            .enumerate()
-            .skip(scroll)
-            .take(visible_height)
+        for (display_i, real_i) in indices.iter().enumerate().skip(scroll).take(visible_height)
         {
-            let is_selected = cursor == i + 1;
+            let session = &sessions[*real_i];
+            let is_selected = cursor == display_i + 1;
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
             let raw_id = session.session_id.0.as_ref();
             let short_id = &raw_id[..8.min(raw_id.len())];
@@ -371,41 +440,90 @@ impl SessionPickerView {
 
 impl View for SessionPickerView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
-        match &mut self.state {
+        // Split-borrow self so we can reach `metadata` while also mutably
+        // borrowing `state`.
+        let SessionPickerView {
+            state, metadata, ..
+        } = self;
+        match state {
             PickerState::Populated {
                 sessions,
                 cursor,
                 resuming,
+                search_focused,
+                filter,
                 ..
             } => {
                 if *resuming {
                     return None;
                 }
-                match key.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if *cursor > 0 {
-                            *cursor -= 1;
+
+                if *search_focused {
+                    match key.code {
+                        KeyCode::Esc => {
+                            *search_focused = false;
+                            None
                         }
-                        None
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if *cursor < sessions.len() {
-                            *cursor += 1;
+                        KeyCode::Enter => {
+                            *search_focused = false;
+                            None
                         }
-                        None
-                    }
-                    KeyCode::Char('n') => Some(Action::NewSessionRequested),
-                    KeyCode::Enter => {
-                        if *cursor == 0 {
-                            Some(Action::NewSessionRequested)
-                        } else {
-                            let sid = sessions[*cursor - 1].session_id.0.to_string();
-                            *resuming = true;
-                            Some(Action::ResumeSession { session_id: sid })
+                        KeyCode::Backspace => {
+                            filter.pop();
+                            *cursor = 0;
+                            None
                         }
+                        KeyCode::Char(c) => {
+                            filter.push(c);
+                            *cursor = 0;
+                            None
+                        }
+                        _ => None,
                     }
-                    KeyCode::Esc => Some(Action::NavigateTo(ViewId::Dashboard)),
-                    _ => None,
+                } else {
+                    match key.code {
+                        KeyCode::Char('/') => {
+                            *search_focused = true;
+                            None
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if *cursor > 0 {
+                                *cursor -= 1;
+                            }
+                            None
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            let visible =
+                                Self::filtered_indices(sessions, filter, metadata).len();
+                            if *cursor < visible {
+                                *cursor += 1;
+                            }
+                            None
+                        }
+                        KeyCode::Char('n') => Some(Action::NewSessionRequested),
+                        KeyCode::Enter => {
+                            if *cursor == 0 {
+                                Some(Action::NewSessionRequested)
+                            } else {
+                                let indices =
+                                    Self::filtered_indices(sessions, filter, metadata);
+                                let real_idx = indices.get(*cursor - 1).copied()?;
+                                let sid = sessions[real_idx].session_id.0.to_string();
+                                *resuming = true;
+                                Some(Action::ResumeSession { session_id: sid })
+                            }
+                        }
+                        KeyCode::Esc => {
+                            if !filter.is_empty() {
+                                filter.clear();
+                                *cursor = 0;
+                                None
+                            } else {
+                                Some(Action::NavigateTo(ViewId::Dashboard))
+                            }
+                        }
+                        _ => None,
+                    }
                 }
             }
             PickerState::Loading | PickerState::Error { .. } => match key.code {
@@ -428,7 +546,18 @@ impl View for SessionPickerView {
                 sessions,
                 cursor,
                 resuming,
-            } => self.render_populated(frame, area, agent, sessions, *cursor, *resuming),
+                search_focused,
+                filter,
+            } => self.render_populated(
+                frame,
+                area,
+                agent,
+                sessions,
+                *cursor,
+                *resuming,
+                *search_focused,
+                filter,
+            ),
             PickerState::Error { message } => self.render_error(frame, area, message),
         }
     }
