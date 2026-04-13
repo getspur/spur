@@ -65,6 +65,14 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
         SpurEvent::DelegationRequested { from: _, to_agent, task } => {
             // Populate the task_spec of the most recent Executor owned by the
             // worker name, if empty.
+            //
+            // Known v1 limitation: `DelegationRequested` carries `from` (brain
+            // session) and `to_agent` (agent name) but not the worker session
+            // id. If two workers share an agent name with empty task_specs,
+            // the most-recent one wins. Acceptable for v1 because (a) the
+            // assignment is not destructive (empty-only), and (b) follow-up
+            // spec will switch the orchestrator to emit `ExecutorSpawned`
+            // directly with task_spec populated, removing this path.
             let id = lineage
                 .nodes_mut_vec()
                 .into_iter()

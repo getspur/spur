@@ -204,25 +204,6 @@ impl ExecutorLineage {
             .collect()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn insert_root(&mut self, node: ExecutorNode) {
-        self.roots.push(node.id.clone());
-        self.nodes.insert(node.id.clone(), node);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn insert_child(&mut self, parent: &ExecutorId, node: ExecutorNode) {
-        if let Some(p) = self.nodes.get_mut(parent) {
-            p.child_ids.push(node.id.clone());
-        }
-        self.nodes.insert(node.id.clone(), node);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn node_mut(&mut self, id: &ExecutorId) -> Option<&mut ExecutorNode> {
-        self.nodes.get_mut(id)
-    }
-
     pub(crate) fn insert_root_node(&mut self, node: ExecutorNode) {
         self.roots.push(node.id.clone());
         self.nodes.insert(node.id.clone(), node);
