@@ -19,6 +19,7 @@ use spur_pm::Issue;
 use agent_client_protocol::{
     ContentBlock, InitializeRequest, ListSessionsRequest, LoadSessionRequest, McpServer,
     McpServerStdio, PromptRequest, ProtocolVersion, SessionInfo, SessionUpdate, TextContent,
+    SetSessionModeRequest,
 };
 
 use spur_cost::CostTracker;
@@ -62,6 +63,9 @@ pub enum InteractiveInput {
     Message { text: String, interrupt: bool },
     ListSessions,
     ResumeSession { session_id: String },
+    /// Request `set_session_mode` on the active brain session. No-op if
+    /// there is no active brain session.
+    SetSessionMode { mode_id: String },
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -112,6 +116,29 @@ impl Orchestrator {
     /// Subscribe to orchestrator events (for TUI, logging, etc.).
     pub fn subscribe(&self) -> broadcast::Receiver<SpurEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Classify an error as an auth-required failure.
+    ///
+    /// The ACP spec reserves error code `-32000` with `authRequired`-shaped
+    /// data payloads for this, but in practice the agent_client_protocol
+    /// crate surfaces it as a stringly-typed error. Claude Code's wrapper
+    /// also prints human-readable prompts. Match on substrings.
+    fn is_auth_required_error(e: &anyhow::Error) -> bool {
+        let msg = e.to_string().to_lowercase();
+        msg.contains("authrequired")
+            || msg.contains("authentication required")
+            || msg.contains("auth_required")
+            || msg.contains("please run /login")
+            || msg.contains("run `/login`")
+            || msg.contains("run /login")
+    }
+
+    /// Human-readable banner text for auth-required failures.
+    fn auth_required_banner() -> String {
+        "Claude Code requires authentication. Run `claude /login` in a \
+         terminal, then restart this session. Press any key to dismiss."
+            .to_string()
     }
 
     /// Run an ad-hoc task through the brain agent.
@@ -451,6 +478,23 @@ impl Orchestrator {
                     }
                 }
 
+                // ── SetSessionMode ───────────────────────────────────────
+                InteractiveInput::SetSessionMode { mode_id } => {
+                    if let Some(b) = brain.as_mut() {
+                        let req = SetSessionModeRequest::new(
+                            agent_client_protocol::SessionId::new(b.acp_session_id.clone()),
+                            agent_client_protocol::SessionModeId::new(
+                                std::sync::Arc::<str>::from(mode_id.as_str()),
+                            ),
+                        );
+                        if let Err(e) = b.connection.set_session_mode(req).await {
+                            warn!(error = %e, mode_id = %mode_id, "set_session_mode failed");
+                        }
+                    } else {
+                        warn!(mode_id = %mode_id, "SetSessionMode received but no active brain session");
+                    }
+                }
+
                 // ── Message ─────────────────────────────────────────────
                 InteractiveInput::Message { text, interrupt } => {
                     // Flatten interrupt messages (they were queued during streaming).
@@ -478,10 +522,17 @@ impl Orchestrator {
                             Ok(b) => brain = Some(b),
                             Err(e) => {
                                 error!(error = %e, "Failed to spawn brain");
-                                self.emit(SpurEvent::BrainError {
-                                    session: SessionId::new(),
-                                    message: e.to_string(),
-                                });
+                                if Self::is_auth_required_error(&e) {
+                                    self.emit(SpurEvent::AuthRequired {
+                                        session: SessionId::new(),
+                                        message: Self::auth_required_banner(),
+                                    });
+                                } else {
+                                    self.emit(SpurEvent::BrainError {
+                                        session: SessionId::new(),
+                                        message: e.to_string(),
+                                    });
+                                }
                                 continue;
                             }
                         }
@@ -499,10 +550,17 @@ impl Orchestrator {
                         Ok(s) => s,
                         Err(e) => {
                             error!(error = %e, "Brain prompt failed");
-                            self.emit(SpurEvent::BrainError {
-                                session: b.spur_session_id.clone(),
-                                message: e.to_string(),
-                            });
+                            if Self::is_auth_required_error(&e) {
+                                self.emit(SpurEvent::AuthRequired {
+                                    session: b.spur_session_id.clone(),
+                                    message: Self::auth_required_banner(),
+                                });
+                            } else {
+                                self.emit(SpurEvent::BrainError {
+                                    session: b.spur_session_id.clone(),
+                                    message: e.to_string(),
+                                });
+                            }
                             b.delegation_handle.abort();
                             let _ = b.connection.shutdown().await;
                             brain = None;
