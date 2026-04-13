@@ -61,7 +61,7 @@ pub enum StreamItem {
 }
 
 /// Accumulated-text markdown renderer.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct MarkdownStream {
     raw_text: String,
     dirty_since: Option<Instant>,
@@ -73,11 +73,36 @@ pub struct MarkdownStream {
     fence_placeholders: std::collections::HashMap<MermaidId, Line<'static>>,
     known_fences: Vec<FenceRef>,
     next_fence_id: u64,
+    /// When false, ```mermaid fences are not extracted — they flow through
+    /// to tui-markdown as ordinary code blocks. Set at construction time
+    /// from the terminal's image-protocol capability.
+    mermaid_enabled: bool,
+}
+
+impl Default for MarkdownStream {
+    fn default() -> Self {
+        Self {
+            raw_text: String::new(),
+            dirty_since: None,
+            cached_items: Vec::new(),
+            fence_placeholders: std::collections::HashMap::new(),
+            known_fences: Vec::new(),
+            next_fence_id: 0,
+            mermaid_enabled: true,
+        }
+    }
 }
 
 impl MarkdownStream {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct with explicit mermaid support. `false` makes ```mermaid
+    /// fences render as ordinary code blocks (used when the terminal has
+    /// no image-protocol support).
+    pub fn new_with_mermaid(mermaid_enabled: bool) -> Self {
+        Self { mermaid_enabled, ..Self::default() }
     }
 
     /// Append a chunk of text. Cheap — does not reparse.
@@ -156,8 +181,10 @@ impl MarkdownStream {
     /// Rebuild `cached_lines` from `raw_text`.
     fn rebuild(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         // ── Stage 1: pre-scan raw_text for closed ```mermaid fences ───────
+        // Skipped entirely when the terminal has no image-protocol support —
+        // mermaid fences then flow through tui-markdown as ordinary code.
         let mut discovered: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-        {
+        if self.mermaid_enabled {
             use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
             let parser = Parser::new_ext(&self.raw_text, Options::empty()).into_offset_iter();
             let mut open_fence_start: Option<usize> = None;
@@ -405,5 +432,22 @@ mod stream_item_tests {
             .flat_map(|l| l.spans.iter().map(|sp| sp.content.as_ref()))
             .collect();
         assert!(joined.contains("mermaid #0"), "expected placeholder in back-compat lines(): {joined:?}");
+    }
+
+    #[test]
+    fn text_mode_renders_mermaid_fence_as_code_block() {
+        let mut s = MarkdownStream::new_with_mermaid(false);
+        s.append("Intro\n\n```mermaid\nflowchart LR\nA-->B\n```\n\nOutro\n");
+        let _ = s.flush_now(&StateLookup::empty());
+
+        // No fence item should be produced — mermaid should fall through to
+        // tui-markdown as an ordinary code block.
+        let has_fence = s.items().iter().any(|it| matches!(it, StreamItem::Fence(_)));
+        assert!(!has_fence, "text mode must not produce Fence items: {:?}", s.items());
+
+        // Body text should appear verbatim in the rendered output.
+        let joined = s.cached_lines_debug().join("\n");
+        assert!(joined.contains("flowchart LR"), "expected mermaid source in output: {joined}");
+        assert!(joined.contains("A-->B"), "expected mermaid source in output: {joined}");
     }
 }
