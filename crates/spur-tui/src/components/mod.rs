@@ -4,6 +4,8 @@ pub mod agents_tree;
 pub mod help_overlay;
 pub mod input_bar;
 pub mod line_wrap;
+#[cfg(feature = "markdown")]
+pub mod mermaid;
 pub mod react_trace;
 pub mod review_card;
 pub mod status_bar;
