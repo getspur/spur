@@ -1,4 +1,6 @@
 pub mod dashboard;
+#[cfg(feature = "markdown")]
+pub mod mermaid_viewer;
 pub mod session_detail;
 pub mod session_picker;
 
