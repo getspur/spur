@@ -293,6 +293,20 @@ impl View for SessionDetailView {
                     spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
                         if let Some(text) = extract_text(chunk) {
                             if !text.is_empty() {
+                                let prev_kind = self
+                                    .react_trace
+                                    .last_entry_kind_name()
+                                    .unwrap_or("none");
+                                let will_continue = prev_kind == "agent_message";
+                                tracing::debug!(
+                                    streaming_probe = true,
+                                    site = "D_trace_append",
+                                    text_len = text.len(),
+                                    prev_entry_kind = prev_kind,
+                                    will_continue = will_continue,
+                                    session = %self.session_id,
+                                    "about to append_message"
+                                );
                                 self.react_trace.append_message(text, &self.agent_name, Self::now_stamp());
                             }
                         }
