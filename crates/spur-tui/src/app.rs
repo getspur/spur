@@ -705,8 +705,16 @@ impl App {
             }
 
             Action::NewSessionRequested => {
-                // Stub until Task 15 (BUG-2 fix) adds NewSessionWithMessage plumbing.
-                // For now, dismiss picker by navigating to Dashboard.
+                // Shut down the current brain atomically so picker [+ New session]
+                // doesn't leave the old agent subprocess's session running.
+                // Orchestrator's NewSessionWithMessage arm with empty blocks is
+                // defined as "retire current brain, defer spawn to next Message."
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::NewSessionWithMessage {
+                        blocks: vec![],
+                        interrupt: false,
+                    });
+                }
                 self.current_view = ViewId::Dashboard;
                 self.dirty = true;
             }
