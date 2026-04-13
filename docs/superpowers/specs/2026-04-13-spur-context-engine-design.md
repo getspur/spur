@@ -54,7 +54,9 @@ All reads go through DuckDB SQL. Structured writes go through DuckDB. Embedding 
 
 **Chosen**: `spur-context` is a new crate alongside `spur-cost`, not a replacement.
 
-**Why**: Different concerns. `spur-cost` tracks accounting (dollars, durations). `spur-context` tracks semantic content (decisions, reasoning, outcomes). They share `session_id` as a common key. Optional future consolidation via DuckDB foreign tables or migration.
+**Why**: Different concerns. `spur-cost` tracks operational metrics (dollars, durations, delegation status). `spur-context` tracks semantic content (task descriptions in natural language, worker output text, entity relationships). They complement rather than duplicate — `spur-cost` knows a delegation cost $0.12 and took 45 seconds; `spur-context` knows it "refactored the JWT validation middleware and added refresh token support." They share `session_id` as a common key.
+
+**Future unification**: DuckDB's SQLite scanner extension (`ATTACH 'cost.db' AS cost (TYPE SQLITE)`) can provide cross-database queries without migrating spur-cost. This enables unified queries like "find auth-related tasks sorted by cost" in a single SQL statement.
 
 ### Decision 6: Entity Extraction Deferred to Phase 2
 
@@ -95,6 +97,47 @@ DuckDB supports concurrent reads but only one writer. This naturally fits Spur's
 - Read-only access (brain querying context) is concurrent-safe
 
 No additional concurrency primitives needed.
+
+### Context Delivery
+
+The brain agent is an external LLM connected via ACP — it cannot call Rust functions directly. Context must be delivered through the existing communication channels.
+
+**Phase 1: Prompt Injection**
+
+The orchestrator queries `ContextEngine` before constructing the brain's initial prompt, and prepends a context summary:
+
+```
+## Historical Context
+- [Session S-42] Delegated "refactor auth middleware" to claude-worker → success.
+  Output: Modified 3 files, added JWT validation, tests passing.
+- [Session S-38] Delegated "update auth flow" to claude-worker → failure.
+  Output: Worker didn't handle token refresh edge cases.
+
+## Current Task
+Fix the authentication regression in the login endpoint.
+```
+
+**Phase 2+: MCP Tools**
+
+`spur-mcp` gains new tools that the brain can call interactively during reasoning:
+
+- `recall_context(query, top_k)` — semantic search over past decisions/observations
+- `search_knowledge(entity, depth)` — graph traversal from a named entity
+- `query_history(project, keywords)` — structured search over past work
+
+Both mechanisms coexist: automatic baseline context + on-demand deep exploration.
+
+### Context Assembly (Phase 1)
+
+The orchestrator determines relevant context using three signals combined:
+
+1. **Project match** — past decisions from the same project
+2. **Keyword overlap** — `ILIKE` search on current task description terms
+3. **Recency** — most recent first
+
+**Budget**: Max 5 past decisions with their top observation each, formatted as markdown. This keeps the prompt concise while providing actionable history.
+
+**Phase 3 upgrade**: Vector similarity replaces keyword matching for relevance ranking.
 
 ## Crate Structure
 
@@ -150,8 +193,11 @@ CREATE TABLE IF NOT EXISTS observations (
 ```
 
 - `session_id` links to spur-cost's sessions table by convention (shared UUID), not enforced FK
+- `action` is the delegation task description from the `DelegationRequest`
+- `reasoning` is nullable — populated when the brain agent provides structured decision output (e.g., via a future "explain your reasoning" tool). In Phase 1, typically NULL as the orchestrator only sees the `DelegationRequest`, not the brain's internal reasoning
 - `artifacts_json` stores a JSON array of file paths, diffs, or other artifacts; queryable via DuckDB's native JSON functions
 - `outcome` tracks decision results: `pending`, `success`, `failure`
+- `observations.content` source: the worker agent's final response text from the ACP session's last `ContentBlock`
 
 ### Phase 2 Schema (Knowledge Graph)
 
@@ -221,6 +267,13 @@ pub struct Observation {
     pub artifacts: Option<Vec<String>>,
     pub created_at: String,
 }
+
+/// A assembled context item for brain prompt injection.
+pub struct ContextItem {
+    pub decision: Decision,
+    pub observation: Option<Observation>,
+    pub relevance_score: f32, // 0.0-1.0, used for ranking
+}
 ```
 
 ### ContextEngine API
@@ -264,6 +317,15 @@ impl ContextEngine {
 
     /// Full-text keyword search over decision actions and reasoning.
     pub fn search_decisions(&self, keyword: &str, limit: usize) -> Result<Vec<Decision>>;
+
+    // ── Context Assembly ────────────────────────────────────
+
+    /// Assemble relevant historical context for the brain's prompt.
+    /// Combines project match + keyword overlap + recency.
+    /// Returns up to `max_items` decisions with their top observation.
+    pub fn assemble_context(
+        &self, project: Option<&str>, task_keywords: &[&str], max_items: usize,
+    ) -> Result<Vec<ContextItem>>;
 }
 ```
 
