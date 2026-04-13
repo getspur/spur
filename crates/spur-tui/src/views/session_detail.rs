@@ -983,6 +983,19 @@ impl View for SessionDetailView {
                 }
             }
 
+            SpurEventBody::AgentSessionReady {
+                session,
+                resumed,
+                ..
+            } => {
+                if session.0 != self.session_id.0 {
+                    return;
+                }
+                if *resumed {
+                    self.push_system_note("Resumed from prior conversation".to_string());
+                }
+            }
+
             // All other event types are not relevant to this session view.
             _ => {}
         }
