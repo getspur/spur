@@ -1,0 +1,69 @@
+[brain]
+# To try the new ACP-based Claude transport, flip `default` to
+# "claude-code-acp". Keeping the stream-json one as default during rollout.
+default = "claude-code"
+fallback = ["claude-code-acp", "kiro"]
+
+[brain.prompt]
+
+[[agents.entries]]
+name = "gemini"
+command = "gemini"
+args = []
+transport = "cli-wrap"
+role = "both"
+capabilities = []
+cost_tier = "medium"
+
+[[agents.entries]]
+name = "claude-code"
+command = "claude"
+args = [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--permission-mode",
+    "acceptEdits",
+]
+transport = "stream-json"
+role = "both"
+capabilities = []
+cost_tier = "medium"
+
+[[agents.entries]]
+name = "kiro"
+command = "kiro-cli"
+args = ["acp"]
+transport = "acp"
+role = "both"
+capabilities = []
+cost_tier = "medium"
+
+# Claude Code via the upstream ACP wrapper. Preferred transport: gives us
+# plan mode, usage tracking, slash-command discovery, and full permission
+# gating via the SDK. Requires Node.js on PATH.
+#
+# The pinned version is critical — @latest would silently pull breaking
+# changes mid-session. Bump deliberately and retest after each bump.
+[[agents.entries]]
+name = "claude-code-acp"
+command = "npx"
+args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
+transport = "acp"
+role = "both"
+capabilities = []
+cost_tier = "medium"
+
+[failover]
+cooldown_minutes = 30
+
+[worktree]
+max_concurrent = 5
+stale_cleanup_hours = 24
+
+[cost]
+db_path = "~/.spur/cost.db"
+
+[pm]
