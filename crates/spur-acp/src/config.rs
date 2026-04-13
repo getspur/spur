@@ -1,3 +1,4 @@
+use crate::domain::delegation::TimeoutFallback;
 use crate::types::{AgentRole, CostTier, TransportKind};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -30,6 +31,9 @@ pub struct AgentConfig {
         with = "optional_duration_serde"
     )]
     pub rate_limit_window: Option<Duration>,
+    /// Human-review policy for delegations to this agent.
+    #[serde(default)]
+    pub review: AgentReviewPolicy,
 }
 
 fn default_role() -> AgentRole {
@@ -38,6 +42,68 @@ fn default_role() -> AgentRole {
 
 fn default_cost_tier() -> CostTier {
     CostTier::Medium
+}
+
+/// Per-agent human-review policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentReviewPolicy {
+    /// When true, the orchestrator gates every delegation to this agent
+    /// on a human review. Default: false.
+    #[serde(default)]
+    pub review_required: bool,
+    /// How long to wait for a human decision before applying the default.
+    /// Serialized as `review_timeout_secs` (integer seconds) in TOML.
+    #[serde(
+        default = "default_review_timeout",
+        rename = "review_timeout_secs",
+        with = "duration_secs_serde"
+    )]
+    pub review_timeout: Duration,
+    /// What to apply on timeout.
+    /// Default: `TimeoutFallback::Reject { reason: "review timeout" }`.
+    #[serde(default = "default_review_timeout_default")]
+    pub review_timeout_default: TimeoutFallback,
+    /// Cap on `ReviewDecision::Retry` loops. Default: 3.
+    #[serde(default = "default_max_review_retries")]
+    pub max_review_retries: u32,
+}
+
+impl Default for AgentReviewPolicy {
+    fn default() -> Self {
+        Self {
+            review_required: false,
+            review_timeout: default_review_timeout(),
+            review_timeout_default: default_review_timeout_default(),
+            max_review_retries: default_max_review_retries(),
+        }
+    }
+}
+
+fn default_review_timeout() -> Duration {
+    Duration::from_secs(30 * 60)
+}
+
+fn default_review_timeout_default() -> TimeoutFallback {
+    TimeoutFallback::Reject {
+        reason: "review timeout".into(),
+    }
+}
+
+fn default_max_review_retries() -> u32 {
+    3
+}
+
+mod duration_secs_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        d.as_secs().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        u64::deserialize(d).map(Duration::from_secs)
+    }
 }
 
 /// Global SPUR configuration (from ~/.spur/config.toml + .spur/config.toml).

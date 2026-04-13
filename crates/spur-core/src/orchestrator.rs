@@ -808,6 +808,7 @@ impl Orchestrator {
                         capabilities: vec![],
                         cost_tier: CostTier::Medium,
                         rate_limit_window: None,
+                        review: Default::default(),
                     };
                     self.registry.register(config);
                     found.push(name.to_string());

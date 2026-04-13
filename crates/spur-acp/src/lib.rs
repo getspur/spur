@@ -5,7 +5,7 @@ pub mod protocol;
 pub mod registry;
 pub mod types;
 
-pub use config::AgentConfig;
+pub use config::{AgentConfig, AgentReviewPolicy};
 pub use connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 pub use registry::AgentRegistry;
 
