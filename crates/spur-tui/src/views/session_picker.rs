@@ -13,6 +13,7 @@ use spur_acp::{SessionInfo, SpurEvent};
 
 use crate::action::{Action, ViewId};
 use crate::components::status_bar::{StatusBar, StatusBarProps};
+use crate::session_metadata::SessionMetadata;
 
 use super::View;
 
@@ -52,6 +53,7 @@ pub struct SessionPickerView {
     state: PickerState,
     /// Interior-mutable so render(&self) can adjust scroll position.
     scroll_offset: Cell<usize>,
+    metadata: SessionMetadata,
 }
 
 impl SessionPickerView {
@@ -59,7 +61,12 @@ impl SessionPickerView {
         Self {
             state: PickerState::Loading,
             scroll_offset: Cell::new(0),
+            metadata: SessionMetadata::default(),
         }
+    }
+
+    pub fn set_metadata(&mut self, metadata: SessionMetadata) {
+        self.metadata = metadata;
     }
 
     pub fn set_sessions(&mut self, agent: String, sessions: Vec<SessionInfo>) {
@@ -120,6 +127,21 @@ impl SessionPickerView {
         } else {
             "(untitled session)".to_string()
         }
+    }
+
+    fn resolved_title(
+        session: &spur_acp::SessionInfo,
+        metadata: &SessionMetadata,
+        show_cwd: bool,
+    ) -> String {
+        if let Some(entry) = metadata.sessions.get(session.session_id.0.as_ref()) {
+            if let Some(ref t) = entry.title_override {
+                if !t.is_empty() {
+                    return t.clone();
+                }
+            }
+        }
+        Self::display_text(session, show_cwd)
     }
 
     fn render_loading(&self, frame: &mut Frame, area: Rect) {
@@ -211,7 +233,7 @@ impl SessionPickerView {
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
             let raw_id = session.session_id.0.as_ref();
             let short_id = &raw_id[..8.min(raw_id.len())];
-            let display = Self::display_text(session, show_cwd);
+            let display = Self::resolved_title(session, &self.metadata, show_cwd);
             let time_str = session
                 .updated_at
                 .as_deref()
