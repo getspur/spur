@@ -154,16 +154,7 @@ impl DetailPane {
         }
     }
 
-    fn render_review<'a>(&self, node: &'a ExecutorNode) -> Vec<Line<'a>> {
-        match &node.pending_review {
-            Some(_) => vec![Line::from(Span::styled(
-                "(review card rendered in Task 10)",
-                Style::default().fg(Color::DarkGray),
-            ))],
-            None => vec![Line::from(Span::styled(
-                "(no pending review)",
-                Style::default().fg(Color::DarkGray),
-            ))],
-        }
+    fn render_review(&self, node: &ExecutorNode) -> Vec<Line<'static>> {
+        super::review_card::render_review(node)
     }
 }

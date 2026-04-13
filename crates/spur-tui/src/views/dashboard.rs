@@ -16,7 +16,7 @@ use spur_core::{ExecutorId, ExecutorLineage};
 use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
-use crate::components::detail_pane::DetailPane;
+use crate::components::detail_pane::{DetailPane, DetailTab};
 use crate::components::input_bar::InputBar;
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 use crate::components::{LogEntry, LogEntryKind};
@@ -299,6 +299,32 @@ impl View for DashboardView {
                     text,
                     interrupt,
                 });
+            }
+
+            // If InputBar has exactly one char and we're in the Review tab,
+            // intercept review decision keys before general navigation.
+            if self.input_bar.text().len() == 1
+                && self.focused_node.is_some()
+                && self.detail_pane.current_tab == DetailTab::Review
+            {
+                let ch = self.input_bar.text().chars().next().unwrap();
+                match ch {
+                    ch @ ('a' | 'd' | 'm' | 'R') => {
+                        self.input_bar.clear();
+                        if let Some(decision) =
+                            crate::components::review_card::decision_for_key(ch, None)
+                        {
+                            if let Some(id) = self.focused_node.clone() {
+                                return Some(Action::SubmitReview {
+                                    executor_id: id.0,
+                                    decision,
+                                });
+                            }
+                        }
+                        return None;
+                    }
+                    _ => {}
+                }
             }
 
             // If InputBar was empty and user typed a navigation char, treat as nav

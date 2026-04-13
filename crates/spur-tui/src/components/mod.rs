@@ -5,6 +5,7 @@ pub mod help_overlay;
 pub mod input_bar;
 pub mod line_wrap;
 pub mod react_trace;
+pub mod review_card;
 pub mod status_bar;
 
 use ratatui::style::{Color, Style};

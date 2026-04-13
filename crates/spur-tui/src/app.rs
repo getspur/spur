@@ -35,6 +35,10 @@ pub enum UserInput {
     SetSessionMode {
         mode_id: String,
     },
+    SubmitReview {
+        executor_id: String,
+        decision: spur_core::ReviewDecision,
+    },
 }
 
 /// Tracks the brain agent's current state for status indicators.
@@ -482,8 +486,20 @@ impl App {
                     self.dashboard.agents_tree_mut().toggle_collapsed(&id);
                 }
             }
-            Action::SubmitReview { .. } => {
-                // handled in Task 10
+            Action::SubmitReview { executor_id, decision } => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::SubmitReview {
+                        executor_id: executor_id.clone(),
+                        decision: decision.clone(),
+                    });
+                }
+                // Optimistically reflect the resolution locally so the UI
+                // updates immediately without waiting for the authoritative
+                // event to round-trip.
+                self.lineage.apply(&spur_acp::SpurEvent::ExecutorReviewResolved {
+                    id: executor_id,
+                    decision: to_wire_decision(&decision),
+                });
             }
 
             // Scroll actions are already handled inside the views' handle_key methods.
@@ -747,5 +763,16 @@ pub(crate) fn apply_session_update(
         _ => {
             tracing::trace!("apply_session_update: unhandled variant");
         }
+    }
+}
+
+fn to_wire_decision(d: &spur_core::ReviewDecision) -> spur_acp::ExecutorReviewDecision {
+    use spur_core::ReviewDecision as L;
+    use spur_acp::ExecutorReviewDecision as W;
+    match d {
+        L::Approve => W::Approve,
+        L::Reject { reason } => W::Reject { reason: reason.clone() },
+        L::Modify { note } => W::Modify { note: note.clone() },
+        L::Retry { new_constraints } => W::Retry { new_constraints: new_constraints.clone() },
     }
 }
