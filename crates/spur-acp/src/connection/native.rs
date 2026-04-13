@@ -115,6 +115,16 @@ pub struct NativeAcpConnection {
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
 }
 
+/// Compute the path where the ACP subprocess's stderr should be written.
+/// Uses `.spur/logs/<agent>-<timestamp>-acp.log` relative to CWD.
+fn build_acp_log_path(agent_name: &str) -> std::path::PathBuf {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    std::path::PathBuf::from(".spur/logs").join(format!("{agent_name}-{ts}-acp.log"))
+}
+
 impl NativeAcpConnection {
     /// Create a new native ACP connection.
     ///
@@ -479,11 +489,45 @@ fn acp_thread_main(
         };
 
         // Spawn the agent subprocess.
+        let log_path = build_acp_log_path(&agent_name);
+        if let Some(parent) = log_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    agent = %agent_name,
+                    path = %parent.display(),
+                    error = %e,
+                    "NativeAcpConnection: failed to create log directory; falling back to inherit",
+                );
+            }
+        }
+        tracing::info!(
+            agent = %agent_name,
+            log_path = %log_path.display(),
+            "NativeAcpConnection: capturing child stderr to log file"
+        );
+        let stderr_cfg = match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+        {
+            Ok(f) => std::process::Stdio::from(f),
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_name,
+                    path = %log_path.display(),
+                    error = %e,
+                    "NativeAcpConnection: failed to open stderr log; falling back to inherit",
+                );
+                std::process::Stdio::inherit()
+            }
+        };
+
         let child_result = tokio::process::Command::new(&command)
             .args(&extra_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(stderr_cfg)
             .spawn();
 
         let mut child = match child_result {
@@ -1153,4 +1197,29 @@ async fn terminal_reader(
         Err(_) => TerminalExitStatus::new(),
     };
     let _ = exit_tx.send(Some(exit_status));
+}
+
+#[cfg(test)]
+mod stderr_capture_tests {
+    use super::*;
+
+    #[test]
+    fn log_path_uses_spur_logs_directory() {
+        let path = build_acp_log_path("claude-code-acp");
+        assert!(
+            path.to_string_lossy().contains(".spur/logs/"),
+            "expected log under .spur/logs/, got {}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy().ends_with("-acp.log"),
+            "expected -acp.log suffix, got {}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy().contains("claude-code-acp"),
+            "expected agent name in path, got {}",
+            path.display()
+        );
+    }
 }
