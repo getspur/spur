@@ -31,6 +31,14 @@ pub enum UserInput {
         blocks: Vec<spur_acp::ContentBlock>,
         interrupt: bool,
     },
+    /// Spawn a new brain session and send these blocks as the first prompt
+    /// atomically. Emitted by the TUI when the user types into Dashboard's
+    /// InputBar with no brain attached, or from the picker's
+    /// NewSessionRequested path.
+    NewSessionWithMessage {
+        blocks: Vec<spur_acp::ContentBlock>,
+        interrupt: bool,
+    },
     ListSessions,
     ResumeSession {
         session_id: String,
@@ -452,10 +460,24 @@ impl App {
             }
 
             Action::SendMessage {
-                session,
+                mut session,
                 blocks,
                 interrupt,
             } => {
+                // Empty session means "route to the currently active session".
+                // Dashboard's InputBar emits this when a brain is attached.
+                if session.0.is_empty() {
+                    if let Some(ref detail) = self.session_detail {
+                        session = detail.session_id().clone();
+                    } else {
+                        tracing::warn!(
+                            "SendMessage with empty session and no active session_detail — \
+                             dropping (caller should have used NewSessionWithMessage)"
+                        );
+                        return;
+                    }
+                }
+
                 // Transition to Thinking when sending a message
                 if matches!(self.brain_status, BrainStatus::Ready | BrainStatus::Idle | BrainStatus::Error(_)) {
                     self.brain_status = BrainStatus::Thinking;
@@ -496,6 +518,35 @@ impl App {
                 }
 
                 self.sync_brain_status();
+            }
+
+            Action::NewSessionWithMessage { blocks, interrupt } => {
+                // Transition to Thinking so the UI reflects work-in-flight
+                // immediately; the orchestrator will spawn a brain and send
+                // the prompt atomically.
+                if matches!(
+                    self.brain_status,
+                    BrainStatus::Ready | BrainStatus::Idle | BrainStatus::Error(_)
+                ) {
+                    self.brain_status = BrainStatus::Thinking;
+                }
+
+                // Buffer the preview so it replays into session_detail once
+                // BrainSpawned creates the view.
+                if !blocks.is_empty() {
+                    let preview =
+                        crate::commands::submit_router::blocks_preview(&blocks);
+                    self.pending_user_messages.push(preview);
+                }
+
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::NewSessionWithMessage {
+                        blocks,
+                        interrupt,
+                    });
+                }
+                self.sync_brain_status();
+                self.dirty = true;
             }
 
             Action::KiroExecute { session, command, args } => {

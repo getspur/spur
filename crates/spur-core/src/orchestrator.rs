@@ -67,6 +67,10 @@ pub struct BrainSession {
 /// A user input message from the TUI.
 pub enum InteractiveInput {
     Message { blocks: Vec<ContentBlock>, interrupt: bool },
+    /// Spawn a fresh brain session and send these blocks as the first prompt
+    /// atomically. If a brain is already attached, it is shut down first.
+    /// Empty `blocks` means spawn-only with no first prompt.
+    NewSessionWithMessage { blocks: Vec<ContentBlock>, interrupt: bool },
     ListSessions,
     ResumeSession { session_id: String },
     /// Request `set_session_mode` on the active brain session. No-op if
@@ -733,6 +737,27 @@ impl Orchestrator {
                     self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
                         session: b.spur_session_id.clone(),
                     }));
+                }
+
+                // ── NewSessionWithMessage ────────────────────────────────
+                // Explicit "spawn a fresh brain and send first prompt atomically".
+                // Shut down any existing brain first, then delegate to the
+                // Message arm's lazy-spawn path by pushing back onto the queue.
+                // Empty `blocks` means spawn-only (no first prompt) — we still
+                // re-queue so the Message arm owns the spawn logic uniformly.
+                InteractiveInput::NewSessionWithMessage { blocks, interrupt } => {
+                    if let Some(mut b) = brain.take() {
+                        b.delegation_handle.abort();
+                        let _ = b.connection.shutdown().await;
+                        let _ = b.mcp_server.shutdown();
+                    }
+                    if blocks.is_empty() {
+                        // Spawn-only: no prompt. Leave brain=None; the next
+                        // Message will lazy-spawn. (No-op here; intent recorded.)
+                        info!("NewSessionWithMessage with empty blocks — spawn deferred to next Message");
+                    } else {
+                        pending_messages.push_back(InteractiveInput::Message { blocks, interrupt });
+                    }
                 }
 
                 // ── SubmitReview ─────────────────────────────────────────
