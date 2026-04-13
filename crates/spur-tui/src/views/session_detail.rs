@@ -14,7 +14,7 @@ use spur_acp::{DelegationStatus, SessionId, SpurEvent};
 use crate::action::{Action, ViewId};
 use crate::components::input_bar::InputBar;
 use crate::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
-use crate::components::status_bar::StatusBar;
+use crate::components::status_bar::{StatusBar, StatusBarProps};
 
 use super::View;
 
@@ -500,12 +500,14 @@ impl View for SessionDetailView {
         StatusBar::render(
             frame,
             chunks[3],
-            &ViewId::SessionDetail(self.session_id.clone()),
-            self.cost,
-            &elapsed,
-            self.current_mode.as_deref(),
-            self.context_used,
-            self.context_size,
+            StatusBarProps {
+                view: &ViewId::SessionDetail(self.session_id.clone()),
+                total_cost: self.cost,
+                elapsed: &elapsed,
+                current_mode: self.current_mode.as_deref(),
+                context_used: self.context_used,
+                context_size: self.context_size,
+            },
         );
     }
 }

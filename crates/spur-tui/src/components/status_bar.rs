@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -10,29 +10,32 @@ use crate::action::ViewId;
 
 pub struct StatusBar;
 
+/// Everything the status bar needs to render one frame.
+#[derive(Clone, Copy)]
+pub struct StatusBarProps<'a> {
+    pub view: &'a ViewId,
+    pub total_cost: f64,
+    pub elapsed: &'a str,
+    pub current_mode: Option<&'a str>,
+    pub context_used: Option<u64>,
+    pub context_size: Option<u64>,
+}
+
 impl StatusBar {
-    pub fn render(
-        frame: &mut Frame,
-        area: Rect,
-        view: &ViewId,
-        total_cost: f64,
-        elapsed: &str,
-        current_mode: Option<&str>,
-        context_used: Option<u64>,
-        context_size: Option<u64>,
-    ) {
-        let hints = match view {
+    pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
+        let hints = match props.view {
             ViewId::Dashboard => " [i]nput [Enter]session [s]essions [?]help [q]uit",
             ViewId::SessionDetail(_) => " [Enter]send [Esc]back [j/k]scroll [?]help",
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
         };
 
-        let mode_text = current_mode
+        let mode_text = props
+            .current_mode
             .filter(|m| !m.is_empty())
             .map(|m| format!(" [{m}]"))
             .unwrap_or_default();
 
-        let usage_text = match (context_used, context_size) {
+        let usage_text = match (props.context_used, props.context_size) {
             (Some(used), Some(size)) if size > 0 => {
                 let pct = (used as f64 / size as f64) * 100.0;
                 format!(" ctx {:.0}%", pct)
@@ -40,20 +43,13 @@ impl StatusBar {
             _ => String::new(),
         };
 
-        let line = Line::from(vec![
+        let right = Line::from(vec![
             Span::styled(
-                hints,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::DIM),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("${:.2}", total_cost),
+                format!("${:.2}", props.total_cost),
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(
-                format!(" {} ", elapsed),
+                format!(" {} ", props.elapsed),
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(mode_text, Style::default().fg(Color::Magenta)),
@@ -61,12 +57,24 @@ impl StatusBar {
             Span::raw(" "),
             Span::styled(
                 "SPUR",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
         ]);
 
-        frame.render_widget(Paragraph::new(line), area);
+        let right_width = right.width() as u16;
+        let hints_line = Line::from(Span::styled(
+            hints,
+            Style::default().fg(Color::White).add_modifier(Modifier::DIM),
+        ));
+
+        // Right-align the metric/brand group; let the hints take the rest.
+        let [hints_area, right_area] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(right_width.max(1)),
+        ])
+        .areas(area);
+
+        frame.render_widget(Paragraph::new(hints_line), hints_area);
+        frame.render_widget(Paragraph::new(right).right_aligned(), right_area);
     }
 }
