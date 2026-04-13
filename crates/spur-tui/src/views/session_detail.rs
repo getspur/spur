@@ -30,9 +30,10 @@ pub struct SessionDetailView {
     /// Current session mode id (e.g. "plan", "default"). Populated from
     /// `SessionUpdate::CurrentModeUpdate`.
     pub current_mode: Option<String>,
-    /// Commands advertised by the agent. Populated from
-    /// `SessionUpdate::AvailableCommandsUpdate`. Not yet wired to UI.
-    pub available_commands: Vec<spur_acp::AvailableCommand>,
+    /// Merged slash-command registry (spur-local + agent-advertised).
+    /// Populated from `SessionUpdate::AvailableCommandsUpdate` for the
+    /// agent portion.
+    pub(crate) command_registry: crate::commands::CommandRegistry,
     /// Tokens currently used in the agent's context window. Populated from
     /// `SessionUpdate::UsageUpdate`.
     pub context_used: Option<u64>,
@@ -55,7 +56,7 @@ impl SessionDetailView {
             cost: 0.0,
             started_at: Instant::now(),
             current_mode: None,
-            available_commands: Vec::new(),
+            command_registry: crate::commands::CommandRegistry::new(),
             context_used: None,
             context_size: None,
             auth_error: None,
@@ -72,10 +73,15 @@ impl SessionDetailView {
         self.react_trace.entry_count()
     }
 
-    /// Commands advertised by the agent via
-    /// `SessionUpdate::AvailableCommandsUpdate`.
-    pub fn available_commands(&self) -> &[spur_acp::AvailableCommand] {
-        &self.available_commands
+    /// Merged slash-command registry (spur-local + agent-advertised).
+    pub fn command_registry(&self) -> &crate::commands::CommandRegistry {
+        &self.command_registry
+    }
+
+    /// Lowercase agent identifier used for namespacing commands in the
+    /// registry (e.g. `"claude"`, `"kiro"`).
+    pub(crate) fn agent_handle_for_commands(&self) -> String {
+        self.agent_name.to_lowercase()
     }
 
     /// Current local time formatted as HH:MM:SS.
