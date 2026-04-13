@@ -53,6 +53,8 @@ pub struct SessionPickerView {
     /// Interior-mutable so render(&self) can adjust scroll position.
     scroll_offset: Cell<usize>,
     metadata: SessionMetadata,
+    /// View-level toggle; when false, archived sessions are hidden.
+    show_archived: bool,
 }
 
 impl SessionPickerView {
@@ -61,11 +63,20 @@ impl SessionPickerView {
             state: PickerState::Loading,
             scroll_offset: Cell::new(0),
             metadata: SessionMetadata::default(),
+            show_archived: false,
         }
     }
 
     pub fn set_metadata(&mut self, metadata: SessionMetadata) {
         self.metadata = metadata;
+    }
+
+    pub fn toggle_show_archived(&mut self) {
+        self.show_archived = !self.show_archived;
+    }
+
+    pub fn is_show_archived(&self) -> bool {
+        self.show_archived
     }
 
     pub fn set_sessions(&mut self, agent: String, sessions: Vec<SessionInfo>) {
@@ -93,7 +104,8 @@ impl SessionPickerView {
         if *cursor == 0 {
             return None;
         }
-        let indices = Self::filtered_indices(sessions, filter, &self.metadata);
+        let indices =
+            Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
         let real_idx = indices.get(*cursor - 1).copied()?;
         Some(sessions[real_idx].session_id.0.as_ref().to_string())
     }
@@ -102,9 +114,25 @@ impl SessionPickerView {
         sessions: &[SessionInfo],
         filter: &str,
         metadata: &SessionMetadata,
+        show_archived: bool,
     ) -> Vec<usize> {
+        let candidates: Vec<usize> = (0..sessions.len())
+            .filter(|&i| {
+                let archived = metadata
+                    .sessions
+                    .get(sessions[i].session_id.0.as_ref())
+                    .map(|e| e.archived)
+                    .unwrap_or(false);
+                if archived {
+                    show_archived
+                } else {
+                    true
+                }
+            })
+            .collect();
+
         if filter.is_empty() {
-            let mut all: Vec<usize> = (0..sessions.len()).collect();
+            let mut all = candidates;
             all.sort_by(|&a, &b| {
                 let ea = metadata.sessions.get(sessions[a].session_id.0.as_ref());
                 let eb = metadata.sessions.get(sessions[b].session_id.0.as_ref());
@@ -129,13 +157,13 @@ impl SessionPickerView {
         };
         let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
         let pattern = Pattern::parse(filter, CaseMatching::Ignore, Normalization::Smart);
-        let mut scored: Vec<(u32, usize)> = sessions
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let title = Self::resolved_title(s, metadata, false);
-                let cwd = s.cwd.display().to_string();
-                let id = s.session_id.0.as_ref();
+        let mut scored: Vec<(u32, usize)> = candidates
+            .into_iter()
+            .filter_map(|i| {
+                let session = &sessions[i];
+                let title = Self::resolved_title(session, metadata, false);
+                let cwd = session.cwd.display().to_string();
+                let id = session.session_id.0.as_ref();
                 let haystack = format!("{title} {cwd} {id}");
                 let score = pattern.score(
                     nucleo_matcher::Utf32Str::new(&haystack, &mut Vec::new()),
@@ -152,7 +180,8 @@ impl SessionPickerView {
         match &self.state {
             PickerState::Populated {
                 sessions, filter, ..
-            } => Self::filtered_indices(sessions, filter, &self.metadata).len(),
+            } => Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived)
+                .len(),
             _ => 0,
         }
     }
@@ -161,7 +190,7 @@ impl SessionPickerView {
         match &self.state {
             PickerState::Populated {
                 sessions, filter, ..
-            } => Self::filtered_indices(sessions, filter, &self.metadata)
+            } => Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived)
                 .get(idx)
                 .and_then(|&i| sessions.get(i)),
             _ => None,
@@ -286,7 +315,8 @@ impl SessionPickerView {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
         let visible_height = area.height.saturating_sub(4) as usize;
 
-        let indices = Self::filtered_indices(sessions, filter, &self.metadata);
+        let indices =
+            Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
 
         // Clamp scroll_offset so cursor is always visible.
         // `cursor` indexes a virtual list where 0 = [+ New session] row and
@@ -302,17 +332,24 @@ impl SessionPickerView {
         }
         self.scroll_offset.set(scroll);
 
+        let mut header_spans = vec![
+            Span::styled(
+                "Sessions ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("({})", agent),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ];
+        if self.show_archived {
+            header_spans.push(Span::styled(
+                " [showing archived]",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         let mut lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    "Sessions ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("({})", agent),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
+            Line::from(header_spans),
             Line::from(vec![
                 Span::styled("  Search  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
@@ -377,12 +414,23 @@ impl SessionPickerView {
                 String::new()
             };
 
-            let style = if is_selected {
+            let archived = self
+                .metadata
+                .sessions
+                .get(session.session_id.0.as_ref())
+                .map(|e| e.archived)
+                .unwrap_or(false);
+
+            let style = if archived {
+                Style::default().fg(Color::DarkGray)
+            } else if is_selected {
                 Style::default().fg(Color::White)
             } else {
                 Style::default().fg(Color::Gray)
             };
-            let id_style = if is_selected {
+            let id_style = if archived {
+                Style::default().fg(Color::DarkGray)
+            } else if is_selected {
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD)
@@ -416,6 +464,12 @@ impl SessionPickerView {
                 time_str,
                 Style::default().fg(Color::DarkGray),
             ));
+            if archived {
+                spans.push(Span::styled(
+                    " [archived]",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
             lines.push(Line::from(spans));
         }
 
@@ -498,7 +552,10 @@ impl View for SessionPickerView {
         // Split-borrow self so we can reach `metadata` while also mutably
         // borrowing `state`.
         let SessionPickerView {
-            state, metadata, ..
+            state,
+            metadata,
+            show_archived,
+            ..
         } = self;
         match state {
             PickerState::Populated {
@@ -549,7 +606,8 @@ impl View for SessionPickerView {
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             let visible =
-                                Self::filtered_indices(sessions, filter, metadata).len();
+                                Self::filtered_indices(sessions, filter, metadata, *show_archived)
+                                    .len();
                             if *cursor < visible {
                                 *cursor += 1;
                             }
@@ -560,8 +618,12 @@ impl View for SessionPickerView {
                             if *cursor == 0 {
                                 Some(Action::NewSessionRequested)
                             } else {
-                                let indices =
-                                    Self::filtered_indices(sessions, filter, metadata);
+                                let indices = Self::filtered_indices(
+                                    sessions,
+                                    filter,
+                                    metadata,
+                                    *show_archived,
+                                );
                                 let real_idx = indices.get(*cursor - 1).copied()?;
                                 let sid = sessions[real_idx].session_id.0.to_string();
                                 *resuming = true;
@@ -579,6 +641,9 @@ impl View for SessionPickerView {
                         }
                         KeyCode::Char('p') => hl_session_id
                             .map(|session_id| Action::ToggleSessionPin { session_id }),
+                        KeyCode::Char('d') => hl_session_id
+                            .map(|session_id| Action::ToggleSessionArchive { session_id }),
+                        KeyCode::Char('a') => Some(Action::ToggleShowArchived),
                         _ => None,
                     }
                 }
