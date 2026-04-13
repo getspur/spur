@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::time::SystemTime;
 
 use spur_acp::{SpurEvent, SpurEventBody};
 
@@ -17,6 +16,10 @@ pub struct ExecutorLineage {
     roots: Vec<ExecutorId>,
     /// Events received for an executor before its `ExecutorSpawned`.
     orphan_buffer: HashMap<ExecutorId, VecDeque<SpurEvent>>,
+    /// Parent-orphan buffer: `ExecutorSpawned` events whose `parent_id` is not
+    /// yet in `nodes` are stashed here under the parent id, drained on parent
+    /// arrival.
+    parent_orphan_buffer: HashMap<ExecutorId, VecDeque<SpurEvent>>,
     /// Insertion-ordered queue of ids with active pending reviews. Maintained
     /// alongside `nodes` so `pending_reviews()` returns deterministic order.
     pending_review_order: VecDeque<ExecutorId>,
@@ -28,9 +31,13 @@ impl ExecutorLineage {
     }
 
     pub fn apply(&mut self, event: &SpurEvent) {
-        // Try legacy adapter first (BrainSpawned, WorkerSpawned, etc.)
+        // Legacy adapter runs ONLY on top-level apply — NOT on orphan replay,
+        // to prevent future re-entry into the adapter from replayed events.
         super::adapter::apply_legacy(self, event);
+        self.apply_inner(event);
+    }
 
+    fn apply_inner(&mut self, event: &SpurEvent) {
         match &event.body {
             SpurEventBody::ExecutorSpawned {
                 id,
@@ -42,6 +49,15 @@ impl ExecutorLineage {
             } => {
                 let eid = ExecutorId::new(id);
                 let parent = parent_id.as_ref().map(ExecutorId::new);
+
+                // If a parent is named but not yet present, buffer and wait.
+                if let Some(ref p) = parent {
+                    if !self.nodes.contains_key(p) {
+                        self.buffer_parent_orphan(p.clone(), event.clone());
+                        return;
+                    }
+                }
+
                 let attempt = Attempt {
                     session_id: session_id.clone(),
                     started_at: event.occurred_at,
@@ -63,19 +79,27 @@ impl ExecutorLineage {
                     pending_review: None,
                 };
                 match parent {
-                    Some(p) if self.nodes.contains_key(&p) => {
+                    Some(p) => {
                         self.nodes.get_mut(&p).unwrap().child_ids.push(eid.clone());
                         self.nodes.insert(eid.clone(), node);
                     }
-                    _ => {
+                    None => {
                         self.roots.push(eid.clone());
                         self.nodes.insert(eid.clone(), node);
                     }
                 }
-                // Replay any buffered orphan events for this id.
+
+                // Replay any CHILD-orphan events buffered under this new node.
                 if let Some(queue) = self.orphan_buffer.remove(&eid) {
                     for ev in queue {
-                        self.apply(&ev);
+                        self.apply_inner(&ev);
+                    }
+                }
+                // Replay any PARENT-orphan events (children whose spawn arrived
+                // before this parent).
+                if let Some(queue) = self.parent_orphan_buffer.remove(&eid) {
+                    for ev in queue {
+                        self.apply_inner(&ev);
                     }
                 }
             }
@@ -177,6 +201,15 @@ impl ExecutorLineage {
         }
     }
 
+    fn buffer_parent_orphan(&mut self, parent_id: ExecutorId, event: SpurEvent) {
+        let q = self.parent_orphan_buffer.entry(parent_id).or_default();
+        if q.len() < MAX_ORPHAN_BUFFER_PER_EXEC {
+            q.push_back(event);
+        } else {
+            tracing::warn!("parent-orphan buffer overflow; dropping event");
+        }
+    }
+
     pub fn nodes(&self) -> impl Iterator<Item = &ExecutorNode> {
         self.nodes.values()
     }
@@ -233,4 +266,3 @@ fn terminal_attempt_status(p: LifecycleState) -> Option<AttemptStatus> {
         _ => None,
     }
 }
-
