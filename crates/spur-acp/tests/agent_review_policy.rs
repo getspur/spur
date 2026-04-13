@@ -13,10 +13,12 @@ transport = "stdio"
     assert_eq!(cfg.review.review_required, false);
     assert_eq!(cfg.review.review_timeout, Duration::from_secs(30 * 60));
     assert_eq!(cfg.review.max_review_retries, 3);
-    assert!(matches!(
+    assert_eq!(
         cfg.review.review_timeout_default,
-        TimeoutFallback::Reject { .. }
-    ));
+        TimeoutFallback::Reject {
+            reason: "review timeout".into()
+        }
+    );
 }
 
 #[test]

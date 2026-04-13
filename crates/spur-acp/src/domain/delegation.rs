@@ -39,6 +39,7 @@ pub enum DelegationStatus {
 /// Shared by `AgentReviewPolicy::review_timeout_default` (config input)
 /// and `DelegationStatus::TimedOut.fallback` (status discriminant).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TimeoutFallback {
     /// Auto-approve — worker's diff/summary retained as if reviewed.
     Approve,
