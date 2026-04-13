@@ -166,12 +166,21 @@ impl ExecutorLineage {
 
             SpurEventBody::ExecutorRetryStarted {
                 id,
-                attempt_n: _,
+                attempt_n,
                 reason: _,
                 new_session_id,
             } => {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
+                    let expected = node.attempts.len() as u32 + 1;
+                    if *attempt_n != expected {
+                        tracing::warn!(
+                            executor_id = %id,
+                            got = *attempt_n,
+                            expected,
+                            "attempt_n mismatch — orchestrator may have dropped retry events"
+                        );
+                    }
                     let new_attempt = Attempt {
                         session_id: new_session_id.clone(),
                         started_at: event.occurred_at,
