@@ -523,7 +523,7 @@ impl App {
         // or text batches to flush.
         match self.current_view {
             ViewId::Dashboard => {
-                self.dashboard.tick();
+                let flushed_batch = self.dashboard.tick_and_report_flush();
                 // Mark dirty when executors are actively running (spinners animate)
                 use spur_core::LifecycleState;
                 let has_active = self.lineage.nodes().any(|n| {
@@ -534,7 +534,7 @@ impl App {
                             | LifecycleState::Resuming
                     )
                 });
-                if has_active {
+                if has_active || flushed_batch {
                     self.dirty = true;
                 }
             }

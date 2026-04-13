@@ -36,17 +36,6 @@ pub fn focused_border_style(focused: bool) -> Style {
     }
 }
 
-/// Tracked state for a single agent.
-#[derive(Debug, Clone)]
-pub struct AgentState {
-    pub name: String,
-    pub role: String,
-    pub status: String,
-    pub parent: Option<String>,
-    pub started_at: Option<Instant>,
-    pub cost: f64,
-}
-
 /// A single entry in the activity log.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
