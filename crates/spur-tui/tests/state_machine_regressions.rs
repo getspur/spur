@@ -5,7 +5,7 @@
 //! - pending_reviews must return insertion order.
 
 use spur_acp::{
-    ExecutorReviewKind, ExecutorReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
+    ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
 };
 use spur_core::{ExecutorId, ExecutorLineage};
 
@@ -23,8 +23,8 @@ fn spawn(id: &str) -> SpurEvent {
 fn review_req(id: &str) -> SpurEvent {
     SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: id.into(),
-        kind: ExecutorReviewKind::Completion,
-        payload: ExecutorReviewPayload {
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
             summary: "s".into(),
             diff_summary: None,
             pr_url: None,
@@ -63,7 +63,7 @@ fn pending_reviews_removes_resolved_entries() {
     l.apply(&review_req("b"));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
         id: "a".into(),
-        decision: spur_acp::ExecutorReviewDecision::Approve,
+        decision: spur_acp::ReviewDecision::Approve,
     }));
     let order = l.pending_reviews();
     assert_eq!(order, vec![ExecutorId::new("b")]);
@@ -75,7 +75,7 @@ fn resolving_nonexistent_review_is_noop() {
     l.apply(&spawn("a"));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
         id: "a".into(),
-        decision: spur_acp::ExecutorReviewDecision::Approve,
+        decision: spur_acp::ReviewDecision::Approve,
     }));
     // No panic; state unchanged
     assert_eq!(l.pending_reviews().len(), 0);

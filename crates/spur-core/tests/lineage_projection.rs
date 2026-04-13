@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use spur_acp::{
-    DelegationStatus, ExecutorArtifactPayload, ExecutorReviewDecision, ExecutorReviewKind,
-    ExecutorReviewPayload, LifecycleState, Role, SessionId, SpurEvent, SpurEventBody,
+    Artifact, DelegationStatus, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
+    SessionId, SpurEvent, SpurEventBody,
 };
-use spur_core::{Artifact, ExecutorId, ExecutorLineage};
+use spur_core::{ExecutorId, ExecutorLineage};
 
 fn spawn(id: &str, parent: Option<&str>) -> SpurEvent {
     SpurEvent::now(SpurEventBody::ExecutorSpawned {
@@ -77,7 +77,7 @@ fn artifact_appends_to_current_attempt() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorArtifact {
         id: "w".into(),
-        artifact: ExecutorArtifactPayload::PrUrl("https://x/1".into()),
+        artifact: Artifact::PrUrl("https://x/1".into()),
     }));
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
@@ -92,8 +92,8 @@ fn review_requested_populates_pending_review_and_phase() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w".into(),
-        kind: ExecutorReviewKind::Completion,
-        payload: ExecutorReviewPayload {
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
             summary: "done".into(),
             diff_summary: None,
             pr_url: None,
@@ -112,8 +112,8 @@ fn review_resolved_clears_pending_review() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w".into(),
-        kind: ExecutorReviewKind::Completion,
-        payload: ExecutorReviewPayload {
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
             summary: "done".into(),
             diff_summary: None,
             pr_url: None,
@@ -122,7 +122,7 @@ fn review_resolved_clears_pending_review() {
     }));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
         id: "w".into(),
-        decision: ExecutorReviewDecision::Approve,
+        decision: ReviewDecision::Approve,
     }));
 
     let n = l.node(&ExecutorId::new("w")).unwrap();

@@ -98,9 +98,8 @@ impl ExecutorLineage {
             SpurEventBody::ExecutorArtifact { id, artifact } => {
                 let eid = ExecutorId::new(id);
                 if let Some(node) = self.nodes.get_mut(&eid) {
-                    let art = map_artifact(artifact);
                     if let Some(a) = node.current_attempt_mut() {
-                        a.artifacts.push(art);
+                        a.artifacts.push(artifact.clone());
                     }
                 } else {
                     self.buffer_orphan(eid, event.clone());
@@ -116,8 +115,8 @@ impl ExecutorLineage {
                 if let Some(node) = self.nodes.get_mut(&eid) {
                     node.phase = LifecycleState::AwaitingReview;
                     node.pending_review = Some(ReviewRequest {
-                        kind: map_review_kind(kind),
-                        payload: map_review_payload(payload),
+                        kind: kind.clone(),
+                        payload: payload.clone(),
                         // TODO H-Task 4: use event.occurred_at
                         requested_at: SystemTime::now(),
                     });
@@ -236,44 +235,3 @@ fn terminal_attempt_status(p: LifecycleState) -> Option<AttemptStatus> {
     }
 }
 
-fn map_artifact(p: &spur_acp::ExecutorArtifactPayload) -> super::types::Artifact {
-    use spur_acp::ExecutorArtifactPayload as S;
-    use super::types::{Artifact, DiffSummary};
-    match p {
-        S::Diff(d) => Artifact::Diff(DiffSummary {
-            files_changed: d.files_changed,
-            insertions: d.insertions,
-            deletions: d.deletions,
-            files: d.files.clone(),
-        }),
-        S::PrUrl(u) => Artifact::PrUrl(u.clone()),
-        S::FileList(f) => Artifact::FileList(f.clone()),
-        S::Text(t) => Artifact::Text(t.clone()),
-    }
-}
-
-fn map_review_kind(k: &spur_acp::ExecutorReviewKind) -> super::types::ReviewKind {
-    use spur_acp::ExecutorReviewKind as S;
-    use super::types::ReviewKind;
-    match k {
-        S::Completion => ReviewKind::Completion,
-        S::Failure => ReviewKind::Failure,
-        S::Conflict => ReviewKind::Conflict,
-        S::Checkpoint => ReviewKind::Checkpoint,
-    }
-}
-
-fn map_review_payload(p: &spur_acp::ExecutorReviewPayload) -> super::types::ReviewPayload {
-    use super::types::{DiffSummary, ReviewPayload};
-    ReviewPayload {
-        summary: p.summary.clone(),
-        diff_summary: p.diff_summary.as_ref().map(|d| DiffSummary {
-            files_changed: d.files_changed,
-            insertions: d.insertions,
-            deletions: d.deletions,
-            files: d.files.clone(),
-        }),
-        pr_url: p.pr_url.clone(),
-        error: p.error.clone(),
-    }
-}
