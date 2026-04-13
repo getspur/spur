@@ -812,4 +812,17 @@ mod markdown_integration_tests {
         assert!(joined.contains("Heading"), "expected heading text after flush: {joined}");
         assert!(joined.contains("Body text"), "expected body text after flush: {joined}");
     }
+
+    #[test]
+    fn items_path_renders_same_text_as_lines_path() {
+        let mut trace = ReactTrace::new();
+        trace.append_message("# Heading\n\nBody", "claude", "10:00".to_string());
+        use crate::components::markdown_stream::StateLookup;
+        let _ = trace.drain_fence_dispatches(&StateLookup::empty());
+
+        let rendered = trace.render_lines_for_test(60);
+        let joined = rendered.join("\n");
+        assert!(joined.contains("Heading"), "expected heading: {joined}");
+        assert!(joined.contains("Body"), "expected body: {joined}");
+    }
 }
