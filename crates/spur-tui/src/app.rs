@@ -776,7 +776,10 @@ pub(crate) fn apply_session_update(
             state.current_mode = Some(u.current_mode_id.to_string());
         }
         AvailableCommandsUpdate(u) => {
-            state.available_commands = u.available_commands.clone();
+            let handle = state.agent_handle_for_commands();
+            state
+                .command_registry
+                .set_agent_commands(&handle, u.available_commands.clone());
         }
         UsageUpdate(u) => {
             state.context_used = Some(u.used);
