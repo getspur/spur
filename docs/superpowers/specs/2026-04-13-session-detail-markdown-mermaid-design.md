@@ -1,6 +1,6 @@
 # Session Detail — Markdown Streaming + Mermaid Rendering
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-04-13
 **Scope:** `crates/spur-tui/src/views/session_detail.rs`, `crates/spur-tui/src/components/react_trace.rs`, related components.
 **Objective:** Render streaming markdown for assistant messages inline in the ReAct trace, and render Mermaid diagrams from ```` ```mermaid ```` fences using `mermaid-rs-renderer` (`mmdr`), displayed in a full-screen overlay viewer.
