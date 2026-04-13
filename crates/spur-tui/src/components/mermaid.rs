@@ -61,6 +61,48 @@ impl std::fmt::Debug for MermaidState {
     }
 }
 
+/// Per-fence render state consumed by the inline render path and the
+/// back-compat `MarkdownStream::lines()` placeholder cache. Encodes the
+/// Pending / Error / Ready distinction with the pre-computed inline row
+/// height for Ready.
+#[derive(Debug, Clone, Copy)]
+pub enum FenceRender {
+    Pending,
+    Error,
+    Ready(u16),
+}
+
+/// Single source of truth for the placeholder Line emitted when a fence
+/// cannot render inline as an image. Maps:
+/// - `Pending` → `⏳` DarkGray+DIM
+/// - `Error`   → `⚠` Yellow+BOLD
+/// - `Ready(_)` → `📊` Magenta+BOLD (the "ready but rendering as placeholder"
+///   case — height is already encoded for the caller's ImageRow decision)
+pub fn fence_placeholder_line(
+    id: MermaidId,
+    render: FenceRender,
+) -> ratatui::text::Line<'static> {
+    use ratatui::{
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+    };
+    let (text, style) = match render {
+        FenceRender::Error => (
+            format!("[⚠ mermaid #{} error · Alt-v to view]", id.0),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        FenceRender::Pending => (
+            format!("[⏳ mermaid #{} rendering…]", id.0),
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        ),
+        FenceRender::Ready(_) => (
+            format!("[📊 mermaid #{} · press Alt-v to view]", id.0),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ),
+    };
+    Line::from(Span::styled(text, style))
+}
+
 /// Error type returned by [`render_mermaid`].
 #[derive(Debug)]
 pub enum RenderError {

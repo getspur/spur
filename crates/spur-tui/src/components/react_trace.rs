@@ -132,22 +132,14 @@ pub(crate) fn compute_inline_height_rows(
     raw.clamp(6, 20) as u16
 }
 
-/// Per-fence render state consumed by `build_virtual_rows`. Encodes the
-/// Pending / Error / Ready distinction so the virtual-row flattener can
-/// emit the right placeholder without access to the full registry.
-#[cfg(feature = "markdown")]
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum FenceRender {
-    Pending,
-    Error,
-    Ready(u16),
-}
-
 #[cfg(feature = "markdown")]
 fn compute_fence_states(
     ctx: &RenderContext<'_>,
-) -> std::collections::HashMap<crate::components::mermaid::MermaidId, FenceRender> {
-    use crate::components::mermaid::MermaidState;
+) -> std::collections::HashMap<
+    crate::components::mermaid::MermaidId,
+    crate::components::mermaid::FenceRender,
+> {
+    use crate::components::mermaid::{FenceRender, MermaidState};
     let mut out = std::collections::HashMap::new();
     for (id, state) in ctx.mermaid_registry.iter() {
         let r = match state {
@@ -771,10 +763,13 @@ impl ReactTrace {
     /// Duplicates some entry-kind rendering logic with `build_display_lines`;
     /// future work can consolidate.
     #[cfg(feature = "markdown")]
-    pub(crate) fn build_virtual_rows_with_heights(
+    pub(crate) fn build_virtual_rows(
         &self,
         effective_width: u16,
-        states: &std::collections::HashMap<crate::components::mermaid::MermaidId, FenceRender>,
+        states: &std::collections::HashMap<
+            crate::components::mermaid::MermaidId,
+            crate::components::mermaid::FenceRender,
+        >,
     ) -> Vec<VirtualRow> {
         use crate::components::markdown_stream::StreamItem;
 
@@ -867,6 +862,7 @@ impl ReactTrace {
                                         }
                                     }
                                     StreamItem::Fence(id) => {
+                                        use crate::components::mermaid::FenceRender;
                                         match states.get(id).copied() {
                                             Some(FenceRender::Ready(h)) if h > 0 => {
                                                 for r in 0..h {
@@ -877,25 +873,25 @@ impl ReactTrace {
                                                     });
                                                 }
                                             }
-                                            Some(FenceRender::Error) => {
-                                                let line = Line::from(Span::styled(
-                                                    format!("   [⚠ mermaid #{} error · Alt-v to view]", id.0),
-                                                    Style::default()
-                                                        .fg(Color::Yellow)
-                                                        .add_modifier(Modifier::BOLD),
-                                                ));
-                                                push_wrapped(&mut rows, line);
-                                            }
-                                            // Pending, Rendering (not dispatched yet),
-                                            // or an unknown/zero-height Ready all render
-                                            // as the ⏳ placeholder.
-                                            _ => {
-                                                let line = Line::from(Span::styled(
-                                                    format!("   [⏳ mermaid #{} rendering…]", id.0),
-                                                    Style::default()
-                                                        .fg(Color::DarkGray)
-                                                        .add_modifier(Modifier::DIM),
-                                                ));
+                                            other => {
+                                                // Ready(0) is effectively still-rendering
+                                                // from the inline-render POV; fold into
+                                                // Pending. None → not yet in registry.
+                                                let render = match other {
+                                                    Some(FenceRender::Error) => FenceRender::Error,
+                                                    _ => FenceRender::Pending,
+                                                };
+                                                // Shared helper produces an un-indented
+                                                // Line; re-indent to match AgentMessage body.
+                                                let placeholder =
+                                                    crate::components::mermaid::fence_placeholder_line(
+                                                        *id, render,
+                                                    );
+                                                let mut spans = vec![Span::raw("   ")];
+                                                spans.extend(placeholder.spans.iter().cloned());
+                                                let mut line = Line::from(spans);
+                                                line.style = placeholder.style;
+                                                line.alignment = placeholder.alignment;
                                                 push_wrapped(&mut rows, line);
                                             }
                                         }
@@ -1224,9 +1220,8 @@ impl ReactTrace {
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
 
-        // Build heights map from registry (Ready states only).
         let states = compute_fence_states(ctx);
-        let rows = self.build_virtual_rows_with_heights(effective_width, &states);
+        let rows = self.build_virtual_rows(effective_width, &states);
 
         let total = rows.len();
         self.last_total_lines.set(total);
@@ -1325,9 +1320,12 @@ impl ReactTrace {
         effective_width: u16,
         visible_height: usize,
         offset: usize,
-        states: &std::collections::HashMap<crate::components::mermaid::MermaidId, FenceRender>,
+        states: &std::collections::HashMap<
+            crate::components::mermaid::MermaidId,
+            crate::components::mermaid::FenceRender,
+        >,
     ) -> Vec<Segment> {
-        let rows = self.build_virtual_rows_with_heights(effective_width, states);
+        let rows = self.build_virtual_rows(effective_width, states);
         let end = (offset + visible_height).min(rows.len());
         segment_visible_rows(&rows, offset, end)
     }
@@ -1502,6 +1500,7 @@ mod markdown_integration_tests {
 #[cfg(all(test, feature = "markdown"))]
 mod virtual_row_tests {
     use super::*;
+    use crate::components::mermaid::FenceRender;
 
     #[test]
     fn virtual_rows_text_only_match_line_count() {
@@ -1511,7 +1510,7 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         let total = trace
-            .build_virtual_rows_with_heights(60, &std::collections::HashMap::new())
+            .build_virtual_rows(60, &std::collections::HashMap::new())
             .len();
         // Header (1) + 3 body lines + blank separator (1) = 5
         assert_eq!(total, 5, "unexpected virtual row count: {total}");
@@ -1536,7 +1535,7 @@ mod virtual_row_tests {
             HashMap::new();
         states.insert(crate::components::mermaid::MermaidId(0), FenceRender::Ready(12));
 
-        let rows = trace.build_virtual_rows_with_heights(60, &states);
+        let rows = trace.build_virtual_rows(60, &states);
 
         let image_rows: Vec<_> = rows
             .iter()
@@ -1567,7 +1566,7 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         let empty = std::collections::HashMap::new();
-        let rows = trace.build_virtual_rows_with_heights(60, &empty);
+        let rows = trace.build_virtual_rows(60, &empty);
 
         let image_rows = rows
             .iter()

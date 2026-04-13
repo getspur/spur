@@ -273,33 +273,20 @@ impl MarkdownStream {
                 let id_num: u64 = rest.parse().unwrap_or(0);
                 let id = MermaidId(id_num);
 
-                // Capture a state-aware placeholder for the back-compat
-                // `lines()` view (error/pending variants).
-                let (text, style) = if states.is_err(id) {
-                    (
-                        format!("[⚠ mermaid #{id_num} error · press Alt-v to view]"),
-                        ratatui::style::Style::default()
-                            .fg(ratatui::style::Color::Yellow)
-                            .add_modifier(ratatui::style::Modifier::BOLD),
-                    )
+                // State-aware placeholder for the back-compat `lines()`
+                // view. The shared helper keeps this text in sync with the
+                // inline render path in react_trace.rs.
+                use super::mermaid::FenceRender;
+                let render = if states.is_err(id) {
+                    FenceRender::Error
                 } else if states.is_pending(id) {
-                    (
-                        format!("[⏳ mermaid #{id_num} rendering…]"),
-                        ratatui::style::Style::default()
-                            .fg(ratatui::style::Color::DarkGray)
-                            .add_modifier(ratatui::style::Modifier::DIM),
-                    )
+                    FenceRender::Pending
                 } else {
-                    (
-                        format!("[📊 mermaid #{id_num} · press Alt-v to view]"),
-                        ratatui::style::Style::default()
-                            .fg(ratatui::style::Color::Magenta)
-                            .add_modifier(ratatui::style::Modifier::BOLD),
-                    )
+                    FenceRender::Ready(1) // height unused in the 📊 fallback
                 };
                 placeholders.insert(
                     id,
-                    Line::from(ratatui::text::Span::styled(text, style)),
+                    super::mermaid::fence_placeholder_line(id, render),
                 );
                 items.push(StreamItem::Fence(id));
             } else {
