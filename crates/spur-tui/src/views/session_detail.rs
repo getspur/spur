@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -39,6 +39,9 @@ pub struct SessionDetailView {
     /// Total context window size in tokens. Populated from
     /// `SessionUpdate::UsageUpdate`.
     pub context_size: Option<u64>,
+    /// Most recent auth-required error for this session. Rendered as a red
+    /// banner at the top of the view. Dismissed on the next keystroke.
+    pub auth_error: Option<String>,
 }
 
 impl SessionDetailView {
@@ -55,6 +58,7 @@ impl SessionDetailView {
             available_commands: Vec::new(),
             context_used: None,
             context_size: None,
+            auth_error: None,
         }
     }
 
@@ -175,6 +179,19 @@ impl SessionDetailView {
 
 impl View for SessionDetailView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Dismiss the auth banner on any keystroke (before any further routing).
+        // The mode-toggle binding below still fires because the action is
+        // dispatched regardless.
+        if self.auth_error.is_some() {
+            self.auth_error = None;
+        }
+
+        // Alt-m → cycle session mode between "default" and "plan".
+        // Matched early so it works even while the input bar has focus.
+        if matches!(key.code, KeyCode::Char('m')) && key.modifiers.contains(KeyModifiers::ALT) {
+            return Some(Action::TogglePlanMode);
+        }
+
         // Priority 1: Permission handling when a permission is pending.
         if self.react_trace.has_pending_permission() {
             use crate::action::PermissionChoice;
@@ -455,6 +472,37 @@ impl View for SessionDetailView {
     fn render(&self, frame: &mut Frame, area: Rect) {
         let elapsed = self.elapsed();
 
+        // If an auth error is active, split off the top 3 rows for a red
+        // banner. This preserves the rest of the layout exactly as before.
+        let (banner_area, content_area) = if self.auth_error.is_some() {
+            let [banner, content] = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            (Some(banner), content)
+        } else {
+            (None, area)
+        };
+
+        if let (Some(banner_area), Some(msg)) = (banner_area, self.auth_error.as_ref()) {
+            use ratatui::widgets::{Block, Borders, Wrap};
+            let banner = Paragraph::new(msg.as_str())
+                .style(
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Authentication required"),
+                );
+            frame.render_widget(banner, banner_area);
+        }
+
         let input_height = self.input_bar.required_height();
         let chunks = Layout::vertical([
             Constraint::Length(1),            // header
@@ -462,7 +510,7 @@ impl View for SessionDetailView {
             Constraint::Length(input_height), // input bar
             Constraint::Length(1),            // status bar
         ])
-        .split(area);
+        .split(content_area);
 
         // ── Header: breadcrumb + elapsed + cost ─────────────────────────
         let header = Line::from(vec![

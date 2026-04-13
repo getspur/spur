@@ -29,6 +29,11 @@ pub enum UserInput {
     ResumeSession {
         session_id: String,
     },
+    /// Request the orchestrator to call `set_session_mode` on the current
+    /// brain session with the given mode id (e.g. `"plan"`, `"default"`).
+    SetSessionMode {
+        mode_id: String,
+    },
 }
 
 /// Tracks the brain agent's current state for status indicators.
@@ -183,6 +188,18 @@ impl App {
             SpurEvent::SessionsListError { message } => {
                 if let Some(ref mut picker) = self.session_picker {
                     picker.set_error(message.clone());
+                }
+                return;
+            }
+            SpurEvent::AuthRequired { session, message } => {
+                // Only surface the banner if the event is for the currently-
+                // displayed session (or we have no session_detail yet — in
+                // which case the event is dropped; the next session spawn
+                // will hit the same error and re-emit).
+                if let Some(ref mut detail) = self.session_detail {
+                    if detail.session_id().0 == session.0 {
+                        detail.auth_error = Some(message.clone());
+                    }
                 }
                 return;
             }
@@ -347,6 +364,36 @@ impl App {
             Action::ResumeSession { session_id } => {
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumeSession { session_id });
+                }
+            }
+
+            Action::TogglePlanMode => {
+                // Cycle between "plan" and "default". If mode is unknown, assume
+                // we're in "default" and jump to "plan".
+                let current = self
+                    .session_detail
+                    .as_ref()
+                    .and_then(|d| d.current_mode.as_deref());
+                let next = match current {
+                    Some("plan") => "default",
+                    _ => "plan",
+                };
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::SetSessionMode {
+                        mode_id: next.to_string(),
+                    });
+                }
+                // Optimistic update so the status bar reflects the toggle
+                // immediately; orchestrator will emit CurrentModeUpdate to
+                // reconcile if the agent rejects the mode id.
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.current_mode = Some(next.to_string());
+                }
+            }
+
+            Action::AuthRequired(message) => {
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.auth_error = Some(message);
                 }
             }
 
