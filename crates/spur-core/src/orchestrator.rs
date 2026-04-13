@@ -1471,6 +1471,12 @@ impl Orchestrator {
         // Accumulated cost across all attempts in this delegation.
         let mut total_cost: f64 = 0.0;
 
+        // WorktreeManager owned here (not inside run_one_worker_attempt)
+        // so execute_delegation can make post-gate commit/remove decisions.
+        // Each delegation task gets its own manager (concurrent delegations
+        // do not share mutable state). Retries reuse the same manager.
+        let mut worktrees = WorktreeManager::new(repo_root);
+
         // Worker session for the *next* attempt. Generated here (not
         // inside run_one_worker_attempt) so the Retry arm can emit
         // ExecutorRetryStarted.new_session_id matching the session id
@@ -1485,7 +1491,7 @@ impl Orchestrator {
                 &agent,
                 &current_task,
                 &agent_config,
-                repo_root.clone(),
+                &mut worktrees,
                 &event_tx,
             )
             .await
@@ -1520,8 +1526,17 @@ impl Orchestrator {
             }
             let eid = executor_id.clone().unwrap();
 
-            // No review gate — emit DelegationCompleted and return.
+            // No review gate — commit/remove then emit DelegationCompleted.
             if !agent_config.review.review_required {
+                apply_worktree_cleanup(
+                    &mut worktrees,
+                    &outcome.worker_session,
+                    &outcome.candidate_status,
+                    &outcome.diff,
+                    &agent,
+                    &outcome.worktree_path,
+                )
+                .await;
                 return finalize(
                     &event_tx,
                     outcome.worker_session,
@@ -1548,13 +1563,24 @@ impl Orchestrator {
                     // finalize so the lineage projection records the
                     // terminal Failed status (preserves the
                     // "every terminal emits DelegationCompleted"
-                    // invariant).
+                    // invariant). Registration failure → Failed (not
+                    // preserved; no useful diff to inspect).
+                    let failed_status = DelegationStatus::Failed {
+                        error: format!("review registration failed: {e}"),
+                    };
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &failed_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
                     return finalize(
                         &event_tx,
                         outcome.worker_session,
-                        DelegationStatus::Failed {
-                            error: format!("review registration failed: {e}"),
-                        },
+                        failed_status,
                         outcome.diff,
                         outcome.summary,
                         total_cost,
@@ -1591,6 +1617,16 @@ impl Orchestrator {
                         waited_for: agent_config.review.review_timeout,
                         fallback: agent_config.review.review_timeout_default.clone(),
                     };
+                    // TimedOut → preserve worktree (no commit).
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
                     return finalize(
                         &event_tx,
                         outcome.worker_session,
@@ -1609,6 +1645,16 @@ impl Orchestrator {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Approve,
                     }));
+                    // Approve → commit + remove.
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
                     return finalize(
                         &event_tx,
                         outcome.worker_session,
@@ -1624,6 +1670,16 @@ impl Orchestrator {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Reject { reason },
                     }));
+                    // Rejected → no commit, preserve worktree.
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
                     return finalize(
                         &event_tx,
                         outcome.worker_session,
@@ -1639,6 +1695,16 @@ impl Orchestrator {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Modify { note },
                     }));
+                    // Modified → commit + remove (approved with reviewer note).
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
                     return finalize(
                         &event_tx,
                         outcome.worker_session,
@@ -1669,6 +1735,16 @@ impl Orchestrator {
                                 agent_config.review.max_review_retries
                             ),
                         };
+                        // Retry limit → Failed (remove, no commit).
+                        apply_worktree_cleanup(
+                            &mut worktrees,
+                            &outcome.worker_session,
+                            &final_status,
+                            &outcome.diff,
+                            &agent,
+                            &outcome.worktree_path,
+                        )
+                        .await;
                         return finalize(
                             &event_tx,
                             outcome.worker_session,
@@ -1705,11 +1781,11 @@ impl Orchestrator {
                     attempt_n += 1;
                     next_worker_session = retry_session;
 
-                    // Note: worktree for the current outcome was
-                    // already cleaned up inside run_one_worker_attempt
-                    // (matching existing per-attempt cleanup behavior).
-                    // Task 11 may change this to preserve the worktree
-                    // for post-hoc inspection.
+                    // Retry intermediates are never preserved — remove
+                    // the current attempt's worktree before spawning
+                    // the next attempt. No commit (intermediate diff is
+                    // moot once the retry produces its own diff).
+                    let _ = worktrees.remove_worktree(&outcome.worker_session).await;
                     continue;
                 }
                 None => {
@@ -1719,6 +1795,16 @@ impl Orchestrator {
                         waited_for: agent_config.review.review_timeout,
                         fallback: agent_config.review.review_timeout_default.clone(),
                     };
+                    // Sender-drop TimedOut → preserve worktree (no commit).
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
                     return finalize(
                         &event_tx,
                         outcome.worker_session,
@@ -1730,6 +1816,77 @@ impl Orchestrator {
                 }
             }
         }
+    }
+}
+
+/// Returns `true` if the worktree should be preserved (not removed) for
+/// this final `DelegationStatus`.
+///
+/// Preserved: `Rejected` and `TimedOut` (any fallback). Both cases mean
+/// the worker did real work but the human feedback loop produced either
+/// (a) a rejection that needs diff inspection or (b) a timeout that
+/// left the decision unresolved. The reviewer/operator may want to
+/// read the worktree's diff before discarding.
+///
+/// Not preserved: `Success`/`Modified` (approved — changes merged into
+/// the brain's tree), `Failed`/`Conflict`/`Timeout` (no real work
+/// to inspect — worker hung or errored, or conflict blocked the run).
+pub fn should_preserve_worktree(status: &DelegationStatus) -> bool {
+    matches!(
+        status,
+        DelegationStatus::Rejected { .. } | DelegationStatus::TimedOut { .. }
+    )
+}
+
+/// Returns `true` if the worker's diff should be committed into the
+/// brain's branch based on the final `DelegationStatus`.
+///
+/// Commit on `Success` (Approve) and `Modified` (human-annotated
+/// approval). Do NOT commit on Rejected/TimedOut (preserve for
+/// inspection), nor on Failed/Conflict/Timeout (no clean diff to merge).
+pub fn should_commit_worker_diff(status: &DelegationStatus) -> bool {
+    matches!(
+        status,
+        DelegationStatus::Success | DelegationStatus::Modified { .. }
+    )
+}
+
+/// Post-gate cleanup: commit the worker diff (if approved) and either
+/// preserve or remove the worktree based on the final status.
+///
+/// Called from every terminal arm in `execute_delegation`. On Retry,
+/// only `remove_worktree` is called (no commit — intermediate attempts
+/// do not get merged into the brain tree).
+async fn apply_worktree_cleanup(
+    worktrees: &mut WorktreeManager,
+    worker_session: &SessionId,
+    final_status: &DelegationStatus,
+    diff: &Option<String>,
+    agent: &str,
+    worktree_path: &std::path::Path,
+) {
+    if should_commit_worker_diff(final_status) {
+        if diff.is_some() {
+            if let Err(e) = worktrees
+                .commit_worker_changes(
+                    worker_session,
+                    &format!("spur: worker {} output", agent),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "failed to commit worker diff");
+            }
+        }
+    }
+
+    if should_preserve_worktree(final_status) {
+        tracing::info!(
+            worktree = %worktree_path.display(),
+            status = ?final_status,
+            "preserving worktree for review inspection"
+        );
+    } else {
+        let _ = worktrees.remove_worktree(worker_session).await;
     }
 }
 
@@ -1789,16 +1946,31 @@ struct WorkerAttemptOutcome {
     diff: Option<String>,
     summary: Option<String>,
     cost: f64,
+    /// Path to the worktree that holds this attempt's diff.
+    /// Used by `execute_delegation` to log a preserved path on
+    /// `Rejected` / `TimedOut` — worktree removal is deferred to
+    /// after the review gate.
+    worktree_path: PathBuf,
 }
 
 /// Run a single worker attempt: snapshot brain state, create worktree,
-/// spawn agent, prompt, collect diff, and clean up.
+/// spawn agent, prompt, collect diff.
 ///
 /// `worker_session` is provided by the caller (rather than generated
 /// inside) so `execute_delegation`'s Retry arm can announce the next
 /// attempt's session id in `ExecutorRetryStarted.new_session_id` and
 /// have it match what this function actually uses — closing the lineage
 /// `Attempt.session_id ↔ worker event` linkage gap.
+///
+/// **Worktree lifecycle**: this function creates the worktree and
+/// collects the diff, but does NOT commit or remove the worktree.
+/// Commit and removal are deferred to `execute_delegation` so the
+/// post-gate decision can determine whether to preserve
+/// (`Rejected`/`TimedOut`) or remove (all other terminal statuses).
+/// Exception: if a setup failure occurs AFTER the worktree is created
+/// (e.g., agent init failure), the worktree IS cleaned up here
+/// immediately — setup failures short-circuit without retry and the
+/// caller's `finalize` records the error status.
 ///
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
 /// worker candidate status — success OR worker-reported errors — both
@@ -1814,7 +1986,7 @@ async fn run_one_worker_attempt(
     agent: &str,
     task: &str,
     agent_config: &spur_acp::config::AgentConfig,
-    repo_root: PathBuf,
+    worktrees: &mut WorktreeManager,
     event_tx: &broadcast::Sender<SpurEvent>,
 ) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
     // NOTE: DelegationRequested is emitted per-attempt here. The legacy
@@ -1831,10 +2003,6 @@ async fn run_one_worker_attempt(
     }));
 
     let start = Instant::now();
-
-    // Each attempt gets its own WorktreeManager so concurrent
-    // delegations (and successive retries) do not share mutable state.
-    let mut worktrees = WorktreeManager::new(repo_root);
 
     // 1. Snapshot brain state and create worktree.
     let snapshot_branch = worktrees
@@ -1940,13 +2108,13 @@ async fn run_one_worker_attempt(
         .await
         .unwrap_or(None);
 
-    // 5. Commit and clean up worktree.
-    if diff.is_some() {
-        let _ = worktrees
-            .commit_worker_changes(&worker_session, &format!("spur: worker {} output", agent))
-            .await;
-    }
-    let _ = worktrees.remove_worktree(&worker_session).await;
+    // 5. Capture worktree path for execute_delegation's post-gate cleanup.
+    // Commit and removal are deferred — see function doc.
+    let worktree_path = worktrees
+        .active
+        .get(&worker_session.to_string())
+        .map(|i| i.path.clone())
+        .unwrap_or_default();
 
     let duration = start.elapsed();
     let cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
@@ -1973,6 +2141,7 @@ async fn run_one_worker_attempt(
         diff,
         summary,
         cost,
+        worktree_path,
     })
 }
 

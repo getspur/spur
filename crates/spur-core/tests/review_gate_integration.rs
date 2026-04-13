@@ -349,3 +349,43 @@ async fn dispatcher_ignores_non_review_variants() {
     handle.await.unwrap();
     // No assertion beyond "did not panic" + "handle completed".
 }
+
+// ─── Task 11: should_preserve_worktree tests ───────────────────────────
+
+#[test]
+fn should_preserve_worktree_matches_expected_variants() {
+    use spur_acp::{DelegationStatus, TimeoutFallback};
+    use spur_core::orchestrator::should_preserve_worktree;
+    use std::path::PathBuf;
+
+    // Non-preserved: Success / Failed / Conflict / Timeout (worker-hang) / Modified.
+    assert!(!should_preserve_worktree(&DelegationStatus::Success));
+    assert!(!should_preserve_worktree(&DelegationStatus::Failed {
+        error: "e".into(),
+    }));
+    assert!(!should_preserve_worktree(&DelegationStatus::Conflict {
+        files: vec![PathBuf::from("a")]
+    }));
+    assert!(!should_preserve_worktree(&DelegationStatus::Timeout));
+    assert!(!should_preserve_worktree(&DelegationStatus::Modified {
+        reviewer_note: "n".into(),
+    }));
+
+    // Preserved: Rejected (human feedback — worker's work needs inspection)
+    // and TimedOut (nobody reviewed; preserve so someone still can).
+    assert!(should_preserve_worktree(&DelegationStatus::Rejected {
+        reason: "r".into()
+    }));
+    assert!(should_preserve_worktree(&DelegationStatus::TimedOut {
+        waited_for: std::time::Duration::from_secs(60),
+        fallback: TimeoutFallback::Reject { reason: "r".into() },
+    }));
+    assert!(should_preserve_worktree(&DelegationStatus::TimedOut {
+        waited_for: std::time::Duration::from_secs(60),
+        fallback: TimeoutFallback::Abandon,
+    }));
+    assert!(should_preserve_worktree(&DelegationStatus::TimedOut {
+        waited_for: std::time::Duration::from_secs(60),
+        fallback: TimeoutFallback::Approve,
+    }));
+}
