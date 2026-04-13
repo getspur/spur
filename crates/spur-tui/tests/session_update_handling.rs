@@ -44,8 +44,9 @@ fn available_commands_update_preserves_hint() {
         AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("[threshold]")),
     );
     let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![cmd]));
+    let notif = SessionNotification::new(nid(), update);
 
-    spur_tui::app::apply_session_update(&mut view, &update);
+    spur_tui::test_support::apply_notification(&mut view, &notif);
 
     let got = view.available_commands();
     assert_eq!(got.len(), 1);
