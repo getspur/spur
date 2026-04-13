@@ -116,13 +116,18 @@ pub struct NativeAcpConnection {
 }
 
 /// Compute the path where the ACP subprocess's stderr should be written.
-/// Uses `.spur/logs/<agent>-<timestamp>-acp.log` relative to CWD.
+/// Uses `.spur/logs/<agent>-<unix_ts>-<pid>-acp.log` relative to CWD.
+///
+/// The file is truncated when opened and the child process appends to it
+/// for its lifetime — so one file per child-process spawn. Including PID
+/// avoids collisions when multiple agents start in the same second.
 fn build_acp_log_path(agent_name: &str) -> std::path::PathBuf {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    std::path::PathBuf::from(".spur/logs").join(format!("{agent_name}-{ts}-acp.log"))
+    let pid = std::process::id();
+    std::path::PathBuf::from(".spur/logs").join(format!("{agent_name}-{ts}-{pid}-acp.log"))
 }
 
 impl NativeAcpConnection {
@@ -1206,19 +1211,27 @@ mod stderr_capture_tests {
     #[test]
     fn log_path_uses_spur_logs_directory() {
         let path = build_acp_log_path("claude-code-acp");
+        let s = path.to_string_lossy();
         assert!(
-            path.to_string_lossy().contains(".spur/logs/"),
+            s.contains(".spur/logs/"),
             "expected log under .spur/logs/, got {}",
             path.display()
         );
         assert!(
-            path.to_string_lossy().ends_with("-acp.log"),
+            s.ends_with("-acp.log"),
             "expected -acp.log suffix, got {}",
             path.display()
         );
         assert!(
-            path.to_string_lossy().contains("claude-code-acp"),
+            s.contains("claude-code-acp"),
             "expected agent name in path, got {}",
+            path.display()
+        );
+        // PID must be embedded so concurrent spawns don't collide.
+        let pid = std::process::id().to_string();
+        assert!(
+            s.contains(&pid),
+            "expected process id {pid} in path, got {}",
             path.display()
         );
     }
