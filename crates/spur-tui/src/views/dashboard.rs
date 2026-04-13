@@ -268,8 +268,23 @@ impl DashboardView {
     }
 }
 
-impl View for DashboardView {
-    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+impl DashboardView {
+    /// Handle a key event with access to the lineage projection so that the
+    /// emitted `Action::SubmitReview` can carry the correct `attempt_n`.
+    /// Called by `App` instead of the `View::handle_key` trait method.
+    pub fn handle_key_with_lineage(
+        &mut self,
+        key: KeyEvent,
+        lineage: &ExecutorLineage,
+    ) -> Option<Action> {
+        self.handle_key_inner(key, Some(lineage))
+    }
+
+    fn handle_key_inner(
+        &mut self,
+        key: KeyEvent,
+        lineage: Option<&ExecutorLineage>,
+    ) -> Option<Action> {
         // Priority 0: Tab-cycling in detail pane when a node is focused and
         // the input bar is empty. Must be checked before the editing-key block
         // so that Left/Right are not consumed by InputBar cursor movement.
@@ -325,8 +340,13 @@ impl View for DashboardView {
                             crate::components::review_card::decision_for_key(ch, None)
                         {
                             if let Some(id) = self.focused_node.clone() {
+                                let attempt_n = lineage
+                                    .and_then(|l| l.node(&id))
+                                    .and_then(|n| n.pending_review.as_ref().map(|r| r.attempt_n))
+                                    .unwrap_or(1);
                                 return Some(Action::SubmitReview {
                                     executor_id: id.0,
+                                    attempt_n,
                                     decision,
                                 });
                             }
@@ -440,6 +460,12 @@ impl View for DashboardView {
         }
 
         None
+    }
+}
+
+impl View for DashboardView {
+    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        self.handle_key_inner(key, None)
     }
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {

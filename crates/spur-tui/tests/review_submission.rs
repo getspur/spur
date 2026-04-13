@@ -35,3 +35,18 @@ fn unknown_key_returns_none() {
     let d = decision_for_key('z', None);
     assert!(d.is_none());
 }
+
+#[test]
+fn submit_review_carries_attempt_n() {
+    use spur_tui::UserInput;
+    use spur_core::ReviewDecision;
+    let input = UserInput::SubmitReview {
+        executor_id: "exec-1".into(),
+        attempt_n: 2,
+        decision: ReviewDecision::Approve,
+    };
+    match input {
+        UserInput::SubmitReview { attempt_n, .. } => assert_eq!(attempt_n, 2),
+        _ => panic!("wrong variant"),
+    }
+}

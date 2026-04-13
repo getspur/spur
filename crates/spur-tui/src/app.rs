@@ -37,6 +37,9 @@ pub enum UserInput {
     },
     SubmitReview {
         executor_id: String,
+        /// The attempt_n from the pending review card the user acted on.
+        /// The orchestrator's dispatcher uses this as a supersession guard.
+        attempt_n: u32,
         decision: spur_core::ReviewDecision,
     },
 }
@@ -120,7 +123,7 @@ impl App {
                 }
 
                 let action = match self.current_view {
-                    ViewId::Dashboard => self.dashboard.handle_key(key),
+                    ViewId::Dashboard => self.dashboard.handle_key_with_lineage(key, &self.lineage),
                     ViewId::SessionDetail(_) => {
                         if let Some(ref mut detail) = self.session_detail {
                             detail.handle_key(key)
@@ -503,7 +506,7 @@ impl App {
                     self.dashboard.agents_tree_mut().toggle_collapsed(&id);
                 }
             }
-            Action::SubmitReview { executor_id, decision } => {
+            Action::SubmitReview { executor_id, attempt_n, decision } => {
                 let has_review = self
                     .lineage
                     .node(&spur_core::ExecutorId(executor_id.clone()))
@@ -516,6 +519,7 @@ impl App {
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::SubmitReview {
                         executor_id: executor_id.clone(),
+                        attempt_n,
                         decision: decision.clone(),
                     });
                 }
