@@ -1,6 +1,6 @@
 # Chat Input: Slash Commands and `@` Mentions
 
-**Status:** draft
+**Status:** implemented
 **Date:** 2026-04-13
 **Owner:** TUI
 **Related file:** `crates/spur-tui/src/views/session_detail.rs`
