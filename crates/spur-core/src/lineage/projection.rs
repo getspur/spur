@@ -154,6 +154,7 @@ impl ExecutorLineage {
 
             SpurEventBody::ExecutorReviewRequested {
                 id,
+                attempt_n,
                 kind,
                 payload,
             } => {
@@ -164,6 +165,7 @@ impl ExecutorLineage {
                         kind: kind.clone(),
                         payload: payload.clone(),
                         requested_at: event.occurred_at,
+                        attempt_n: *attempt_n,
                     });
                     if !self.pending_review_order.contains(&eid) {
                         self.pending_review_order.push_back(eid.clone());
