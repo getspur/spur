@@ -13,6 +13,26 @@ use super::mermaid::MermaidId;
 
 pub const DEBOUNCE: Duration = Duration::from_millis(50);
 
+/// Read-only view of mermaid fence state, passed to rebuild so the
+/// placeholder can reflect error/pending distinctions.
+pub struct StateLookup<'a> {
+    pub errors: &'a std::collections::HashSet<MermaidId>,
+}
+
+impl<'a> StateLookup<'a> {
+    /// A lookup with no error entries — use when no error state is known.
+    pub fn empty() -> Self {
+        static EMPTY: std::sync::OnceLock<std::collections::HashSet<MermaidId>> =
+            std::sync::OnceLock::new();
+        Self { errors: EMPTY.get_or_init(std::collections::HashSet::new) }
+    }
+
+    /// Returns true if the given fence id is in the error state.
+    pub fn is_err(&self, id: MermaidId) -> bool {
+        self.errors.contains(&id)
+    }
+}
+
 /// Internal per-fence record (populated in Task 4; empty in this skeleton).
 #[derive(Debug, Clone)]
 pub struct FenceRef {
@@ -43,18 +63,25 @@ impl MarkdownStream {
     }
 
     /// Flush if the debounce window has elapsed. Returns any newly-detected
-    /// mermaid fences (always empty in this skeleton; Task 4 adds the logic).
-    pub fn maybe_flush(&mut self) -> Vec<FenceRef> {
+    /// mermaid fences. Pass `states` so the placeholder can reflect errors.
+    pub fn maybe_flush(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         match self.dirty_since {
-            Some(t) if t.elapsed() >= DEBOUNCE => self.flush_now(),
+            Some(t) if t.elapsed() >= DEBOUNCE => self.flush_now(states),
             _ => Vec::new(),
         }
     }
 
     /// Force a flush immediately.
-    pub fn flush_now(&mut self) -> Vec<FenceRef> {
+    pub fn flush_now(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         self.dirty_since = None;
-        self.rebuild()
+        self.rebuild(states)
+    }
+
+    /// Force the next `maybe_flush`/`flush_now` to rebuild even if not yet
+    /// dirty by time. Used when external state (mermaid registry errors)
+    /// changes so the placeholder reflects the new state on the next tick.
+    pub fn mark_dirty_now(&mut self) {
+        self.dirty_since = Some(Instant::now() - DEBOUNCE);
     }
 
     pub fn lines(&self) -> &[Line<'static>] {
@@ -75,7 +102,7 @@ impl MarkdownStream {
     }
 
     /// Rebuild `cached_lines` from `raw_text`.
-    fn rebuild(&mut self) -> Vec<FenceRef> {
+    fn rebuild(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         // ── Stage 1: pre-scan raw_text for closed ```mermaid fences ───────
         let mut discovered: Vec<(std::ops::Range<usize>, String)> = Vec::new();
         {
@@ -182,11 +209,27 @@ impl MarkdownStream {
                 .and_then(|s| s.strip_suffix('\u{0000}'))
                 .and_then(|s| s.strip_prefix("MERMAID:"))
             {
-                let placeholder = format!("[📊 mermaid #{rest} · press Alt-v to view]");
+                // Parse the numeric id from the sentinel to check error state.
+                let id_num: Option<u64> = rest.parse().ok();
+                let is_error = id_num
+                    .map(|n| states.is_err(MermaidId(n)))
+                    .unwrap_or(false);
+
+                let (placeholder, color) = if is_error {
+                    (
+                        format!("[⚠ mermaid #{rest} error · press Alt-v to view]"),
+                        ratatui::style::Color::Yellow,
+                    )
+                } else {
+                    (
+                        format!("[📊 mermaid #{rest} · press Alt-v to view]"),
+                        ratatui::style::Color::Magenta,
+                    )
+                };
                 *line = ratatui::text::Line::from(ratatui::text::Span::styled(
                     placeholder,
                     ratatui::style::Style::default()
-                        .fg(ratatui::style::Color::Magenta)
+                        .fg(color)
                         .add_modifier(ratatui::style::Modifier::BOLD),
                 ));
             }

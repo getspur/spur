@@ -191,6 +191,7 @@ impl SessionDetailView {
         result: Result<std::sync::Arc<image::DynamicImage>, String>,
     ) {
         use crate::components::mermaid::MermaidState;
+        let is_error = result.is_err();
         let state = match result {
             // The registry stores owned `DynamicImage`, unwrap the Arc via clone
             // of the underlying data. If the Arc has a single ref, this is O(1);
@@ -200,6 +201,12 @@ impl SessionDetailView {
             Err(message) => MermaidState::Error { message },
         };
         self.mermaid_registry.insert(ref_id, state);
+
+        // On error, mark every markdown stream dirty so the next tick's
+        // maybe_flush rebuilds placeholders with the error indicator.
+        if is_error {
+            self.react_trace.mark_all_streams_dirty();
+        }
     }
 
     #[cfg(feature = "markdown")]
@@ -533,7 +540,24 @@ impl View for SessionDetailView {
         #[cfg(feature = "markdown")]
         {
             use crate::components::mermaid::MermaidState;
-            for (_entry_idx, fence) in self.react_trace.drain_fence_dispatches() {
+            use crate::components::markdown_stream::StateLookup;
+
+            // Build the set of fence ids currently in error state so that
+            // rebuilt placeholders reflect error vs pending.
+            let error_ids: std::collections::HashSet<crate::components::mermaid::MermaidId> =
+                self.mermaid_registry
+                    .iter()
+                    .filter_map(|(id, state)| {
+                        if matches!(state, MermaidState::Error { .. }) {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            let states = StateLookup { errors: &error_ids };
+
+            for (_entry_idx, fence) in self.react_trace.drain_fence_dispatches(&states) {
                 self.mermaid_registry.insert(
                     fence.id,
                     MermaidState::Pending { code: fence.code.clone() },
