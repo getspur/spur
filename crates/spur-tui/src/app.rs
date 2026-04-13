@@ -1061,7 +1061,7 @@ impl App {
             ViewId::Dashboard => self.dashboard.render_with_lineage(frame, area, &self.lineage),
             ViewId::SessionDetail(_) => {
                 if let Some(ref detail) = self.session_detail {
-                    detail.render(frame, area);
+                    detail.render_with_lineage(frame, area, &self.lineage);
                 }
             }
             ViewId::SessionPicker => {
@@ -1095,7 +1095,11 @@ impl App {
         }
 
         if self.help_visible {
-            HelpOverlay::render(frame, area);
+            #[cfg(feature = "markdown")]
+            let mermaid_enabled = self.mermaid_picker.is_some();
+            #[cfg(not(feature = "markdown"))]
+            let mermaid_enabled = false;
+            HelpOverlay::render(frame, area, mermaid_enabled);
         }
 
         if self.quit_confirm_visible {
