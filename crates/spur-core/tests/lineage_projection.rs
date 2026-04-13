@@ -145,6 +145,11 @@ fn review_resolved_clears_pending_review() {
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
     assert!(n.pending_review.is_none());
+    assert_eq!(
+        n.phase,
+        LifecycleState::AwaitingReview,
+        "resolve must not change phase"
+    );
 }
 
 #[test]
