@@ -45,7 +45,8 @@ fn headings_preserve_bold_style() {
     // The first Line carries BOLD via Line::style (tui-markdown uses
     // Line::styled for heading prefixes, placing the style on the line
     // rather than on individual spans).
-    let first_line = s.lines().first().expect("expected at least one line");
+    let lines = s.lines();
+    let first_line = lines.first().expect("expected at least one line");
     let has_bold = first_line
         .style
         .add_modifier
