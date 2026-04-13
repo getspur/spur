@@ -52,12 +52,25 @@ pub struct FenceRef {
     pub code: String,
 }
 
+/// Structured output of a rebuilt markdown stream. Preserves fence boundaries
+/// so the render layer can allocate sub-Rects for image widgets.
+#[derive(Debug, Clone)]
+pub enum StreamItem {
+    Text(Vec<Line<'static>>),
+    Fence(MermaidId),
+}
+
 /// Accumulated-text markdown renderer.
 #[derive(Debug, Default, Clone)]
 pub struct MarkdownStream {
     raw_text: String,
     dirty_since: Option<Instant>,
-    cached_lines: Vec<Line<'static>>,
+    cached_items: Vec<StreamItem>,
+    /// State-aware placeholder line keyed by fence id, populated during
+    /// `rebuild` from the caller-provided `StateLookup`. Consumed by the
+    /// back-compat `lines()` view so error/pending variants render
+    /// identically to the pre-refactor behavior.
+    fence_placeholders: std::collections::HashMap<MermaidId, Line<'static>>,
     known_fences: Vec<FenceRef>,
     next_fence_id: u64,
 }
@@ -95,14 +108,42 @@ impl MarkdownStream {
         self.dirty_since = Some(Instant::now() - DEBOUNCE);
     }
 
-    pub fn lines(&self) -> &[Line<'static>] {
-        &self.cached_lines
+    pub fn items(&self) -> &[StreamItem] {
+        &self.cached_items
+    }
+
+    /// Back-compat flat view. Substitutes the placeholder text line for each
+    /// `Fence(id)`. Uses a state-aware placeholder if one was captured during
+    /// the most recent `rebuild`; otherwise falls back to the default
+    /// Ready-style placeholder. New call sites should migrate to `items()`.
+    pub fn lines(&self) -> Vec<Line<'static>> {
+        let mut out: Vec<Line<'static>> = Vec::new();
+        for item in &self.cached_items {
+            match item {
+                StreamItem::Text(lines) => out.extend(lines.iter().cloned()),
+                StreamItem::Fence(id) => {
+                    if let Some(line) = self.fence_placeholders.get(id) {
+                        out.push(line.clone());
+                    } else {
+                        let placeholder =
+                            format!("[📊 mermaid #{} · press Alt-v to view]", id.0);
+                        out.push(Line::from(ratatui::text::Span::styled(
+                            placeholder,
+                            ratatui::style::Style::default()
+                                .fg(ratatui::style::Color::Magenta)
+                                .add_modifier(ratatui::style::Modifier::BOLD),
+                        )));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Test-only helper: returns the concatenated text content of each
     /// cached Line for simple equality assertions in tests.
     pub fn cached_lines_debug(&self) -> Vec<String> {
-        self.cached_lines
+        self.lines()
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
             .collect()
@@ -194,11 +235,12 @@ impl MarkdownStream {
 
         // ── Stage 4: parse transformed text via tui-markdown ──────────────
         if transformed.is_empty() {
-            self.cached_lines.clear();
+            self.cached_items.clear();
+            self.fence_placeholders.clear();
             return new_fences;
         }
         let text = tui_markdown::from_str(&transformed);
-        self.cached_lines = text
+        let parsed_lines: Vec<ratatui::text::Line<'static>> = text
             .lines
             .into_iter()
             .map(|line| {
@@ -211,8 +253,13 @@ impl MarkdownStream {
             })
             .collect();
 
-        // ── Stage 5: post-process — swap sentinels for placeholders ───────
-        for line in &mut self.cached_lines {
+        // ── Stage 5 (revised): split lines into StreamItems by fence sentinels ──
+        let mut items: Vec<StreamItem> = Vec::new();
+        let mut current_text: Vec<ratatui::text::Line<'static>> = Vec::new();
+        let mut placeholders: std::collections::HashMap<MermaidId, Line<'static>> =
+            std::collections::HashMap::new();
+
+        for line in parsed_lines {
             let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             let trimmed = raw.trim();
             if let Some(rest) = trimmed
@@ -220,10 +267,15 @@ impl MarkdownStream {
                 .and_then(|s| s.strip_suffix('\u{0000}'))
                 .and_then(|s| s.strip_prefix("MERMAID:"))
             {
+                if !current_text.is_empty() {
+                    items.push(StreamItem::Text(std::mem::take(&mut current_text)));
+                }
                 let id_num: u64 = rest.parse().unwrap_or(0);
                 let id = MermaidId(id_num);
 
-                let (placeholder, style) = if states.is_err(id) {
+                // Capture a state-aware placeholder for the back-compat
+                // `lines()` view (error/pending variants).
+                let (text, style) = if states.is_err(id) {
                     (
                         format!("[⚠ mermaid #{id_num} error · press Alt-v to view]"),
                         ratatui::style::Style::default()
@@ -245,9 +297,21 @@ impl MarkdownStream {
                             .add_modifier(ratatui::style::Modifier::BOLD),
                     )
                 };
-                *line = ratatui::text::Line::from(ratatui::text::Span::styled(placeholder, style));
+                placeholders.insert(
+                    id,
+                    Line::from(ratatui::text::Span::styled(text, style)),
+                );
+                items.push(StreamItem::Fence(id));
+            } else {
+                current_text.push(line);
             }
         }
+        if !current_text.is_empty() {
+            items.push(StreamItem::Text(current_text));
+        }
+
+        self.cached_items = items;
+        self.fence_placeholders = placeholders;
 
         new_fences
     }
@@ -312,5 +376,47 @@ fn convert_span(span: ratatui_core::text::Span<'_>) -> ratatui::text::Span<'stat
     ratatui::text::Span {
         content: std::borrow::Cow::Owned(span.content.into_owned()),
         style: convert_style(span.style),
+    }
+}
+
+#[cfg(test)]
+mod stream_item_tests {
+    use super::*;
+    use crate::components::markdown_stream::StateLookup;
+
+    #[test]
+    fn items_splits_text_and_fences() {
+        let mut s = MarkdownStream::new();
+        s.append("Intro prose\n\n```mermaid\nflowchart LR\nA-->B\n```\n\nOutro prose\n");
+        let _ = s.flush_now(&StateLookup::empty());
+
+        let items = s.items();
+        assert_eq!(items.len(), 3, "expected Text, Fence, Text; got {items:?}");
+        assert!(matches!(items[0], StreamItem::Text(_)));
+        assert!(matches!(items[1], StreamItem::Fence(_)));
+        assert!(matches!(items[2], StreamItem::Text(_)));
+    }
+
+    #[test]
+    fn items_preserves_multiple_fences() {
+        let mut s = MarkdownStream::new();
+        s.append("A\n\n```mermaid\ngraph TD\nA-->B\n```\n\nB\n\n```mermaid\ngraph TD\nX-->Y\n```\n\nC\n");
+        let _ = s.flush_now(&StateLookup::empty());
+        let items = s.items();
+        let fence_count = items.iter().filter(|i| matches!(i, StreamItem::Fence(_))).count();
+        assert_eq!(fence_count, 2, "expected two fences; got items: {items:?}");
+    }
+
+    #[test]
+    fn lines_back_compat_still_emits_placeholders() {
+        let mut s = MarkdownStream::new();
+        s.append("Intro\n\n```mermaid\ngraph TD\nA-->B\n```\n");
+        let _ = s.flush_now(&StateLookup::empty());
+        let joined: String = s
+            .lines()
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|sp| sp.content.as_ref()))
+            .collect();
+        assert!(joined.contains("mermaid #0"), "expected placeholder in back-compat lines(): {joined:?}");
     }
 }

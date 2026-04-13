@@ -400,7 +400,7 @@ impl ReactTrace {
                     let used_markdown = entry
                         .markdown
                         .as_ref()
-                        .filter(|stream| !stream.lines().is_empty())
+                        .filter(|stream| !stream.items().is_empty())
                         .map(|stream| {
                             for line in stream.lines() {
                                 // Indent markdown lines by 3 spaces to match existing format.
@@ -685,7 +685,7 @@ impl ReactTrace {
                     let used_markdown = entry
                         .markdown
                         .as_ref()
-                        .filter(|stream| !stream.lines().is_empty())
+                        .filter(|stream| !stream.items().is_empty())
                         .map(|stream| {
                             for line in stream.lines() {
                                 let joined: String =
