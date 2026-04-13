@@ -39,9 +39,6 @@ enum PickerState {
         cursor: usize,
         resuming: bool,
     },
-    Empty {
-        agent: String,
-    },
     Error {
         message: String,
     },
@@ -70,16 +67,12 @@ impl SessionPickerView {
     }
 
     pub fn set_sessions(&mut self, agent: String, sessions: Vec<SessionInfo>) {
-        if sessions.is_empty() {
-            self.state = PickerState::Empty { agent };
-        } else {
-            self.state = PickerState::Populated {
-                agent,
-                sessions,
-                cursor: 0,
-                resuming: false,
-            };
-        }
+        self.state = PickerState::Populated {
+            agent,
+            sessions,
+            cursor: 0,
+            resuming: false,
+        };
         self.scroll_offset.set(0);
     }
 
@@ -200,12 +193,16 @@ impl SessionPickerView {
         let visible_height = area.height.saturating_sub(4) as usize;
 
         // Clamp scroll_offset so cursor is always visible.
+        // `cursor` indexes a virtual list where 0 = [+ New session] row and
+        // 1..=sessions.len() are real sessions. We scroll the real sessions;
+        // the [+ New session] row is always visible as the first entry.
         let mut scroll = self.scroll_offset.get();
-        if cursor >= scroll + visible_height {
-            scroll = cursor.saturating_sub(visible_height.saturating_sub(1));
+        let session_cursor = cursor.saturating_sub(1);
+        if cursor >= 1 && session_cursor >= scroll + visible_height {
+            scroll = session_cursor.saturating_sub(visible_height.saturating_sub(1));
         }
-        if cursor < scroll {
-            scroll = cursor;
+        if cursor >= 1 && session_cursor < scroll {
+            scroll = session_cursor;
         }
         self.scroll_offset.set(scroll);
 
@@ -223,13 +220,41 @@ impl SessionPickerView {
             Line::from(""),
         ];
 
+        // [+ Start new session] virtual row.
+        let is_new_selected = cursor == 0;
+        let new_prefix = if is_new_selected { "\u{25b8} " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(
+                new_prefix,
+                if is_new_selected {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default()
+                },
+            ),
+            Span::styled(
+                "+ Start new session",
+                if is_new_selected {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Green)
+                },
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "  \u{2500}\u{2500}\u{2500}\u{2500}",
+            Style::default().fg(Color::DarkGray),
+        )));
+
         for (i, session) in sessions
             .iter()
             .enumerate()
             .skip(scroll)
             .take(visible_height)
         {
-            let is_selected = i == cursor;
+            let is_selected = cursor == i + 1;
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
             let raw_id = session.session_id.0.as_ref();
             let short_id = &raw_id[..8.min(raw_id.len())];
@@ -279,59 +304,6 @@ impl SessionPickerView {
         ])
         .split(area);
         frame.render_widget(Paragraph::new(lines), chunks[0]);
-        StatusBar::render(
-            frame,
-            chunks[1],
-            StatusBarProps {
-                view: &ViewId::SessionPicker,
-                running: 0,
-                pending_review: 0,
-                total_cost: 0.0,
-                elapsed: "0m 00s",
-                current_mode: None,
-                context_used: None,
-                context_size: None,
-            },
-        );
-        render_footer_hint(frame, chunks[2]);
-    }
-
-    fn render_empty(&self, frame: &mut Frame, area: Rect, agent: &str) {
-        let lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    "Sessions ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("({})", agent),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  No saved sessions found.",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "  Start a new conversation from the dashboard.",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ];
-        let chunks = Layout::vertical([
-            Constraint::Min(4),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
-        let v_pad = chunks[0].height.saturating_sub(5) / 3;
-        let content_area = Rect {
-            x: chunks[0].x,
-            y: chunks[0].y + v_pad,
-            width: chunks[0].width,
-            height: chunks[0].height.saturating_sub(v_pad),
-        };
-        frame.render_widget(Paragraph::new(lines), content_area);
         StatusBar::render(
             frame,
             chunks[1],
@@ -417,26 +389,29 @@ impl View for SessionPickerView {
                         None
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        if *cursor + 1 < sessions.len() {
+                        if *cursor < sessions.len() {
                             *cursor += 1;
                         }
                         None
                     }
+                    KeyCode::Char('n') => Some(Action::NewSessionRequested),
                     KeyCode::Enter => {
-                        let sid = sessions[*cursor].session_id.0.to_string();
-                        *resuming = true;
-                        Some(Action::ResumeSession { session_id: sid })
+                        if *cursor == 0 {
+                            Some(Action::NewSessionRequested)
+                        } else {
+                            let sid = sessions[*cursor - 1].session_id.0.to_string();
+                            *resuming = true;
+                            Some(Action::ResumeSession { session_id: sid })
+                        }
                     }
                     KeyCode::Esc => Some(Action::NavigateTo(ViewId::Dashboard)),
                     _ => None,
                 }
             }
-            PickerState::Loading | PickerState::Empty { .. } | PickerState::Error { .. } => {
-                match key.code {
-                    KeyCode::Esc => Some(Action::NavigateTo(ViewId::Dashboard)),
-                    _ => None,
-                }
-            }
+            PickerState::Loading | PickerState::Error { .. } => match key.code {
+                KeyCode::Esc => Some(Action::NavigateTo(ViewId::Dashboard)),
+                _ => None,
+            },
         }
     }
 
@@ -454,7 +429,6 @@ impl View for SessionPickerView {
                 cursor,
                 resuming,
             } => self.render_populated(frame, area, agent, sessions, *cursor, *resuming),
-            PickerState::Empty { agent } => self.render_empty(frame, area, agent),
             PickerState::Error { message } => self.render_error(frame, area, message),
         }
     }
