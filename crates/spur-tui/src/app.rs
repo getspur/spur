@@ -270,6 +270,7 @@ impl App {
                         session.clone(),
                         agent.clone(),
                         "brain".to_string(),
+                        std::env::current_dir().unwrap_or_default(),
                     );
                     // Replay any user messages that were buffered before the view existed.
                     for msg in self.pending_user_messages.drain(..) {
