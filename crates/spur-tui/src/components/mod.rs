@@ -2,6 +2,7 @@ pub mod activity_log;
 pub mod agents_tree;
 pub mod help_overlay;
 pub mod input_bar;
+pub mod line_wrap;
 pub mod react_trace;
 pub mod status_bar;
 
