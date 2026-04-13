@@ -760,7 +760,7 @@ pub async fn run_tui(
 /// `SessionDetailView`. Variants not handled here are intentionally left to
 /// the trace-rendering code in `session_detail::handle_spur_event`. Unknown
 /// variants log at TRACE so future protocol additions don't crash the UI.
-pub fn apply_session_update(
+pub(crate) fn apply_session_update(
     state: &mut SessionDetailView,
     update: &spur_acp::SessionUpdate,
 ) {
