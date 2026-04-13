@@ -119,3 +119,38 @@ fn registry_resolve_unknown_returns_none() {
     assert!(reg.resolve("/does-not-exist").is_none());
     assert!(reg.resolve("hello world").is_none());
 }
+
+#[test]
+fn fuzzy_rank_commands_prefers_prefix_matches() {
+    use spur_tui::commands::fuzzy::rank;
+    use spur_tui::commands::CommandRegistry;
+    let mut reg = CommandRegistry::new();
+    reg.set_agent_commands(
+        "claude",
+        vec![
+            acp_cmd("compact", "", None),
+            acp_cmd("config", "", None),
+            acp_cmd("doctor", "", None),
+        ],
+    );
+    let entries: Vec<_> = reg
+        .list()
+        .into_iter()
+        .filter(|e| matches!(e.source, spur_tui::commands::CommandSource::Agent { .. }))
+        .collect();
+    let ranked = rank(&entries, "co");
+    let names: Vec<&str> = ranked.iter().map(|e| e.name.as_str()).collect();
+    assert!(names[0] == "compact" || names[0] == "config", "top: {:?}", names);
+    assert!(!names.contains(&"doctor") || names.iter().position(|n| *n == "doctor").unwrap() > 1);
+}
+
+#[test]
+fn fuzzy_rank_empty_query_returns_input_order() {
+    use spur_tui::commands::fuzzy::rank;
+    use spur_tui::commands::CommandRegistry;
+    let reg = CommandRegistry::new();
+    let entries = reg.list();
+    let ranked = rank(&entries, "");
+    assert_eq!(ranked.len(), entries.len());
+    assert_eq!(ranked[0].name, entries[0].name);
+}

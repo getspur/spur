@@ -1,4 +1,5 @@
 pub mod entry;
+pub mod fuzzy;
 pub mod registry;
 pub mod spur_local;
 
