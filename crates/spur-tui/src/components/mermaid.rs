@@ -32,10 +32,11 @@ pub enum MermaidState {
     Pending { code: String },
     Rendering,
     Ready {
-        image: DynamicImage,
-        /// Lazily-built ratatui_image protocol state for inline rendering.
-        /// Populated on first render; invalidated on terminal resize.
-        /// `RefCell` is required because the render path takes `&self`.
+        /// Reference-counted to avoid deep-copying the pixel buffer on the
+        /// hot render path — the dispatch layer already hands in an `Arc`.
+        image: std::sync::Arc<DynamicImage>,
+        /// Lazily-built protocol. Populated on first visible render;
+        /// invalidated on terminal resize. `RefCell` because render takes `&self`.
         inline_protocol: RefCell<Option<StatefulProtocol>>,
     },
     Error { message: String },
@@ -277,7 +278,7 @@ mod tests {
         use std::cell::RefCell;
         use image::RgbaImage;
 
-        let img = DynamicImage::ImageRgba8(RgbaImage::new(10, 10));
+        let img = std::sync::Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
         let state = MermaidState::Ready {
             image: img,
             inline_protocol: RefCell::new(None),

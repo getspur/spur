@@ -58,12 +58,12 @@ pub struct SessionDetailView {
     /// Used on accept to retrieve the URI/display name.
     active_mention_hits: Vec<crate::mentions::MentionEntry>,
     #[cfg(feature = "markdown")]
-    pub mermaid_registry: std::collections::HashMap<
+    pub(crate) mermaid_registry: std::collections::HashMap<
         crate::components::mermaid::MermaidId,
         crate::components::mermaid::MermaidState,
     >,
     #[cfg(feature = "markdown")]
-    pub pending_fence_actions: std::collections::VecDeque<crate::action::Action>,
+    pub(crate) pending_fence_actions: std::collections::VecDeque<crate::action::Action>,
     /// Graphics `Picker` used to build inline mermaid image protocols during
     /// render. Set once from `App` when the view is created; `None` when no
     /// graphics protocol is available (text fallback kicks in).
@@ -280,12 +280,8 @@ impl SessionDetailView {
     ) {
         use crate::components::mermaid::MermaidState;
         let state = match result {
-            // The registry stores owned `DynamicImage`, unwrap the Arc via clone
-            // of the underlying data. If the Arc has a single ref, this is O(1);
-            // otherwise it copies pixels once (still rare — Arc is typically
-            // single-owner at this point).
             Ok(image_arc) => MermaidState::Ready {
-                image: (*image_arc).clone(),
+                image: image_arc,
                 inline_protocol: std::cell::RefCell::new(None),
             },
             Err(message) => MermaidState::Error { message },
@@ -1093,7 +1089,7 @@ mod invalidate_protocols_tests {
         view.mermaid_registry.insert(
             id,
             MermaidState::Ready {
-                image: DynamicImage::ImageRgba8(RgbaImage::new(4, 4)),
+                image: std::sync::Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(4, 4))),
                 inline_protocol: RefCell::new(None),
             },
         );
