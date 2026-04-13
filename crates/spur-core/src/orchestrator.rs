@@ -1471,8 +1471,17 @@ impl Orchestrator {
         // Accumulated cost across all attempts in this delegation.
         let mut total_cost: f64 = 0.0;
 
+        // Worker session for the *next* attempt. Generated here (not
+        // inside run_one_worker_attempt) so the Retry arm can emit
+        // ExecutorRetryStarted.new_session_id matching the session id
+        // the next attempt will actually use — closing the lineage
+        // Attempt.session_id ↔ worker event linkage.
+        let first_worker_session = SessionId::new();
+        let mut next_worker_session = first_worker_session;
+
         loop {
             let outcome = match run_one_worker_attempt(
+                next_worker_session.clone(),
                 &agent,
                 &current_task,
                 &agent_config,
@@ -1482,7 +1491,25 @@ impl Orchestrator {
             .await
             {
                 Ok(o) => o,
-                Err(early_return) => return early_return,
+                Err(setup_err) => {
+                    // Setup failures short-circuit the entire
+                    // delegation without retry — retrying a
+                    // worktree-creation failure is not spec'd
+                    // behavior. We still call finalize so
+                    // DelegationCompleted is emitted (the worker
+                    // session was named, even if no worker actually
+                    // ran).
+                    return finalize(
+                        &event_tx,
+                        next_worker_session,
+                        DelegationStatus::Failed {
+                            error: setup_err.to_string(),
+                        },
+                        None,
+                        None,
+                        total_cost,
+                    );
+                }
             };
 
             total_cost += outcome.cost;
@@ -1495,16 +1522,14 @@ impl Orchestrator {
 
             // No review gate — emit DelegationCompleted and return.
             if !agent_config.review.review_required {
-                let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
-                    worker_session: outcome.worker_session.clone(),
-                    status: outcome.candidate_status.clone(),
-                }));
-                return DelegationResult {
-                    status: outcome.candidate_status,
-                    diff: outcome.diff,
-                    summary: outcome.summary,
-                    estimated_cost_usd: total_cost,
-                };
+                return finalize(
+                    &event_tx,
+                    outcome.worker_session,
+                    outcome.candidate_status,
+                    outcome.diff,
+                    outcome.summary,
+                    total_cost,
+                );
             }
 
             // Review gate: register FIRST, then emit events.
@@ -1519,14 +1544,21 @@ impl Orchestrator {
                         error = %e,
                         "review_sink registration failed — skipping review gate"
                     );
-                    return DelegationResult {
-                        status: DelegationStatus::Failed {
+                    // Worker DID run; emit DelegationCompleted via
+                    // finalize so the lineage projection records the
+                    // terminal Failed status (preserves the
+                    // "every terminal emits DelegationCompleted"
+                    // invariant).
+                    return finalize(
+                        &event_tx,
+                        outcome.worker_session,
+                        DelegationStatus::Failed {
                             error: format!("review registration failed: {e}"),
                         },
-                        diff: outcome.diff,
-                        summary: outcome.summary,
-                        estimated_cost_usd: total_cost,
-                    };
+                        outcome.diff,
+                        outcome.summary,
+                        total_cost,
+                    );
                 }
             };
 
@@ -1559,16 +1591,14 @@ impl Orchestrator {
                         waited_for: agent_config.review.review_timeout,
                         fallback: agent_config.review.review_timeout_default.clone(),
                     };
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
-                        worker_session: outcome.worker_session.clone(),
-                        status: final_status.clone(),
-                    }));
-                    return DelegationResult {
-                        status: final_status,
-                        diff: outcome.diff,
-                        summary: outcome.summary,
-                        estimated_cost_usd: total_cost,
-                    };
+                    return finalize(
+                        &event_tx,
+                        outcome.worker_session,
+                        final_status,
+                        outcome.diff,
+                        outcome.summary,
+                        total_cost,
+                    );
                 }
             };
 
@@ -1579,16 +1609,14 @@ impl Orchestrator {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Approve,
                     }));
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
-                        worker_session: outcome.worker_session.clone(),
-                        status: final_status.clone(),
-                    }));
-                    return DelegationResult {
-                        status: final_status,
-                        diff: outcome.diff,
-                        summary: outcome.summary,
-                        estimated_cost_usd: total_cost,
-                    };
+                    return finalize(
+                        &event_tx,
+                        outcome.worker_session,
+                        final_status,
+                        outcome.diff,
+                        outcome.summary,
+                        total_cost,
+                    );
                 }
                 Some(ReviewDecision::Reject { reason }) => {
                     let final_status = DelegationStatus::Rejected { reason: reason.clone() };
@@ -1596,16 +1624,14 @@ impl Orchestrator {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Reject { reason },
                     }));
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
-                        worker_session: outcome.worker_session.clone(),
-                        status: final_status.clone(),
-                    }));
-                    return DelegationResult {
-                        status: final_status,
-                        diff: outcome.diff,
-                        summary: outcome.summary,
-                        estimated_cost_usd: total_cost,
-                    };
+                    return finalize(
+                        &event_tx,
+                        outcome.worker_session,
+                        final_status,
+                        outcome.diff,
+                        outcome.summary,
+                        total_cost,
+                    );
                 }
                 Some(ReviewDecision::Modify { note }) => {
                     let final_status = DelegationStatus::Modified { reviewer_note: note.clone() };
@@ -1613,18 +1639,25 @@ impl Orchestrator {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Modify { note },
                     }));
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
-                        worker_session: outcome.worker_session.clone(),
-                        status: final_status.clone(),
-                    }));
-                    return DelegationResult {
-                        status: final_status,
-                        diff: outcome.diff,
-                        summary: outcome.summary,
-                        estimated_cost_usd: total_cost,
-                    };
+                    return finalize(
+                        &event_tx,
+                        outcome.worker_session,
+                        final_status,
+                        outcome.diff,
+                        outcome.summary,
+                        total_cost,
+                    );
                 }
                 Some(ReviewDecision::Retry { new_constraints }) => {
+                    // NOTE: this retry logic is duplicated in
+                    // run_gate_with_retries (the test helper). Keep
+                    // the following invariants in sync if either site
+                    // changes:
+                    //   - Bound: attempt_n > max_review_retries
+                    //   - Error message: "retry limit exceeded after N attempts"
+                    //   - Decision mapping: Approve→candidate,
+                    //     Reject→Rejected, Modify→Modified
+                    //
                     // `>` (not `>=`): spec's "Retry × 4 when
                     // max_review_retries = 3 produces Failed" means 3
                     // retries are allowed (attempts bump 1→2→3→4), and
@@ -1636,36 +1669,41 @@ impl Orchestrator {
                                 agent_config.review.max_review_retries
                             ),
                         };
-                        let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
-                            worker_session: outcome.worker_session.clone(),
-                            status: final_status.clone(),
-                        }));
-                        return DelegationResult {
-                            status: final_status,
-                            diff: outcome.diff,
-                            summary: outcome.summary,
-                            estimated_cost_usd: total_cost,
-                        };
+                        return finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        );
                     }
 
-                    // Retry: emit ExecutorRetryStarted, append
-                    // constraints to the ORIGINAL task (not the
-                    // accumulated one — this prevents compounding
-                    // constraint text across N retries), bump
-                    // attempt_n, and loop.
-                    let new_session = SessionId::new();
+                    // Retry: generate the NEXT attempt's session id
+                    // FIRST so we can announce it in
+                    // ExecutorRetryStarted (matching what
+                    // run_one_worker_attempt will use on the next
+                    // iteration). The lineage projection treats
+                    // new_session_id as the Attempt.session_id of
+                    // the next attempt; emitting a fresh-but-unused
+                    // id here would silently dangle.
+                    let retry_session = SessionId::new();
                     let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorRetryStarted {
                         id: eid.0.clone(),
                         attempt_n: attempt_n + 1,
                         reason: new_constraints.clone(),
-                        new_session_id: new_session,
+                        new_session_id: retry_session.clone(),
                     }));
 
+                    // Append constraints to the ORIGINAL task (not
+                    // the accumulated one — prevents compounding
+                    // constraint text across N retries).
                     current_task = format!(
                         "{}\n\n## Additional constraints\n{}",
                         original_task, new_constraints
                     );
                     attempt_n += 1;
+                    next_worker_session = retry_session;
 
                     // Note: worktree for the current outcome was
                     // already cleaned up inside run_one_worker_attempt
@@ -1681,18 +1719,64 @@ impl Orchestrator {
                         waited_for: agent_config.review.review_timeout,
                         fallback: agent_config.review.review_timeout_default.clone(),
                     };
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
-                        worker_session: outcome.worker_session.clone(),
-                        status: final_status.clone(),
-                    }));
-                    return DelegationResult {
-                        status: final_status,
-                        diff: outcome.diff,
-                        summary: outcome.summary,
-                        estimated_cost_usd: total_cost,
-                    };
+                    return finalize(
+                        &event_tx,
+                        outcome.worker_session,
+                        final_status,
+                        outcome.diff,
+                        outcome.summary,
+                        total_cost,
+                    );
                 }
             }
+        }
+    }
+}
+
+/// Common terminal-arm helper: emits `DelegationCompleted` and
+/// constructs the `DelegationResult`. Centralizing this makes the
+/// "every terminal emits DelegationCompleted" invariant locally
+/// verifiable (one call site per terminal arm in `execute_delegation`).
+fn finalize(
+    event_tx: &broadcast::Sender<SpurEvent>,
+    worker_session: SessionId,
+    final_status: DelegationStatus,
+    diff: Option<String>,
+    summary: Option<String>,
+    total_cost: f64,
+) -> DelegationResult {
+    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
+        worker_session,
+        status: final_status.clone(),
+    }));
+    DelegationResult {
+        status: final_status,
+        diff,
+        summary,
+        estimated_cost_usd: total_cost,
+    }
+}
+
+/// Setup-level error during a worker-spawn attempt. Distinct from the
+/// worker's own output-level outcome (which lives in
+/// `WorkerAttemptOutcome`). Setup errors short-circuit the entire
+/// delegation without retry — retrying a worktree-creation failure is
+/// not a spec'd behavior.
+#[derive(Debug)]
+enum AttemptSetupError {
+    SnapshotFailed(String),
+    WorktreeFailed(String),
+    InitFailed(String),
+    SessionFailed(String),
+}
+
+impl std::fmt::Display for AttemptSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SnapshotFailed(e) => write!(f, "Failed to snapshot brain state: {e}"),
+            Self::WorktreeFailed(e) => write!(f, "Failed to create worktree: {e}"),
+            Self::InitFailed(e) => write!(f, "Failed to initialize worker: {e}"),
+            Self::SessionFailed(e) => write!(f, "Failed to create worker session: {e}"),
         }
     }
 }
@@ -1710,24 +1794,36 @@ struct WorkerAttemptOutcome {
 /// Run a single worker attempt: snapshot brain state, create worktree,
 /// spawn agent, prompt, collect diff, and clean up.
 ///
+/// `worker_session` is provided by the caller (rather than generated
+/// inside) so `execute_delegation`'s Retry arm can announce the next
+/// attempt's session id in `ExecutorRetryStarted.new_session_id` and
+/// have it match what this function actually uses — closing the lineage
+/// `Attempt.session_id ↔ worker event` linkage gap.
+///
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
 /// worker candidate status — success OR worker-reported errors — both
 /// of which are retry-eligible (the human reviewer decides).
 ///
-/// Returns `Err(DelegationResult)` only for pre-worker setup failures
-/// (worktree creation, agent initialization, session creation). These
-/// short-circuit the entire delegation with no retry, consistent with
-/// pre-T10 behavior.
+/// Returns `Err(AttemptSetupError)` only for pre-worker setup failures
+/// (worktree creation, agent initialization, session creation). The
+/// caller short-circuits the delegation without retry — consistent
+/// with pre-T10 behavior. Per-attempt error shape is decoupled from
+/// the public `DelegationResult` type.
 async fn run_one_worker_attempt(
+    worker_session: SessionId,
     agent: &str,
     task: &str,
     agent_config: &spur_acp::config::AgentConfig,
     repo_root: PathBuf,
     event_tx: &broadcast::Sender<SpurEvent>,
-) -> Result<WorkerAttemptOutcome, DelegationResult> {
-    let worker_session = SessionId::new();
-
-    // Emit DelegationRequested event (per-attempt).
+) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
+    // NOTE: DelegationRequested is emitted per-attempt here. The legacy
+    // lineage adapter (lineage/adapter.rs) keys task_spec population to
+    // the FIRST matching empty-task_spec executor, so on retry the
+    // constraint-augmented task silently drops at the adapter boundary.
+    // This is part of the broader "adapter keys off worker_session, not
+    // stable executor_id" limitation documented for follow-up work.
+    // The projection path (apply_inner) sees each event correctly.
     let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationRequested {
         from: worker_session.clone(),
         to_agent: agent.to_string(),
@@ -1741,36 +1837,15 @@ async fn run_one_worker_attempt(
     let mut worktrees = WorktreeManager::new(repo_root);
 
     // 1. Snapshot brain state and create worktree.
-    let snapshot_branch = match worktrees.snapshot_brain_state().await {
-        Ok(b) => b,
-        Err(e) => {
-            return Err(DelegationResult {
-                status: DelegationStatus::Failed {
-                    error: format!("Failed to snapshot brain state: {e}"),
-                },
-                diff: None,
-                summary: None,
-                estimated_cost_usd: 0.0,
-            });
-        }
-    };
+    let snapshot_branch = worktrees
+        .snapshot_brain_state()
+        .await
+        .map_err(|e| AttemptSetupError::SnapshotFailed(e.to_string()))?;
 
-    let worktree_info = match worktrees
+    let worktree_info = worktrees
         .create_worktree(&worker_session, agent, &snapshot_branch)
         .await
-    {
-        Ok(info) => info,
-        Err(e) => {
-            return Err(DelegationResult {
-                status: DelegationStatus::Failed {
-                    error: format!("Failed to create worktree: {e}"),
-                },
-                diff: None,
-                summary: None,
-                estimated_cost_usd: 0.0,
-            });
-        }
-    };
+        .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
 
     // 2. Spawn worker agent in worktree via AgentConnection.
     let mut connection: Box<dyn AgentConnection> = match agent_config.transport {
@@ -1800,14 +1875,7 @@ async fn run_one_worker_attempt(
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
     if let Err(e) = connection.initialize(init_request).await {
         let _ = worktrees.remove_worktree(&worker_session).await;
-        return Err(DelegationResult {
-            status: DelegationStatus::Failed {
-                error: format!("Failed to initialize worker: {e}"),
-            },
-            diff: None,
-            summary: None,
-            estimated_cost_usd: 0.0,
-        });
+        return Err(AttemptSetupError::InitFailed(e.to_string()));
     }
 
     // Emit WorkerSpawned event.
@@ -1826,14 +1894,7 @@ async fn run_one_worker_attempt(
         Err(e) => {
             let _ = connection.shutdown().await;
             let _ = worktrees.remove_worktree(&worker_session).await;
-            return Err(DelegationResult {
-                status: DelegationStatus::Failed {
-                    error: format!("Failed to create worker session: {e}"),
-                },
-                diff: None,
-                summary: None,
-                estimated_cost_usd: 0.0,
-            });
+            return Err(AttemptSetupError::SessionFailed(e.to_string()));
         }
     };
 
@@ -2063,6 +2124,12 @@ pub async fn run_gate_for_candidate(
 /// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
 /// `max_review_retries`. On exceed, returns
 /// `Failed { error: "retry limit exceeded after N attempts" }`.
+///
+/// NOTE: this mirrors execute_delegation's production retry loop. See
+/// the cross-reference comment at the Retry match arm there for
+/// invariants. Drift hazard: tests passing here do not guarantee the
+/// production loop behaves the same. Changes to retry semantics
+/// should touch both.
 pub async fn run_gate_with_retries(
     executor_id: ExecutorId,
     candidate_status: DelegationStatus,
