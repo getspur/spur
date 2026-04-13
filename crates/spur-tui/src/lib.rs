@@ -3,6 +3,7 @@ pub mod app;
 pub mod commands;
 pub mod components;
 pub mod mentions;
+pub mod session_metadata;
 pub mod tui;
 pub mod views;
 
