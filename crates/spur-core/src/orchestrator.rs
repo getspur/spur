@@ -1071,6 +1071,13 @@ impl Orchestrator {
             });
         }
 
+        self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
+            session: session_id.clone(),
+            acp_session_id: session_response.session_id.to_string(),
+            brain: brain_name.clone(),
+            resumed: false,
+        }));
+
         Ok(BrainSession {
             connection,
             acp_session_id: session_response.session_id.to_string(),
@@ -1460,7 +1467,7 @@ impl Orchestrator {
         while let Some(request) = channel.request_rx.recv().await {
             // Destructure the request — it is not Clone, so we move each field.
             let DelegationRequest {
-                id: _,
+                id: request_id,
                 agent,
                 task,
                 context_files,
@@ -1506,6 +1513,7 @@ impl Orchestrator {
                     agent,
                     task,
                     context_files,
+                    request_id,
                     repo_root,
                     agent_configs,
                     event_tx.clone(),
@@ -1558,6 +1566,7 @@ impl Orchestrator {
         agent: String,
         original_task: String,
         _context_files: Vec<String>,
+        request_id: String,
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         event_tx: broadcast::Sender<SpurEvent>,
@@ -1623,6 +1632,7 @@ impl Orchestrator {
                 next_worker_session.clone(),
                 &agent,
                 &current_task,
+                &request_id,
                 &agent_config,
                 &mut worktrees,
                 &event_tx,
@@ -2217,6 +2227,7 @@ async fn run_one_worker_attempt(
     worker_session: SessionId,
     agent: &str,
     task: &str,
+    request_id: &str,
     agent_config: &spur_acp::config::AgentConfig,
     worktrees: &mut WorktreeManager,
     event_tx: &broadcast::Sender<SpurEvent>,
@@ -2232,6 +2243,7 @@ async fn run_one_worker_attempt(
         from: worker_session.clone(),
         to_agent: agent.to_string(),
         task: task.to_string(),
+        request_id: request_id.to_string(),
     }));
 
     let start = Instant::now();
@@ -2283,6 +2295,13 @@ async fn run_one_worker_attempt(
         agent: agent.to_string(),
         session: worker_session.clone(),
         worktree: worktree_info.path.clone(),
+    }));
+    // Correlate this executor with the brain's delegate_to_worker call
+    // so the brain-side session_detail view can render an inline card.
+    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationDispatched {
+        from: worker_session.clone(),
+        request_id: request_id.to_string(),
+        executor_id: worker_session.0.clone(),
     }));
 
     // Workers get no MCP servers (per spec).
