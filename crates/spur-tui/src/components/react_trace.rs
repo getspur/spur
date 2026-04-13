@@ -228,6 +228,10 @@ pub struct ReactTrace {
     last_total_lines: Cell<usize>,
     /// Cached visible height from last render.
     last_visible_height: Cell<usize>,
+    /// Whether mermaid rendering is available. Forwarded to newly-created
+    /// `MarkdownStream` instances so ```mermaid fences render as ordinary
+    /// code blocks when the terminal lacks image-protocol support.
+    mermaid_enabled: bool,
 }
 
 impl ReactTrace {
@@ -239,7 +243,15 @@ impl ReactTrace {
             tick_counter: 0,
             last_total_lines: Cell::new(0),
             last_visible_height: Cell::new(20),
+            mermaid_enabled: true,
         }
+    }
+
+    /// Set whether ```mermaid fences should be rendered as images. Called
+    /// from the session-view layer once the terminal's image-protocol
+    /// capability is known. Affects streams created after this call.
+    pub fn set_mermaid_enabled(&mut self, enabled: bool) {
+        self.mermaid_enabled = enabled;
     }
 
     /// Return a short kind name for the most recent entry, or `None` if empty.
@@ -304,7 +316,8 @@ impl ReactTrace {
                     return;
                 }
             }
-            let mut stream = super::markdown_stream::MarkdownStream::new();
+            let mut stream =
+                super::markdown_stream::MarkdownStream::new_with_mermaid(self.mermaid_enabled);
             stream.append(text);
             self.push(TraceEntry {
                 kind: TraceKind::AgentMessage { agent: agent.to_string() },
@@ -1413,6 +1426,12 @@ impl ReactTrace {
 
 #[cfg(test)]
 impl ReactTrace {
+    /// Test-only helper: mutable access to the entry list so tests can
+    /// inspect per-entry `MarkdownStream` state.
+    pub(crate) fn entries_mut_for_test(&mut self) -> &mut [TraceEntry] {
+        &mut self.entries
+    }
+
     /// Test-only helper: mimics the line-building portion of `render` but
     /// returns each line as a joined `String` of span text, so tests can
     /// assert on visible content without needing a real `Frame`.
@@ -1574,6 +1593,36 @@ mod markdown_integration_tests {
         let joined = rendered.join("\n");
         assert!(joined.contains("Heading"), "expected heading: {joined}");
         assert!(joined.contains("Body"), "expected body: {joined}");
+    }
+
+    #[test]
+    fn text_mode_agent_message_stream_produces_no_fence_items() {
+        use crate::components::markdown_stream::{StateLookup, StreamItem};
+        let mut trace = ReactTrace::new();
+        trace.set_mermaid_enabled(false);
+        trace.append_message(
+            "Here's a diagram:\n\n```mermaid\nflowchart LR\nA-->B\n```\n",
+            "claude",
+            "10:00".to_string(),
+        );
+        let states = StateLookup::empty();
+        let _ = trace.force_flush_all(&states);
+
+        let entries = trace.entries_mut_for_test();
+        assert!(!entries.is_empty(), "expected at least one entry");
+        for entry in entries {
+            if let Some(stream) = entry.markdown.as_mut() {
+                let has_fence = stream
+                    .items()
+                    .iter()
+                    .any(|it| matches!(it, StreamItem::Fence(_)));
+                assert!(
+                    !has_fence,
+                    "text mode must not produce Fence items: {:?}",
+                    stream.items()
+                );
+            }
+        }
     }
 }
 
