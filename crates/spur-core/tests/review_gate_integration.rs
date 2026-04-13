@@ -281,7 +281,11 @@ async fn retry_limit_exceeded_produces_failed() {
     match final_status {
         DelegationStatus::Failed { error } => {
             assert!(error.contains("retry limit exceeded"), "got: {}", error);
-            assert!(error.contains("2"), "got: {}", error);
+            // max_review_retries=2; bound fires at attempt_n=3 (1 original
+            // + 2 retries, then a 3rd Retry decision exceeds the bound).
+            // The error reports `attempt_n` (the count that ran), not
+            // `max_review_retries`.
+            assert!(error.contains("3"), "got: {}", error);
         }
         other => panic!("expected Failed, got {:?}", other),
     }
@@ -371,11 +375,14 @@ fn should_preserve_worktree_matches_expected_variants() {
         reviewer_note: "n".into(),
     }));
 
-    // Preserved: Rejected (human feedback — worker's work needs inspection)
-    // and TimedOut (nobody reviewed; preserve so someone still can).
+    // Preserved: Rejected (human feedback — worker's work needs inspection).
     assert!(should_preserve_worktree(&DelegationStatus::Rejected {
         reason: "r".into()
     }));
+
+    // TimedOut with Reject or Abandon fallback: preserve for inspection
+    // (no human reviewed and the configured policy says "treat as no" or
+    // "abandon" — operator may still want to read the diff).
     assert!(should_preserve_worktree(&DelegationStatus::TimedOut {
         waited_for: std::time::Duration::from_secs(60),
         fallback: TimeoutFallback::Reject { reason: "r".into() },
@@ -384,8 +391,54 @@ fn should_preserve_worktree_matches_expected_variants() {
         waited_for: std::time::Duration::from_secs(60),
         fallback: TimeoutFallback::Abandon,
     }));
-    assert!(should_preserve_worktree(&DelegationStatus::TimedOut {
+
+    // TimedOut with Approve fallback: auto-approved — commit + remove,
+    // NOT preserved. Matches spec's "retained as if reviewed" semantics.
+    assert!(!should_preserve_worktree(&DelegationStatus::TimedOut {
         waited_for: std::time::Duration::from_secs(60),
         fallback: TimeoutFallback::Approve,
     }));
+}
+
+#[test]
+fn should_commit_worker_diff_matches_expected_variants() {
+    use spur_acp::{DelegationStatus, TimeoutFallback};
+    use spur_core::orchestrator::should_commit_worker_diff;
+    use std::path::PathBuf;
+
+    // Commit: Success, Modified (human approval/annotation),
+    // TimedOut { Approve } (auto-approve fallback "retained as if reviewed").
+    assert!(should_commit_worker_diff(&DelegationStatus::Success));
+    assert!(should_commit_worker_diff(&DelegationStatus::Modified {
+        reviewer_note: "n".into()
+    }));
+    assert!(should_commit_worker_diff(&DelegationStatus::TimedOut {
+        waited_for: std::time::Duration::from_secs(60),
+        fallback: TimeoutFallback::Approve,
+    }));
+
+    // No commit: TimedOut { Reject | Abandon } (preserved for inspection).
+    assert!(!should_commit_worker_diff(&DelegationStatus::TimedOut {
+        waited_for: std::time::Duration::from_secs(60),
+        fallback: TimeoutFallback::Reject { reason: "r".into() },
+    }));
+    assert!(!should_commit_worker_diff(&DelegationStatus::TimedOut {
+        waited_for: std::time::Duration::from_secs(60),
+        fallback: TimeoutFallback::Abandon,
+    }));
+
+    // No commit: Rejected (human said no).
+    assert!(!should_commit_worker_diff(&DelegationStatus::Rejected {
+        reason: "r".into()
+    }));
+
+    // No commit: Failed / Conflict / Timeout (worker hang) — no clean
+    // diff to merge.
+    assert!(!should_commit_worker_diff(&DelegationStatus::Failed {
+        error: "e".into()
+    }));
+    assert!(!should_commit_worker_diff(&DelegationStatus::Conflict {
+        files: vec![PathBuf::from("a")]
+    }));
+    assert!(!should_commit_worker_diff(&DelegationStatus::Timeout));
 }

@@ -1379,28 +1379,29 @@ impl Orchestrator {
                     }
                 };
 
-                let result = match tokio::time::timeout(
-                    std::time::Duration::from_secs(300),
-                    Self::execute_delegation(
-                        agent,
-                        task,
-                        context_files,
-                        repo_root,
-                        agent_configs,
-                        event_tx,
-                        review_sink,
-                    ),
+                // No outer timeout: the review gate's own `review_timeout`
+                // bounds review waits (default 30 min, configurable per
+                // agent). A previous hardcoded 300s outer timeout always
+                // fired before the 1800s default review timeout, cancelling
+                // the delegation mid-`select!`, dropping the ReviewSink
+                // entry's receiver without emitting Resolved/TimedOut, and
+                // returning `DelegationStatus::Timeout` (worker-hang) to
+                // the brain. That broke the spec's worker `Timeout`
+                // (hang) vs review `TimedOut` (nobody reviewed) split and
+                // left the TUI stuck on `AwaitingReview` because
+                // `DelegationCompleted` was never emitted for the right
+                // session. v1 accepts that worker-hang detection is not
+                // automatic — separate concern, separate fix.
+                let result = Self::execute_delegation(
+                    agent,
+                    task,
+                    context_files,
+                    repo_root,
+                    agent_configs,
+                    event_tx,
+                    review_sink,
                 )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => DelegationResult {
-                        status: DelegationStatus::Timeout,
-                        diff: None,
-                        summary: None,
-                        estimated_cost_usd: 0.0,
-                    },
-                };
+                .await;
 
                 let _ = respond_to.send(result);
             });
@@ -1721,6 +1722,11 @@ impl Orchestrator {
                     // changes:
                     //   - Bound: attempt_n > max_review_retries
                     //   - Error message: "retry limit exceeded after N attempts"
+                    //     where N == attempt_n (the actual count of
+                    //     attempts that ran), NOT max_review_retries.
+                    //     Example: max_review_retries=3 fires the bound at
+                    //     attempt_n=4 (1 original + 3 retries), so the
+                    //     message reports "4 attempts".
                     //   - Decision mapping: Approve→candidate,
                     //     Reject→Rejected, Modify→Modified
                     //
@@ -1732,7 +1738,7 @@ impl Orchestrator {
                         let final_status = DelegationStatus::Failed {
                             error: format!(
                                 "retry limit exceeded after {} attempts",
-                                agent_config.review.max_review_retries
+                                attempt_n
                             ),
                         };
                         // Retry limit → Failed (remove, no commit).
@@ -1785,7 +1791,18 @@ impl Orchestrator {
                     // the current attempt's worktree before spawning
                     // the next attempt. No commit (intermediate diff is
                     // moot once the retry produces its own diff).
-                    let _ = worktrees.remove_worktree(&outcome.worker_session).await;
+                    //
+                    // Log (don't swallow) failures: a leftover directory
+                    // will cause the next create_worktree to fail with
+                    // a misleading "WorktreeFailed" — this warn lets the
+                    // operator correlate cause and effect.
+                    if let Err(e) = worktrees.remove_worktree(&outcome.worker_session).await {
+                        tracing::warn!(
+                            session = %outcome.worker_session,
+                            error = %e,
+                            "failed to remove retry-attempt worktree; next attempt may fail at create_worktree"
+                        );
+                    }
                     continue;
                 }
                 None => {
@@ -1822,32 +1839,52 @@ impl Orchestrator {
 /// Returns `true` if the worktree should be preserved (not removed) for
 /// this final `DelegationStatus`.
 ///
-/// Preserved: `Rejected` and `TimedOut` (any fallback). Both cases mean
-/// the worker did real work but the human feedback loop produced either
-/// (a) a rejection that needs diff inspection or (b) a timeout that
-/// left the decision unresolved. The reviewer/operator may want to
-/// read the worktree's diff before discarding.
+/// Preserved:
+///   - `Rejected` (human said no — operator may want to inspect diff).
+///   - `TimedOut { fallback: Reject | Abandon }` (no human reviewed in
+///     time AND the configured fallback says "treat as no" or "abandon";
+///     preserve so a human can still inspect).
 ///
-/// Not preserved: `Success`/`Modified` (approved — changes merged into
-/// the brain's tree), `Failed`/`Conflict`/`Timeout` (no real work
-/// to inspect — worker hung or errored, or conflict blocked the run).
+/// NOT preserved:
+///   - `TimedOut { fallback: Approve }` — per spec, Approve fallback
+///     means "auto-approve — worker's diff/summary retained as if
+///     reviewed", so the diff must be committed and the worktree
+///     removed (same lifecycle as a human Approve).
+///   - `Success`/`Modified` (approved — changes merged into the brain's
+///     tree).
+///   - `Failed`/`Conflict`/`Timeout` (no real work to inspect — worker
+///     hung or errored, or conflict blocked the run).
 pub fn should_preserve_worktree(status: &DelegationStatus) -> bool {
     matches!(
         status,
-        DelegationStatus::Rejected { .. } | DelegationStatus::TimedOut { .. }
+        DelegationStatus::Rejected { .. }
+            | DelegationStatus::TimedOut {
+                fallback: TimeoutFallback::Reject { .. } | TimeoutFallback::Abandon,
+                ..
+            }
     )
 }
 
 /// Returns `true` if the worker's diff should be committed into the
 /// brain's branch based on the final `DelegationStatus`.
 ///
-/// Commit on `Success` (Approve) and `Modified` (human-annotated
-/// approval). Do NOT commit on Rejected/TimedOut (preserve for
+/// Commit on:
+///   - `Success` (Approve).
+///   - `Modified` (human-annotated approval).
+///   - `TimedOut { fallback: Approve }` (auto-approve fallback — spec
+///     says diff is "retained as if reviewed", so it must commit).
+///
+/// Do NOT commit on Rejected/TimedOut(Reject|Abandon) (preserve for
 /// inspection), nor on Failed/Conflict/Timeout (no clean diff to merge).
 pub fn should_commit_worker_diff(status: &DelegationStatus) -> bool {
     matches!(
         status,
-        DelegationStatus::Success | DelegationStatus::Modified { .. }
+        DelegationStatus::Success
+            | DelegationStatus::Modified { .. }
+            | DelegationStatus::TimedOut {
+                fallback: TimeoutFallback::Approve,
+                ..
+            }
     )
 }
 
@@ -2343,11 +2380,15 @@ pub async fn run_gate_with_retries(
             }
             Some(ReviewDecision::Retry { .. }) => {
                 // `>` (not `>=`): see execute_delegation for rationale.
+                // Error message reports `attempt_n` (the actual attempt
+                // count that ran), NOT `max_review_retries`. See the
+                // execute_delegation cross-reference for the worked
+                // example.
                 if attempt_n > max_review_retries {
                     return DelegationStatus::Failed {
                         error: format!(
                             "retry limit exceeded after {} attempts",
-                            max_review_retries
+                            attempt_n
                         ),
                     };
                 }
