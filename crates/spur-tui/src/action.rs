@@ -26,6 +26,23 @@ pub enum Action {
     /// Cycle the active Claude session between `default` and `plan` mode.
     /// Dispatched by `Alt-m` in `SessionDetailView`.
     TogglePlanMode,
+    /// Move tree selection down one row.
+    SelectNext,
+    /// Move tree selection up one row.
+    SelectPrev,
+    /// Focus the currently-selected executor node (right pane → detail mode).
+    FocusNode,
+    /// Unfocus (right pane → chronological log).
+    UnfocusNode,
+    /// Jump to the next executor with a pending review.
+    JumpToReview,
+    /// Toggle collapse on the selected subtree.
+    ToggleCollapse,
+    /// Submit a review decision for the given executor.
+    SubmitReview {
+        executor_id: String,
+        decision: spur_core::ReviewDecision,
+    },
 }
 
 /// Which permission option the user selected.
