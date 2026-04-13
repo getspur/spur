@@ -19,6 +19,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 unicode-width = "0.1"
 nucleo-matcher = "0.3"
+ignore = "0.4"
 
 [dev-dependencies]
 agent-client-protocol = { workspace = true }
+tempfile = "3"
