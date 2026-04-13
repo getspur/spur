@@ -2242,6 +2242,7 @@ dependencies = [
  "ratatui-core",
  "ratatui-image",
  "resvg",
+ "serde",
  "serde_json",
  "spur-acp",
  "spur-core",

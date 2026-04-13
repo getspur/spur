@@ -116,25 +116,41 @@ pub(crate) fn segment_visible_rows(
     out
 }
 
-/// Compute inline pixel-height row count for a diagram image. Clamped to
-/// `[6, 20]` rows. Uses `picker.font_size().1` as cell pixel height; falls
-/// back to 16 px when no picker is available.
+/// Row count for rendering an image inline at `pane_width_cols` with aspect
+/// ratio preserved. Clamped to `[6, 60]` rows — short enough not to swamp
+/// the pane, tall enough for realistic diagrams to render without squishing.
+///
+/// Without aspect-correct sizing, `ratatui_image::Resize::Fit` scales by
+/// the tighter of (width ratio, height ratio): a tall image in a short
+/// Rect letterboxes narrow and shrinks text below legibility.
 #[cfg(feature = "markdown")]
 pub(crate) fn compute_inline_height_rows(
     image: &image::DynamicImage,
+    pane_width_cols: u16,
     picker: Option<&ratatui_image::picker::Picker>,
 ) -> u16 {
-    let cell_h_px = picker
-        .map(|p| p.font_size().1 as u32)
-        .filter(|h| *h > 0)
-        .unwrap_or(16);
-    let raw = image.height().div_ceil(cell_h_px);
-    raw.clamp(6, 20) as u16
+    let (cell_w_px, cell_h_px) = picker
+        .map(|p| {
+            let (w, h) = p.font_size();
+            (w.max(1) as u32, h.max(1) as u32)
+        })
+        .unwrap_or((8, 16));
+
+    let pane_width_px = (pane_width_cols as u32).saturating_mul(cell_w_px);
+    if pane_width_px == 0 || image.width() == 0 {
+        return 6;
+    }
+    // display_h_px = image_h × (pane_w_px / image_w); rows = display_h_px / cell_h.
+    let scaled_h_px = ((image.height() as u64) * (pane_width_px as u64))
+        .div_ceil(image.width() as u64) as u32;
+    let rows = scaled_h_px.div_ceil(cell_h_px);
+    rows.clamp(6, 60) as u16
 }
 
 #[cfg(feature = "markdown")]
 fn compute_fence_states(
     ctx: &RenderContext<'_>,
+    pane_width_cols: u16,
 ) -> std::collections::HashMap<
     crate::components::mermaid::MermaidId,
     crate::components::mermaid::FenceRender,
@@ -143,9 +159,9 @@ fn compute_fence_states(
     let mut out = std::collections::HashMap::new();
     for (id, state) in ctx.mermaid_registry.iter() {
         let r = match state {
-            MermaidState::Ready { image, .. } => {
-                FenceRender::Ready(compute_inline_height_rows(image.as_ref(), ctx.picker))
-            }
+            MermaidState::Ready { image, .. } => FenceRender::Ready(
+                compute_inline_height_rows(image.as_ref(), pane_width_cols, ctx.picker),
+            ),
             MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
             MermaidState::Error { .. } => FenceRender::Error,
         };
@@ -1220,7 +1236,7 @@ impl ReactTrace {
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
 
-        let states = compute_fence_states(ctx);
+        let states = compute_fence_states(ctx, effective_width);
         let rows = self.build_virtual_rows(effective_width, &states);
 
         let total = rows.len();
