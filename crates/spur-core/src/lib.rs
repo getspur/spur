@@ -6,5 +6,5 @@ pub use spur_acp::{Artifact, DiffSummary, LifecycleState, ReviewDecision, Review
 pub use lineage::{
     Attempt, AttemptStatus, ExecutorId, ExecutorLineage, ExecutorNode, ReviewRequest,
 };
-pub use orchestrator::{BrainSession, InteractiveInput, Orchestrator, RunOpts, RunResult};
+pub use orchestrator::{review_dispatcher_loop, BrainSession, InteractiveInput, Orchestrator, RunOpts, RunResult};
 pub use review_sink::{ReviewSink, ReviewSinkError};
