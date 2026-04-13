@@ -1,8 +1,7 @@
 //! Verifies new executor lineage events round-trip through serde JSON.
 
 use spur_acp::{
-    ExecutorArtifactPayload, ExecutorReviewDecision, ExecutorReviewKind, ExecutorReviewPayload,
-    SessionId, SpurEvent,
+    ExecutorReviewDecision, ExecutorReviewKind, ExecutorReviewPayload, SessionId, SpurEvent,
 };
 
 #[test]
