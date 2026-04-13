@@ -94,6 +94,8 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                     DelegationStatus::Failed { error } => (LifecycleState::Failed, AttemptStatus::Failed, Some(error.clone())),
                     DelegationStatus::Timeout => (LifecycleState::Failed, AttemptStatus::Failed, Some("timeout".into())),
                     DelegationStatus::Conflict { files } => (LifecycleState::Failed, AttemptStatus::Failed, Some(format!("conflict in {} file(s)", files.len()))),
+                    // Temporary fall-through — replaced in Task 11 with variant-specific rendering.
+                    _ => { /* handled in Task 11 */ (LifecycleState::Failed, AttemptStatus::Failed, None) }
                 };
                 n.phase = phase;
                 if let Some(a) = n.current_attempt_mut() {
