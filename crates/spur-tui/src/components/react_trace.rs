@@ -36,6 +36,20 @@ pub struct TraceEntry {
     pub markdown: Option<super::markdown_stream::MarkdownStream>,
 }
 
+/// A flattened unit of rendered output: one visual row per variant.
+/// Task 3 scope: every row is `Text`. Task 4 will add image-row expansion.
+#[cfg(feature = "markdown")]
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields consumed by Task 6 (inline render migration).
+pub(crate) enum VirtualRow {
+    Text(Line<'static>),
+    ImageRow {
+        id: crate::components::mermaid::MermaidId,
+        row_within: u16,
+        total_rows: u16,
+    },
+}
+
 /// Spinner frames for delegation animation.
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -337,24 +351,12 @@ impl ReactTrace {
         }
     }
 
-    /// Render the full ReAct trace into the given frame area.
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let following_indicator = if self.is_following {
-            " ▼ following "
-        } else {
-            ""
-        };
-
-        let block = Block::default()
-            .title(" Session ")
-            .title_bottom(following_indicator)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
-
-        let spinner_frame = SPINNER_FRAMES
-            [(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
-
-        let mut lines: Vec<Line> = Vec::new();
+    /// Build the flat sequence of display lines produced by the trace,
+    /// before wrapping. Shared between `render` and `build_virtual_rows`.
+    ///
+    /// All returned lines have `'static` content.
+    fn build_display_lines(&self, spinner_frame: &str) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
         for entry in &self.entries {
             let ts_span = Span::styled(
@@ -518,7 +520,7 @@ impl ReactTrace {
                         lines.push(Line::from(vec![
                             Span::raw("   "),
                             Span::styled(
-                                task.as_str(),
+                                task.clone(),
                                 Style::default().fg(Color::Cyan),
                             ),
                         ]));
@@ -609,6 +611,46 @@ impl ReactTrace {
             lines.push(Line::from(""));
         }
 
+        lines
+    }
+
+    /// Flatten display lines into virtual rows (one row per unit).
+    /// For Task 3, every row is `VirtualRow::Text`; fence placeholders
+    /// produced by the markdown stream are treated as ordinary text rows.
+    /// Task 4 will split fence placeholders out into `ImageRow` entries;
+    /// Task 6 will migrate `render` to consume this directly.
+    #[cfg(feature = "markdown")]
+    #[allow(dead_code)] // Consumed in Task 4/6; exercised now by test helper.
+    pub(crate) fn build_virtual_rows(&self, effective_width: u16) -> Vec<VirtualRow> {
+        let spinner_frame = SPINNER_FRAMES
+            [(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+        let lines = self.build_display_lines(spinner_frame);
+        lines
+            .into_iter()
+            .flat_map(|l| wrap_line_to_width(&l, effective_width))
+            .map(VirtualRow::Text)
+            .collect()
+    }
+
+    /// Render the full ReAct trace into the given frame area.
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let following_indicator = if self.is_following {
+            " ▼ following "
+        } else {
+            ""
+        };
+
+        let block = Block::default()
+            .title(" Session ")
+            .title_bottom(following_indicator)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let spinner_frame = SPINNER_FRAMES
+            [(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+
+        let lines = self.build_display_lines(spinner_frame);
+
         // Pre-wrap every built Line to the inner width so the Paragraph
         // renders row-exact and scroll offsets are exact visual rows.
         let inner = block.inner(area);
@@ -658,6 +700,13 @@ impl ReactTrace {
 impl Default for ReactTrace {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
+impl ReactTrace {
+    pub(crate) fn total_virtual_rows_for_test(&self, effective_width: u16) -> usize {
+        self.build_virtual_rows(effective_width).len()
     }
 }
 
@@ -824,5 +873,22 @@ mod markdown_integration_tests {
         let joined = rendered.join("\n");
         assert!(joined.contains("Heading"), "expected heading: {joined}");
         assert!(joined.contains("Body"), "expected body: {joined}");
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
+mod virtual_row_tests {
+    use super::*;
+
+    #[test]
+    fn virtual_rows_text_only_match_line_count() {
+        let mut trace = ReactTrace::new();
+        trace.append_message("Line 1\nLine 2\nLine 3", "claude", "10:00".to_string());
+        use crate::components::markdown_stream::StateLookup;
+        let _ = trace.drain_fence_dispatches(&StateLookup::empty());
+
+        let total = trace.total_virtual_rows_for_test(60);
+        // Header (1) + 3 body lines + blank separator (1) = 5
+        assert_eq!(total, 5, "unexpected virtual row count: {total}");
     }
 }
