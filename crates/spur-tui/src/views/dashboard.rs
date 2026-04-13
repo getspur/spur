@@ -465,6 +465,10 @@ impl DashboardView {
 
 impl View for DashboardView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        debug_assert!(
+            false,
+            "DashboardView::handle_key called via trait — use handle_key_with_lineage; attempt_n will default to 1"
+        );
         self.handle_key_inner(key, None)
     }
 

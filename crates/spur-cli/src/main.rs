@@ -390,10 +390,9 @@ async fn main() -> Result<()> {
                         spur_tui::UserInput::SetSessionMode { mode_id } => {
                             spur_core::InteractiveInput::SetSessionMode { mode_id }
                         }
-                        spur_tui::UserInput::SubmitReview { executor_id, .. } => {
-                            // TODO(follow-up spec): orchestrator converts decision to
-                            // the tool-call result that unblocks brain's delegate tool.
-                            tracing::info!(?executor_id, "review decision captured (orchestrator plumbing pending)");
+                        spur_tui::UserInput::SubmitReview { executor_id, attempt_n, decision: _ } => {
+                            // TODO(Task-7): route to dispatch_tx via InteractiveInput::SubmitReview
+                            tracing::info!(%executor_id, attempt_n, "review decision captured (orchestrator plumbing pending)");
                             continue;
                         }
                     };
