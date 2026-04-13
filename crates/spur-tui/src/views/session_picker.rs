@@ -48,6 +48,12 @@ enum PickerState {
 
 // ─── View ─────────────────────────────────────────────────────────────
 
+/// Active inline-rename session state (shown as a prompt in the bottom chunk).
+struct RenameState {
+    session_id: String,
+    buffer: String,
+}
+
 pub struct SessionPickerView {
     state: PickerState,
     /// Interior-mutable so render(&self) can adjust scroll position.
@@ -55,6 +61,9 @@ pub struct SessionPickerView {
     metadata: SessionMetadata,
     /// View-level toggle; when false, archived sessions are hidden.
     show_archived: bool,
+    /// `Some` when the user pressed `R`; intercepts all keys until
+    /// `Enter` commits or `Esc` cancels.
+    rename_state: Option<RenameState>,
 }
 
 impl SessionPickerView {
@@ -64,7 +73,12 @@ impl SessionPickerView {
             scroll_offset: Cell::new(0),
             metadata: SessionMetadata::default(),
             show_archived: false,
+            rename_state: None,
         }
+    }
+
+    pub fn is_rename_active(&self) -> bool {
+        self.rename_state.is_some()
     }
 
     pub fn set_metadata(&mut self, metadata: SessionMetadata) {
@@ -480,20 +494,31 @@ impl SessionPickerView {
         ])
         .split(area);
         frame.render_widget(Paragraph::new(lines), chunks[0]);
-        StatusBar::render(
-            frame,
-            chunks[1],
-            StatusBarProps {
-                view: &ViewId::SessionPicker,
-                running: 0,
-                pending_review: 0,
-                total_cost: 0.0,
-                elapsed: "0m 00s",
-                current_mode: None,
-                context_used: None,
-                context_size: None,
-            },
-        );
+        if let Some(ref rs) = self.rename_state {
+            let prompt = format!("Rename \u{2192} {}_", rs.buffer);
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    prompt,
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )),
+                chunks[1],
+            );
+        } else {
+            StatusBar::render(
+                frame,
+                chunks[1],
+                StatusBarProps {
+                    view: &ViewId::SessionPicker,
+                    running: 0,
+                    pending_review: 0,
+                    total_cost: 0.0,
+                    elapsed: "0m 00s",
+                    current_mode: None,
+                    context_used: None,
+                    context_size: None,
+                },
+            );
+        }
         render_footer_hint(frame, chunks[2]);
     }
 
@@ -547,112 +572,176 @@ impl SessionPickerView {
 
 impl View for SessionPickerView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
-        // Compute once — needed by list-mode p/R/d arms before we split-borrow.
-        let hl_session_id = self.highlighted_session_id();
-        // Split-borrow self so we can reach `metadata` while also mutably
-        // borrowing `state`.
-        let SessionPickerView {
-            state,
-            metadata,
-            show_archived,
-            ..
-        } = self;
-        match state {
-            PickerState::Populated {
-                sessions,
-                cursor,
-                resuming,
-                search_focused,
-                filter,
-                ..
-            } => {
-                if *resuming {
+        // 1. Rename-mode intercepts all keys until Enter/Esc.
+        if let Some(rs) = self.rename_state.as_mut() {
+            match key.code {
+                KeyCode::Enter => {
+                    let out = Action::RenameSession {
+                        session_id: rs.session_id.clone(),
+                        new_title: rs.buffer.clone(),
+                    };
+                    self.rename_state = None;
+                    return Some(out);
+                }
+                KeyCode::Esc => {
+                    self.rename_state = None;
                     return None;
                 }
+                KeyCode::Backspace => {
+                    rs.buffer.pop();
+                    return None;
+                }
+                KeyCode::Char(c) => {
+                    rs.buffer.push(c);
+                    return None;
+                }
+                _ => return None,
+            }
+        }
 
-                if *search_focused {
-                    match key.code {
-                        KeyCode::Esc => {
-                            *search_focused = false;
-                            None
-                        }
-                        KeyCode::Enter => {
-                            *search_focused = false;
-                            None
-                        }
-                        KeyCode::Backspace => {
-                            filter.pop();
-                            *cursor = 0;
-                            None
-                        }
-                        KeyCode::Char(c) => {
-                            filter.push(c);
-                            *cursor = 0;
-                            None
-                        }
-                        _ => None,
+        // Compute once — needed by list-mode p/R/d arms before we split-borrow.
+        let hl_session_id = self.highlighted_session_id();
+
+        // Deferred state transitions to apply after the split borrow ends.
+        enum Post {
+            None,
+            StartRename { session_id: String, buffer: String },
+        }
+        let mut post = Post::None;
+
+        // Split-borrow self so we can reach `metadata` while also mutably
+        // borrowing `state`.
+        let action = {
+            let SessionPickerView {
+                state,
+                metadata,
+                show_archived,
+                ..
+            } = self;
+            match state {
+                PickerState::Populated {
+                    sessions,
+                    cursor,
+                    resuming,
+                    search_focused,
+                    filter,
+                    ..
+                } => {
+                    if *resuming {
+                        return None;
                     }
-                } else {
-                    match key.code {
-                        KeyCode::Char('/') => {
-                            *search_focused = true;
-                            None
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if *cursor > 0 {
-                                *cursor -= 1;
+
+                    if *search_focused {
+                        match key.code {
+                            KeyCode::Esc => {
+                                *search_focused = false;
+                                None
                             }
-                            None
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let visible =
-                                Self::filtered_indices(sessions, filter, metadata, *show_archived)
-                                    .len();
-                            if *cursor < visible {
-                                *cursor += 1;
+                            KeyCode::Enter => {
+                                *search_focused = false;
+                                None
                             }
-                            None
+                            KeyCode::Backspace => {
+                                filter.pop();
+                                *cursor = 0;
+                                None
+                            }
+                            KeyCode::Char(c) => {
+                                filter.push(c);
+                                *cursor = 0;
+                                None
+                            }
+                            _ => None,
                         }
-                        KeyCode::Char('n') => Some(Action::NewSessionRequested),
-                        KeyCode::Enter => {
-                            if *cursor == 0 {
-                                Some(Action::NewSessionRequested)
-                            } else {
-                                let indices = Self::filtered_indices(
+                    } else {
+                        match key.code {
+                            KeyCode::Char('/') => {
+                                *search_focused = true;
+                                None
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if *cursor > 0 {
+                                    *cursor -= 1;
+                                }
+                                None
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let visible = Self::filtered_indices(
                                     sessions,
                                     filter,
                                     metadata,
                                     *show_archived,
-                                );
-                                let real_idx = indices.get(*cursor - 1).copied()?;
-                                let sid = sessions[real_idx].session_id.0.to_string();
-                                *resuming = true;
-                                Some(Action::ResumeSession { session_id: sid })
-                            }
-                        }
-                        KeyCode::Esc => {
-                            if !filter.is_empty() {
-                                filter.clear();
-                                *cursor = 0;
+                                )
+                                .len();
+                                if *cursor < visible {
+                                    *cursor += 1;
+                                }
                                 None
-                            } else {
-                                Some(Action::NavigateTo(ViewId::Dashboard))
                             }
+                            KeyCode::Char('n') => Some(Action::NewSessionRequested),
+                            KeyCode::Enter => {
+                                if *cursor == 0 {
+                                    Some(Action::NewSessionRequested)
+                                } else {
+                                    let indices = Self::filtered_indices(
+                                        sessions,
+                                        filter,
+                                        metadata,
+                                        *show_archived,
+                                    );
+                                    let real_idx = indices.get(*cursor - 1).copied()?;
+                                    let sid = sessions[real_idx].session_id.0.to_string();
+                                    *resuming = true;
+                                    Some(Action::ResumeSession { session_id: sid })
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if !filter.is_empty() {
+                                    filter.clear();
+                                    *cursor = 0;
+                                    None
+                                } else {
+                                    Some(Action::NavigateTo(ViewId::Dashboard))
+                                }
+                            }
+                            KeyCode::Char('p') => hl_session_id
+                                .clone()
+                                .map(|session_id| Action::ToggleSessionPin { session_id }),
+                            KeyCode::Char('d') => hl_session_id
+                                .clone()
+                                .map(|session_id| Action::ToggleSessionArchive { session_id }),
+                            KeyCode::Char('a') => Some(Action::ToggleShowArchived),
+                            KeyCode::Char('R') => {
+                                if let Some(ref sid) = hl_session_id {
+                                    let buffer = sessions
+                                        .iter()
+                                        .find(|s| s.session_id.0.as_ref() == sid.as_str())
+                                        .map(|s| Self::resolved_title(s, metadata, false))
+                                        .unwrap_or_default();
+                                    post = Post::StartRename {
+                                        session_id: sid.clone(),
+                                        buffer,
+                                    };
+                                }
+                                None
+                            }
+                            _ => None,
                         }
-                        KeyCode::Char('p') => hl_session_id
-                            .map(|session_id| Action::ToggleSessionPin { session_id }),
-                        KeyCode::Char('d') => hl_session_id
-                            .map(|session_id| Action::ToggleSessionArchive { session_id }),
-                        KeyCode::Char('a') => Some(Action::ToggleShowArchived),
-                        _ => None,
                     }
                 }
+                PickerState::Loading | PickerState::Error { .. } => match key.code {
+                    KeyCode::Esc => Some(Action::NavigateTo(ViewId::Dashboard)),
+                    _ => None,
+                },
             }
-            PickerState::Loading | PickerState::Error { .. } => match key.code {
-                KeyCode::Esc => Some(Action::NavigateTo(ViewId::Dashboard)),
-                _ => None,
-            },
+        };
+
+        // Apply deferred state transitions.
+        if let Post::StartRename { session_id, buffer } = post {
+            self.rename_state = Some(RenameState { session_id, buffer });
         }
+
+        action
     }
 
     fn handle_spur_event(&mut self, _event: &SpurEvent) {

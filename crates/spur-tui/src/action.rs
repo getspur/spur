@@ -31,6 +31,11 @@ pub enum Action {
     ToggleSessionArchive { session_id: String },
     /// Toggle the picker's view-level show-archived flag.
     ToggleShowArchived,
+    /// Commit an inline rename from the picker to metadata `title_override`.
+    RenameSession {
+        session_id: String,
+        new_title: String,
+    },
     /// User requested spawning a new session from the picker.
     NewSessionRequested,
     /// Cycle the active Claude session between `default` and `plan` mode.

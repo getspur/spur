@@ -156,3 +156,40 @@ fn a_key_toggles_show_archived() {
     let action = picker.handle_key(key('a'));
     assert!(matches!(action, Some(Action::ToggleShowArchived)));
 }
+
+#[test]
+fn capital_r_enters_rename_mode_and_enter_commits() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "old title")]);
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    assert!(picker.is_rename_active());
+    // Clear old title by sending backspaces (the prompt pre-fills "old title" — 9 chars).
+    for _ in 0..20 {
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    }
+    for c in "new name".chars() {
+        let _ = picker.handle_key(key(c));
+    }
+    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match action {
+        Some(Action::RenameSession { session_id, new_title }) => {
+            assert_eq!(session_id, "a1");
+            assert_eq!(new_title, "new name");
+        }
+        other => panic!("expected RenameSession, got {other:?}"),
+    }
+    assert!(!picker.is_rename_active());
+}
+
+#[test]
+fn esc_in_rename_cancels_without_action() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "old")]);
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    let _ = picker.handle_key(key('z'));
+    let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(action.is_none());
+    assert!(!picker.is_rename_active());
+}
