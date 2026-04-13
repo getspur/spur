@@ -56,6 +56,24 @@ impl ReactTrace {
         }
     }
 
+    /// Return a short kind name for the most recent entry, or `None` if empty.
+    ///
+    /// Used by diagnostic logging to detect when a trace entry of a different
+    /// kind sits between successive `AgentMessageChunk`s — which forces
+    /// `append_message` to push a new block instead of continuing the previous
+    /// one.
+    pub fn last_entry_kind_name(&self) -> Option<&'static str> {
+        self.entries.last().map(|e| match &e.kind {
+            TraceKind::Think => "think",
+            TraceKind::AgentMessage { .. } => "agent_message",
+            TraceKind::Act { .. } => "act",
+            TraceKind::Observe => "observe",
+            TraceKind::Delegate { .. } => "delegate",
+            TraceKind::UserMessage => "user_message",
+            TraceKind::Permission { .. } => "permission",
+        })
+    }
+
     /// Append text to the most recent THINK entry, or create a new one
     /// if the last entry is not THINK. This prevents each TextDelta chunk
     /// from creating a separate "🧠 THINK" block in the trace.
