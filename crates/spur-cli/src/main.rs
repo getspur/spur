@@ -392,6 +392,9 @@ async fn main() -> Result<()> {
                         spur_tui::UserInput::Message { blocks, interrupt, .. } => {
                             spur_core::InteractiveInput::Message { blocks, interrupt }
                         }
+                        spur_tui::UserInput::NewSessionWithMessage { blocks, interrupt } => {
+                            spur_core::InteractiveInput::NewSessionWithMessage { blocks, interrupt }
+                        }
                         spur_tui::UserInput::ListSessions => {
                             spur_core::InteractiveInput::ListSessions
                         }

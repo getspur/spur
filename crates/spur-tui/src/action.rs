@@ -11,6 +11,13 @@ pub enum Action {
         blocks: Vec<spur_acp::ContentBlock>,
         interrupt: bool,
     },
+    /// Spawn a new session and send these blocks as the first prompt atomically.
+    /// Emitted by Dashboard's InputBar when no brain is attached, and by the
+    /// picker's NewSessionRequested path once wired (blocks empty = no first prompt).
+    NewSessionWithMessage {
+        blocks: Vec<spur_acp::ContentBlock>,
+        interrupt: bool,
+    },
     ToggleVerbose,
     ScrollUp,
     ScrollDown,

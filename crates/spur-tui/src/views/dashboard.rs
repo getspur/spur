@@ -350,14 +350,23 @@ impl DashboardView {
         if is_editing_key {
             // Check if InputBar handles it (Enter on non-empty submits)
             if let Some((text, interrupt)) = self.input_bar.handle_key(key) {
-                // Text submitted — send as message
-                return Some(Action::SendMessage {
-                    session: spur_acp::SessionId::new(),
-                    blocks: vec![spur_acp::ContentBlock::Text(
-                        spur_acp::TextContent::new(text),
-                    )],
-                    interrupt,
-                });
+                let blocks = vec![spur_acp::ContentBlock::Text(
+                    spur_acp::TextContent::new(text),
+                )];
+                // Routing: if brain is attached (status is set), this is a
+                // routed message to the active session — App substitutes the
+                // correct SessionId. Otherwise it's an explicit new-session
+                // intent that spawns a brain atomically with the first prompt.
+                if self.input_bar.has_status() {
+                    return Some(Action::SendMessage {
+                        // Placeholder — App replaces with active session id.
+                        session: spur_acp::SessionId(String::new()),
+                        blocks,
+                        interrupt,
+                    });
+                } else {
+                    return Some(Action::NewSessionWithMessage { blocks, interrupt });
+                }
             }
 
             // If InputBar has exactly one char and we're in the Review tab,
