@@ -43,6 +43,13 @@ pub struct SessionDetailView {
     /// Most recent auth-required error for this session. Rendered as a red
     /// banner at the top of the view. Dismissed on the next keystroke.
     pub auth_error: Option<String>,
+    /// Autocomplete popup for `/` slash-commands (and later `@` mentions).
+    /// Wrapped in `RefCell` because `View::render` takes `&self` but the
+    /// popup needs `&mut` access for its internal `ListState`.
+    completion_popup: std::cell::RefCell<crate::components::completion_popup::CompletionPopup>,
+    /// Currently active popup trigger (if any), derived from the InputBar
+    /// text + cursor.
+    active_trigger: Option<crate::components::completion_trigger::Trigger>,
 }
 
 impl SessionDetailView {
@@ -60,6 +67,10 @@ impl SessionDetailView {
             context_used: None,
             context_size: None,
             auth_error: None,
+            completion_popup: std::cell::RefCell::new(
+                crate::components::completion_popup::CompletionPopup::new(),
+            ),
+            active_trigger: None,
         }
     }
 
@@ -197,6 +208,86 @@ impl SessionDetailView {
         });
     }
 
+    // ── Completion popup wiring ─────────────────────────────────────────
+
+    fn refresh_popup(&mut self) {
+        use crate::commands::fuzzy;
+        use crate::components::completion_popup::PopupRow;
+        use crate::components::completion_trigger::{detect, TriggerKind};
+
+        let text = self.input_bar.text();
+        let cursor = self.input_bar.cursor();
+        let trig = detect(text, cursor);
+        self.active_trigger = trig.clone();
+
+        match trig {
+            Some(t) if t.kind == TriggerKind::Slash => {
+                let entries = self.command_registry.list();
+                let ranked = fuzzy::rank(&entries, &t.query);
+                let rows: Vec<PopupRow> = ranked
+                    .iter()
+                    .map(|e| PopupRow {
+                        label: self.command_registry.canonical_typed_form(e),
+                        description: e.description.clone(),
+                        source_tag: match &e.source {
+                            crate::commands::CommandSource::Spur => "⟨spur⟩".into(),
+                            crate::commands::CommandSource::Agent { handle } => {
+                                format!("⟨{}⟩", handle)
+                            }
+                        },
+                    })
+                    .collect();
+                self.completion_popup.borrow_mut().set_rows(rows);
+            }
+            _ => {
+                // Mention popup wired in Task 14; for now clear rows.
+                self.completion_popup.borrow_mut().set_rows(Vec::new());
+            }
+        }
+    }
+
+    fn popup_open(&self) -> bool {
+        self.active_trigger.is_some() && !self.completion_popup.borrow().is_empty()
+    }
+
+    /// Replace the range [prefix_start..cursor] in the InputBar with `replacement`.
+    /// Leaves the cursor at `prefix_start + replacement.len()`.
+    fn replace_trigger_token(&mut self, prefix_start: usize, replacement: &str) {
+        let current = self.input_bar.text().to_string();
+        let cursor = self.input_bar.cursor();
+        let mut new_text = String::with_capacity(current.len());
+        new_text.push_str(&current[..prefix_start]);
+        new_text.push_str(replacement);
+        new_text.push_str(&current[cursor..]);
+        let new_cursor = prefix_start + replacement.len();
+        self.input_bar.set_text(new_text, new_cursor);
+    }
+
+    fn accept_completion(&mut self) -> Option<crate::action::Action> {
+        use crate::components::completion_trigger::TriggerKind;
+
+        let trig = self.active_trigger.clone()?;
+        let idx = self.completion_popup.borrow().selected()?;
+        let rows = self.completion_popup.borrow().rows().to_vec();
+        let row = rows.get(idx)?.clone();
+
+        match trig.kind {
+            TriggerKind::Slash => {
+                // row.label is the canonical typed form (e.g. "/help" or "/claude:help").
+                let insertion = format!("{} ", row.label);
+                self.replace_trigger_token(trig.prefix_start, &insertion);
+                self.active_trigger = None;
+                self.completion_popup.borrow_mut().set_rows(Vec::new());
+                None
+            }
+            TriggerKind::Mention => {
+                // Wired in Task 14.
+                self.active_trigger = None;
+                self.completion_popup.borrow_mut().set_rows(Vec::new());
+                None
+            }
+        }
+    }
 }
 
 impl View for SessionDetailView {
@@ -231,6 +322,34 @@ impl View for SessionDetailView {
             }
         }
 
+        // Priority 1.5: popup is open — route navigation/accept/dismiss keys.
+        if self.popup_open() {
+            match key.code {
+                KeyCode::Up => {
+                    self.completion_popup.borrow_mut().select_prev();
+                    return None;
+                }
+                KeyCode::Down => {
+                    self.completion_popup.borrow_mut().select_next();
+                    return None;
+                }
+                KeyCode::Esc => {
+                    self.active_trigger = None;
+                    self.completion_popup.borrow_mut().set_rows(Vec::new());
+                    return None;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    return self.accept_completion();
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.active_trigger = None;
+                    self.completion_popup.borrow_mut().set_rows(Vec::new());
+                    return None;
+                }
+                _ => { /* fall through to editing */ }
+            }
+        }
+
         // Priority 2: If the key is a printable char or an editing key, route to input_bar.
         let is_editing_key = matches!(
             key.code,
@@ -252,6 +371,9 @@ impl View for SessionDetailView {
                     interrupt,
                 });
             }
+
+            // Key was an ordinary edit (insert/delete/arrow). Re-evaluate popup state.
+            self.refresh_popup();
 
             // If the input_bar is empty and the key was a navigation key (j/k/g/G),
             // we want scroll behavior instead. But since we already routed to
@@ -565,6 +687,13 @@ impl View for SessionDetailView {
 
         // ── Input bar ───────────────────────────────────────────────────
         self.input_bar.render(frame, chunks[2]);
+
+        // ── Completion popup (overlay above the InputBar) ──────────────
+        if self.popup_open() {
+            self.completion_popup
+                .borrow_mut()
+                .render(frame, chunks[2], area);
+        }
 
         // ── Status bar ──────────────────────────────────────────────────
         StatusBar::render(
