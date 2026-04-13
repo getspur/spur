@@ -8,10 +8,9 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-// TODO: re-enable after Task 3 adds set_session_mode + authenticate to the trait
-// use agent_client_protocol::{AuthenticateRequest, AuthMethodId, SetSessionModeRequest};
 use agent_client_protocol::{
-    ContentBlock, InitializeRequest, PromptRequest, ProtocolVersion, TextContent,
+    AuthMethodId, AuthenticateRequest, ContentBlock, InitializeRequest, ListSessionsRequest,
+    LoadSessionRequest, PromptRequest, ProtocolVersion, SetSessionModeRequest, TextContent,
 };
 use spur_acp::connection::{AgentConnection, NativeAcpConnection};
 
@@ -74,21 +73,115 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("[ok] prompt streamed {chunks} notifications");
 
-    // TODO: re-enable after Task 3 adds set_session_mode + authenticate to the trait
-    // let mode_req = SetSessionModeRequest::new(session.session_id.clone(), "plan");
-    // match conn.set_session_mode(mode_req).await {
-    //     Ok(_) => println!("[ok] set_session_mode(plan)"),
-    //     Err(e) => println!("[WARN] set_session_mode failed: {e}"),
-    // }
+    let mode_req = SetSessionModeRequest::new(session.session_id.clone(), "plan");
+    match conn.set_session_mode(mode_req).await {
+        Ok(_) => println!("[ok] set_session_mode(plan)"),
+        Err(e) => println!("[WARN] set_session_mode failed: {e}"),
+    }
 
-    // TODO: re-enable after Task 3 adds set_session_mode + authenticate to the trait
-    // match conn
-    //     .authenticate(AuthenticateRequest::new(AuthMethodId("claude-ai-login".into())))
-    //     .await
-    // {
-    //     Ok(_) => println!("[ok] authenticate echoed"),
-    //     Err(e) => println!("[info] authenticate returned: {e} (expected if not wired)"),
-    // }
+    match conn
+        .authenticate(AuthenticateRequest::new(AuthMethodId::new("claude-ai-login")))
+        .await
+    {
+        Ok(_) => println!("[ok] authenticate echoed"),
+        Err(e) => println!("[info] authenticate returned: {e} (expected if not wired)"),
+    }
+
+    // ── Phase 1: list_sessions + load_session evidence ──────────────────────
+    // We want to know whether ACP list/load work against claude-agent-acp, so
+    // we can decide whether Spur needs a filesystem fallback for Claude's
+    // JSONL format.
+
+    println!();
+    println!("=== Phase 1: list_sessions + load_session ===");
+
+    let t_list_none = Instant::now();
+    let list_all = conn
+        .list_sessions(ListSessionsRequest::new())
+        .await?;
+    println!(
+        "[ok] list_sessions (no cwd) in {:?}: {} sessions",
+        t_list_none.elapsed(),
+        list_all.sessions.len()
+    );
+
+    let t_list_cwd = Instant::now();
+    let list_scoped = conn
+        .list_sessions(ListSessionsRequest::new().cwd(cwd.clone()))
+        .await?;
+    println!(
+        "[ok] list_sessions (cwd={}) in {:?}: {} sessions",
+        cwd.display(),
+        t_list_cwd.elapsed(),
+        list_scoped.sessions.len()
+    );
+
+    // Pick a historical session (skip the one we just created in this run).
+    let target = list_scoped
+        .sessions
+        .iter()
+        .find(|s| s.session_id.0 != session.session_id.0);
+    if let Some(first) = target {
+        println!(
+            "     first: id={} cwd={} title={:?}",
+            first.session_id.0,
+            first.cwd.display(),
+            first.title
+        );
+
+        let t_load = Instant::now();
+        let load_req = LoadSessionRequest::new(first.session_id.clone(), first.cwd.clone());
+        match conn.load_session(load_req).await {
+            Ok(mut load_stream) => {
+                let mut replayed = 0usize;
+                let mut variant_counts: std::collections::HashMap<&'static str, usize> =
+                    std::collections::HashMap::new();
+                while let Some(notif) = load_stream.next().await {
+                    replayed += 1;
+                    let name = match &notif.update {
+                        agent_client_protocol::SessionUpdate::UserMessageChunk(_) => {
+                            "user_message_chunk"
+                        }
+                        agent_client_protocol::SessionUpdate::AgentMessageChunk(_) => {
+                            "agent_message_chunk"
+                        }
+                        agent_client_protocol::SessionUpdate::AgentThoughtChunk(_) => {
+                            "agent_thought_chunk"
+                        }
+                        agent_client_protocol::SessionUpdate::ToolCall(_) => "tool_call",
+                        agent_client_protocol::SessionUpdate::ToolCallUpdate(_) => {
+                            "tool_call_update"
+                        }
+                        agent_client_protocol::SessionUpdate::Plan(_) => "plan",
+                        agent_client_protocol::SessionUpdate::AvailableCommandsUpdate(_) => {
+                            "available_commands_update"
+                        }
+                        agent_client_protocol::SessionUpdate::CurrentModeUpdate(_) => {
+                            "current_mode_update"
+                        }
+                        _ => "other",
+                    };
+                    *variant_counts.entry(name).or_insert(0) += 1;
+                    if replayed >= 5000 {
+                        break;
+                    }
+                }
+                println!(
+                    "[ok] load_session streamed {replayed} notifications in {:?}",
+                    t_load.elapsed()
+                );
+                let mut kinds: Vec<(&str, usize)> =
+                    variant_counts.into_iter().collect();
+                kinds.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+                for (k, v) in kinds {
+                    println!("     {k}: {v}");
+                }
+            }
+            Err(e) => println!("[WARN] load_session failed: {e}"),
+        }
+    } else {
+        println!("[info] no sessions found for cwd={} — skipping load_session test", cwd.display());
+    }
 
     conn.shutdown().await?;
     println!("\n=== spike complete ===");
