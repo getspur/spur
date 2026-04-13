@@ -113,3 +113,48 @@ fn retry_preserves_previous_attempts() {
     assert!(n.attempts[1].ended_at.is_none());
     assert_eq!(n.phase, LifecycleState::Running);
 }
+
+#[test]
+fn replay_produces_identical_timestamps() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let events: Vec<SpurEvent> = vec![
+        SpurEvent {
+            occurred_at: t0,
+            body: SpurEventBody::ExecutorSpawned {
+                id: "w".into(),
+                parent_id: None,
+                session_id: SessionId("s1".into()),
+                agent: "worker".into(),
+                role: Role::Executor,
+                task_spec: "task".into(),
+            },
+        },
+        SpurEvent {
+            occurred_at: t0 + Duration::from_secs(10),
+            body: SpurEventBody::ExecutorPhaseChanged {
+                id: "w".into(),
+                phase: LifecycleState::Succeeded,
+            },
+        },
+    ];
+
+    let mut a = ExecutorLineage::new();
+    for e in &events { a.apply(e); }
+
+    std::thread::sleep(Duration::from_millis(10));
+
+    let mut b = ExecutorLineage::new();
+    for e in &events { b.apply(e); }
+
+    let na = a.node(&ExecutorId::new("w")).unwrap();
+    let nb = b.node(&ExecutorId::new("w")).unwrap();
+
+    let aa = na.current_attempt().unwrap();
+    let ab = nb.current_attempt().unwrap();
+
+    assert_eq!(aa.started_at, ab.started_at, "started_at must be identical on replay");
+    assert_eq!(aa.ended_at, ab.ended_at, "ended_at must be identical on replay");
+    assert_eq!(aa.started_at, t0, "started_at must come from event.occurred_at");
+}
