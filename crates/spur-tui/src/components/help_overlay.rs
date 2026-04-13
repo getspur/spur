@@ -12,7 +12,7 @@ impl HelpOverlay {
     pub fn render(frame: &mut Frame, area: Rect) {
         // Center a 66x30 popup to accommodate the expanded key listing.
         let width = 66u16.min(area.width.saturating_sub(4));
-        let height = 34u16.min(area.height.saturating_sub(4));
+        let height = 42u16.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(width)) / 2;
         let y = (area.height.saturating_sub(height)) / 2;
         let popup_area = Rect::new(x, y, width, height);
@@ -49,10 +49,27 @@ impl HelpOverlay {
             Line::from("  j/k, Up/Down       Scroll activity log"),
             Line::from("  g / G              Jump to top / bottom"),
             Line::from("  Tab                Cycle panel focus"),
-            Line::from("  i                  Chat with brain"),
             Line::from("  v                  Toggle verbose mode"),
-            Line::from("  s                  Browse sessions"),
+            Line::from("  s                  Open session picker"),
             Line::from("  q, Esc             Quit"),
+            Line::from(""),
+            Line::from(Span::styled(
+                " Session Picker",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  j/k, Up/Down       Navigate list"),
+            Line::from("  Enter              Resume / create (on [+ New])"),
+            Line::from("  /                  Focus search field"),
+            Line::from("  n                  New session"),
+            Line::from("  R                  Rename selected"),
+            Line::from("  d                  Archive (or unarchive)"),
+            Line::from("  p                  Toggle pin"),
+            Line::from("  a                  Toggle show-archived"),
+            Line::from("  P                  Toggle preview pane"),
+            Line::from("  r                  Refresh list"),
+            Line::from("  Esc                Clear filter → back"),
             Line::from(""),
             Line::from(Span::styled(
                 " Session Detail",

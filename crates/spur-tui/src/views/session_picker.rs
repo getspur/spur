@@ -16,6 +16,18 @@ use crate::components::status_bar::{StatusBar, StatusBarProps};
 
 use super::View;
 
+const FOOTER_HINT: &str = "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} d archive \u{00b7} a show-archived \u{00b7} p pin \u{00b7} P preview \u{00b7} r refresh \u{00b7} Esc back";
+
+fn render_footer_hint(frame: &mut Frame, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            FOOTER_HINT,
+            Style::default().fg(Color::DarkGray),
+        )),
+        area,
+    );
+}
+
 // ─── State ────────────────────────────────────────────────────────────
 
 enum PickerState {
@@ -122,7 +134,12 @@ impl SessionPickerView {
                 Span::styled(" \u{00b7}\u{00b7}\u{00b7}", Style::default().fg(Color::Cyan)),
             ]),
         ];
-        let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
+        let chunks = Layout::vertical([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
         let v_pad = chunks[0].height.saturating_sub(4) / 3;
         let content_area = Rect {
             x: chunks[0].x,
@@ -145,6 +162,7 @@ impl SessionPickerView {
                 context_size: None,
             },
         );
+        render_footer_hint(frame, chunks[2]);
     }
 
     fn render_populated(
@@ -232,7 +250,12 @@ impl SessionPickerView {
             ]));
         }
 
-        let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
+        let chunks = Layout::vertical([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
         frame.render_widget(Paragraph::new(lines), chunks[0]);
         StatusBar::render(
             frame,
@@ -248,6 +271,7 @@ impl SessionPickerView {
                 context_size: None,
             },
         );
+        render_footer_hint(frame, chunks[2]);
     }
 
     fn render_empty(&self, frame: &mut Frame, area: Rect, agent: &str) {
@@ -272,7 +296,12 @@ impl SessionPickerView {
                 Style::default().fg(Color::DarkGray),
             )),
         ];
-        let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
+        let chunks = Layout::vertical([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
         let v_pad = chunks[0].height.saturating_sub(5) / 3;
         let content_area = Rect {
             x: chunks[0].x,
@@ -295,6 +324,7 @@ impl SessionPickerView {
                 context_size: None,
             },
         );
+        render_footer_hint(frame, chunks[2]);
     }
 
     fn render_error(&self, frame: &mut Frame, area: Rect, message: &str) {
@@ -313,7 +343,12 @@ impl SessionPickerView {
                 Style::default().fg(Color::DarkGray),
             )),
         ];
-        let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
+        let chunks = Layout::vertical([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
         let v_pad = chunks[0].height.saturating_sub(5) / 3;
         let content_area = Rect {
             x: chunks[0].x,
@@ -336,6 +371,7 @@ impl SessionPickerView {
                 context_size: None,
             },
         );
+        render_footer_hint(frame, chunks[2]);
     }
 }
 
