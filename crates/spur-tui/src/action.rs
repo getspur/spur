@@ -38,6 +38,8 @@ pub enum Action {
     },
     /// User requested spawning a new session from the picker.
     NewSessionRequested,
+    /// Re-issue `ListSessions` to refresh the picker's agent-side state.
+    RefreshSessions,
     /// Cycle the active Claude session between `default` and `plan` mode.
     /// Dispatched by `Alt-m` in `SessionDetailView`.
     TogglePlanMode,

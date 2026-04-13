@@ -832,6 +832,7 @@ impl View for SessionPickerView {
                                 .clone()
                                 .map(|session_id| Action::ToggleSessionArchive { session_id }),
                             KeyCode::Char('a') => Some(Action::ToggleShowArchived),
+                            KeyCode::Char('r') => Some(Action::RefreshSessions),
                             KeyCode::Char('R') => {
                                 if let Some(ref sid) = hl_session_id {
                                     let buffer = sessions

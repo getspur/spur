@@ -206,6 +206,14 @@ fn capital_p_toggles_preview_visible() {
 }
 
 #[test]
+fn r_key_emits_refresh_sessions() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    let action = picker.handle_key(key('r'));
+    assert!(matches!(action, Some(Action::RefreshSessions)));
+}
+
+#[test]
 fn picker_preserves_cursor_and_filter_across_set_sessions() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions(

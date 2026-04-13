@@ -581,6 +581,13 @@ impl App {
                 self.dirty = true;
             }
 
+            Action::RefreshSessions => {
+                if let Some(tx) = self.user_input_tx.as_ref() {
+                    let _ = tx.try_send(crate::UserInput::ListSessions);
+                }
+                self.dirty = true;
+            }
+
             Action::NewSessionRequested => {
                 // Stub until Task 15 (BUG-2 fix) adds NewSessionWithMessage plumbing.
                 // For now, dismiss picker by navigating to Dashboard.
