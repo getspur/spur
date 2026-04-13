@@ -1,6 +1,6 @@
 //! Golden-text snapshot: confirm recursive traversal renders depth > 1.
 
-use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+use spur_acp::{Role, SessionId, SpurEvent, SpurEventBody};
 use spur_core::ExecutorLineage;
 
 #[test]
@@ -12,7 +12,7 @@ fn recursive_tree_renders_depth_two() {
         parent_id: None,
         session_id: SessionId("b".into()),
         agent: "kiro".into(),
-        role: "Brain".into(),
+        role: Role::Brain,
         task_spec: "root".into(),
     }));
     lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
@@ -20,7 +20,7 @@ fn recursive_tree_renders_depth_two() {
         parent_id: Some("b".into()),
         session_id: SessionId("w".into()),
         agent: "worker".into(),
-        role: "Executor".into(),
+        role: Role::Executor,
         task_spec: "child".into(),
     }));
     lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
@@ -28,7 +28,7 @@ fn recursive_tree_renders_depth_two() {
         parent_id: Some("w".into()),
         session_id: SessionId("sw".into()),
         agent: "sub".into(),
-        role: "SubExecutor".into(),
+        role: Role::SubExecutor,
         task_spec: "grandchild".into(),
     }));
 

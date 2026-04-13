@@ -15,23 +15,7 @@ impl ExecutorId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Role {
-    Brain,
-    Executor,
-    SubExecutor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LifecycleState {
-    Spawning,
-    Running,
-    AwaitingReview,
-    Resuming,
-    Succeeded,
-    Failed,
-    Cancelled,
-}
+pub use spur_acp::{LifecycleState, Role};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttemptStatus {

@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use spur_acp::{
     DelegationStatus, ExecutorArtifactPayload, ExecutorReviewDecision, ExecutorReviewKind,
-    ExecutorReviewPayload, SessionId, SpurEvent, SpurEventBody,
+    ExecutorReviewPayload, LifecycleState, Role, SessionId, SpurEvent, SpurEventBody,
 };
-use spur_core::{ExecutorId, ExecutorLineage, LifecycleState};
+use spur_core::{ExecutorId, ExecutorLineage};
 
 #[test]
 fn full_flow_brain_to_review_to_resolved() {
@@ -91,12 +91,12 @@ fn retry_preserves_previous_attempts() {
         parent_id: None,
         session_id: SessionId("s1".into()),
         agent: "worker".into(),
-        role: "Executor".into(),
+        role: Role::Executor,
         task_spec: "initial".into(),
     }));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "w".into(),
-        phase: "Failed".into(),
+        phase: LifecycleState::Failed,
     }));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorRetryStarted {
         id: "w".into(),

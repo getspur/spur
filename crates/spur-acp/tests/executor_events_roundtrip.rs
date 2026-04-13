@@ -1,9 +1,33 @@
 //! Verifies new executor lineage events round-trip through serde JSON.
 
 use spur_acp::{
-    ExecutorReviewDecision, ExecutorReviewKind, ExecutorReviewPayload, SessionId, SpurEvent,
+    ExecutorReviewDecision, ExecutorReviewKind, ExecutorReviewPayload, Role, SessionId, SpurEvent,
     SpurEventBody,
 };
+
+#[test]
+fn executor_phase_changed_rejects_invalid_variant() {
+    let json = r#"{
+        "occurred_at": {"secs_since_epoch": 1000, "nanos_since_epoch": 0},
+        "body": {"ExecutorPhaseChanged": {"id": "x", "phase": "running"}}
+    }"#;
+    let result: Result<SpurEvent, _> = serde_json::from_str(json);
+    assert!(result.is_err(), "lowercase 'running' must fail to deserialize");
+}
+
+#[test]
+fn executor_spawned_rejects_invalid_role() {
+    let json = r#"{
+        "occurred_at": {"secs_since_epoch": 1000, "nanos_since_epoch": 0},
+        "body": {"ExecutorSpawned": {
+            "id": "x", "parent_id": null,
+            "session_id": "s",
+            "agent": "a", "role": "brain", "task_spec": ""
+        }}
+    }"#;
+    let result: Result<SpurEvent, _> = serde_json::from_str(json);
+    assert!(result.is_err(), "lowercase 'brain' must fail to deserialize");
+}
 
 #[test]
 fn executor_spawned_roundtrips() {
@@ -12,7 +36,7 @@ fn executor_spawned_roundtrips() {
         parent_id: Some("brain-1".into()),
         session_id: SessionId("s1".into()),
         agent: "worker".into(),
-        role: "Executor".into(),
+        role: Role::Executor,
         task_spec: "fix bug".into(),
     });
     let json = serde_json::to_string(&ev).unwrap();

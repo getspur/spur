@@ -51,6 +51,24 @@ pub enum ExecutorReviewDecision {
     Retry { new_constraints: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LifecycleState {
+    Spawning,
+    Running,
+    AwaitingReview,
+    Resuming,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    Brain,
+    Executor,
+    SubExecutor,
+}
+
 /// Envelope wrapping every domain event with an occurrence timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpurEvent {
@@ -97,12 +115,12 @@ pub enum SpurEventBody {
         parent_id: Option<String>,
         session_id: SessionId,
         agent: String,
-        role: String,           // "Brain" | "Executor" | "SubExecutor"
+        role: Role,
         task_spec: String,
     },
     ExecutorPhaseChanged {
         id: String,
-        phase: String,          // serialized `LifecycleState` variant name
+        phase: LifecycleState,
     },
     ExecutorArtifact {
         id: String,

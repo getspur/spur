@@ -10,6 +10,6 @@ pub mod types;
 
 pub use projection::ExecutorLineage;
 pub use types::{
-    Artifact, Attempt, AttemptStatus, ExecutorId, ExecutorNode, LifecycleState, ReviewDecision,
-    ReviewKind, ReviewPayload, ReviewRequest, Role,
+    Artifact, Attempt, AttemptStatus, ExecutorId, ExecutorNode, ReviewDecision,
+    ReviewKind, ReviewPayload, ReviewRequest,
 };
