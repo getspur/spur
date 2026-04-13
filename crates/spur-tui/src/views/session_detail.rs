@@ -69,6 +69,11 @@ pub struct SessionDetailView {
     /// graphics protocol is available (text fallback kicks in).
     #[cfg(feature = "markdown")]
     render_picker: Option<ratatui_image::picker::Picker>,
+    /// Timestamp of the most recent InputBar text change whose contents
+    /// differ from `last_persisted_draft`. `None` while the debounce is idle.
+    last_draft_change_at: Option<std::time::Instant>,
+    /// Last InputBar text value written to the metadata store (initially "").
+    last_persisted_draft: String,
 }
 
 impl SessionDetailView {
@@ -104,7 +109,36 @@ impl SessionDetailView {
             pending_fence_actions: std::collections::VecDeque::new(),
             #[cfg(feature = "markdown")]
             render_picker: None,
+            last_draft_change_at: None,
+            last_persisted_draft: String::new(),
         }
+    }
+
+    /// Test/debug helper. Overrides the internal debounce clock so tests can
+    /// simulate an elapsed debounce window without sleeping.
+    pub fn test_set_last_draft_change(&mut self, at: std::time::Instant) {
+        self.last_draft_change_at = Some(at);
+    }
+
+    /// If the InputBar text has changed and >= 500ms have elapsed since the
+    /// last change, returns a `SaveDraft` action and arms the debounce for
+    /// the next edit. Otherwise returns `None`. Called from `App`'s tick loop.
+    pub fn draft_save_action(&mut self) -> Option<Action> {
+        let at = self.last_draft_change_at?;
+        if at.elapsed() < std::time::Duration::from_millis(500) {
+            return None;
+        }
+        let current = self.input_bar.text().to_string();
+        if current == self.last_persisted_draft {
+            self.last_draft_change_at = None;
+            return None;
+        }
+        self.last_persisted_draft = current.clone();
+        self.last_draft_change_at = None;
+        Some(Action::SaveDraft {
+            session_id: self.session_id.0.clone(),
+            draft: current,
+        })
     }
 
     /// Install the graphics `Picker` used to build inline mermaid protocols.
@@ -446,8 +480,8 @@ impl SessionDetailView {
     }
 }
 
-impl View for SessionDetailView {
-    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+impl SessionDetailView {
+    fn handle_key_inner(&mut self, key: KeyEvent) -> Option<Action> {
         // Dismiss the auth banner on any keystroke (before any further routing).
         // The mode-toggle binding below still fires because the action is
         // dispatched regardless.
@@ -631,6 +665,22 @@ impl View for SessionDetailView {
         }
 
         None
+    }
+}
+
+impl View for SessionDetailView {
+    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let action = self.handle_key_inner(key);
+        // Arm the draft-save debounce whenever the InputBar text diverges
+        // from the last persisted value. This covers inserts, deletes, and
+        // the empty-after-send case (where sending clears the bar to "" —
+        // if the previously-persisted draft was non-empty, we want to
+        // overwrite it with the now-empty value).
+        let current_text = self.input_bar.text();
+        if current_text != self.last_persisted_draft {
+            self.last_draft_change_at = Some(std::time::Instant::now());
+        }
+        action
     }
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {
