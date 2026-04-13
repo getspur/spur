@@ -16,6 +16,7 @@ use spur_core::{ExecutorId, ExecutorLineage};
 use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
+use crate::components::detail_pane::DetailPane;
 use crate::components::input_bar::InputBar;
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 use crate::components::{LogEntry, LogEntryKind};
@@ -38,6 +39,7 @@ pub enum Panel {
 pub struct DashboardView {
     agents_tree: AgentsTree,
     activity_log: ActivityLog,
+    detail_pane: DetailPane,
     input_bar: InputBar,
     focused_panel: Panel,
     focused_node: Option<ExecutorId>,
@@ -54,6 +56,7 @@ impl DashboardView {
         Self {
             agents_tree: AgentsTree::new(),
             activity_log,
+            detail_pane: DetailPane::new(),
             input_bar: InputBar::new(),
             focused_panel: Panel::Log,
             focused_node: None,
@@ -91,6 +94,14 @@ impl DashboardView {
 
     pub fn focused_node(&self) -> Option<&ExecutorId> {
         self.focused_node.as_ref()
+    }
+
+    pub fn detail_pane(&self) -> &DetailPane {
+        &self.detail_pane
+    }
+
+    pub fn detail_pane_mut(&mut self) -> &mut DetailPane {
+        &mut self.detail_pane
     }
 
     pub fn scroll_activity_up(&mut self) {
@@ -219,7 +230,18 @@ impl DashboardView {
         .split(area);
 
         self.agents_tree.render(frame, chunks[0], lineage);
-        self.activity_log.render(frame, chunks[1]);
+        match &self.focused_node {
+            Some(id) => {
+                if let Some(node) = lineage.node(id) {
+                    self.detail_pane.render(frame, chunks[1], node);
+                } else {
+                    self.activity_log.render(frame, chunks[1]);
+                }
+            }
+            None => {
+                self.activity_log.render(frame, chunks[1]);
+            }
+        }
         self.input_bar.render(frame, chunks[2]);
         StatusBar::render(
             frame,
@@ -238,6 +260,23 @@ impl DashboardView {
 
 impl View for DashboardView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Priority 0: Tab-cycling in detail pane when a node is focused and
+        // the input bar is empty. Must be checked before the editing-key block
+        // so that Left/Right are not consumed by InputBar cursor movement.
+        if self.input_bar.is_empty() && self.focused_node.is_some() {
+            match key.code {
+                KeyCode::Right => {
+                    self.detail_pane.cycle_tab(true);
+                    return None;
+                }
+                KeyCode::Left => {
+                    self.detail_pane.cycle_tab(false);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         // Priority 1: If key is printable or editing, route to InputBar
         let is_editing_key = matches!(
             key.code,

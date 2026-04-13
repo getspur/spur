@@ -1,4 +1,5 @@
 pub mod activity_log;
+pub mod detail_pane;
 pub mod agents_tree;
 pub mod help_overlay;
 pub mod input_bar;
