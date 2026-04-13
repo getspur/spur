@@ -50,10 +50,22 @@ pub struct SessionDetailView {
     /// Currently active popup trigger (if any), derived from the InputBar
     /// text + cursor.
     active_trigger: Option<crate::components::completion_trigger::Trigger>,
+    /// Registry of `@`-mention sources (files, directories).
+    mention_registry: crate::mentions::MentionRegistry,
+    /// Working directory used to resolve file mentions.
+    cwd: std::path::PathBuf,
+    /// Mention hits currently shown in the popup, parallel to popup rows.
+    /// Used on accept to retrieve the URI/display name.
+    active_mention_hits: Vec<crate::mentions::MentionEntry>,
 }
 
 impl SessionDetailView {
-    pub fn new(session_id: SessionId, agent_name: String, role: String) -> Self {
+    pub fn new(
+        session_id: SessionId,
+        agent_name: String,
+        role: String,
+        cwd: std::path::PathBuf,
+    ) -> Self {
         Self {
             session_id,
             agent_name,
@@ -71,6 +83,9 @@ impl SessionDetailView {
                 crate::components::completion_popup::CompletionPopup::new(),
             ),
             active_trigger: None,
+            mention_registry: crate::mentions::MentionRegistry::new(),
+            cwd,
+            active_mention_hits: Vec::new(),
         }
     }
 
@@ -248,10 +263,35 @@ impl SessionDetailView {
                     })
                     .collect();
                 self.completion_popup.borrow_mut().set_rows(rows);
+                self.active_mention_hits.clear();
+            }
+            Some(t) if t.kind == TriggerKind::Mention => {
+                let hits = self.mention_registry.query(
+                    &self.session_id,
+                    &self.cwd,
+                    &t.query,
+                    20,
+                );
+                let rows: Vec<PopupRow> = hits
+                    .iter()
+                    .map(|m| {
+                        let icon = match m.kind {
+                            crate::mentions::MentionKind::Directory => "\u{1F4C1}",
+                            crate::mentions::MentionKind::File => "\u{1F4C4}",
+                        };
+                        PopupRow {
+                            label: format!("{} @{}", icon, m.display),
+                            description: String::new(),
+                            source_tag: String::new(),
+                        }
+                    })
+                    .collect();
+                self.completion_popup.borrow_mut().set_rows(rows);
+                self.active_mention_hits = hits;
             }
             _ => {
-                // Mention popup wired in Task 14; for now clear rows.
                 self.completion_popup.borrow_mut().set_rows(Vec::new());
+                self.active_mention_hits.clear();
             }
         }
     }
@@ -291,9 +331,19 @@ impl SessionDetailView {
                 None
             }
             TriggerKind::Mention => {
-                // Wired in Task 14.
+                let idx = self.completion_popup.borrow().selected()?;
+                let hit = self.active_mention_hits.get(idx)?.clone();
+
+                // Replace the `@query` token with an empty string, then
+                // insert the atom at the vacated position.
+                // `replace_trigger_token` leaves the cursor at
+                // `prefix_start`; `insert_atom` then inserts there.
+                self.replace_trigger_token(trig.prefix_start, "");
+                let atom = format!("@{}", hit.display);
+                self.input_bar.insert_atom(atom, hit.uri, hit.display);
                 self.active_trigger = None;
                 self.completion_popup.borrow_mut().set_rows(Vec::new());
+                self.active_mention_hits.clear();
                 None
             }
         }

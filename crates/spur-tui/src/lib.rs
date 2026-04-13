@@ -24,6 +24,7 @@ pub mod test_support {
             SessionId("test".to_string()),
             "test-agent".to_string(),
             "brain".to_string(),
+            std::path::PathBuf::from("."),
         )
     }
 

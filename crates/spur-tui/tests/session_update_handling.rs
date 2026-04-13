@@ -81,6 +81,7 @@ fn kiro_available_notification_populates_registry() {
         sid.clone(),
         "kiro".to_string(),
         "brain".to_string(),
+        std::path::PathBuf::from("."),
     );
 
     let params = serde_json::json!({
