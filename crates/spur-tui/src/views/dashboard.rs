@@ -554,6 +554,20 @@ impl View for DashboardView {
     }
 
     fn tick(&mut self) {
+        self.tick_and_report_flush();
+    }
+
+    /// No-op: always use `render_with_lineage` for Dashboard.
+    /// `App::render` calls `render_with_lineage` directly.
+    fn render(&self, _frame: &mut Frame, _area: Rect) {
+        // render_with_lineage is called directly from App::render
+    }
+}
+
+impl DashboardView {
+    /// Tick + flush batched text. Returns true iff at least one batch was
+    /// flushed to the activity log (so the caller can mark the TUI dirty).
+    pub fn tick_and_report_flush(&mut self) -> bool {
         self.agents_tree.tick();
 
         // Flush text batches older than 500ms
@@ -565,6 +579,7 @@ impl View for DashboardView {
             .filter(|(_, (_, ts))| now.duration_since(*ts) > threshold)
             .map(|(k, _)| k.clone())
             .collect();
+        let flushed_any = !expired.is_empty();
 
         for session_id in expired {
             if let Some((text, _)) = self.text_batch.remove(&session_id) {
@@ -587,11 +602,7 @@ impl View for DashboardView {
                 });
             }
         }
-    }
 
-    /// No-op: always use `render_with_lineage` for Dashboard.
-    /// `App::render` calls `render_with_lineage` directly.
-    fn render(&self, _frame: &mut Frame, _area: Rect) {
-        // render_with_lineage is called directly from App::render
+        flushed_any
     }
 }
