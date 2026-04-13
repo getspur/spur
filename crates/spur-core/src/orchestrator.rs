@@ -499,14 +499,14 @@ impl Orchestrator {
                         });
                         match b
                             .connection
-                            .call_ext("_kiro.dev/commands/execute", params)
+                            .call_ext(spur_acp::ext::KIRO_COMMANDS_EXECUTE, params)
                             .await
                         {
                             Ok(resp) => {
                                 self.emit(SpurEvent::now(
                                     SpurEventBody::AgentExtNotification {
                                         session: session.clone(),
-                                        method: "_spur.dev/kiro/execute/response".into(),
+                                        method: spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE.into(),
                                         params: resp,
                                     },
                                 ));
