@@ -338,7 +338,7 @@ async fn dispatcher_ignores_non_review_variants() {
     let handle = tokio::spawn(review_dispatcher_loop(input_rx, sink.clone()));
 
     tx.send(InteractiveInput::Message {
-        text: "hi".into(),
+        blocks: vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new("hi".to_string()))],
         interrupt: false,
     })
     .await
