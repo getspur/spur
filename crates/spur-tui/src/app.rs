@@ -9,6 +9,9 @@ use tokio::time::timeout;
 use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 use spur_core::ExecutorLineage;
 
+#[cfg(feature = "markdown")]
+use ratatui_image::picker::Picker;
+
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
 use crate::tui;
@@ -69,6 +72,12 @@ pub struct App {
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
     /// Event-sourced projection of brain → executor lineage.
     lineage: ExecutorLineage,
+    #[cfg(feature = "markdown")]
+    pub(crate) mermaid_picker: Option<Picker>,
+    #[cfg(feature = "markdown")]
+    pub(crate) mermaid_rx: tokio::sync::mpsc::UnboundedReceiver<Action>,
+    #[cfg(feature = "markdown")]
+    pub(crate) mermaid_tx: tokio::sync::mpsc::UnboundedSender<Action>,
 }
 
 impl App {
@@ -78,6 +87,11 @@ impl App {
         } else {
             (ViewId::Dashboard, None)
         };
+
+        #[cfg(feature = "markdown")]
+        let mermaid_picker = Picker::from_query_stdio().ok();
+        #[cfg(feature = "markdown")]
+        let (mermaid_tx, mermaid_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app = Self {
             current_view,
@@ -93,6 +107,12 @@ impl App {
             pending_user_messages: Vec::new(),
             pending_permission: None,
             lineage: ExecutorLineage::new(),
+            #[cfg(feature = "markdown")]
+            mermaid_picker,
+            #[cfg(feature = "markdown")]
+            mermaid_rx,
+            #[cfg(feature = "markdown")]
+            mermaid_tx,
         };
 
         if start_in_picker {
@@ -131,6 +151,8 @@ impl App {
                     ViewId::SessionPicker => {
                         self.session_picker.as_mut().and_then(|p| p.handle_key(key))
                     }
+                    #[cfg(feature = "markdown")]
+                    ViewId::MermaidOverlay(_) => None,
                 };
 
                 if let Some(action) = action {
@@ -177,6 +199,8 @@ impl App {
             ViewId::SessionPicker => {
                 // No mouse scroll in v1 picker.
             }
+            #[cfg(feature = "markdown")]
+            ViewId::MermaidOverlay(_) => {}
         }
         self.dirty = true;
     }
@@ -323,6 +347,11 @@ impl App {
 
             Action::NavigateTo(ViewId::SessionPicker) => {
                 self.current_view = ViewId::SessionPicker;
+            }
+
+            #[cfg(feature = "markdown")]
+            Action::NavigateTo(ViewId::MermaidOverlay(_)) => {
+                // MermaidOverlay navigation is handled in Task 8.
             }
 
             Action::NavigateBack => {
@@ -522,6 +551,29 @@ impl App {
                 }));
             }
 
+            #[cfg(feature = "markdown")]
+            Action::MermaidRenderRequest { session, ref_id, code } => {
+                let tx = self.mermaid_tx.clone();
+                let session_cloned = session.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = crate::components::mermaid::render_mermaid(&code)
+                        .map(std::sync::Arc::new)
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(Action::MermaidRenderCompleted {
+                        session: session_cloned,
+                        ref_id,
+                        result,
+                    });
+                });
+            }
+            #[cfg(feature = "markdown")]
+            Action::MermaidRenderCompleted { .. } => {
+                // Completion is handled by SessionDetailView in Task 8 via a
+                // session_detail accessor. For now the action terminates here;
+                // Task 8 will forward it to the focused SessionDetailView.
+                self.dirty = true;
+            }
+
             // Scroll actions are already handled inside the views' handle_key methods.
             Action::ScrollUp
             | Action::ScrollDown
@@ -579,6 +631,13 @@ impl App {
 
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
+        #[cfg(feature = "markdown")]
+        {
+            while let Ok(action) = self.mermaid_rx.try_recv() {
+                self.process_action(action);
+            }
+        }
+
         if let Some((_, deadline)) = &self.pending_permission {
             if std::time::Instant::now() >= *deadline {
                 self.pending_permission.take(); // drops reply_tx → auto-deny
@@ -615,6 +674,8 @@ impl App {
             ViewId::SessionPicker => {
                 self.session_picker.as_mut().map(|p| p.tick());
             }
+            #[cfg(feature = "markdown")]
+            ViewId::MermaidOverlay(_) => {}
         }
     }
 
@@ -631,6 +692,10 @@ impl App {
             }
             ViewId::SessionPicker => {
                 self.session_picker.as_ref().map(|p| p.render(frame, area));
+            }
+            #[cfg(feature = "markdown")]
+            ViewId::MermaidOverlay(_) => {
+                // MermaidOverlay rendering is handled in Task 8.
             }
         }
 
