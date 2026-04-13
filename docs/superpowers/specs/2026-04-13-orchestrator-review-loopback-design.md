@@ -36,31 +36,46 @@ observe→review→execute loop is half-built. This spec wires it.
 
 ## Industry grounding
 
-Research round (2026-04-13) examined LangGraph, CrewAI, AutoGen,
-Temporal, Argo, n8n. Three convergent patterns and one clear
-reference:
+Research round (2026-04-13, refined after a second primary-source
+pass) examined LangGraph, OpenAI Agents SDK, Temporal, Argo, n8n,
+CrewAI, AutoGen.
 
-**The reference: LangGraph's `interrupt()`-inside-the-tool pattern.**
-The tool call stays blocked; the human's decision resumes it with a
-typed payload; that payload is translated into the tool's return
-value the agent sees. Spur's Rust async + `oneshot` channel gives
-strictly better continuation semantics than LangGraph's Python
-implementation (no replay needed — the await point is a real
-continuation).
+**Closest architectural analog: Argo Workflows `suspend`/`resume`.**
+Argo's `(workflow_id → suspended node, awaiting a typed enum
+parameter)` maps 1:1 onto Spur's `(ExecutorId → oneshot<ReviewDecision>)`.
+Both gate real work behind a correlation-id lookup plus a typed
+decision. Argo's durable `workflow_id` is what Temporal offers in
+richer form; Spur's in-memory `HashMap` is the non-durable counterpart
+(durability disclaimed as non-goal).
+
+**Closest tool-call-gating analog: OpenAI Agents SDK `needs_approval`.**
+Approve → real tool result returned; Reject → synthetic refusal
+injected; decision scoped per `call_id`. This matches Spur's synthetic-
+`DelegationResult`-with-typed-status approach, except OpenAI's decision
+vocabulary is binary. Spur's richer vocabulary (Approve / Reject /
+Modify / Retry) requires the fuller enum surface.
+
+**LangGraph `interrupt()` is *not* the right reference** despite
+tempting surface similarity. Its `Command(resume=value)` does not
+resume the tool coroutine at its await point — it re-runs the whole
+node, with documented replay / double-execution traps
+([langchain-ai/langgraph#6533](https://github.com/langchain-ai/langgraph/issues/6533)).
+Rust async + `oneshot` genuinely does provide a real continuation,
+which is why Spur is structurally immune to LangGraph's replay class
+of bug.
 
 **Pattern divergences matter:**
-- **Retry ownership** splits: Temporal and CrewAI internalize retries
-  in the orchestrator (one logical call, many worker spawns); AutoGen
-  and LangGraph-default surface rejection to the agent. Research's
-  recommendation and adopted position: **split the two** — internal
-  loop for `Retry`, surface for `Reject`. Rationale: `Retry` is "same
-  task, refined"; `Reject` is a signal the agent needs to reason
-  about.
-- **Tool-result translation** has three shapes: synthetic result,
-  new conversational turn, or real-result gated. Research's adopted
-  position: **synthetic tool result with typed status variants** —
-  the brain sees one `DelegationResult` whose `status` already
-  encodes the human's decision.
+- **Retry ownership** splits across the industry: Temporal and CrewAI
+  internalize retries; AutoGen and LangGraph-default surface rejection.
+  **We adopt a novel split**: internal loop for `Retry`, surface for
+  `Reject`. *Novel* — no surveyed system makes this distinction at the
+  decision-verb level. Rationale: `Retry` is "same task, refined"
+  (mechanical); `Reject` is strategic and the brain must replan.
+  We own this as a design invention, not industry convention.
+- **Tool-result translation** adopted: **synthetic tool result with
+  typed status variants** — one `DelegationResult` whose `status`
+  encodes the human's decision. This is OpenAI's shape extended from
+  binary to Spur's richer vocabulary.
 
 ## Architecture
 
@@ -91,8 +106,11 @@ pauses there, awaits a `ReviewDecision`, shapes the final
 │     emit ExecutorPhaseChanged { id, AwaitingReview }               │
 │                                                                    │
 │     decision = select! {                                           │
-│       Ok(d) = rx => d,                                             │
-│       _ = sleep(review_timeout) => review_timeout_default,         │
+│       Ok(d) = rx => d,  // (attempt_n-matched by dispatcher)       │
+│       _ = sleep(review_timeout) => {                               │
+│         pending_reviews.remove(executor_id);  // explicit cleanup  │
+│         TimeoutApplied(review_timeout_default)                     │
+│       },                                                           │
 │     }                                                              │
 │                                                                    │
 │     emit ExecutorReviewResolved { id, decision }                   │
@@ -103,6 +121,9 @@ pauses there, awaits a `ReviewDecision`, shapes the final
 │       Modify{n} => status = Modified{n}, keep diff+summary         │
 │       Retry{c} => despawn+respawn, attempt_n += 1,                 │
 │                   loop if under max_review_retries                 │
+│       TimeoutApplied(fallback) =>                                  │
+│          status = TimedOut { waited_for, fallback },               │
+│          preserve worktree                                         │
 │     }                                                              │
 │                                                                    │
 │   emit DelegationCompleted                                         │
@@ -113,21 +134,30 @@ pauses there, awaits a `ReviewDecision`, shapes the final
 ### Three units, one interface each
 
 **Unit 1 — Expanded `DelegationStatus` enum** (modify `spur-acp::domain::delegation`)
-- *Does:* encodes all possible outcomes of a delegation — worker-only
-  outcomes (Success, Failed, Conflict, Timeout) plus review outcomes
-  (Rejected, Modified, Abandoned).
+- *Does:* encodes all possible outcomes of a delegation.
+  - Pre-existing worker-level variants: `Success`, `Failed { error }`,
+    `Conflict { files }`, `Timeout` (existing 5-minute worker-hang
+    timeout — kept as a separate variant from review timeout).
+  - New review-level variants: `Rejected { reason }` (human-issued
+    only), `Modified { reviewer_note }`,
+    `TimedOut { waited_for, fallback: TimeoutFallback }` (review-gate
+    timeout; `fallback` records what `TimeoutFallback` was applied).
+  - The split `Timeout` (worker) vs. `TimedOut` (review) is deliberate:
+    worker `Timeout` = "worker got stuck"; review `TimedOut` = "nobody
+    reviewed in time." The brain must treat them differently.
 - *Marked `#[non_exhaustive]`* so external crates can add catch-alls
   without recompile-breakage on future additions.
 
 **Unit 2 — Pending-reviews routing** (new field on `Orchestrator`)
-- *Does:* owns `pending_reviews: Arc<Mutex<HashMap<ExecutorId, oneshot::Sender<ReviewDecision>>>>`. The delegation task registers the sender; a separate user-input dispatcher pops+sends when `UserInput::SubmitReview` arrives.
+- *Does:* owns `pending_reviews: Arc<Mutex<HashMap<ExecutorId, (u32, oneshot::Sender<ReviewDecision>)>>>`. The tuple's `u32` is the currently-registered `attempt_n`, used by the dispatcher's supersession guard. The delegation task registers `(attempt_n, sender)`; a separate user-input dispatcher, after confirming attempt_n matches, pops and sends when `UserInput::SubmitReview` arrives.
 - *Depends on:* `tokio::sync::{oneshot, Mutex}`, `spur_core::ExecutorId`.
 - *Testability:* pure state container; unit tests with synthetic decisions.
 
 **Unit 3 — User-input dispatcher task** (new top-level task in `Orchestrator::run`)
-- *Does:* reads from a new `mpsc::Receiver<UserInput>` owned by the orchestrator; on `SubmitReview { executor_id, decision }`, looks up the oneshot in `pending_reviews` and forwards the decision.
+- *Does:* reads from a new `mpsc::Receiver<UserInput>` owned by the orchestrator; on `SubmitReview { executor_id, attempt_n, decision }`, looks up the oneshot in `pending_reviews`, **checks `attempt_n` matches the currently-registered review's attempt_n** (supersession guard — see "Attempt supersession" below), pops the sender, and forwards the decision. Mismatch or no-entry → log `tracing::warn!` and drop.
 - *Spawned at orchestrator startup; runs for the orchestrator's lifetime.*
 - *Depends on:* Unit 2, `spur_tui::UserInput`.
+- *Why a separate channel (not extending `InteractiveInput`):* `run_interactive` serializes input behind brain-turn processing (see its `pending_messages: VecDeque` queue at `orchestrator.rs:346` and the `select!` at line 628). A `SubmitReview` delivered through that channel would incur head-of-line latency against brain I/O. A separate channel + dispatcher keeps review-decision latency bounded regardless of brain state.
 
 ### Decision → DelegationStatus mapping
 
@@ -137,6 +167,14 @@ pauses there, awaits a `ReviewDecision`, shapes the final
 | `Reject { reason }` | `Rejected { reason }` | worker's diff (preserved) | worker's summary | **preserved for inspection** |
 | `Modify { note }` | `Modified { reviewer_note: note }` | worker's diff | worker's summary | removed |
 | `Retry { new_constraints }` | *(not a terminal decision — orchestrator re-enters the delegation loop)* | final iteration's diff | final iteration's summary | reused across attempts |
+| *(review timeout)* | `TimedOut { waited_for, fallback }` | worker's diff (preserved) | worker's summary | **preserved** |
+
+**`Rejected` is human-issued only.** Timeout-driven outcomes use
+`TimedOut` (below). Keeping these separate matters: the brain treats
+`Rejected.reason` as actionable feedback to address; `TimedOut` is
+"no human reviewed in time" and must NOT be misinterpreted as
+feedback. Collapsing them lets the brain waste turns trying to
+address "review timeout" as if it were a grievance.
 
 **Retry terminal behavior:** Retry is not a terminal decision; the
 final `DelegationStatus` is determined by whichever non-Retry
@@ -145,21 +183,33 @@ Retry → Retry → Approve produces `Success`. Retry × 4 when
 `max_review_retries = 3` produces
 `Failed { error: "retry limit exceeded after 3 attempts" }`.
 
-**Review-timeout with `ReviewTimeoutAction::Abandon`** produces
-`DelegationStatus::Abandoned { waited_for: review_timeout }`.
-With `ReviewTimeoutAction::Reject { reason }` it produces
-`Rejected { reason }`. With `ReviewTimeoutAction::Approve` it
-produces `Success`.
+**Review timeout** produces `DelegationStatus::TimedOut { waited_for,
+fallback }`, where `fallback` records what the configured
+`TimeoutFallback` did:
 
-**Review-timeout default:** `Rejected { reason: "review timeout" }`. This
-is the safer default — treats no-response as no. Users can configure
-`review_timeout_default` to a different `ReviewDecision` if their
-workflow wants auto-approve on timeout.
+```rust
+pub enum TimeoutFallback {
+    /// Auto-approve — worker's diff/summary retained as if reviewed.
+    /// Brain reads TimedOut rather than Success so it can still
+    /// distinguish human-approved from timeout-approved.
+    Approve,
+    /// Auto-reject — carries the configured reason.
+    Reject { reason: String },
+    /// Explicit "nobody reviewed" signal for headless/batch modes.
+    /// Worktree preserved.
+    Abandon,
+}
+```
 
-**`Abandoned { waited_for }`** fires only when config explicitly sets
-`review_timeout_default = Abandon`. Reserved for headless/batch modes
-where the operator wants "nobody reviewed in time" as a distinct,
-observable signal.
+The old `Abandoned { waited_for }` variant is retired — it was just
+"TimedOut with fallback = Abandon." One variant carrying the fallback
+discriminant is cleaner than two variants that must stay in sync.
+
+**Review-timeout default:** `TimedOut { waited_for,
+fallback: TimeoutFallback::Reject { reason: "review timeout" } }`.
+The safer default (treats no-response as no) but the brain-visible
+variant is `TimedOut`, not `Rejected`, so it is not confusable with
+human-issued rejection.
 
 ### Retry semantics
 
@@ -173,6 +223,61 @@ observable signal.
 - The brain sees exactly one `DelegationResult` regardless of attempts.
 - `ExecutorLineage` correctly tracks the attempt history (projection
   already handles `ExecutorRetryStarted`).
+- **Semaphore permit held across the retry loop.** Because retry
+  happens inside the same spawned `execute_delegation` task that
+  acquired a `max_concurrent` permit, the permit is retained across
+  all attempts. Known v1 scaling limitation: with `max_concurrent = 4`
+  and 4 concurrent delegations simultaneously hitting `Retry`, the
+  pool stalls until a human resolves one. Acceptable for v1 because
+  reviews are human-gated.
+
+### Worker side-effect idempotency contract
+
+`Retry` despawns and respawns the worker. Any side-effect the worker
+performed in attempt N is **not rolled back** — it simply runs again
+in attempt N+1. Same replay class of bug LangGraph users keep hitting
+([langchain-ai/langgraph#6533](https://github.com/langchain-ai/langgraph/issues/6533)).
+
+**Contract** (enforced by worker implementations, not by this spec's code):
+
+- Workers MUST NOT commit external side-effects during or before the
+  review gate. Only allowed side-effect: worktree-local file changes
+  (rolled back by worktree despawn).
+- External side-effects — PR creation, Linear comments, webhook posts,
+  remote git pushes — MUST happen *after* the orchestrator receives
+  `ReviewDecision::Approve`, in orchestrator code or a post-Approve
+  worker invocation, not inside the worker path that runs before the
+  gate.
+
+**Failure mode if violated**: attempt 1 creates a Linear comment;
+human clicks Retry; attempt 2 re-runs the worker and creates a
+*second* Linear comment. By attempt 3, there are three. The brain
+never sees any of this because it's downstream of the review gate.
+
+### Attempt supersession
+
+When `Retry` fires, the old attempt's `oneshot::Sender` was consumed
+on dispatch. A fresh `Sender` is registered under the same
+`executor_id` for attempt N+1. Without discipline this admits a
+stale-UI hazard:
+
+> User opens the review card for attempt 1, pauses. Someone clicks
+> Retry. Orchestrator respawns; new sender registered for attempt 2.
+> First user, unaware, hits `a` for Approve. Dispatcher pops the
+> attempt-2 sender and delivers `Approve` — accidentally approving
+> attempt 2's output nobody has seen.
+
+**Fix**: propagate `attempt_n` end-to-end so the dispatcher can
+reject stale decisions.
+
+- `SpurEventBody::ExecutorReviewRequested` carries `attempt_n: u32`.
+  The TUI's review card captures this.
+- `spur_tui::UserInput::SubmitReview` carries `attempt_n: u32`.
+- The dispatcher's `pending_reviews` stores
+  `(attempt_n, oneshot::Sender<ReviewDecision>)`. On `SubmitReview`
+  receipt, it compares incoming `attempt_n` against the stored one
+  *before* popping. Mismatch → `tracing::warn!` and drop the
+  decision; keep the sender in place.
 
 ### Config additions
 
@@ -186,20 +291,18 @@ pub struct AgentReviewPolicy {
     /// How long to wait for a human decision before applying the default.
     /// Default: 30 minutes.
     pub review_timeout: Duration,
-    /// What to apply on timeout. Default: `Reject { reason: "review timeout" }`.
-    /// Set to `Abandon` for headless modes that want an explicit
-    /// "nobody reviewed" signal.
-    pub review_timeout_default: ReviewTimeoutAction,
+    /// What to apply on timeout. Default:
+    /// `TimeoutFallback::Reject { reason: "review timeout" }`.
+    pub review_timeout_default: TimeoutFallback,
     /// Cap on retry loops from `ReviewDecision::Retry`. Default: 3.
     pub max_review_retries: u32,
 }
-
-pub enum ReviewTimeoutAction {
-    Approve,
-    Reject { reason: String },
-    Abandon,
-}
 ```
+
+**Type unification**: the config's timeout-default field and the
+`TimedOut` variant's `fallback` field share a single `TimeoutFallback`
+type (defined in the "Decision → DelegationStatus mapping" section).
+No conversion / `From` impl needed.
 
 Read from agent config TOML; default values apply when the
 `[review]` section is absent.
@@ -248,20 +351,27 @@ Brain reads "Delegation [Rejected | Success | Modified | ...]: ..."
   executor_id** (race — decision arrives after review already
   resolved or node removed): log a `tracing::warn!` and drop the
   decision. Do not panic.
+- **Attempt-n mismatch on `SubmitReview`**: log `tracing::warn!` with
+  `got` and `expected` attempt_n, drop the decision, keep the
+  registered sender in place (see "Attempt supersession" above).
 - **Retry limit exceeded**: final status = `Failed { error: "retry
   limit exceeded after {n} attempts" }`. Worktree state: the last
   attempt's worktree is removed normally. Historical attempts'
   worktrees were already removed as part of the despawn-respawn
   cycle.
 - **Review timeout fires while decision is in-flight** (race):
-  timeout wins. The decision that arrives afterward is dropped via
-  the "unknown executor_id" path above. This is acceptable — timeout
-  semantics trump late decisions.
+  timeout wins. The timeout branch **must explicitly remove the
+  entry from `pending_reviews`** before applying the fallback
+  (`pending_reviews.lock().await.remove(&executor_id)`); otherwise a
+  late-arriving `SubmitReview` finds a stale sender whose receiver has
+  already been dropped.
 - **Brain tool call cancelled while review is pending**: the MCP
   server's oneshot receiver drops. `oneshot.send(result)` returns
-  `Err`. Orchestrator logs + abandons the delegation, cleans up the
-  worktree. Pending review is cancelled (oneshot sender in
-  `pending_reviews` is dropped too).
+  `Err`. Before cleanup, the orchestrator emits
+  `SpurEventBody::ExecutorReviewCancelled { id, reason: "brain call
+  cancelled" }` (new event body variant) so the lineage projection
+  records the abandonment. Orchestrator then cleans up the worktree
+  and drops the pending review's sender.
 
 ## Testing strategy
 
@@ -295,40 +405,49 @@ Brain reads "Delegation [Rejected | Success | Modified | ...]: ..."
 Each stage compiles + tests independently.
 
 1. **Expand `DelegationStatus`.** Add `Rejected`, `Modified`,
-   `Abandoned` variants with `#[non_exhaustive]`. Update every
-   `match status` site (spur-core + spur-tui lineage adapter +
-   activity_log renderer). Existing tests must still pass.
-2. **Add `AgentReviewPolicy` config.** Parse from agent config TOML
-   with sensible defaults; plumb into the delegation path as a
-   field on `agent_config`.
-3. **Add `pending_reviews` state + user-input dispatcher task.** New
-   field on `Orchestrator`; spawn a dispatcher task in
-   `Orchestrator::run`; wire a new `mpsc::Receiver<UserInput>` input.
-4. **Wire `UserInput::SubmitReview` from spur-cli.** Replace the TODO
-   stub with a `send` on the orchestrator's input channel. spur-cli
-   needs an `Arc` (or channel) to reach the orchestrator; verify
-   plumbing.
-5. **Insert the review gate in `delegate`.** Around line 1594: when
-   `review_required`, register oneshot, emit events, `select!` on
-   (decision_rx, timeout), shape `DelegationResult` per the decision.
-6. **Retry loop.** Wrap the delegate body so `ReviewDecision::Retry`
-   re-spawns the worker with appended constraints, emits
-   `ExecutorRetryStarted`, re-enters review. Bound by
-   `max_review_retries`.
-7. **Worktree preservation on Reject and Abandoned.** The normal
-   cleanup path removes the worktree. Add a conditional that skips
-   cleanup when `status` is `Rejected` or `Abandoned` — both are
-   cases where the worker did real work but no one validated it;
-   preserve for inspection. Log the preserved worktree's path so
-   the human can find it. (`Success`, `Modified`, `Failed`,
-   `Conflict`, `Timeout` all fall through to normal cleanup.)
-8. **DelegationResult text formatter update.** The brain-facing text
-   rendering of `DelegationResult` must produce distinct output for
-   `Rejected` / `Modified` / `Abandoned` / `Success` / etc. so the
-   brain's prompt sees actionably-different strings.
-9. **End-to-end smoke.** Configure a test agent with
-   `review_required = true`; run through Approve/Reject/Modify/Retry
-   scenarios manually with the TUI; verify brain behavior.
+   `TimedOut { waited_for, fallback: TimeoutFallback }` variants with
+   `#[non_exhaustive]`; add `TimeoutFallback` enum. Update every
+   `match status` site with stub arms (semantic handling in later
+   stages). `Timeout` retained (worker hang); `Abandoned` retired in
+   favor of `TimedOut { fallback: Abandon }`.
+2. **Add `attempt_n` to `ExecutorReviewRequested`** event body; add
+   `attempt_n: u32` to projection's `ReviewRequest`.
+3. **Add `ExecutorReviewCancelled`** body variant; projection clears
+   `pending_review` on receipt.
+4. **Add `AgentReviewPolicy` config.** Parse from agent config TOML
+   with defaults; `review_timeout_default: TimeoutFallback` (shared
+   with `DelegationStatus::TimedOut.fallback`).
+5. **Create `ReviewSink`** (new `crates/spur-core/src/review_sink.rs`):
+   `register(executor_id, attempt_n)`, `submit(executor_id, attempt_n,
+   decision)` with attempt_n supersession guard, `remove`.
+6. **Extend `UserInput::SubmitReview`** with `attempt_n` (TUI + action
+   + dashboard view plumbing).
+7. **Add `review_sink` state + dispatcher task + spur-cli wiring.**
+   `InteractiveInput::SubmitReview` variant; `review_dispatcher_loop`
+   task; spur-cli replaces TODO stub with routing into dispatcher.
+8. **Plumb `review_sink` into `execute_delegation`.** Mechanical
+   parameter threading from `handle_delegations` → `execute_delegation`.
+9. **Insert the review gate.** When `review_required`, register on
+   `review_sink`, emit events, `select!` on (decision_rx, timeout),
+   shape `DelegationStatus` per decision. Timeout branch explicitly
+   removes the sink entry before applying fallback.
+10. **Retry loop + supersession.** Wrap worker-spawn + gate in a loop
+    on `ReviewDecision::Retry`; bump `attempt_n`; emit
+    `ExecutorRetryStarted`. Bounded by `max_review_retries`.
+11. **Worktree preservation on `Rejected` and `TimedOut`.** Skip
+    cleanup; log preserved path. `Success`, `Modified`, `Failed`,
+    `Conflict`, worker `Timeout` all fall through to normal cleanup.
+12. **Brain-cancellation audit event.** When `respond_to.send` fails
+    with a pending review, emit
+    `SpurEventBody::ExecutorReviewCancelled { id, reason }` before
+    cleanup.
+13. **DelegationResult text formatter distinctness.** Regression test:
+    `Rejected` / `Modified` / `TimedOut` / `Success` render as
+    distinguishable JSON so the brain's prompt can pattern-match.
+14. **End-to-end smoke.** Configure a test agent with
+    `review_required = true`; run through Approve/Reject/Modify/Retry
+    scenarios; verify brain behavior; verify stale-UI double-submit is
+    rejected by attempt_n guard; verify timeout produces `TimedOut`.
 
 ## Open questions
 
