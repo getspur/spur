@@ -115,7 +115,6 @@ impl ReactTrace {
         {
             if let Some(last) = self.entries.last_mut() {
                 if let TraceKind::AgentMessage { .. } = last.kind {
-                    last.text.push_str(text);
                     if let Some(stream) = last.markdown.as_mut() {
                         stream.append(text);
                     }
@@ -129,7 +128,7 @@ impl ReactTrace {
             stream.append(text);
             self.push(TraceEntry {
                 kind: TraceKind::AgentMessage { agent: agent.to_string() },
-                text: text.to_string(),
+                text: String::new(), // stream owns the raw text
                 timestamp,
                 markdown: Some(stream),
             });
@@ -373,8 +372,11 @@ impl ReactTrace {
                     ]));
 
                     #[cfg(feature = "markdown")]
-                    let used_markdown = {
-                        if let Some(stream) = entry.markdown.as_ref() {
+                    let used_markdown = entry
+                        .markdown
+                        .as_ref()
+                        .filter(|stream| !stream.lines().is_empty())
+                        .map(|stream| {
                             for line in stream.lines() {
                                 // Indent markdown lines by 3 spaces to match existing format.
                                 let mut spans = vec![Span::raw("   ")];
@@ -385,15 +387,25 @@ impl ReactTrace {
                                 lines.push(new_line);
                             }
                             true
-                        } else {
-                            false
-                        }
-                    };
+                        })
+                        .unwrap_or(false);
+
                     #[cfg(not(feature = "markdown"))]
                     let used_markdown = false;
 
                     if !used_markdown {
-                        for text_line in entry.text.lines() {
+                        // Source of truth: stream.raw_text() when markdown is
+                        // on (the stream owns the text); entry.text otherwise.
+                        #[cfg(feature = "markdown")]
+                        let source: &str = entry
+                            .markdown
+                            .as_ref()
+                            .map(|s| s.raw_text())
+                            .unwrap_or(entry.text.as_str());
+                        #[cfg(not(feature = "markdown"))]
+                        let source: &str = entry.text.as_str();
+
+                        for text_line in source.lines() {
                             lines.push(Line::from(vec![
                                 Span::raw("   "),
                                 Span::styled(
@@ -621,5 +633,158 @@ impl ReactTrace {
 impl Default for ReactTrace {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+impl ReactTrace {
+    /// Test-only helper: mimics the line-building portion of `render` but
+    /// returns each line as a joined `String` of span text, so tests can
+    /// assert on visible content without needing a real `Frame`.
+    pub(crate) fn render_lines_for_test(&self, _width: u16) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+
+        for entry in &self.entries {
+            match &entry.kind {
+                TraceKind::Think => {
+                    lines.push(format!("{} 🧠 THINK", entry.timestamp));
+                    for text_line in entry.text.lines() {
+                        lines.push(format!("   {}", text_line));
+                    }
+                }
+
+                TraceKind::AgentMessage { agent } => {
+                    lines.push(format!("{} ✉ {}", entry.timestamp, agent));
+
+                    #[cfg(feature = "markdown")]
+                    let used_markdown = entry
+                        .markdown
+                        .as_ref()
+                        .filter(|stream| !stream.lines().is_empty())
+                        .map(|stream| {
+                            for line in stream.lines() {
+                                let joined: String =
+                                    line.spans.iter().map(|s| s.content.as_ref()).collect();
+                                lines.push(format!("   {}", joined));
+                            }
+                            true
+                        })
+                        .unwrap_or(false);
+
+                    #[cfg(not(feature = "markdown"))]
+                    let used_markdown = false;
+
+                    if !used_markdown {
+                        #[cfg(feature = "markdown")]
+                        let source: &str = entry
+                            .markdown
+                            .as_ref()
+                            .map(|s| s.raw_text())
+                            .unwrap_or(entry.text.as_str());
+                        #[cfg(not(feature = "markdown"))]
+                        let source: &str = entry.text.as_str();
+
+                        for text_line in source.lines() {
+                            lines.push(format!("   {}", text_line));
+                        }
+                    }
+                }
+
+                TraceKind::Act { tool, args } => {
+                    lines.push(format!("{} 🔧 ACT  {}", entry.timestamp, tool));
+                    for arg_line in args.lines() {
+                        lines.push(format!("   {}", arg_line));
+                    }
+                    for text_line in entry.text.lines() {
+                        lines.push(format!("   {}", text_line));
+                    }
+                }
+
+                TraceKind::Observe => {
+                    lines.push(format!("{} 👁 OBSERVE", entry.timestamp));
+                    for text_line in entry.text.lines() {
+                        lines.push(format!("   {}", text_line));
+                    }
+                }
+
+                TraceKind::Delegate { agent, task, status } => {
+                    lines.push(format!("{} → DELEGATE to {}", entry.timestamp, agent));
+                    if !task.is_empty() {
+                        lines.push(format!("   {}", task));
+                    }
+                    if !status.is_empty() {
+                        lines.push(format!("   {}", status));
+                    }
+                }
+
+                TraceKind::UserMessage => {
+                    lines.push(format!("{} 💬 YOU", entry.timestamp));
+                    for text_line in entry.text.lines() {
+                        lines.push(format!("   {}", text_line));
+                    }
+                }
+
+                TraceKind::Permission { description, pending, countdown } => {
+                    lines.push(format!("{} ⚠ PERMISSION: {}", entry.timestamp, description));
+                    if *pending {
+                        if *countdown > 0 {
+                            lines.push(format!(
+                                "   [y]es [n]o [a]lways  (auto-deny in {}s)",
+                                countdown
+                            ));
+                        } else {
+                            lines.push("   [y]es [n]o [a]lways".to_string());
+                        }
+                    }
+                    for text_line in entry.text.lines() {
+                        lines.push(format!("   {}", text_line));
+                    }
+                }
+            }
+
+            lines.push(String::new());
+        }
+
+        lines
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
+mod markdown_integration_tests {
+    use super::*;
+
+    /// Regression: when the first AgentMessageChunk arrives, the render
+    /// frame that immediately follows must show the text body, not a
+    /// blank region waiting for the 50ms debounce to fire.
+    #[test]
+    fn first_chunk_renders_body_before_debounce_flush() {
+        let mut trace = ReactTrace::new();
+        trace.append_message("Hello, world!", "claude", "10:00:00".to_string());
+
+        let rendered = trace.render_lines_for_test(60);
+        let joined = rendered.join("\n");
+        assert!(
+            joined.contains("Hello, world!"),
+            "expected first chunk text to be visible in render output, got:\n{joined}"
+        );
+    }
+
+    /// Once the debounce flushes and styled lines are cached, render uses
+    /// them (not the plain-text fallback). Assert by checking that the
+    /// content is still present after flush.
+    #[test]
+    fn post_flush_rendered_lines_still_show_text() {
+        use crate::components::markdown_stream::StateLookup;
+        let mut trace = ReactTrace::new();
+        trace.append_message("# Heading\n\nBody text", "claude", "10:00:00".to_string());
+
+        // Force a flush via drain_fence_dispatches with empty state.
+        let states = StateLookup::empty();
+        let _ = trace.drain_fence_dispatches(&states);
+
+        let rendered = trace.render_lines_for_test(60);
+        let joined = rendered.join("\n");
+        assert!(joined.contains("Heading"), "expected heading text after flush: {joined}");
+        assert!(joined.contains("Body text"), "expected body text after flush: {joined}");
     }
 }
