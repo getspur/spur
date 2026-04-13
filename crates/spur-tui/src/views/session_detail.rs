@@ -228,6 +228,11 @@ impl SessionDetailView {
         self.react_trace.entry_count()
     }
 
+    /// Expose the react trace for inspection (used in tests).
+    pub fn react_trace(&self) -> &ReactTrace {
+        &self.react_trace
+    }
+
     /// Merged slash-command registry (spur-local + agent-advertised).
     pub fn command_registry(&self) -> &crate::commands::CommandRegistry {
         &self.command_registry
@@ -837,6 +842,7 @@ impl View for SessionDetailView {
                 from,
                 to_agent,
                 task,
+                request_id,
             } => {
                 if from.0 != self.session_id.0 {
                     return;
@@ -846,12 +852,27 @@ impl View for SessionDetailView {
                         agent: to_agent.clone(),
                         task: task.clone(),
                         status: "delegated".to_string(),
+                        request_id: Some(request_id.clone()),
+                        executor_id: None,
                     },
                     text: String::new(),
                     timestamp: Self::now_stamp(),
                     #[cfg(feature = "markdown")]
                     markdown: None,
                 });
+            }
+
+            SpurEventBody::DelegationDispatched {
+                from,
+                request_id,
+                executor_id,
+            } => {
+                if from.0 != self.session_id.0 {
+                    return;
+                }
+                // Find the most recent Delegate entry with matching request_id
+                // and attach the executor_id.
+                self.react_trace.attach_executor_id(request_id, executor_id);
             }
 
             SpurEventBody::DelegationCompleted {
@@ -986,6 +1007,20 @@ impl View for SessionDetailView {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
+        debug_assert!(
+            false,
+            "SessionDetailView::render called via trait \u2014 use render_with_lineage instead"
+        );
+        self.render_inner(frame, area, None);
+    }
+}
+impl SessionDetailView {
+    fn render_inner(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+    ) {
         let elapsed = self.elapsed();
 
         // Reserve the top row for the (non-blocking) resume banner when
@@ -1081,10 +1116,10 @@ impl View for SessionDetailView {
                 mermaid_registry: &self.mermaid_registry,
                 picker: self.render_picker.as_ref(),
             };
-            self.react_trace.render_with_ctx(frame, chunks[1], &ctx);
+            self.react_trace.render_with_ctx(frame, chunks[1], &ctx, lineage);
         }
         #[cfg(not(feature = "markdown"))]
-        self.react_trace.render(frame, chunks[1]);
+        self.react_trace.render(frame, chunks[1], lineage);
 
         // ── Input bar ───────────────────────────────────────────────────
         self.input_bar.render(frame, chunks[2]);
@@ -1118,6 +1153,18 @@ impl View for SessionDetailView {
         {
             banner.render(frame, rect);
         }
+    }
+
+    /// Render with an `ExecutorLineage` reference so inline executor
+    /// cards can splice into the conversation at Delegate entries.
+    /// Called from `app.rs` in place of the trait `render`.
+    pub fn render_with_lineage(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        lineage: &spur_core::lineage::projection::ExecutorLineage,
+    ) {
+        self.render_inner(frame, area, Some(lineage));
     }
 }
 

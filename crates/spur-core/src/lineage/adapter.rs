@@ -31,6 +31,13 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 phase: LifecycleState::Running,
                 attempts: vec![fresh_attempt(session.clone(), event.occurred_at)],
                 pending_review: None,
+                last_event_at: None,
+                tool_call_count: 0,
+                latest_tool_call: None,
+                files_touched_count: 0,
+                latest_diff_summary: None,
+                latest_diff_text: None,
+                last_error: None,
             });
         }
 
@@ -55,6 +62,13 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 phase: LifecycleState::Running,
                 attempts: vec![fresh_attempt(session.clone(), event.occurred_at)],
                 pending_review: None,
+                last_event_at: None,
+                tool_call_count: 0,
+                latest_tool_call: None,
+                files_touched_count: 0,
+                latest_diff_summary: None,
+                latest_diff_text: None,
+                last_error: None,
             };
             match parent {
                 Some(p) => lineage.attach_child(&p, node),
@@ -62,7 +76,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             }
         }
 
-        SpurEventBody::DelegationRequested { from: _, to_agent, task } => {
+        SpurEventBody::DelegationRequested { from: _, to_agent, task, request_id: _ } => {
             // Populate the task_spec of the most recent Executor owned by the
             // worker name, if empty.
             //
