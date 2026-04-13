@@ -28,8 +28,9 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use agent_client_protocol::{
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    McpServer, NewSessionResponse, PromptRequest, SessionNotification,
+    AuthenticateRequest, AuthenticateResponse, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionResponse,
+    PromptRequest, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
 };
 
 use crate::types::AgentHealth;
@@ -125,5 +126,77 @@ pub trait AgentConnection: Send + Sync {
     ) -> anyhow::Result<ListSessionsResponse> {
         let _ = request;
         Err(anyhow::anyhow!("list_sessions not supported by this transport"))
+    }
+
+    /// Set the current mode of a session (e.g. `"plan"`, `"default"`).
+    ///
+    /// Not all transports support this; the default implementation returns an error.
+    async fn set_session_mode(
+        &mut self,
+        request: SetSessionModeRequest,
+    ) -> anyhow::Result<SetSessionModeResponse> {
+        let _ = request;
+        Err(anyhow::anyhow!("set_session_mode not supported by this transport"))
+    }
+
+    /// Authenticate with the agent using a previously-advertised auth method.
+    ///
+    /// Not all transports support this; the default implementation returns an error.
+    async fn authenticate(
+        &mut self,
+        request: AuthenticateRequest,
+    ) -> anyhow::Result<AuthenticateResponse> {
+        let _ = request;
+        Err(anyhow::anyhow!("authenticate not supported by this transport"))
+    }
+}
+
+#[cfg(test)]
+mod agent_connection_defaults {
+    use super::*;
+    use agent_client_protocol::{AuthenticateRequest, AuthMethodId, SetSessionModeRequest};
+
+    struct NullConn;
+
+    #[async_trait]
+    impl AgentConnection for NullConn {
+        async fn initialize(&mut self, _r: InitializeRequest) -> anyhow::Result<InitializeResponse> {
+            unimplemented!()
+        }
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp: Vec<McpServer>,
+        ) -> anyhow::Result<NewSessionResponse> {
+            unimplemented!()
+        }
+        async fn prompt(
+            &mut self,
+            _r: PromptRequest,
+        ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+            unimplemented!()
+        }
+        async fn cancel(&mut self, _s: &str) -> anyhow::Result<()> { unimplemented!() }
+        async fn shutdown(&mut self) -> anyhow::Result<()> { unimplemented!() }
+        fn health(&self) -> crate::types::AgentHealth { unimplemented!() }
+    }
+
+    #[tokio::test]
+    async fn set_session_mode_default_is_unsupported() {
+        let mut c = NullConn;
+        let req = SetSessionModeRequest::new(
+            agent_client_protocol::SessionId::new("s".to_string()),
+            "plan",
+        );
+        let err = c.set_session_mode(req).await.unwrap_err().to_string();
+        assert!(err.contains("not supported"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn authenticate_default_is_unsupported() {
+        let mut c = NullConn;
+        let req = AuthenticateRequest::new(AuthMethodId::new("x"));
+        let err = c.authenticate(req).await.unwrap_err().to_string();
+        assert!(err.contains("not supported"), "got: {err}");
     }
 }
