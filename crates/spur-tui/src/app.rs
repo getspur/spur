@@ -963,9 +963,14 @@ impl App {
     /// picker if one exists. Call from any action that mutates metadata.
     fn refresh_picker_metadata(&mut self) {
         let draft = self.compute_draft_session();
+        let current = self
+            .session_detail
+            .as_ref()
+            .map(|d| d.session_id().0.clone());
         if let Some(ref mut picker) = self.session_picker {
             picker.set_metadata(self.metadata_store.metadata().clone());
             picker.set_current_session_has_draft(draft);
+            picker.set_current_session_id(current);
         }
     }
 
