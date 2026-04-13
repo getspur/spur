@@ -59,3 +59,32 @@ fn load_malformed_file_returns_empty_store() {
     let store = SessionMetadataStore::load(&path);
     assert!(store.metadata().sessions.is_empty());
 }
+
+#[test]
+fn gc_removes_entries_for_sessions_not_in_live_list() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    let mut store = SessionMetadataStore::load(&path);
+
+    for id in ["alive1", "alive2", "gone1", "gone2"] {
+        store.upsert_entry(id.to_string(), SessionEntry::default());
+    }
+
+    let live_ids: Vec<String> = vec!["alive1".into(), "alive2".into()];
+    let removed = store.gc_orphans(&live_ids);
+    assert_eq!(removed.len(), 2);
+    assert!(removed.contains(&"gone1".to_string()));
+    assert!(removed.contains(&"gone2".to_string()));
+    assert_eq!(store.metadata().sessions.len(), 2);
+}
+
+#[test]
+fn gc_clears_last_active_when_that_session_is_orphaned() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    let mut store = SessionMetadataStore::load(&path);
+    store.upsert_entry("gone".into(), SessionEntry::default());
+    store.set_last_active("gone".into(), "2026-04-13T00:00:00Z".into());
+    store.gc_orphans(&[]);
+    assert!(store.metadata().last_active_session_id.is_none());
+}

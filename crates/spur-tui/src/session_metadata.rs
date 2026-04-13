@@ -90,6 +90,31 @@ impl SessionMetadataStore {
         self.metadata.last_active_at = Some(at);
     }
 
+    /// Remove entries for sessions no longer present in `live_ids`. If the
+    /// `last_active_session_id` points to a removed entry, clear it too.
+    /// Returns the session ids that were removed.
+    pub fn gc_orphans(&mut self, live_ids: &[String]) -> Vec<String> {
+        let live: std::collections::HashSet<&str> =
+            live_ids.iter().map(|s| s.as_str()).collect();
+        let to_remove: Vec<String> = self
+            .metadata
+            .sessions
+            .keys()
+            .filter(|k| !live.contains(k.as_str()))
+            .cloned()
+            .collect();
+        for id in &to_remove {
+            self.metadata.sessions.remove(id);
+        }
+        if let Some(ref last) = self.metadata.last_active_session_id {
+            if !live.contains(last.as_str()) {
+                self.metadata.last_active_session_id = None;
+                self.metadata.last_active_at = None;
+            }
+        }
+        to_remove
+    }
+
     /// Atomic save: write to `path.tmp`, then rename to `path`. Creates parent
     /// directory if missing. Survives process crashes and partial writes via
     /// POSIX rename semantics (macOS/Linux). Does not guarantee durability
