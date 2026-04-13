@@ -557,6 +557,25 @@ impl App {
                 self.dirty = true;
             }
 
+            Action::RenameSession {
+                session_id,
+                new_title,
+            } => {
+                let entry = self.metadata_store.entry_mut(&session_id);
+                entry.title_override = if new_title.trim().is_empty() {
+                    None
+                } else {
+                    Some(new_title)
+                };
+                if let Err(e) = self.metadata_store.save() {
+                    tracing::warn!(error = %e, "failed to persist rename");
+                }
+                if let Some(ref mut picker) = self.session_picker {
+                    picker.set_metadata(self.metadata_store.metadata().clone());
+                }
+                self.dirty = true;
+            }
+
             Action::NewSessionRequested => {
                 // Stub until Task 15 (BUG-2 fix) adds NewSessionWithMessage plumbing.
                 // For now, dismiss picker by navigating to Dashboard.
