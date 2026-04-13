@@ -382,7 +382,12 @@ impl Orchestrator {
                         }
                     };
 
-                    let sessions_result = match conn.list_sessions(ListSessionsRequest::new()).await {
+                    // Scope to the repo's cwd so we get project-local sessions, not every
+                    // session the agent has ever tracked. The ACP SDK treats an absent
+                    // cwd as "list everything globally" (for claude-agent-acp: all 194
+                    // sessions across all projects vs the 37 that belong to this repo).
+                    let list_req = ListSessionsRequest::new().cwd(self.repo_root.clone());
+                    let sessions_result = match conn.list_sessions(list_req).await {
                         Ok(response) => Ok(response.sessions),
                         Err(e) => {
                             // Fallback: read sessions from agent's local storage.
