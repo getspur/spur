@@ -362,6 +362,10 @@ impl App {
                     for msg in self.pending_user_messages.drain(..) {
                         view.push_user_message(&msg);
                     }
+                    // Restore draft from metadata, if any.
+                    if let Some(entry) = self.metadata_store.entry(&session.0) {
+                        view.restore_draft(&entry.draft);
+                    }
                     self.session_detail = Some(view);
                 }
 

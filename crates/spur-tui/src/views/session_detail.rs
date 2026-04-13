@@ -141,6 +141,22 @@ impl SessionDetailView {
         })
     }
 
+    /// Pre-fill the InputBar with a previously-saved draft. Empty string = no-op.
+    /// Also marks the draft as persisted so the next debounce tick doesn't
+    /// re-save the same text.
+    pub fn restore_draft(&mut self, draft: &str) {
+        if draft.is_empty() {
+            return;
+        }
+        self.input_bar.set_text(draft.to_string(), draft.len());
+        self.last_persisted_draft = draft.to_string();
+    }
+
+    /// Current text content of the InputBar (read-only accessor for tests).
+    pub fn input_bar_text(&self) -> &str {
+        self.input_bar.text()
+    }
+
     /// Install the graphics `Picker` used to build inline mermaid protocols.
     /// Called by `App` once after view construction. Cheap clone of a small value.
     #[cfg(feature = "markdown")]
