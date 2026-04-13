@@ -70,3 +70,27 @@ fn save_draft_only_fires_once_per_change() {
     // Second call without new typing: no-op.
     assert!(view.draft_save_action().is_none());
 }
+
+#[test]
+fn session_view_restores_draft_from_metadata() {
+    let mut view = SessionDetailView::new(
+        spur_acp::SessionId("sess-1".to_string()),
+        "claude-code-acp".into(),
+        "brain".into(),
+        std::path::PathBuf::from("."),
+    );
+    view.restore_draft("previous unsent text");
+    assert_eq!(view.input_bar_text(), "previous unsent text");
+}
+
+#[test]
+fn restore_draft_with_empty_string_is_noop() {
+    let mut view = SessionDetailView::new(
+        spur_acp::SessionId("sess-1".to_string()),
+        "claude-code-acp".into(),
+        "brain".into(),
+        std::path::PathBuf::from("."),
+    );
+    view.restore_draft("");
+    assert_eq!(view.input_bar_text(), "");
+}
