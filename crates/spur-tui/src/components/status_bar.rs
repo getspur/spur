@@ -29,6 +29,8 @@ impl StatusBar {
             ViewId::Dashboard => " [i]nput [Enter]focus [r]eview [s]essions [?]help [q]uit",
             ViewId::SessionDetail(_) => " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [?]help",
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
+            #[cfg(feature = "markdown")]
+            ViewId::MermaidOverlay(_) => " [Esc]close",
         };
 
         let mode_text = props
