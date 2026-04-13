@@ -158,3 +158,102 @@ fn replay_produces_identical_timestamps() {
     assert_eq!(aa.ended_at, ab.ended_at, "ended_at must be identical on replay");
     assert_eq!(aa.started_at, t0, "started_at must come from event.occurred_at");
 }
+
+#[test]
+fn replay_produces_byte_identical_state() {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let mk = |offset_secs: u64, body: SpurEventBody| SpurEvent {
+        occurred_at: t0 + Duration::from_secs(offset_secs),
+        body,
+    };
+
+    let events: Vec<SpurEvent> = vec![
+        mk(0, SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b".into()),
+        }),
+        mk(1, SpurEventBody::WorkerSpawned {
+            agent: "w".into(),
+            session: SessionId("w1".into()),
+            worktree: PathBuf::from("/tmp"),
+        }),
+        mk(2, SpurEventBody::DelegationRequested {
+            from: SessionId("b".into()),
+            to_agent: "w".into(),
+            task: "task".into(),
+        }),
+        mk(3, SpurEventBody::CostUpdate {
+            session: SessionId("w1".into()),
+            agent: "w".into(),
+            estimated_cost_usd: 0.25,
+        }),
+        mk(4, SpurEventBody::ExecutorArtifact {
+            id: "w1".into(),
+            artifact: Artifact::PrUrl("https://x".into()),
+        }),
+        mk(5, SpurEventBody::ExecutorReviewRequested {
+            id: "w1".into(),
+            kind: ReviewKind::Completion,
+            payload: ReviewPayload {
+                summary: "".into(), diff_summary: None, pr_url: None, error: None,
+            },
+        }),
+        mk(6, SpurEventBody::ExecutorReviewResolved {
+            id: "w1".into(),
+            decision: ReviewDecision::Approve,
+        }),
+        mk(7, SpurEventBody::DelegationCompleted {
+            worker_session: SessionId("w1".into()),
+            status: DelegationStatus::Success,
+        }),
+    ];
+
+    let mut a = ExecutorLineage::new();
+    for e in &events { a.apply(e); }
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let mut b = ExecutorLineage::new();
+    for e in &events { b.apply(e); }
+
+    let collect = |l: &ExecutorLineage| -> Vec<(ExecutorId, LifecycleState, Vec<(std::time::SystemTime, Option<std::time::SystemTime>)>)> {
+        let mut out: Vec<_> = l.nodes().map(|n| {
+            let attempts: Vec<_> = n.attempts.iter().map(|a| (a.started_at, a.ended_at)).collect();
+            (n.id.clone(), n.phase, attempts)
+        }).collect();
+        out.sort_by(|x, y| x.0.0.cmp(&y.0.0));
+        out
+    };
+
+    assert_eq!(collect(&a), collect(&b), "replay must produce identical state including timestamps");
+}
+
+#[test]
+fn applying_same_event_twice_is_idempotent_except_cost() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let spawn = SpurEvent {
+        occurred_at: t0,
+        body: SpurEventBody::ExecutorSpawned {
+            id: "w".into(), parent_id: None,
+            session_id: SessionId("s".into()),
+            agent: "a".into(), role: Role::Brain, task_spec: "".into(),
+        },
+    };
+    let phase = SpurEvent {
+        occurred_at: t0 + Duration::from_secs(1),
+        body: SpurEventBody::ExecutorPhaseChanged {
+            id: "w".into(), phase: LifecycleState::Running,
+        },
+    };
+
+    let mut l = ExecutorLineage::new();
+    l.apply(&spawn); l.apply(&phase);
+    l.apply(&spawn); l.apply(&phase); // re-apply — idempotent
+
+    let n = l.node(&ExecutorId::new("w")).unwrap();
+    assert_eq!(n.attempts.len(), 1, "duplicate spawn must not create new node/attempt");
+    assert_eq!(n.phase, LifecycleState::Running);
+}
