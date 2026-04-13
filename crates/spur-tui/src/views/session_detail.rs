@@ -391,10 +391,7 @@ impl SessionDetailView {
                 let idx = self.completion_popup.borrow().selected()?;
                 let hit = self.active_mention_hits.get(idx)?.clone();
 
-                // Replace the `@query` token with an empty string, then
-                // insert the atom at the vacated position.
-                // `replace_trigger_token` leaves the cursor at
-                // `prefix_start`; `insert_atom` then inserts there.
+                // Clear the `@query` range, then insert the atom at the vacated position.
                 self.replace_trigger_token(trig.prefix_start, "");
                 let atom = format!("@{}", hit.display);
                 self.input_bar.insert_atom(atom, hit.uri, hit.display);
@@ -761,23 +758,15 @@ impl View for SessionDetailView {
                 if session.0 != self.session_id.0 {
                     return;
                 }
-                if method == "_kiro.dev/commands/available" {
-                    if let Some(cmds) = params
-                        .get("availableCommands")
-                        .and_then(|v| v.as_array())
-                    {
-                        let parsed: Vec<spur_acp::AvailableCommand> = cmds
-                            .iter()
-                            .filter_map(|c| {
-                                serde_json::from_value::<spur_acp::AvailableCommand>(
-                                    c.clone(),
-                                )
-                                .ok()
-                            })
-                            .collect();
-                        self.command_registry.set_agent_commands("kiro", parsed);
+                if method == spur_acp::ext::KIRO_COMMANDS_AVAILABLE {
+                    if let Some(arr) = params.get("availableCommands").cloned() {
+                        if let Ok(parsed) =
+                            serde_json::from_value::<Vec<spur_acp::AvailableCommand>>(arr)
+                        {
+                            self.command_registry.set_agent_commands("kiro", parsed);
+                        }
                     }
-                } else if method == "_spur.dev/kiro/execute/response" {
+                } else if method == spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE {
                     self.push_system_note(format!(
                         "\u{27e8}kiro\u{27e9} response: {}",
                         params

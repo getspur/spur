@@ -22,6 +22,10 @@ pub struct CompletionPopup {
     rows: Vec<PopupRow>,
     state: ListState,
     empty_message: String,
+    /// Cached row widths recomputed on `set_rows`. Avoids 3× per-frame scan.
+    max_label: usize,
+    max_desc: usize,
+    max_tag: usize,
 }
 
 impl CompletionPopup {
@@ -30,10 +34,16 @@ impl CompletionPopup {
             rows: Vec::new(),
             state: ListState::default(),
             empty_message: "No matches. Type to refine, Esc to dismiss.".to_string(),
+            max_label: 0,
+            max_desc: 0,
+            max_tag: 0,
         }
     }
 
     pub fn set_rows(&mut self, rows: Vec<PopupRow>) {
+        self.max_label = rows.iter().map(|r| r.label.len()).max().unwrap_or(0);
+        self.max_desc = rows.iter().map(|r| r.description.len()).max().unwrap_or(0);
+        self.max_tag = rows.iter().map(|r| r.source_tag.len()).max().unwrap_or(0);
         self.rows = rows;
         if !self.rows.is_empty() {
             self.state.select(Some(0));
@@ -79,20 +89,7 @@ impl CompletionPopup {
     pub fn render(&mut self, frame: &mut Frame, anchor: Rect, container: Rect) {
         let max_rows = self.rows.len().clamp(1, 8) as u16;
         let popup_height = max_rows + 2; // +2 for the block border
-        let max_label = self.rows.iter().map(|r| r.label.len()).max().unwrap_or(0);
-        let max_desc = self
-            .rows
-            .iter()
-            .map(|r| r.description.len())
-            .max()
-            .unwrap_or(0);
-        let max_tag = self
-            .rows
-            .iter()
-            .map(|r| r.source_tag.len())
-            .max()
-            .unwrap_or(0);
-        let desired_width = (max_label + max_desc + max_tag + 8) as u16;
+        let desired_width = (self.max_label + self.max_desc + self.max_tag + 8) as u16;
         let popup_width = desired_width
             .min(container.width / 2)
             .max(30)

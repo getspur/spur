@@ -92,7 +92,7 @@ fn kiro_available_notification_populates_registry() {
     });
     let ev = SpurEvent::now(SpurEventBody::AgentExtNotification {
         session: sid,
-        method: "_kiro.dev/commands/available".to_string(),
+        method: spur_acp::ext::KIRO_COMMANDS_AVAILABLE.to_string(),
         params,
     });
     view.handle_spur_event(&ev);

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod connection;
 pub mod domain;
+pub mod ext;
 pub mod protocol;
 pub mod registry;
 pub mod types;

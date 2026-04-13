@@ -18,9 +18,8 @@ pub fn rank(entries: &[CommandEntry], query: &str) -> Vec<CommandEntry> {
     let mut scored: Vec<(u32, CommandEntry)> = entries
         .iter()
         .filter_map(|e| {
-            let haystack = e.name.clone();
             let score = pattern.score(
-                nucleo_matcher::Utf32Str::new(&haystack, &mut Vec::new()),
+                nucleo_matcher::Utf32Str::new(&e.name, &mut Vec::new()),
                 &mut matcher,
             )?;
             Some((score, e.clone()))
