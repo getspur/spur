@@ -74,6 +74,9 @@ pub struct SessionDetailView {
     last_draft_change_at: Option<std::time::Instant>,
     /// Last InputBar text value written to the metadata store (initially "").
     last_persisted_draft: String,
+    /// Informational banner shown when the session was auto-resumed on
+    /// startup. Auto-fades after 3s or on first keystroke.
+    resume_banner: Option<crate::components::resume_banner::ResumeBanner>,
 }
 
 impl SessionDetailView {
@@ -111,7 +114,25 @@ impl SessionDetailView {
             render_picker: None,
             last_draft_change_at: None,
             last_persisted_draft: String::new(),
+            resume_banner: None,
         }
+    }
+
+    /// Show the resume banner for an auto-resumed session. Called by App on
+    /// startup after reading session metadata.
+    pub fn show_resume_banner(&mut self, title: String, quit_ago: String) {
+        self.resume_banner = Some(crate::components::resume_banner::ResumeBanner::new(
+            title, quit_ago,
+        ));
+    }
+
+    /// Whether the resume banner is currently visible (not dismissed and
+    /// within its 3s auto-fade window).
+    pub fn banner_is_visible(&self) -> bool {
+        self.resume_banner
+            .as_ref()
+            .map(|b| b.should_render())
+            .unwrap_or(false)
     }
 
     /// Test/debug helper. Overrides the internal debounce clock so tests can
@@ -686,6 +707,12 @@ impl SessionDetailView {
 
 impl View for SessionDetailView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Any keystroke dismisses the resume banner, but the key continues
+        // to flow through to the normal handler — the banner is purely
+        // informational and never consumes input.
+        if let Some(ref mut banner) = self.resume_banner {
+            banner.dismiss();
+        }
         let action = self.handle_key_inner(key);
         // Arm the draft-save debounce whenever the InputBar text diverges
         // from the last persisted value. This covers inserts, deletes, and
@@ -940,6 +967,26 @@ impl View for SessionDetailView {
     fn render(&self, frame: &mut Frame, area: Rect) {
         let elapsed = self.elapsed();
 
+        // Reserve the top row for the (non-blocking) resume banner when
+        // visible. Subsequent banner/content layout operates on `area_rest`.
+        let (resume_banner_area, area_rest) = if self.banner_is_visible() {
+            let banner = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            };
+            let rest = Rect {
+                x: area.x,
+                y: area.y + 1,
+                width: area.width,
+                height: area.height.saturating_sub(1),
+            };
+            (Some(banner), rest)
+        } else {
+            (None, area)
+        };
+
         // If an auth error is active, split off the top 3 rows for a red
         // banner. This preserves the rest of the layout exactly as before.
         let (banner_area, content_area) = if self.auth_error.is_some() {
@@ -947,10 +994,10 @@ impl View for SessionDetailView {
                 Constraint::Length(3),
                 Constraint::Min(0),
             ])
-            .areas(area);
+            .areas(area_rest);
             (Some(banner), content)
         } else {
-            (None, area)
+            (None, area_rest)
         };
 
         if let (Some(banner_area), Some(msg)) = (banner_area, self.auth_error.as_ref()) {
@@ -1043,6 +1090,13 @@ impl View for SessionDetailView {
                 context_size: self.context_size,
             },
         );
+
+        // ── Resume banner (top row, if visible) ─────────────────────────
+        if let (Some(banner), Some(rect)) =
+            (self.resume_banner.as_ref(), resume_banner_area)
+        {
+            banner.render(frame, rect);
+        }
     }
 }
 
