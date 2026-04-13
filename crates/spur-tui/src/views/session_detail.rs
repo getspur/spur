@@ -258,7 +258,10 @@ impl SessionDetailView {
             // of the underlying data. If the Arc has a single ref, this is O(1);
             // otherwise it copies pixels once (still rare — Arc is typically
             // single-owner at this point).
-            Ok(image_arc) => MermaidState::Ready { image: (*image_arc).clone() },
+            Ok(image_arc) => MermaidState::Ready {
+                image: (*image_arc).clone(),
+                inline_protocol: std::cell::RefCell::new(None),
+            },
             Err(message) => MermaidState::Error { message },
         };
         self.mermaid_registry.insert(ref_id, state);

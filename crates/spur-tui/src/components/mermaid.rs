@@ -14,10 +14,12 @@
 //! `std::panic::catch_unwind` in [`render_mermaid`], so a bad diagram never
 //! unwinds the caller.
 
+use std::cell::RefCell;
 use std::panic;
 use std::sync::{Arc, OnceLock};
 
 use image::DynamicImage;
+use ratatui_image::protocol::StatefulProtocol;
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -26,12 +28,36 @@ use image::DynamicImage;
 pub struct MermaidId(pub u64);
 
 /// State machine for a pending / rendered mermaid diagram.
-#[derive(Debug)]
 pub enum MermaidState {
     Pending { code: String },
     Rendering,
-    Ready { image: DynamicImage },
+    Ready {
+        image: DynamicImage,
+        /// Lazily-built ratatui_image protocol state for inline rendering.
+        /// Populated on first render; invalidated on terminal resize.
+        /// `RefCell` is required because the render path takes `&self`.
+        inline_protocol: RefCell<Option<StatefulProtocol>>,
+    },
     Error { message: String },
+}
+
+impl std::fmt::Debug for MermaidState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MermaidState::Pending { code } => {
+                f.debug_struct("Pending").field("code", code).finish()
+            }
+            MermaidState::Rendering => f.debug_struct("Rendering").finish(),
+            MermaidState::Ready { image, .. } => f
+                .debug_struct("Ready")
+                .field("image_size", &(image.width(), image.height()))
+                .field("inline_protocol", &"<cached>")
+                .finish(),
+            MermaidState::Error { message } => {
+                f.debug_struct("Error").field("message", message).finish()
+            }
+        }
+    }
 }
 
 /// Error type returned by [`render_mermaid`].
@@ -243,6 +269,24 @@ mod tests {
                 "rasterize_svg panicked on input: {svg:?}"
             );
             // The inner Result may be Ok or Err — both are fine.
+        }
+    }
+
+    #[test]
+    fn ready_state_holds_inline_protocol_slot() {
+        use std::cell::RefCell;
+        use image::RgbaImage;
+
+        let img = DynamicImage::ImageRgba8(RgbaImage::new(10, 10));
+        let state = MermaidState::Ready {
+            image: img,
+            inline_protocol: RefCell::new(None),
+        };
+        match state {
+            MermaidState::Ready { inline_protocol, .. } => {
+                assert!(inline_protocol.borrow().is_none());
+            }
+            _ => panic!("expected Ready"),
         }
     }
 }
