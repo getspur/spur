@@ -14,6 +14,8 @@ pub struct StatusBar;
 #[derive(Clone, Copy)]
 pub struct StatusBarProps<'a> {
     pub view: &'a ViewId,
+    pub running: usize,
+    pub pending_review: usize,
     pub total_cost: f64,
     pub elapsed: &'a str,
     pub current_mode: Option<&'a str>,
@@ -24,7 +26,7 @@ pub struct StatusBarProps<'a> {
 impl StatusBar {
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         let hints = match props.view {
-            ViewId::Dashboard => " [i]nput [Enter]session [s]essions [?]help [q]uit",
+            ViewId::Dashboard => " [i]nput [Enter]focus [r]eview [s]essions [?]help [q]uit",
             ViewId::SessionDetail(_) => " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [?]help",
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
         };
@@ -43,20 +45,43 @@ impl StatusBar {
             _ => String::new(),
         };
 
+        // Build the review span: yellow+bold when reviews are pending, dark-gray otherwise.
+        let review_style = if props.pending_review > 0 {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
         let right = Line::from(vec![
+            Span::styled(
+                format!("{} running", props.running),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} review", props.pending_review),
+                review_style,
+            ),
+            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("${:.2}", props.total_cost),
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(
-                format!(" {} ", props.elapsed),
+                format!(" · {} ", props.elapsed),
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(mode_text, Style::default().fg(Color::Magenta)),
             Span::styled(usage_text, Style::default().fg(Color::LightBlue)),
+            Span::styled(
+                "?: help",
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw(" "),
             Span::styled(
-                "SPUR",
+                "spur",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
         ]);
