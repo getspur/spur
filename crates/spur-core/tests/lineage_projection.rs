@@ -105,6 +105,8 @@ fn review_requested_populates_pending_review_and_phase() {
     let n = l.node(&ExecutorId::new("w")).unwrap();
     assert!(n.pending_review.is_some());
     assert_eq!(n.phase, LifecycleState::AwaitingReview);
+    let r = n.pending_review.as_ref().unwrap();
+    assert_eq!(r.attempt_n, 1, "attempt_n must be carried into ReviewRequest");
 }
 
 #[test]

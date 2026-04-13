@@ -140,6 +140,8 @@ pub enum SpurEventBody {
     },
     ExecutorRetryStarted {
         id: String,
+        /// 1-based index of the new attempt; validated against the projection's
+        /// current attempt count to detect dropped retry events.
         attempt_n: u32,
         reason: String,
         new_session_id: SessionId,
