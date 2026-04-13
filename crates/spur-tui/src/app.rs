@@ -478,6 +478,8 @@ impl App {
                 if let Some(id) = next {
                     self.dashboard.agents_tree_mut().set_selected(Some(id.clone()));
                     self.dashboard.set_focused_node(Some(id));
+                    self.dashboard.detail_pane_mut().current_tab =
+                        crate::components::detail_pane::DetailTab::Review;
                 }
             }
             Action::ToggleCollapse => {
@@ -487,6 +489,15 @@ impl App {
                 }
             }
             Action::SubmitReview { executor_id, decision } => {
+                let has_review = self
+                    .lineage
+                    .node(&spur_core::ExecutorId(executor_id.clone()))
+                    .map(|n| n.pending_review.is_some())
+                    .unwrap_or(false);
+                if !has_review {
+                    tracing::warn!(executor_id = %executor_id, "SubmitReview ignored: no pending review on this node");
+                    return;
+                }
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::SubmitReview {
                         executor_id: executor_id.clone(),

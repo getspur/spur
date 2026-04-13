@@ -15,6 +15,9 @@ pub struct ExecutorLineage {
     roots: Vec<ExecutorId>,
     /// Events received for an executor before its `ExecutorSpawned`.
     orphan_buffer: HashMap<ExecutorId, VecDeque<SpurEvent>>,
+    /// Insertion-ordered queue of ids with active pending reviews. Maintained
+    /// alongside `nodes` so `pending_reviews()` returns deterministic order.
+    pending_review_order: VecDeque<ExecutorId>,
 }
 
 impl ExecutorLineage {
@@ -119,6 +122,9 @@ impl ExecutorLineage {
                         payload: map_review_payload(payload),
                         requested_at: *requested_at,
                     });
+                    if !self.pending_review_order.contains(&eid) {
+                        self.pending_review_order.push_back(eid.clone());
+                    }
                 } else {
                     self.buffer_orphan(eid, event.clone());
                 }
@@ -131,6 +137,7 @@ impl ExecutorLineage {
                     // Phase stays `AwaitingReview` until a subsequent
                     // PhaseChanged or RetryStarted moves it. Orchestrator owns
                     // that transition.
+                    self.pending_review_order.retain(|x| x != &eid);
                 } else {
                     self.buffer_orphan(eid, event.clone());
                 }
@@ -197,11 +204,7 @@ impl ExecutorLineage {
     }
 
     pub fn pending_reviews(&self) -> Vec<ExecutorId> {
-        self.nodes
-            .values()
-            .filter(|n| n.pending_review.is_some())
-            .map(|n| n.id.clone())
-            .collect()
+        self.pending_review_order.iter().cloned().collect()
     }
 
     pub(crate) fn insert_root_node(&mut self, node: ExecutorNode) {
