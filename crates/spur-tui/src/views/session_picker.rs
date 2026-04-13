@@ -78,6 +78,12 @@ pub struct SessionPickerView {
     /// Used to decide whether Enter on a different session (or [+ New])
     /// should show the switch-safety confirm banner.
     current_session_with_draft: Option<String>,
+    /// SPUR session id of the currently-active SessionDetail, if any.
+    /// Distinct from `current_session_with_draft` (which is Some only when
+    /// the active session has UNSENT draft text). Used so that Enter on the
+    /// current session's row short-circuits to NavigateTo instead of
+    /// pointlessly re-resuming the session the user is already in.
+    current_session_id: Option<String>,
     /// `Some` when the confirm-switch banner is up. Encodes what to do on
     /// `y`/`Enter` confirm: resume the given id, or start a new session.
     confirm_switch: Option<ConfirmSwitchTarget>,
@@ -93,6 +99,7 @@ impl SessionPickerView {
             rename_state: None,
             preview_visible: false,
             current_session_with_draft: None,
+            current_session_id: None,
             confirm_switch: None,
         }
     }
@@ -109,6 +116,12 @@ impl SessionPickerView {
     /// the id of the current session if it has an unsent draft, else None.
     pub fn set_current_session_has_draft(&mut self, session_id: Option<String>) {
         self.current_session_with_draft = session_id;
+    }
+
+    /// Push the SPUR session id of the currently-active SessionDetail into
+    /// the picker. `None` when Dashboard is the active view.
+    pub fn set_current_session_id(&mut self, session_id: Option<String>) {
+        self.current_session_id = session_id;
     }
 
     pub fn is_confirm_switch_visible(&self) -> bool {
@@ -807,6 +820,7 @@ impl View for SessionPickerView {
                 metadata,
                 show_archived,
                 current_session_with_draft,
+                current_session_id,
                 ..
             } = self;
             match state {
@@ -891,20 +905,31 @@ impl View for SessionPickerView {
                                     );
                                     let real_idx = indices.get(*cursor - 1).copied()?;
                                     let sid = sessions[real_idx].session_id.0.to_string();
-                                    // Confirm only when the draft belongs to a DIFFERENT
-                                    // session than the one being resumed.
-                                    let draft_elsewhere = current_session_with_draft
-                                        .as_ref()
-                                        .map(|cur| cur != &sid)
-                                        .unwrap_or(false);
-                                    if draft_elsewhere {
-                                        post = Post::StartConfirmSwitch(
-                                            ConfirmSwitchTarget::Resume(sid),
-                                        );
-                                        None
+
+                                    if current_session_id.as_deref() == Some(sid.as_str()) {
+                                        // Short-circuit: the selected row IS the currently-active session.
+                                        // Don't re-resume — just navigate back to its detail view. No
+                                        // backend traffic; no confirm-switch banner (there's nothing to
+                                        // switch away from).
+                                        Some(Action::NavigateTo(ViewId::SessionDetail(
+                                            spur_acp::SessionId(sid),
+                                        )))
                                     } else {
-                                        *resuming = true;
-                                        Some(Action::ResumeSession { session_id: sid })
+                                        // Confirm only when the draft belongs to a DIFFERENT session than
+                                        // the one being resumed.
+                                        let draft_elsewhere = current_session_with_draft
+                                            .as_ref()
+                                            .map(|cur| cur != &sid)
+                                            .unwrap_or(false);
+                                        if draft_elsewhere {
+                                            post = Post::StartConfirmSwitch(
+                                                ConfirmSwitchTarget::Resume(sid),
+                                            );
+                                            None
+                                        } else {
+                                            *resuming = true;
+                                            Some(Action::ResumeSession { session_id: sid })
+                                        }
                                     }
                                 }
                             }
@@ -995,5 +1020,60 @@ impl View for SessionPickerView {
 
     fn tick(&mut self) {
         // No animations in the picker.
+    }
+}
+
+#[cfg(test)]
+mod current_session_shortcut_tests {
+    use super::*;
+    use crate::action::{Action, ViewId};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
+
+    fn make_session(id: &str) -> SessionInfo {
+        SessionInfo::new(id.to_string(), PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn enter_on_current_session_row_navigates_back() {
+        let mut picker = SessionPickerView::new();
+        picker.set_sessions("test-brain".into(), vec![make_session("A")]);
+        picker.set_current_session_id(Some("A".into()));
+
+        // Cursor starts at 0 ([+ New session]); move to 1 (the A row).
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match action {
+            Some(Action::NavigateTo(ViewId::SessionDetail(sid))) => {
+                assert_eq!(sid.0, "A");
+            }
+            other => panic!(
+                "expected NavigateTo(SessionDetail(A)), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn enter_on_different_session_row_still_resumes() {
+        let mut picker = SessionPickerView::new();
+        picker.set_sessions(
+            "test-brain".into(),
+            vec![make_session("A"), make_session("B")],
+        );
+        picker.set_current_session_id(Some("A".into()));
+
+        // Move cursor to row index 2 = session B.
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match action {
+            Some(Action::ResumeSession { session_id }) => {
+                assert_eq!(session_id, "B");
+            }
+            other => panic!("expected ResumeSession(B), got {:?}", other),
+        }
     }
 }
