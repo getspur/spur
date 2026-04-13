@@ -1151,7 +1151,7 @@ impl Orchestrator {
         // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
         // fall back to new_session so we have a working session for subsequent prompts.
         // The historical conversation is displayed from the disk fallback in either case.
-        let (final_acp_session_id, history_stream) = match connection
+        let (final_acp_session_id, history_stream, resumed) = match connection
             .load_session(
                 LoadSessionRequest::new(acp_session_id.clone(), self.repo_root.clone())
                     .mcp_servers(mcp_servers.clone()),
@@ -1160,7 +1160,7 @@ impl Orchestrator {
         {
             Ok(stream) => {
                 debug!(brain = %brain_name, "load_session succeeded");
-                (acp_session_id, Some(stream))
+                (acp_session_id, Some(stream), true)
             }
             Err(e) => {
                 warn!(brain = %brain_name, error = %e, "load_session failed, falling back to new_session");
@@ -1168,7 +1168,7 @@ impl Orchestrator {
                     .new_session(self.repo_root.clone(), mcp_servers)
                     .await
                     .context("Failed to create fallback session after load_session failure")?;
-                (session_response.session_id.to_string(), None)
+                (session_response.session_id.to_string(), None, false)
             }
         };
 
@@ -1199,6 +1199,13 @@ impl Orchestrator {
                 }
             });
         }
+
+        self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
+            session: session_id.clone(),
+            acp_session_id: final_acp_session_id.clone(),
+            brain: brain_name.clone(),
+            resumed,
+        }));
 
         let brain_session = BrainSession {
             connection,
