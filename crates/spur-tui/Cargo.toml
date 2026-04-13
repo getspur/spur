@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["markdown"]
+markdown = ["dep:tui-markdown", "dep:mermaid-rs-renderer", "dep:image", "dep:ratatui-image"]
+
 [dependencies]
 spur-acp = { workspace = true }
 spur-core = { workspace = true }
@@ -18,6 +22,12 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 unicode-width = "0.1"
+
+# Markdown + mermaid stack (gated by `markdown` feature)
+tui-markdown = { version = "0.3", optional = true }
+mermaid-rs-renderer = { version = "0.2", default-features = false, features = ["png"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+ratatui-image = { version = "10", default-features = false, features = ["tokio", "chafa-dyn"], optional = true }
 
 [dev-dependencies]
 agent-client-protocol = { workspace = true }
