@@ -48,6 +48,7 @@ fn full_flow_brain_to_review_to_resolved() {
     let n = l.node(&ExecutorId::new("w1")).unwrap();
     assert_eq!(n.phase, LifecycleState::AwaitingReview);
     assert!(n.pending_review.is_some());
+    assert_eq!(n.pending_review.as_ref().unwrap().attempt_n, 1);
     assert_eq!(l.pending_reviews().len(), 1);
 
     // User approves
