@@ -52,34 +52,80 @@ impl InputBar {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<(String, bool)> {
         match key.code {
             KeyCode::Char(c) => {
-                self.text.insert(self.cursor, c);
-                self.cursor += c.len_utf8();
+                if let Some(idx) = self.range_at(self.cursor) {
+                    self.delete_range(idx);
+                }
+                let at = self.cursor;
+                self.text.insert(at, c);
+                self.shift_ranges(at, c.len_utf8() as isize);
+                self.cursor = at + c.len_utf8();
                 None
             }
             KeyCode::Backspace => {
-                if self.cursor > 0 {
-                    // Find the start of the previous character.
+                if let Some(idx) = self.range_at(self.cursor) {
+                    self.delete_range(idx);
+                } else if let Some(idx) = self.range_ending_at(self.cursor) {
+                    self.delete_range(idx);
+                } else if let Some(idx) = self.range_starting_at(self.cursor) {
+                    // Cursor sits on the left edge of an atom (e.g. after
+                    // arrow-skipping into it from the right). Treat the atom
+                    // as the unit-to-delete rather than the character before
+                    // it — this keeps atom semantics consistent with how
+                    // arrow keys treat the same boundary.
+                    self.delete_range(idx);
+                } else if self.cursor > 0 {
                     let prev = self.prev_char_boundary(self.cursor);
+                    let delta = -((self.cursor - prev) as isize);
                     self.text.drain(prev..self.cursor);
+                    self.shift_ranges(prev, delta);
                     self.cursor = prev;
                 }
                 None
             }
             KeyCode::Delete => {
-                if self.cursor < self.text.len() {
+                if let Some(idx) = self.range_at(self.cursor) {
+                    self.delete_range(idx);
+                } else if let Some(idx) = self.range_starting_at(self.cursor) {
+                    self.delete_range(idx);
+                } else if self.cursor < self.text.len() {
                     let next = self.next_char_boundary(self.cursor);
+                    let delta = -((next - self.cursor) as isize);
                     self.text.drain(self.cursor..next);
+                    self.shift_ranges(self.cursor, delta);
                 }
                 None
             }
             KeyCode::Left => {
-                if self.cursor > 0 {
+                if let Some(idx) = self
+                    .range_at(self.cursor)
+                    .or_else(|| self.range_ending_at(self.cursor))
+                {
+                    // Cursor is inside or at the right edge of an atom — jump
+                    // to its left edge (atomic skip).
+                    let r = &self.protected_ranges[idx];
+                    self.cursor = r.start;
+                } else if self.cursor > 0 {
                     self.cursor = self.prev_char_boundary(self.cursor);
+                } else if let Some(idx) = self.range_starting_at(self.cursor) {
+                    // Cursor is at byte 0 with an atom starting there and
+                    // nothing to its left — re-enter the atom from its left
+                    // side so a subsequent character key triggers the
+                    // "typing inside an atom replaces it" path.
+                    let r = &self.protected_ranges[idx];
+                    if r.end > r.start + 1 {
+                        self.cursor = r.start + 1;
+                    }
                 }
                 None
             }
             KeyCode::Right => {
-                if self.cursor < self.text.len() {
+                if let Some(idx) = self
+                    .range_at(self.cursor)
+                    .or_else(|| self.range_starting_at(self.cursor))
+                {
+                    let r = &self.protected_ranges[idx];
+                    self.cursor = r.end;
+                } else if self.cursor < self.text.len() {
                     self.cursor = self.next_char_boundary(self.cursor);
                 }
                 None
@@ -105,6 +151,40 @@ impl InputBar {
             }
             _ => None,
         }
+    }
+
+    /// Insert a protected atom at the cursor. If the cursor is inside an
+    /// existing range, that range is deleted first.
+    pub fn insert_atom(
+        &mut self,
+        text: impl AsRef<str>,
+        uri: String,
+        name: String,
+    ) {
+        if let Some(idx) = self.range_at(self.cursor) {
+            self.delete_range(idx);
+        }
+        let at = self.cursor;
+        let s = text.as_ref();
+        self.text.insert_str(at, s);
+        let end = at + s.len();
+        self.shift_ranges(at, s.len() as isize);
+        self.protected_ranges.push(ProtectedRange {
+            start: at,
+            end,
+            uri,
+            name,
+        });
+        self.protected_ranges.sort_by_key(|r| r.start);
+        self.cursor = end;
+    }
+
+    /// Test-only: set the cursor position without asserting anything else.
+    #[doc(hidden)]
+    pub fn set_text_cursor_for_test(&mut self, cursor: usize) {
+        assert!(cursor <= self.text.len());
+        assert!(self.text.is_char_boundary(cursor));
+        self.cursor = cursor;
     }
 
     /// The current text content.
@@ -237,6 +317,45 @@ impl InputBar {
             idx += 1;
         }
         idx.min(self.text.len())
+    }
+
+    /// Index of the protected range that strictly contains `pos`
+    /// (i.e. `r.start < pos < r.end`). Use [`range_starting_at`] /
+    /// [`range_ending_at`] for adjacency at the boundaries.
+    fn range_at(&self, pos: usize) -> Option<usize> {
+        self.protected_ranges
+            .iter()
+            .position(|r| pos > r.start && pos < r.end)
+    }
+
+    /// Index of the protected range that ends exactly at `pos`.
+    fn range_ending_at(&self, pos: usize) -> Option<usize> {
+        self.protected_ranges.iter().position(|r| r.end == pos)
+    }
+
+    /// Index of the protected range that starts exactly at `pos`.
+    fn range_starting_at(&self, pos: usize) -> Option<usize> {
+        self.protected_ranges.iter().position(|r| r.start == pos)
+    }
+
+    /// Shift all ranges with `start >= at` by `delta` bytes.
+    fn shift_ranges(&mut self, at: usize, delta: isize) {
+        for r in &mut self.protected_ranges {
+            if r.start >= at {
+                r.start = (r.start as isize + delta) as usize;
+                r.end = (r.end as isize + delta) as usize;
+            }
+        }
+    }
+
+    /// Remove the range at `idx`, drain its bytes from `text`, place the
+    /// cursor at the range start, and shift trailing ranges left.
+    fn delete_range(&mut self, idx: usize) {
+        let r = self.protected_ranges.remove(idx);
+        let len = r.end - r.start;
+        self.text.drain(r.start..r.end);
+        self.cursor = r.start;
+        self.shift_ranges(r.start, -(len as isize));
     }
 }
 
