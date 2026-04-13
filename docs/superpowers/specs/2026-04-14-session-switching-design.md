@@ -128,25 +128,52 @@ Action::NewSessionRequested => {
 }
 ```
 
-### 4. Fix orchestrator `ResumeSession` leak
+### 4. Fix brain-cleanup on session switch (connection reuse)
 
-In `crates/spur-core/src/orchestrator.rs`, at the top of the
-`InteractiveInput::ResumeSession` arm (around line 447), before the
-`agent_connection.take()` / `connect_brain` branch:
+Both `ResumeSession` (leak bug) and `NewSessionWithMessage` (existing
+but over-aggressive teardown) currently call `b.connection.shutdown()`
+on the prior brain, which kills the agent subprocess. For
+claude-code-acp that's a 1–3s node restart per switch; for any agent
+it is wasted work. The ACP connection is stateful at two levels —
+transport/subprocess and session — and only the session needs
+replacing on a switch.
+
+Unify both arms around this cleanup block, placed at the top of each
+arm before the existing `match agent_connection.take()` / branch:
 
 ```rust
-// If there's an active brain, tear it down before loading the new one.
-// Mirrors the NewSessionWithMessage cleanup block.
+// If there's an active brain, retire its session-level state but keep
+// the initialized connection alive for the next load_brain_session /
+// create_brain_session call. Aborting the delegation handle prevents
+// orphan MCP worker responses; shutting down the MCP server frees the
+// endpoint so the next session can bind a fresh one.
 if let Some(mut b) = brain.take() {
     b.delegation_handle.abort();
-    let _ = b.connection.shutdown().await;
     let _ = b.mcp_server.shutdown();
+    // Preserve connection for reuse below.
+    agent_connection = Some((b.connection, b.brain_name));
 }
 ```
 
-`connection.cancel()` is NOT needed here because `ResumeSession` is
-queued while a turn is streaming (see "Mid-turn behavior" above) — by
-the time this arm runs, the stream has already completed.
+The subsequent `match agent_connection.take() { Some(existing) => ..., None => connect_brain(...) }`
+in each arm picks up the reused `(connection, brain_name)` pair and
+hands it to `load_brain_session` or `create_brain_session`, which
+then performs `load_session` or `new_session` on the existing ACP
+channel. The old ACP session id on the agent side is abandoned
+silently — the protocol has no `close_session`, and most ACP agents
+treat unreferenced sessions as inert.
+
+`connection.cancel()` is NOT called because `ResumeSession` is
+queued while a turn is streaming (see "Mid-turn behavior") — by the
+time this arm runs, the stream has already completed. For
+`NewSessionWithMessage`, the stream has completed for the same
+reason.
+
+The existing `NewSessionWithMessage` arm's `b.connection.shutdown()`
+line is replaced by the cleanup block above. Shared blocks should be
+a private helper on `Orchestrator`, e.g.
+`fn retire_active_brain(&mut self, brain: &mut Option<BrainSession>, agent_connection: &mut Option<(Box<dyn AgentConnection>, String)>)`,
+to avoid copy-paste drift.
 
 ### 5. Explicit non-scope
 
@@ -159,6 +186,11 @@ the time this arm runs, the stream has already completed.
 - **`resumed=false` toast after user-initiated resume.** Would need
   to distinguish user-intent-resume from fresh spawn at the event
   level. Defer; silent recovery is acceptable.
+- **Esc-from-picker returns to origin view.** Today, Esc inside the
+  picker navigates to Dashboard. After this change, users will open
+  the picker from SessionDetail, and Esc returning to Dashboard
+  rather than back to the original session is a minor regression.
+  Fixing it requires picker-origin tracking in App. Defer.
 - **Pseudo-row "+ New session"** — already exists in the picker.
 - **Draft-confirm switch banner** — already exists in the picker.
 - **`n` keybinding for new session in picker** — already exists.
@@ -181,12 +213,18 @@ the time this arm runs, the stream has already completed.
    results in a `UserInput::NewSessionWithMessage { blocks: [],
    interrupt: false }` being sent on the user_input channel.
 
-4. **Orchestrator shuts down prior brain on Resume** (spur-core):
-   With a mocked `BrainSession` wired into `run_interactive` and then
-   a `ResumeSession` dispatched, assert `connection.shutdown` and
-   `mcp_server.shutdown` are called on the prior brain before the
-   new one is loaded. (Requires a test mock; if the harness is too
-   heavy, demote this to a manual-smoke verification.)
+4. **Orchestrator retires prior brain on switch** (spur-core):
+   With a mocked `BrainSession` wired into `run_interactive` and a
+   `ResumeSession` (or `NewSessionWithMessage`) dispatched, assert:
+   - `delegation_handle.abort()` was called on the prior brain.
+   - `mcp_server.shutdown()` was called.
+   - `connection.shutdown()` was NOT called — the connection is
+     preserved in the `agent_connection` slot for reuse.
+   - The subsequent `load_brain_session` / `create_brain_session`
+     receives the reused connection (not a fresh `connect_brain`).
+   (Requires a test mock; if the harness is too heavy, demote to a
+   manual-smoke verification that checks `ps aux | grep node` shows
+   exactly one claude-code-acp process across a switch.)
 
 5. **Manual smoke:** with two existing claude-code-acp sessions in
    `session_metadata.json`, from an active SessionDetail on A, press
@@ -205,7 +243,9 @@ the time this arm runs, the stream has already completed.
   `current_session_id` field + setter + short-circuit in Enter handler.
 - `crates/spur-tui/src/app.rs` — fix `NewSessionRequested` handler;
   push current_session_id in `refresh_picker_metadata`.
-- `crates/spur-core/src/orchestrator.rs` — cleanup block in
-  `ResumeSession` arm.
+- `crates/spur-core/src/orchestrator.rs` — extract `retire_active_brain`
+  helper; call it from both `ResumeSession` and `NewSessionWithMessage`
+  arms, replacing their current cleanup blocks.
 
-Expected size: ~60-80 LoC across 5 files.
+Expected size: ~80-100 LoC across 5 files (the orchestrator helper
+extraction adds a few lines relative to inline blocks).
