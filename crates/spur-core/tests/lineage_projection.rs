@@ -395,6 +395,11 @@ fn review_cancelled_clears_pending_review() {
         .unwrap()
         .pending_review
         .is_none());
+    let pending = lineage.pending_reviews();
+    assert!(
+        !pending.iter().any(|e| e.0 == "exec-1"),
+        "cancelled executor must be removed from pending_review_order"
+    );
 }
 
 #[test]
