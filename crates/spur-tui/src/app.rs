@@ -526,6 +526,18 @@ impl App {
                 }
             }
 
+            Action::ToggleSessionPin { session_id } => {
+                let entry = self.metadata_store.entry_mut(&session_id);
+                entry.pinned = !entry.pinned;
+                if let Err(e) = self.metadata_store.save() {
+                    tracing::warn!(error = %e, "failed to persist pin toggle");
+                }
+                if let Some(ref mut picker) = self.session_picker {
+                    picker.set_metadata(self.metadata_store.metadata().clone());
+                }
+                self.dirty = true;
+            }
+
             Action::NewSessionRequested => {
                 // Stub until Task 15 (BUG-2 fix) adds NewSessionWithMessage plumbing.
                 // For now, dismiss picker by navigating to Dashboard.
