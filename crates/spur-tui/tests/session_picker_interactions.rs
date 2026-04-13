@@ -193,3 +193,31 @@ fn esc_in_rename_cancels_without_action() {
     assert!(action.is_none());
     assert!(!picker.is_rename_active());
 }
+
+#[test]
+fn picker_preserves_cursor_and_filter_across_set_sessions() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+    );
+    // Navigate to cursor=2 and set filter to "b".
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let _ = picker.handle_key(key('/'));
+    let _ = picker.handle_key(key('b'));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert_eq!(picker.cursor(), 0); // filter change reset cursor to 0
+    assert_eq!(picker.filter(), "b");
+
+    // Simulate re-receiving the same session list.
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+    );
+
+    // Cursor and filter should be preserved.
+    assert_eq!(picker.cursor(), 0);
+    assert_eq!(picker.filter(), "b");
+}

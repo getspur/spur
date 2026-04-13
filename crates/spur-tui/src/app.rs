@@ -511,13 +511,18 @@ impl App {
             }
 
             Action::RequestSessions => {
-                let mut picker = SessionPickerView::new();
-                picker.set_metadata(self.metadata_store.metadata().clone());
-                self.session_picker = Some(picker);
+                // Retain the picker across opens so cursor + filter survive navigation.
+                if self.session_picker.is_none() {
+                    self.session_picker = Some(SessionPickerView::new());
+                }
+                if let Some(ref mut picker) = self.session_picker {
+                    picker.set_metadata(self.metadata_store.metadata().clone());
+                }
                 self.current_view = ViewId::SessionPicker;
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ListSessions);
                 }
+                self.dirty = true;
             }
 
             Action::ResumeSession { session_id } => {
