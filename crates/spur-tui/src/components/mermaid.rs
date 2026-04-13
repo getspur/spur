@@ -254,6 +254,11 @@ fn rasterize_svg(svg: &str, target_width: u32) -> Result<DynamicImage, RenderErr
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| RenderError::Decode("failed to allocate pixmap".to_string()))?;
 
+    // Mermaid's default theme targets a white background and uses light
+    // pastel fills. Without this, the rasterised SVG is transparent +
+    // pale-stroked — invisible on a dark terminal. Fill opaque white first.
+    pixmap.fill(resvg::tiny_skia::Color::WHITE);
+
     let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
