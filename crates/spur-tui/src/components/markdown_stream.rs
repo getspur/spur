@@ -27,11 +27,7 @@ pub struct MarkdownStream {
     raw_text: String,
     dirty_since: Option<Instant>,
     cached_lines: Vec<Line<'static>>,
-    /// Populated in Task 4 when mermaid fence extraction is implemented.
-    #[allow(dead_code)]
     known_fences: Vec<FenceRef>,
-    /// Populated in Task 4 when mermaid fence extraction is implemented.
-    #[allow(dead_code)]
     next_fence_id: u64,
 }
 
@@ -80,16 +76,90 @@ impl MarkdownStream {
 
     /// Rebuild `cached_lines` from `raw_text`.
     fn rebuild(&mut self) -> Vec<FenceRef> {
-        // Handle empty raw_text — tui-markdown may return a Text with one
-        // empty Line, but our test expects cached_lines_debug() to be empty.
-        if self.raw_text.is_empty() {
-            self.cached_lines.clear();
-            return Vec::new();
+        // ── Stage 1: pre-scan raw_text for closed ```mermaid fences ───────
+        let mut discovered: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        {
+            use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+            let parser = Parser::new_ext(&self.raw_text, Options::empty()).into_offset_iter();
+            let mut open_fence_start: Option<usize> = None;
+            let mut buf = String::new();
+            for (ev, range) in parser {
+                match ev {
+                    Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                        if info.as_ref().trim().eq_ignore_ascii_case("mermaid") {
+                            open_fence_start = Some(range.start);
+                            buf.clear();
+                        }
+                    }
+                    Event::Text(t) if open_fence_start.is_some() => {
+                        buf.push_str(&t);
+                    }
+                    Event::End(TagEnd::CodeBlock) => {
+                        if let Some(start) = open_fence_start.take() {
+                            // pulldown-cmark auto-closes open fences at EOF.
+                            // Distinguish a truly closed fence by checking
+                            // that the slice just before range.end ends with
+                            // a closing ``` (3+ backticks after trimming ws).
+                            let slice = self.raw_text[..range.end]
+                                .trim_end_matches(['\n', '\r', ' ', '\t']);
+                            if slice.ends_with("```") {
+                                discovered
+                                    .push((start..range.end, std::mem::take(&mut buf)));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
-        let text = tui_markdown::from_str(&self.raw_text);
-        // tui-markdown returns `ratatui_core::text::Line` (ratatui-core 0.1)
-        // which is a distinct type from `ratatui::text::Line` (ratatui 0.29).
-        // We convert field-by-field to preserve all style information.
+
+        // ── Stage 2: match against known_fences; assign ids to new ones ───
+        let mut new_fences: Vec<FenceRef> = Vec::new();
+        let mut refreshed: Vec<FenceRef> = Vec::with_capacity(discovered.len());
+        for (range, code) in discovered {
+            let existing = self
+                .known_fences
+                .iter()
+                .find(|f| f.byte_range == range)
+                .cloned();
+            match existing {
+                Some(f) => refreshed.push(f),
+                None => {
+                    let id = MermaidId(self.next_fence_id);
+                    self.next_fence_id += 1;
+                    let f = FenceRef { id, byte_range: range, code };
+                    new_fences.push(f.clone());
+                    refreshed.push(f);
+                }
+            }
+        }
+        self.known_fences = refreshed.clone();
+
+        // ── Stage 3: build transformed input with sentinel lines ──────────
+        let transformed = {
+            let mut out = String::with_capacity(self.raw_text.len());
+            let mut cursor = 0usize;
+            for f in &refreshed {
+                if f.byte_range.start > cursor {
+                    out.push_str(&self.raw_text[cursor..f.byte_range.start]);
+                }
+                // Surrounding blank lines ensure pulldown-cmark treats the
+                // sentinel as its own paragraph, not a continuation.
+                out.push_str(&format!("\n\u{0000}MERMAID:{}\u{0000}\n", f.id.0));
+                cursor = f.byte_range.end;
+            }
+            if cursor < self.raw_text.len() {
+                out.push_str(&self.raw_text[cursor..]);
+            }
+            out
+        };
+
+        // ── Stage 4: parse transformed text via tui-markdown ──────────────
+        if transformed.is_empty() {
+            self.cached_lines.clear();
+            return new_fences;
+        }
+        let text = tui_markdown::from_str(&transformed);
         self.cached_lines = text
             .lines
             .into_iter()
@@ -102,7 +172,27 @@ impl MarkdownStream {
                 out
             })
             .collect();
-        Vec::new()
+
+        // ── Stage 5: post-process — swap sentinels for placeholders ───────
+        for line in &mut self.cached_lines {
+            let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let trimmed = raw.trim();
+            if let Some(rest) = trimmed
+                .strip_prefix('\u{0000}')
+                .and_then(|s| s.strip_suffix('\u{0000}'))
+                .and_then(|s| s.strip_prefix("MERMAID:"))
+            {
+                let placeholder = format!("[📊 mermaid #{rest} · press Alt-v to view]");
+                *line = ratatui::text::Line::from(ratatui::text::Span::styled(
+                    placeholder,
+                    ratatui::style::Style::default()
+                        .fg(ratatui::style::Color::Magenta)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ));
+            }
+        }
+
+        new_fences
     }
 }
 
