@@ -535,6 +535,8 @@ impl View for DashboardView {
                         format!("Delegation conflict in {} files", files.len())
                     }
                     DelegationStatus::Timeout => "Delegation timed out".to_string(),
+                    // Temporary fall-through — replaced in Task 11 with variant-specific rendering.
+                    _ => { /* handled in Task 11 */ "Delegation completed".to_string() }
                 };
                 let kind = match status {
                     DelegationStatus::Success => LogEntryKind::Complete,
