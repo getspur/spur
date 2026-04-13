@@ -24,6 +24,7 @@ fn save_then_load_roundtrip() {
             draft: "hello world".into(),
             pinned: true,
             archived: false,
+            ..Default::default()
         },
     );
     store.set_last_active("abc123".to_string(), "2026-04-13T18:42:00Z".into());
