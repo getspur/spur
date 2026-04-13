@@ -562,6 +562,15 @@ impl SessionDetailView {
             return Some(Action::TogglePlanMode);
         }
 
+        // Alt+s → open session picker. Mirrored by the /sessions slash command.
+        // Matched early so it works even while the input bar has focus or a
+        // permission prompt is pending (user can bail out of a session at any
+        // time; the orchestrator auto-denies the pending permission when the
+        // brain is torn down).
+        if matches!(key.code, KeyCode::Char('s')) && key.modifiers.contains(KeyModifiers::ALT) {
+            return Some(Action::RequestSessions);
+        }
+
         #[cfg(feature = "markdown")]
         if matches!(key.code, KeyCode::Char('v'))
             && key.modifiers.contains(KeyModifiers::ALT)
