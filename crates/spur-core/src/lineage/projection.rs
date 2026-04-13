@@ -189,14 +189,17 @@ impl ExecutorLineage {
             }
 
             SpurEventBody::ExecutorReviewCancelled { id, reason } => {
-                let exec_id = ExecutorId(id.clone());
-                if let Some(node) = self.nodes.get_mut(&exec_id) {
+                let eid = ExecutorId::new(id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
                     node.pending_review = None;
+                    self.pending_review_order.retain(|x| x != &eid);
                     tracing::info!(
                         executor_id = %id,
                         reason = %reason,
                         "review cancelled — pending_review cleared"
                     );
+                } else {
+                    self.buffer_orphan(eid, event.clone());
                 }
             }
 
