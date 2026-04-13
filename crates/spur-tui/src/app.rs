@@ -219,6 +219,10 @@ impl App {
                 self.handle_mouse_event(mouse);
             }
             Event::Resize(_, _) => {
+                #[cfg(feature = "markdown")]
+                if let Some(detail) = self.session_detail.as_mut() {
+                    detail.invalidate_inline_protocols();
+                }
                 self.dirty = true;
             }
             _ => {}

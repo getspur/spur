@@ -114,6 +114,18 @@ impl SessionDetailView {
         self.render_picker = picker;
     }
 
+    /// Drop every cached inline `StatefulProtocol` so they are rebuilt at
+    /// the new Rect size on the next render. Called on terminal resize.
+    #[cfg(feature = "markdown")]
+    pub fn invalidate_inline_protocols(&mut self) {
+        use crate::components::mermaid::MermaidState;
+        for state in self.mermaid_registry.values() {
+            if let MermaidState::Ready { inline_protocol, .. } = state {
+                *inline_protocol.borrow_mut() = None;
+            }
+        }
+    }
+
     /// The session ID this view tracks.
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
@@ -1056,4 +1068,60 @@ fn truncate_lines(s: &str, max_lines: usize) -> String {
     }
     let preview: String = s.lines().take(max_lines).collect::<Vec<_>>().join("\n");
     format!("{}\n... [{} more lines]", preview, total - max_lines)
+}
+
+#[cfg(all(test, feature = "markdown"))]
+mod invalidate_protocols_tests {
+    use super::*;
+    use crate::components::mermaid::{MermaidId, MermaidState};
+    use image::{DynamicImage, RgbaImage};
+    use std::cell::RefCell;
+
+    fn test_view() -> SessionDetailView {
+        SessionDetailView::new(
+            spur_acp::SessionId("test".to_string()),
+            "claude".to_string(),
+            "brain".to_string(),
+            std::path::PathBuf::from("/tmp"),
+        )
+    }
+
+    #[test]
+    fn invalidate_clears_inline_protocols_on_all_ready_states() {
+        let mut view = test_view();
+        let id = MermaidId(1);
+        view.mermaid_registry.insert(
+            id,
+            MermaidState::Ready {
+                image: DynamicImage::ImageRgba8(RgbaImage::new(4, 4)),
+                inline_protocol: RefCell::new(None),
+            },
+        );
+        // Sanity: slot starts None.
+        if let Some(MermaidState::Ready { inline_protocol, .. }) =
+            view.mermaid_registry.get(&id)
+        {
+            assert!(inline_protocol.borrow().is_none());
+        }
+
+        // Invalidate is a no-op on already-None slots but must not panic or
+        // mutate other variants.
+        view.mermaid_registry
+            .insert(MermaidId(2), MermaidState::Rendering);
+        view.mermaid_registry.insert(
+            MermaidId(3),
+            MermaidState::Error { message: "boom".to_string() },
+        );
+        view.invalidate_inline_protocols();
+
+        assert!(matches!(view.mermaid_registry.get(&MermaidId(1)), Some(MermaidState::Ready { .. })));
+        assert!(matches!(view.mermaid_registry.get(&MermaidId(2)), Some(MermaidState::Rendering)));
+        assert!(matches!(view.mermaid_registry.get(&MermaidId(3)), Some(MermaidState::Error { .. })));
+
+        if let Some(MermaidState::Ready { inline_protocol, .. }) =
+            view.mermaid_registry.get(&MermaidId(1))
+        {
+            assert!(inline_protocol.borrow().is_none(), "slot should remain None after invalidate");
+        }
+    }
 }
