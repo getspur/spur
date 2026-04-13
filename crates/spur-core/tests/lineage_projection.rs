@@ -1,10 +1,11 @@
 use std::time::SystemTime;
 
 use spur_acp::{
-    ExecutorArtifactPayload, ExecutorReviewDecision, ExecutorReviewKind, ExecutorReviewPayload,
-    SessionId, SpurEvent,
+    DelegationStatus, ExecutorArtifactPayload, ExecutorReviewDecision, ExecutorReviewKind,
+    ExecutorReviewPayload, SessionId, SpurEvent,
 };
 use spur_core::{Artifact, ExecutorId, ExecutorLineage, LifecycleState};
+use std::path::PathBuf;
 
 fn spawn(id: &str, parent: Option<&str>) -> SpurEvent {
     SpurEvent::ExecutorSpawned {
@@ -186,4 +187,119 @@ fn orphan_phase_event_is_replayed_after_spawn() {
     l.apply(&spawn("late", None));
     let n = l.node(&ExecutorId::new("late")).unwrap();
     assert_eq!(n.phase, LifecycleState::Running);
+}
+
+#[test]
+fn brain_spawned_creates_root_node() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("s1".into()),
+    });
+    assert_eq!(l.root_ids().len(), 1);
+    assert!(l.node(&ExecutorId::new("s1")).is_some());
+}
+
+#[test]
+fn worker_spawned_attaches_under_latest_brain() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    });
+    l.apply(&SpurEvent::WorkerSpawned {
+        agent: "worker".into(),
+        session: SessionId("w1".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    });
+
+    let brain = l.node(&ExecutorId::new("b1")).unwrap();
+    assert_eq!(brain.child_ids.len(), 1);
+    assert_eq!(brain.child_ids[0], ExecutorId::new("w1"));
+}
+
+#[test]
+fn delegation_completed_success_moves_phase_to_succeeded() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    });
+    l.apply(&SpurEvent::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    });
+    l.apply(&SpurEvent::DelegationCompleted {
+        worker_session: SessionId("w1".into()),
+        status: DelegationStatus::Success,
+    });
+
+    let n = l.node(&ExecutorId::new("w1")).unwrap();
+    assert_eq!(n.phase, LifecycleState::Succeeded);
+}
+
+#[test]
+fn cost_update_accumulates_on_current_attempt() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    });
+    l.apply(&SpurEvent::CostUpdate {
+        session: SessionId("b1".into()),
+        agent: "kiro".into(),
+        estimated_cost_usd: 0.10,
+    });
+    l.apply(&SpurEvent::CostUpdate {
+        session: SessionId("b1".into()),
+        agent: "kiro".into(),
+        estimated_cost_usd: 0.05,
+    });
+
+    let n = l.node(&ExecutorId::new("b1")).unwrap();
+    let a = n.current_attempt().unwrap();
+    assert!((a.cost_usd - 0.15).abs() < 1e-9);
+}
+
+#[test]
+fn replay_equals_live() {
+    let events: Vec<SpurEvent> = vec![
+        SpurEvent::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b".into()),
+        },
+        SpurEvent::WorkerSpawned {
+            agent: "w1".into(),
+            session: SessionId("w1".into()),
+            worktree: PathBuf::from("/tmp"),
+        },
+        SpurEvent::DelegationRequested {
+            from: SessionId("b".into()),
+            to_agent: "w1".into(),
+            task: "task-1".into(),
+        },
+        SpurEvent::CostUpdate {
+            session: SessionId("w1".into()),
+            agent: "w1".into(),
+            estimated_cost_usd: 0.25,
+        },
+        SpurEvent::DelegationCompleted {
+            worker_session: SessionId("w1".into()),
+            status: DelegationStatus::Success,
+        },
+    ];
+
+    let mut live = ExecutorLineage::new();
+    for e in &events { live.apply(e); }
+
+    let mut replayed = ExecutorLineage::new();
+    for e in &events { replayed.apply(e); }
+
+    let a: Vec<_> = live.nodes().map(|n| (n.id.clone(), n.phase, n.task_spec.clone())).collect();
+    let b: Vec<_> = replayed.nodes().map(|n| (n.id.clone(), n.phase, n.task_spec.clone())).collect();
+    assert_eq!(a.len(), b.len());
+    for x in &a {
+        assert!(b.contains(x), "replayed state missing {:?}", x);
+    }
 }

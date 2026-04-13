@@ -222,6 +222,26 @@ impl ExecutorLineage {
     pub(crate) fn node_mut(&mut self, id: &ExecutorId) -> Option<&mut ExecutorNode> {
         self.nodes.get_mut(id)
     }
+
+    pub(crate) fn insert_root_node(&mut self, node: ExecutorNode) {
+        self.roots.push(node.id.clone());
+        self.nodes.insert(node.id.clone(), node);
+    }
+
+    pub(crate) fn attach_child(&mut self, parent: &ExecutorId, node: ExecutorNode) {
+        if let Some(p) = self.nodes.get_mut(parent) {
+            p.child_ids.push(node.id.clone());
+        }
+        self.nodes.insert(node.id.clone(), node);
+    }
+
+    pub(crate) fn node_mut_public(&mut self, id: &ExecutorId) -> Option<&mut ExecutorNode> {
+        self.nodes.get_mut(id)
+    }
+
+    pub(crate) fn nodes_mut_vec(&mut self) -> Vec<&mut ExecutorNode> {
+        self.nodes.values_mut().collect()
+    }
 }
 
 fn parse_role(s: &str) -> Role {
