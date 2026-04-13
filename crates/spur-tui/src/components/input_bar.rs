@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -263,7 +263,8 @@ impl InputBar {
     /// Render the input bar into `area`.
     ///
     /// Displays a green-bordered box with a `> ` prompt and a block cursor
-    /// (`█`) at the current cursor position.
+    /// (`█`) at the current cursor position. Protected ranges (atoms) are
+    /// styled cyan + underlined.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -273,9 +274,11 @@ impl InputBar {
                 Style::default().fg(Color::Green),
             ));
 
-        // Split the visible text around the cursor to insert the cursor glyph.
-        let before = &self.text[..self.cursor];
-        let after = &self.text[self.cursor..];
+        let atom_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::UNDERLINED);
+        let plain_style = Style::default();
+        let cursor_style = Style::default().fg(Color::Green);
 
         let mut spans = Vec::new();
 
@@ -287,15 +290,47 @@ impl InputBar {
             ));
         }
 
-        // Prompt + text + cursor
+        // Prompt
         spans.push(Span::raw("> "));
-        spans.push(Span::raw(before));
-        spans.push(Span::styled("\u{2588}", Style::default().fg(Color::Green)));
-        spans.push(Span::raw(after));
 
-        let line = Line::from(spans);
+        // Build split points: 0, len, cursor, and each range boundary.
+        let mut splits: Vec<usize> = Vec::with_capacity(4 + self.protected_ranges.len() * 2);
+        splits.push(0);
+        splits.push(self.text.len());
+        splits.push(self.cursor);
+        for r in &self.protected_ranges {
+            splits.push(r.start);
+            splits.push(r.end);
+        }
+        splits.sort();
+        splits.dedup();
 
-        let paragraph = Paragraph::new(line).block(block);
+        let in_range = |byte: usize| -> bool {
+            self.protected_ranges
+                .iter()
+                .any(|r| byte >= r.start && byte < r.end)
+        };
+
+        for window in splits.windows(2) {
+            let (a, b) = (window[0], window[1]);
+            // Insert cursor glyph at the left boundary of this slice if it
+            // falls there and there is text following (otherwise handled below).
+            if self.cursor == a && self.cursor < self.text.len() {
+                spans.push(Span::styled("\u{2588}", cursor_style));
+            }
+            if a == b {
+                continue;
+            }
+            let style = if in_range(a) { atom_style } else { plain_style };
+            spans.push(Span::styled(self.text[a..b].to_string(), style));
+        }
+
+        // Cursor at end of text (including empty text).
+        if self.cursor == self.text.len() {
+            spans.push(Span::styled("\u{2588}", cursor_style));
+        }
+
+        let paragraph = Paragraph::new(Line::from(spans)).block(block);
         frame.render_widget(paragraph, area);
     }
 
