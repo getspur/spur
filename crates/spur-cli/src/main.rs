@@ -407,17 +407,29 @@ async fn main() -> Result<()> {
 
                     // SubmitReview → dispatch_tx; everything else → user_tx.
                     if matches!(converted, spur_core::InteractiveInput::SubmitReview { .. }) {
-                        let _ = dispatch_tx.send(converted).await;
+                        if let Err(e) = dispatch_tx.send(converted).await {
+                            tracing::warn!(error = %e, "review decision dropped — dispatcher channel closed");
+                        }
                     } else {
-                        let _ = user_tx.send(converted).await;
+                        if let Err(e) = user_tx.send(converted).await {
+                            tracing::warn!(error = %e, "user input dropped — orchestrator channel closed");
+                        }
                     }
                 }
             });
 
-            // Run TUI (blocks).
-            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), sessions).await?;
+            // Run TUI (blocks). Capture the result so we can run structured
+            // shutdown before propagating any error — otherwise `?` would
+            // leak the orchestrator/dispatcher/translator tasks.
+            let tui_result = spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), sessions).await;
 
             orch_handle.abort();
+            // Swallow the JoinError::Cancelled from abort — the orchestrator may
+            // also have panicked, in which case we still want to surface the TUI
+            // error below.
+            let _ = orch_handle.await;
+
+            tui_result?;
             Ok(())
         }
     }
