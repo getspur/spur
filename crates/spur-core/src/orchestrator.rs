@@ -66,6 +66,13 @@ pub enum InteractiveInput {
     /// Request `set_session_mode` on the active brain session. No-op if
     /// there is no active brain session.
     SetSessionMode { mode_id: String },
+    /// Invoke the kiro vendor extension `_kiro.dev/commands/execute` on the
+    /// active brain session. No-op if there is no active brain session.
+    KiroExecute {
+        session: SessionId,
+        command: String,
+        args: serde_json::Value,
+    },
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -479,6 +486,46 @@ impl Orchestrator {
                                 message: e.to_string(),
                             }));
                         }
+                    }
+                }
+
+                // ── KiroExecute ──────────────────────────────────────────
+                InteractiveInput::KiroExecute { session, command, args } => {
+                    if let Some(b) = brain.as_mut() {
+                        let params = serde_json::json!({
+                            "sessionId": b.acp_session_id,
+                            "command": command,
+                            "args": args,
+                        });
+                        match b
+                            .connection
+                            .call_ext("_kiro.dev/commands/execute", params)
+                            .await
+                        {
+                            Ok(resp) => {
+                                self.emit(SpurEvent::now(
+                                    SpurEventBody::AgentExtNotification {
+                                        session: session.clone(),
+                                        method: "_spur.dev/kiro/execute/response".into(),
+                                        params: resp,
+                                    },
+                                ));
+                            }
+                            Err(e) => {
+                                warn!(
+                                    brain = %b.brain_name,
+                                    command = %command,
+                                    error = %e,
+                                    "kiro ext execute failed"
+                                );
+                                self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                                    session,
+                                    message: format!("\u{27e8}kiro\u{27e9} execute failed: {}", e),
+                                }));
+                            }
+                        }
+                    } else {
+                        warn!(command = %command, "KiroExecute received but no active brain session");
                     }
                 }
 
@@ -954,6 +1001,25 @@ impl Orchestrator {
             self.event_tx.clone(),
         ));
 
+        // Spawn the vendor-extension notification pump (if the transport
+        // supports it). Each payload becomes a `SpurEventBody::AgentExtNotification`
+        // scoped to this brain session.
+        if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
+            let event_tx = self.event_tx.clone();
+            let spur_session_id = session_id.clone();
+            tokio::spawn(async move {
+                while let Some(payload) = ext_rx.recv().await {
+                    let _ = event_tx.send(SpurEvent::now(
+                        SpurEventBody::AgentExtNotification {
+                            session: spur_session_id.clone(),
+                            method: payload.method,
+                            params: payload.params,
+                        },
+                    ));
+                }
+            });
+        }
+
         Ok(BrainSession {
             connection,
             acp_session_id: session_response.session_id.to_string(),
@@ -1057,6 +1123,23 @@ impl Orchestrator {
             max_concurrent,
             self.event_tx.clone(),
         ));
+
+        // Pump vendor-extension notifications onto the event stream.
+        if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
+            let event_tx = self.event_tx.clone();
+            let spur_session_id = session_id.clone();
+            tokio::spawn(async move {
+                while let Some(payload) = ext_rx.recv().await {
+                    let _ = event_tx.send(SpurEvent::now(
+                        SpurEventBody::AgentExtNotification {
+                            session: spur_session_id.clone(),
+                            method: payload.method,
+                            params: payload.params,
+                        },
+                    ));
+                }
+            });
+        }
 
         let brain_session = BrainSession {
             connection,

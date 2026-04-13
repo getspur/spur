@@ -149,6 +149,47 @@ pub trait AgentConnection: Send + Sync {
         let _ = request;
         Err(anyhow::anyhow!("authenticate not supported by this transport"))
     }
+
+    /// Invoke a vendor-extension method (`_foo.dev/bar/baz`) on the agent.
+    ///
+    /// `method` is the wire method name including the leading `_` (e.g.
+    /// `"_kiro.dev/commands/execute"`). Transports that wrap the ACP SDK's
+    /// `ClientSideConnection::ext_method` must strip the leading `_` before
+    /// constructing the SDK request (the SDK re-adds it).
+    ///
+    /// Not all transports support this; the default implementation returns
+    /// an error.
+    async fn call_ext(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let _ = (method, params);
+        Err(anyhow::anyhow!("call_ext not supported by this transport"))
+    }
+
+    /// Take ownership of the receiver that drains vendor-extension
+    /// notifications pushed by the agent (`_foo.dev/bar/baz`).
+    ///
+    /// Implementations that route ext notifications through a channel
+    /// should return the receiver here exactly once. The default
+    /// implementation returns `None`, meaning no ext notifications will
+    /// be delivered for this transport.
+    fn take_ext_notification_rx(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<ExtNotificationPayload>> {
+        None
+    }
+}
+
+/// A vendor-extension notification pulled off the wire.
+///
+/// `method` is the wire method name including the leading `_` (e.g.
+/// `"_kiro.dev/commands/available"`). `params` is the raw JSON payload.
+#[derive(Debug, Clone)]
+pub struct ExtNotificationPayload {
+    pub method: String,
+    pub params: serde_json::Value,
 }
 
 #[cfg(test)]

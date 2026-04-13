@@ -396,6 +396,9 @@ async fn main() -> Result<()> {
                             tracing::info!(?executor_id, "review decision captured (orchestrator plumbing pending)");
                             continue;
                         }
+                        spur_tui::UserInput::KiroExecute { session, command, args } => {
+                            spur_core::InteractiveInput::KiroExecute { session, command, args }
+                        }
                     };
                     let _ = user_tx.send(converted).await;
                 }

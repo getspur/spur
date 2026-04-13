@@ -39,6 +39,13 @@ pub enum UserInput {
         executor_id: String,
         decision: spur_core::ReviewDecision,
     },
+    /// Invoke the kiro vendor extension `_kiro.dev/commands/execute` on
+    /// the active brain session.
+    KiroExecute {
+        session: SessionId,
+        command: String,
+        args: serde_json::Value,
+    },
 }
 
 /// Tracks the brain agent's current state for status indicators.
@@ -378,13 +385,19 @@ impl App {
                 self.sync_brain_status();
             }
 
-            Action::KiroExecute { session: _, command, args: _ } => {
-                // Stub handler — real plumbing lands in Task 11.
+            Action::KiroExecute { session, command, args } => {
                 if let Some(ref mut detail) = self.session_detail {
                     detail.push_system_note(format!(
-                        "\u{27e8}kiro\u{27e9} /{} queued (handler pending)",
+                        "\u{27e8}kiro\u{27e9} /{} queued",
                         command
                     ));
+                }
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::KiroExecute {
+                        session,
+                        command,
+                        args,
+                    });
                 }
             }
 

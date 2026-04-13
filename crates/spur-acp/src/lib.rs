@@ -6,7 +6,7 @@ pub mod registry;
 pub mod types;
 
 pub use config::AgentConfig;
-pub use connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
+pub use connection::{AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 pub use registry::AgentRegistry;
 
 // Re-export domain types
@@ -33,4 +33,5 @@ pub use agent_client_protocol::{
     UnstructuredCommandInput,
     CurrentModeUpdate, SessionModeId,
     SetSessionModeRequest, SetSessionModeResponse, UsageUpdate,
+    ExtRequest, ExtResponse, ExtNotification,
 };
