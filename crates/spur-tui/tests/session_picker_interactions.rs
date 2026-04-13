@@ -195,6 +195,17 @@ fn esc_in_rename_cancels_without_action() {
 }
 
 #[test]
+fn capital_p_toggles_preview_visible() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    assert!(!picker.is_preview_visible());
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+    assert!(picker.is_preview_visible());
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+    assert!(!picker.is_preview_visible());
+}
+
+#[test]
 fn picker_preserves_cursor_and_filter_across_set_sessions() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions(

@@ -13,6 +13,7 @@ pub mod mermaid;
 pub mod markdown_stream;
 pub mod react_trace;
 pub mod review_card;
+pub mod session_preview;
 pub mod status_bar;
 
 use ratatui::style::{Color, Style};
