@@ -60,6 +60,7 @@ fn executor_review_resolved_roundtrips() {
 fn executor_review_requested_roundtrips() {
     let ev = SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "exec-1".into(),
+        attempt_n: 1,
         kind: ReviewKind::Completion,
         payload: ReviewPayload {
             summary: "done".into(),
@@ -71,4 +72,38 @@ fn executor_review_requested_roundtrips() {
     let json = serde_json::to_string(&ev).unwrap();
     let round: SpurEvent = serde_json::from_str(&json).unwrap();
     assert!(matches!(round.body, SpurEventBody::ExecutorReviewRequested { .. }));
+}
+
+#[test]
+fn executor_review_requested_carries_attempt_n() {
+    use spur_acp::{ReviewKind, ReviewPayload, SpurEvent, SpurEventBody};
+    let body = SpurEventBody::ExecutorReviewRequested {
+        id: "exec-1".into(),
+        attempt_n: 2,
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
+            summary: "ok".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+        },
+    };
+    let event = SpurEvent::now(body);
+    let j = serde_json::to_value(&event).unwrap();
+    assert_eq!(j["body"]["ExecutorReviewRequested"]["attempt_n"], 2);
+    let _back: SpurEvent = serde_json::from_value(j).expect("round-trip");
+}
+
+#[test]
+fn executor_review_cancelled_round_trips() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+    let body = SpurEventBody::ExecutorReviewCancelled {
+        id: "exec-1".into(),
+        reason: "brain call cancelled".into(),
+    };
+    let event = SpurEvent::now(body);
+    let j = serde_json::to_string(&event).expect("serialize");
+    let _back: SpurEvent = serde_json::from_str(&j).expect("round-trip");
+    assert!(j.contains("ExecutorReviewCancelled"));
+    assert!(j.contains("brain call cancelled"));
 }

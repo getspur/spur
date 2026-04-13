@@ -35,6 +35,7 @@ fn full_flow_brain_to_review_to_resolved() {
     // Checkpoint: review requested
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w1".into(),
+        attempt_n: 1,
         kind: ReviewKind::Completion,
         payload: ReviewPayload {
             summary: "PR ready".into(),
@@ -47,6 +48,7 @@ fn full_flow_brain_to_review_to_resolved() {
     let n = l.node(&ExecutorId::new("w1")).unwrap();
     assert_eq!(n.phase, LifecycleState::AwaitingReview);
     assert!(n.pending_review.is_some());
+    assert_eq!(n.pending_review.as_ref().unwrap().attempt_n, 1);
     assert_eq!(l.pending_reviews().len(), 1);
 
     // User approves
@@ -195,6 +197,7 @@ fn replay_produces_byte_identical_state() {
         }),
         mk(5, SpurEventBody::ExecutorReviewRequested {
             id: "w1".into(),
+            attempt_n: 1,
             kind: ReviewKind::Completion,
             payload: ReviewPayload {
                 summary: "".into(), diff_summary: None, pr_url: None, error: None,
@@ -256,4 +259,100 @@ fn applying_same_event_twice_is_idempotent_except_cost() {
     let n = l.node(&ExecutorId::new("w")).unwrap();
     assert_eq!(n.attempts.len(), 1, "duplicate spawn must not create new node/attempt");
     assert_eq!(n.phase, LifecycleState::Running);
+}
+
+// ─── Fix 2: adapter renders Rejected/Modified/TimedOut with real semantics ──
+
+#[test]
+fn delegation_completed_modified_renders_as_succeeded_with_note() {
+    // Modified is human-approved-with-note — must map to Succeeded, NOT Failed.
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: std::path::PathBuf::from("/tmp/wt"),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationCompleted {
+        worker_session: SessionId("w1".into()),
+        status: DelegationStatus::Modified {
+            reviewer_note: "fix the naming".to_string(),
+        },
+    }));
+
+    let n = l.node(&ExecutorId::new("w1")).unwrap();
+    assert_eq!(
+        n.phase,
+        LifecycleState::Succeeded,
+        "Modified must map to LifecycleState::Succeeded (human approved-with-note)"
+    );
+    let a = n.current_attempt().unwrap();
+    assert!(
+        a.error.as_deref().map(|e| e.contains("fix the naming")).unwrap_or(false),
+        "adapter must carry the reviewer note into attempt.error, got: {:?}",
+        a.error
+    );
+}
+
+#[test]
+fn delegation_completed_rejected_renders_as_failed_with_reason() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: std::path::PathBuf::from("/tmp/wt"),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationCompleted {
+        worker_session: SessionId("w1".into()),
+        status: DelegationStatus::Rejected {
+            reason: "out of scope".to_string(),
+        },
+    }));
+
+    let n = l.node(&ExecutorId::new("w1")).unwrap();
+    assert_eq!(n.phase, LifecycleState::Failed);
+    let a = n.current_attempt().unwrap();
+    assert!(
+        a.error.as_deref().map(|e| e.contains("out of scope")).unwrap_or(false),
+        "adapter must carry rejection reason into attempt.error, got: {:?}",
+        a.error
+    );
+}
+
+#[test]
+fn delegation_completed_timed_out_renders_as_failed_with_timeout_detail() {
+    use spur_acp::TimeoutFallback;
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: std::path::PathBuf::from("/tmp/wt"),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationCompleted {
+        worker_session: SessionId("w1".into()),
+        status: DelegationStatus::TimedOut {
+            waited_for: std::time::Duration::from_secs(1800),
+            fallback: TimeoutFallback::Abandon,
+        },
+    }));
+
+    let n = l.node(&ExecutorId::new("w1")).unwrap();
+    assert_eq!(n.phase, LifecycleState::Failed);
+    let a = n.current_attempt().unwrap();
+    assert!(
+        a.error.as_deref().map(|e| e.contains("1800")).unwrap_or(false),
+        "adapter must include wait duration in attempt.error, got: {:?}",
+        a.error
+    );
 }

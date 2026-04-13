@@ -92,6 +92,7 @@ fn review_requested_populates_pending_review_and_phase() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w".into(),
+        attempt_n: 1,
         kind: ReviewKind::Completion,
         payload: ReviewPayload {
             summary: "done".into(),
@@ -104,6 +105,8 @@ fn review_requested_populates_pending_review_and_phase() {
     let n = l.node(&ExecutorId::new("w")).unwrap();
     assert!(n.pending_review.is_some());
     assert_eq!(n.phase, LifecycleState::AwaitingReview);
+    let r = n.pending_review.as_ref().unwrap();
+    assert_eq!(r.attempt_n, 1, "attempt_n must be carried into ReviewRequest");
 }
 
 #[test]
@@ -112,6 +115,7 @@ fn review_resolved_clears_pending_review() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w".into(),
+        attempt_n: 1,
         kind: ReviewKind::Completion,
         payload: ReviewPayload {
             summary: "done".into(),
@@ -346,6 +350,56 @@ fn attempt_n_mismatch_still_appends_attempt() {
     // Still appends — validation is observability-only.
     assert_eq!(n.attempts.len(), 2, "retry appends even on mismatch");
     assert_eq!(n.phase, LifecycleState::Running);
+}
+
+#[test]
+fn review_cancelled_clears_pending_review() {
+    use spur_acp::{ReviewKind, ReviewPayload, SpurEvent, SpurEventBody};
+    use spur_core::{ExecutorId, ExecutorLineage};
+    let mut lineage = ExecutorLineage::default();
+    // Spawn + request review first (uses existing helpers if present; else construct events inline).
+    let spawn = SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "exec-1".into(),
+        parent_id: None,
+        session_id: spur_acp::SessionId::new(),
+        agent: "worker".into(),
+        role: spur_acp::Role::Executor,
+        task_spec: "t".into(),
+    });
+    lineage.apply(&spawn);
+    let req = SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+        id: "exec-1".into(),
+        attempt_n: 1,
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
+            summary: "ok".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+        },
+    });
+    lineage.apply(&req);
+    assert!(lineage
+        .node(&ExecutorId("exec-1".into()))
+        .unwrap()
+        .pending_review
+        .is_some());
+
+    let cancel = SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+        id: "exec-1".into(),
+        reason: "brain cancel".into(),
+    });
+    lineage.apply(&cancel);
+    assert!(lineage
+        .node(&ExecutorId("exec-1".into()))
+        .unwrap()
+        .pending_review
+        .is_none());
+    let pending = lineage.pending_reviews();
+    assert!(
+        !pending.iter().any(|e| e.0 == "exec-1"),
+        "cancelled executor must be removed from pending_review_order"
+    );
 }
 
 #[test]

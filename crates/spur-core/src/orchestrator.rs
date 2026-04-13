@@ -13,7 +13,10 @@ use spur_acp::config::SpurConfig;
 use spur_acp::connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 use spur_acp::registry::AgentRegistry;
 use spur_acp::types::*;
-use spur_acp::{DelegationResult, DelegationStatus, SpurEvent, SpurEventBody};
+use spur_acp::{
+    DelegationResult, DelegationStatus, LifecycleState, ReviewKind, ReviewPayload, SpurEvent,
+    SpurEventBody, TimeoutFallback,
+};
 use spur_pm::Issue;
 
 use agent_client_protocol::{
@@ -27,6 +30,9 @@ use spur_mcp::{DelegationChannel, DelegationRequest, McpCallbackServer, WorkerIn
 use spur_pm::adapter::PmAdapter;
 use spur_pm::GitHubAdapter;
 use spur_worktree::WorktreeManager;
+
+use crate::review_sink::{ReviewSink, ReviewSinkError};
+use crate::lineage::ExecutorId;
 
 // ─── Run options ─────────────────────────────────────────────────────
 
@@ -73,6 +79,13 @@ pub enum InteractiveInput {
         command: String,
         args: serde_json::Value,
     },
+    /// Submit a human review decision. Routed to the ReviewSink by the
+    /// dispatcher task, not handled inline in `run_interactive`.
+    SubmitReview {
+        executor_id: String,
+        attempt_n: u32,
+        decision: spur_acp::ReviewDecision,
+    },
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -84,6 +97,7 @@ pub struct Orchestrator {
     pub worktrees: WorktreeManager,
     pub cost_tracker: Option<CostTracker>,
     pub event_tx: broadcast::Sender<SpurEvent>,
+    pub review_sink: ReviewSink,  // Clone type, shares inner Arc<Mutex>
     repo_root: PathBuf,
 }
 
@@ -109,6 +123,7 @@ impl Orchestrator {
         };
 
         let (event_tx, _) = broadcast::channel(256);
+        let review_sink = ReviewSink::new();
 
         Ok(Self {
             registry,
@@ -116,6 +131,7 @@ impl Orchestrator {
             worktrees,
             cost_tracker,
             event_tx,
+            review_sink,
             repo_root,
         })
     }
@@ -282,6 +298,7 @@ impl Orchestrator {
             self.config.agents.entries.clone(),
             max_concurrent,
             self.event_tx.clone(),
+            self.review_sink.clone(),
         ));
 
         // Stream brain output.
@@ -717,6 +734,13 @@ impl Orchestrator {
                         session: b.spur_session_id.clone(),
                     }));
                 }
+
+                // ── SubmitReview ─────────────────────────────────────────
+                // Intentional no-op: spur-cli routes SubmitReview to the
+                // review_dispatcher_loop task, not to run_interactive. If
+                // it somehow arrives here (e.g., in tests that send directly
+                // to user_rx), we silently discard it to avoid double-routing.
+                InteractiveInput::SubmitReview { .. } => {}
             }
         }
 
@@ -857,6 +881,7 @@ impl Orchestrator {
                         capabilities: vec![],
                         cost_tier: CostTier::Medium,
                         rate_limit_window: None,
+                        review: Default::default(),
                     };
                     self.registry.register(config);
                     found.push(name.to_string());
@@ -999,6 +1024,7 @@ impl Orchestrator {
             self.config.agents.entries.clone(),
             max_concurrent,
             self.event_tx.clone(),
+            self.review_sink.clone(),
         ));
 
         // Spawn the vendor-extension notification pump (if the transport
@@ -1122,6 +1148,7 @@ impl Orchestrator {
             self.config.agents.entries.clone(),
             max_concurrent,
             self.event_tx.clone(),
+            self.review_sink.clone(),
         ));
 
         // Pump vendor-extension notifications onto the event stream.
@@ -1401,6 +1428,7 @@ impl Orchestrator {
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         max_concurrent: usize,
         event_tx: broadcast::Sender<SpurEvent>,
+        review_sink: ReviewSink,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
@@ -1424,6 +1452,7 @@ impl Orchestrator {
             let agent_configs = agent_configs.clone();
             let semaphore = Arc::clone(&semaphore);
             let event_tx = event_tx.clone();
+            let review_sink = review_sink.clone();
 
             tokio::spawn(async move {
                 // Acquire a permit before starting the delegation.
@@ -1435,29 +1464,47 @@ impl Orchestrator {
                     }
                 };
 
-                let result = match tokio::time::timeout(
-                    std::time::Duration::from_secs(300),
-                    Self::execute_delegation(
-                        agent,
-                        task,
-                        context_files,
-                        repo_root,
-                        agent_configs,
-                        event_tx,
-                    ),
+                // No outer timeout: the review gate's own `review_timeout`
+                // bounds review waits (default 30 min, configurable per
+                // agent). A previous hardcoded 300s outer timeout always
+                // fired before the 1800s default review timeout, cancelling
+                // the delegation mid-`select!`, dropping the ReviewSink
+                // entry's receiver without emitting Resolved/TimedOut, and
+                // returning `DelegationStatus::Timeout` (worker-hang) to
+                // the brain. That broke the spec's worker `Timeout`
+                // (hang) vs review `TimedOut` (nobody reviewed) split and
+                // left the TUI stuck on `AwaitingReview` because
+                // `DelegationCompleted` was never emitted for the right
+                // session. v1 accepts that worker-hang detection is not
+                // automatic — separate concern, separate fix.
+                let (result, executor_id_opt) = Self::execute_delegation(
+                    agent,
+                    task,
+                    context_files,
+                    repo_root,
+                    agent_configs,
+                    event_tx.clone(),
+                    review_sink.clone(),
                 )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => DelegationResult {
-                        status: DelegationStatus::Timeout,
-                        diff: None,
-                        summary: None,
-                        estimated_cost_usd: 0.0,
-                    },
-                };
+                .await;
 
-                let _ = respond_to.send(result);
+                if let Err(_returned_result) = respond_to.send(result) {
+                    // Brain's MCP tool call was cancelled — the oneshot
+                    // receiver was dropped before we could deliver the
+                    // result. If a review was still pending on this
+                    // delegation, emit an audit event so the lineage
+                    // projection records the abandonment rather than
+                    // leaving an orphaned review card indefinitely.
+                    if let Some(ref eid) = executor_id_opt {
+                        cleanup_cancelled_review(
+                            eid,
+                            "brain call cancelled",
+                            &event_tx,
+                            &review_sink,
+                        )
+                        .await;
+                    }
+                }
             });
         }
     }
@@ -1467,24 +1514,43 @@ impl Orchestrator {
     /// This method is fully self-contained: it creates its own
     /// `WorktreeManager` and `AgentRegistry` so it can run in an
     /// independent tokio task without shared mutable state.
+    ///
+    /// ## Retry loop (Task 10)
+    ///
+    /// When `agent_config.review.review_required == true` and the
+    /// reviewer returns `ReviewDecision::Retry { new_constraints }`,
+    /// this method despawns the current worker, appends the constraints
+    /// to the original task, bumps `attempt_n`, emits
+    /// `ExecutorRetryStarted`, and re-enters the worker-spawn +
+    /// review-gate flow. Bounded by
+    /// `agent_config.review.max_review_retries`. On exceed, returns
+    /// `Failed { error: "retry limit exceeded after N attempts" }`.
+    ///
+    /// `executor_id` is stable across attempts (captured from the first
+    /// worker session) so the lineage projection's attempt history
+    /// accumulates on a single node.
     async fn execute_delegation(
         agent: String,
-        task: String,
+        original_task: String,
         _context_files: Vec<String>,
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         event_tx: broadcast::Sender<SpurEvent>,
-    ) -> DelegationResult {
+        review_sink: ReviewSink,
+    ) -> (DelegationResult, Option<ExecutorId>) {
         // Special agent names for PM operations (from MCP server).
         if agent.starts_with("__") {
-            return DelegationResult {
-                status: DelegationStatus::Failed {
-                    error: format!("PM operations not yet wired: {}", agent),
+            return (
+                DelegationResult {
+                    status: DelegationStatus::Failed {
+                        error: format!("PM operations not yet wired: {}", agent),
+                    },
+                    diff: None,
+                    summary: None,
+                    estimated_cost_usd: 0.0,
                 },
-                diff: None,
-                summary: None,
-                estimated_cost_usd: 0.0,
-            };
+                None,
+            );
         }
 
         let registry = AgentRegistry::load(agent_configs);
@@ -1492,211 +1558,798 @@ impl Orchestrator {
         let agent_config = match registry.get(&agent) {
             Some(c) => c.clone(),
             None => {
-                return DelegationResult {
-                    status: DelegationStatus::Failed {
-                        error: format!("Worker agent '{}' not found", agent),
+                return (
+                    DelegationResult {
+                        status: DelegationStatus::Failed {
+                            error: format!("Worker agent '{}' not found", agent),
+                        },
+                        diff: None,
+                        summary: None,
+                        estimated_cost_usd: 0.0,
                     },
-                    diff: None,
-                    summary: None,
-                    estimated_cost_usd: 0.0,
-                };
+                    None,
+                );
             }
         };
 
-        let worker_session = SessionId::new();
+        let mut current_task = original_task.clone();
+        let mut attempt_n: u32 = 1;
+        // Stable across retries; captured from the first worker session.
+        let mut executor_id: Option<ExecutorId> = None;
+        // Accumulated cost across all attempts in this delegation.
+        let mut total_cost: f64 = 0.0;
 
-        // Emit DelegationRequested event.
-        let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationRequested {
-            from: worker_session.clone(),
-            to_agent: agent.clone(),
-            task: task.clone(),
-        }));
-
-        let start = Instant::now();
-
-        // Each delegation gets its own WorktreeManager so concurrent
-        // delegations do not share mutable state.
+        // WorktreeManager owned here (not inside run_one_worker_attempt)
+        // so execute_delegation can make post-gate commit/remove decisions.
+        // Each delegation task gets its own manager (concurrent delegations
+        // do not share mutable state). Retries reuse the same manager.
         let mut worktrees = WorktreeManager::new(repo_root);
 
-        // 1. Snapshot brain state and create worktree.
-        let snapshot_branch = match worktrees.snapshot_brain_state().await {
-            Ok(b) => b,
-            Err(e) => {
-                return DelegationResult {
-                    status: DelegationStatus::Failed {
-                        error: format!("Failed to snapshot brain state: {e}"),
-                    },
-                    diff: None,
-                    summary: None,
-                    estimated_cost_usd: 0.0,
-                };
-            }
-        };
+        // Worker session for the *next* attempt. Generated here (not
+        // inside run_one_worker_attempt) so the Retry arm can emit
+        // ExecutorRetryStarted.new_session_id matching the session id
+        // the next attempt will actually use — closing the lineage
+        // Attempt.session_id ↔ worker event linkage.
+        let first_worker_session = SessionId::new();
+        let mut next_worker_session = first_worker_session;
 
-        let worktree_info = match worktrees
-            .create_worktree(&worker_session, &agent, &snapshot_branch)
+        loop {
+            let outcome = match run_one_worker_attempt(
+                next_worker_session.clone(),
+                &agent,
+                &current_task,
+                &agent_config,
+                &mut worktrees,
+                &event_tx,
+            )
             .await
-        {
-            Ok(info) => info,
-            Err(e) => {
-                return DelegationResult {
-                    status: DelegationStatus::Failed {
-                        error: format!("Failed to create worktree: {e}"),
-                    },
-                    diff: None,
-                    summary: None,
-                    estimated_cost_usd: 0.0,
-                };
-            }
-        };
-
-        // 2. Spawn worker agent in worktree via AgentConnection.
-        let mut connection: Box<dyn AgentConnection> = match agent_config.transport {
-            TransportKind::Acp => Box::new(NativeAcpConnection::new(
-                agent_config.name.clone(),
-                agent_config.command.clone(),
-                agent_config.args.clone(),
-                None,
-            )),
-            TransportKind::Stdio => Box::new(StdioAdapter::new(
-                agent_config.name.clone(),
-                agent_config.command.clone(),
-                agent_config.args.clone(),
-            )),
-            TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
-                agent_config.name.clone(),
-                agent_config.command.clone(),
-                agent_config.args.clone(),
-            )),
-            TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
-                agent_config.name.clone(),
-                agent_config.command.clone(),
-                agent_config.args.clone(),
-            )),
-        };
-
-        let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
-        if let Err(e) = connection.initialize(init_request).await {
-            let _ = worktrees.remove_worktree(&worker_session).await;
-            return DelegationResult {
-                status: DelegationStatus::Failed {
-                    error: format!("Failed to initialize worker: {e}"),
-                },
-                diff: None,
-                summary: None,
-                estimated_cost_usd: 0.0,
+            {
+                Ok(o) => o,
+                Err(setup_err) => {
+                    // Setup failures short-circuit the entire
+                    // delegation without retry — retrying a
+                    // worktree-creation failure is not spec'd
+                    // behavior. We still call finalize so
+                    // DelegationCompleted is emitted (the worker
+                    // session was named, even if no worker actually
+                    // ran).
+                    return (
+                        finalize(
+                            &event_tx,
+                            next_worker_session,
+                            DelegationStatus::Failed {
+                                error: setup_err.to_string(),
+                            },
+                            None,
+                            None,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
+                    );
+                }
             };
-        }
 
-        // Emit WorkerSpawned event.
-        let _ = event_tx.send(SpurEvent::now(SpurEventBody::WorkerSpawned {
-            agent: agent.clone(),
-            session: worker_session.clone(),
-            worktree: worktree_info.path.clone(),
-        }));
+            total_cost += outcome.cost;
 
-        // Workers get no MCP servers (per spec).
-        let session_response = match connection
-            .new_session(worktree_info.path.clone(), vec![])
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = connection.shutdown().await;
-                let _ = worktrees.remove_worktree(&worker_session).await;
-                return DelegationResult {
-                    status: DelegationStatus::Failed {
-                        error: format!("Failed to create worker session: {e}"),
-                    },
-                    diff: None,
-                    summary: None,
-                    estimated_cost_usd: 0.0,
-                };
+            // On first attempt, capture executor_id from worker_session.
+            if executor_id.is_none() {
+                executor_id = Some(ExecutorId::new(outcome.worker_session.0.clone()));
             }
-        };
+            let eid = executor_id.clone().unwrap();
 
-        // 3. Send task to worker.
-        let prompt_text = format!(
-            "Working directory: {}\n\nTask: {}",
-            worktree_info.path.display(),
-            task
-        );
-        let prompt_request = PromptRequest::new(
-            session_response.session_id.clone(),
-            vec![ContentBlock::Text(TextContent::new(prompt_text))],
-        );
+            // No review gate — commit/remove then emit DelegationCompleted.
+            if !agent_config.review.review_required {
+                apply_worktree_cleanup(
+                    &mut worktrees,
+                    &outcome.worker_session,
+                    &outcome.candidate_status,
+                    &outcome.diff,
+                    &agent,
+                    &outcome.worktree_path,
+                )
+                .await;
+                return (
+                    finalize(
+                        &event_tx,
+                        outcome.worker_session,
+                        outcome.candidate_status,
+                        outcome.diff,
+                        outcome.summary,
+                        total_cost,
+                    ),
+                    executor_id.clone(),
+                );
+            }
 
-        let mut output_text = String::new();
-        let mut worker_success = true;
+            // Review gate: register FIRST, then emit events.
+            // `ReviewSink` requires register-before-emit so a TUI
+            // cannot race a `SubmitReview` past an unregistered sink.
+            let rx = match register_gate(eid.clone(), attempt_n, &review_sink).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    tracing::error!(
+                        executor_id = %eid.0,
+                        attempt_n,
+                        error = %e,
+                        "review_sink registration failed — skipping review gate"
+                    );
+                    // Worker DID run; emit DelegationCompleted via
+                    // finalize so the lineage projection records the
+                    // terminal Failed status (preserves the
+                    // "every terminal emits DelegationCompleted"
+                    // invariant). Registration failure → Failed (not
+                    // preserved; no useful diff to inspect).
+                    let failed_status = DelegationStatus::Failed {
+                        error: format!("review registration failed: {e}"),
+                    };
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &failed_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            failed_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
+                    );
+                }
+            };
 
-        match connection.prompt(prompt_request).await {
-            Ok(mut stream) => {
-                while let Some(notification) = stream.next().await {
-                    match &notification.update {
-                        SessionUpdate::AgentThoughtChunk(chunk)
-                        | SessionUpdate::AgentMessageChunk(chunk) => {
-                            if let ContentBlock::Text(tc) = &chunk.content {
-                                output_text.push_str(&tc.text);
-                            }
-                        }
-                        _ => {}
+            let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
+                id: eid.0.clone(),
+                phase: LifecycleState::AwaitingReview,
+            }));
+
+            let review_payload = ReviewPayload {
+                summary: outcome.summary.clone().unwrap_or_default(),
+                diff_summary: None,
+                pr_url: None,
+                error: None,
+            };
+            let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+                id: eid.0.clone(),
+                attempt_n,
+                kind: ReviewKind::Completion,
+                payload: review_payload,
+            }));
+
+            // Inline decision-loop (so we can intercept Retry before
+            // apply_decision_to_candidate maps it to Failed).
+            use spur_acp::ReviewDecision;
+            let decision_result = tokio::select! {
+                r = rx => r.ok(),
+                _ = tokio::time::sleep(agent_config.review.review_timeout) => {
+                    review_sink.remove(&eid).await;
+                    let final_status = DelegationStatus::TimedOut {
+                        waited_for: agent_config.review.review_timeout,
+                        fallback: agent_config.review.review_timeout_default.clone(),
+                    };
+                    // Emit cancellation so the lineage projection clears
+                    // pending_review (DelegationCompleted alone does not).
+                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+                        id: eid.0.clone(),
+                        reason: "review timeout".to_string(),
+                    }));
+                    // TimedOut → preserve worktree (no commit).
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
+                    );
+                }
+            };
+
+            match decision_result {
+                Some(ReviewDecision::Approve) => {
+                    let final_status = outcome.candidate_status.clone();
+                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
+                        id: eid.0.clone(),
+                        decision: ReviewDecision::Approve,
+                    }));
+                    // Approve → commit + remove.
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
+                    );
+                }
+                Some(ReviewDecision::Reject { reason }) => {
+                    let final_status = DelegationStatus::Rejected { reason: reason.clone() };
+                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
+                        id: eid.0.clone(),
+                        decision: ReviewDecision::Reject { reason },
+                    }));
+                    // Rejected → no commit, preserve worktree.
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
+                    );
+                }
+                Some(ReviewDecision::Modify { note }) => {
+                    let final_status = DelegationStatus::Modified { reviewer_note: note.clone() };
+                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
+                        id: eid.0.clone(),
+                        decision: ReviewDecision::Modify { note },
+                    }));
+                    // Modified → commit + remove (approved with reviewer note).
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
+                    );
+                }
+                Some(ReviewDecision::Retry { new_constraints }) => {
+                    // NOTE: this retry logic is duplicated in
+                    // run_gate_with_retries (the test helper). Keep
+                    // the following invariants in sync if either site
+                    // changes:
+                    //   - Bound: attempt_n > max_review_retries
+                    //   - Error message: "retry limit exceeded after N attempts"
+                    //     where N == attempt_n (the actual count of
+                    //     attempts that ran), NOT max_review_retries.
+                    //     Example: max_review_retries=3 fires the bound at
+                    //     attempt_n=4 (1 original + 3 retries), so the
+                    //     message reports "4 attempts".
+                    //   - Decision mapping: Approve→candidate,
+                    //     Reject→Rejected, Modify→Modified
+                    //
+                    // `>` (not `>=`): spec's "Retry × 4 when
+                    // max_review_retries = 3 produces Failed" means 3
+                    // retries are allowed (attempts bump 1→2→3→4), and
+                    // the 4th Retry decision fails.
+                    if attempt_n > agent_config.review.max_review_retries {
+                        let final_status = DelegationStatus::Failed {
+                            error: format!(
+                                "retry limit exceeded after {} attempts",
+                                attempt_n
+                            ),
+                        };
+                        // Retry limit → Failed (remove, no commit).
+                        apply_worktree_cleanup(
+                            &mut worktrees,
+                            &outcome.worker_session,
+                            &final_status,
+                            &outcome.diff,
+                            &agent,
+                            &outcome.worktree_path,
+                        )
+                        .await;
+                        return (
+                            finalize(
+                                &event_tx,
+                                outcome.worker_session,
+                                final_status,
+                                outcome.diff,
+                                outcome.summary,
+                                total_cost,
+                            ),
+                            executor_id.clone(),
+                        );
                     }
+
+                    // Retry: generate the NEXT attempt's session id
+                    // FIRST so we can announce it in
+                    // ExecutorRetryStarted (matching what
+                    // run_one_worker_attempt will use on the next
+                    // iteration). The lineage projection treats
+                    // new_session_id as the Attempt.session_id of
+                    // the next attempt; emitting a fresh-but-unused
+                    // id here would silently dangle.
+                    let retry_session = SessionId::new();
+                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorRetryStarted {
+                        id: eid.0.clone(),
+                        attempt_n: attempt_n + 1,
+                        reason: new_constraints.clone(),
+                        new_session_id: retry_session.clone(),
+                    }));
+
+                    // Append constraints to the ORIGINAL task (not
+                    // the accumulated one — prevents compounding
+                    // constraint text across N retries).
+                    current_task = format!(
+                        "{}\n\n## Additional constraints\n{}",
+                        original_task, new_constraints
+                    );
+                    attempt_n += 1;
+                    next_worker_session = retry_session;
+
+                    // Retry intermediates are never preserved — remove
+                    // the current attempt's worktree before spawning
+                    // the next attempt. No commit (intermediate diff is
+                    // moot once the retry produces its own diff).
+                    //
+                    // Log (don't swallow) failures: a leftover directory
+                    // will cause the next create_worktree to fail with
+                    // a misleading "WorktreeFailed" — this warn lets the
+                    // operator correlate cause and effect.
+                    if let Err(e) = worktrees.remove_worktree(&outcome.worker_session).await {
+                        tracing::warn!(
+                            session = %outcome.worker_session,
+                            error = %e,
+                            "failed to remove retry-attempt worktree; next attempt may fail at create_worktree"
+                        );
+                    }
+                    continue;
+                }
+                None => {
+                    // Sender dropped — treat as timeout.
+                    review_sink.remove(&eid).await;
+                    let final_status = DelegationStatus::TimedOut {
+                        waited_for: agent_config.review.review_timeout,
+                        fallback: agent_config.review.review_timeout_default.clone(),
+                    };
+                    // Emit cancellation so the lineage projection clears
+                    // pending_review (DelegationCompleted alone does not).
+                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+                        id: eid.0.clone(),
+                        reason: "review sender dropped".to_string(),
+                    }));
+                    // Sender-drop TimedOut → preserve worktree (no commit).
+                    apply_worktree_cleanup(
+                        &mut worktrees,
+                        &outcome.worker_session,
+                        &final_status,
+                        &outcome.diff,
+                        &agent,
+                        &outcome.worktree_path,
+                    )
+                    .await;
+                    return (
+                        finalize(
+                            &event_tx,
+                            outcome.worker_session,
+                            final_status,
+                            outcome.diff,
+                            outcome.summary,
+                            total_cost,
+                        ),
+                        executor_id.clone(),
+                    );
                 }
             }
-            Err(e) => {
-                worker_success = false;
-                output_text = format!("Failed to prompt worker: {e}");
-            }
-        }
-
-        let _ = connection.shutdown().await;
-
-        // 4. Collect diff.
-        let diff = worktrees
-            .collect_diff(&worker_session)
-            .await
-            .unwrap_or(None);
-
-        // 5. Commit and clean up worktree.
-        if diff.is_some() {
-            let _ = worktrees
-                .commit_worker_changes(&worker_session, &format!("spur: worker {} output", agent))
-                .await;
-        }
-        let _ = worktrees.remove_worktree(&worker_session).await;
-
-        let duration = start.elapsed();
-        let cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
-
-        let summary = if output_text.len() > 500 {
-            Some(format!("{}...", &output_text[..500]))
-        } else if output_text.is_empty() {
-            None
-        } else {
-            Some(output_text)
-        };
-
-        let status = if worker_success {
-            DelegationStatus::Success
-        } else {
-            DelegationStatus::Failed {
-                error: "Worker reported errors".into(),
-            }
-        };
-
-        // Emit DelegationCompleted event.
-        let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
-            worker_session,
-            status: status.clone(),
-        }));
-
-        DelegationResult {
-            status,
-            diff,
-            summary,
-            estimated_cost_usd: cost,
         }
     }
+}
+
+/// Emit `ExecutorReviewCancelled` and remove the sink entry.
+///
+/// Called from the brain-cancellation path — when `respond_to.send(result)`
+/// returns `Err`, the brain has gone away, and any pending review for
+/// this delegation must be recorded in the lineage projection as
+/// abandoned (otherwise the TUI shows an orphaned review card
+/// indefinitely).
+///
+/// Idempotent: if no review is registered, `review_sink.remove` is a
+/// no-op, and the event is still emitted so the lineage projection
+/// records the cancellation.
+pub async fn cleanup_cancelled_review(
+    executor_id: &ExecutorId,
+    reason: &str,
+    event_tx: &broadcast::Sender<SpurEvent>,
+    review_sink: &ReviewSink,
+) {
+    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+        id: executor_id.0.clone(),
+        reason: reason.to_string(),
+    }));
+    review_sink.remove(executor_id).await;
+}
+
+/// Returns `true` if the worktree should be preserved (not removed) for
+/// this final `DelegationStatus`.
+///
+/// Preserved:
+///   - `Rejected` (human said no — operator may want to inspect diff).
+///   - `TimedOut { fallback: Reject | Abandon }` (no human reviewed in
+///     time AND the configured fallback says "treat as no" or "abandon";
+///     preserve so a human can still inspect).
+///
+/// NOT preserved:
+///   - `TimedOut { fallback: Approve }` — per spec, Approve fallback
+///     means "auto-approve — worker's diff/summary retained as if
+///     reviewed", so the diff must be committed and the worktree
+///     removed (same lifecycle as a human Approve).
+///   - `Success`/`Modified` (approved — changes merged into the brain's
+///     tree).
+///   - `Failed`/`Conflict`/`Timeout` (no real work to inspect — worker
+///     hung or errored, or conflict blocked the run).
+pub fn should_preserve_worktree(status: &DelegationStatus) -> bool {
+    matches!(
+        status,
+        DelegationStatus::Rejected { .. }
+            | DelegationStatus::TimedOut {
+                fallback: TimeoutFallback::Reject { .. } | TimeoutFallback::Abandon,
+                ..
+            }
+    )
+}
+
+/// Returns `true` if the worker's diff should be committed into the
+/// brain's branch based on the final `DelegationStatus`.
+///
+/// Commit on:
+///   - `Success` (Approve).
+///   - `Modified` (human-annotated approval).
+///   - `TimedOut { fallback: Approve }` (auto-approve fallback — spec
+///     says diff is "retained as if reviewed", so it must commit).
+///
+/// Do NOT commit on Rejected/TimedOut(Reject|Abandon) (preserve for
+/// inspection), nor on Failed/Conflict/Timeout (no clean diff to merge).
+pub fn should_commit_worker_diff(status: &DelegationStatus) -> bool {
+    matches!(
+        status,
+        DelegationStatus::Success
+            | DelegationStatus::Modified { .. }
+            | DelegationStatus::TimedOut {
+                fallback: TimeoutFallback::Approve,
+                ..
+            }
+    )
+}
+
+/// Post-gate cleanup: commit the worker diff (if approved) and either
+/// preserve or remove the worktree based on the final status.
+///
+/// Called from every terminal arm in `execute_delegation`. On Retry,
+/// only `remove_worktree` is called (no commit — intermediate attempts
+/// do not get merged into the brain tree).
+async fn apply_worktree_cleanup(
+    worktrees: &mut WorktreeManager,
+    worker_session: &SessionId,
+    final_status: &DelegationStatus,
+    diff: &Option<String>,
+    agent: &str,
+    worktree_path: &std::path::Path,
+) {
+    if should_commit_worker_diff(final_status) {
+        if diff.is_some() {
+            if let Err(e) = worktrees
+                .commit_worker_changes(
+                    worker_session,
+                    &format!("spur: worker {} output", agent),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "failed to commit worker diff");
+            }
+        }
+    }
+
+    if should_preserve_worktree(final_status) {
+        tracing::info!(
+            worktree = %worktree_path.display(),
+            status = ?final_status,
+            "preserving worktree for review inspection"
+        );
+    } else {
+        let _ = worktrees.remove_worktree(worker_session).await;
+    }
+}
+
+/// Common terminal-arm helper: emits `DelegationCompleted` and
+/// constructs the `DelegationResult`. Centralizing this makes the
+/// "every terminal emits DelegationCompleted" invariant locally
+/// verifiable (one call site per terminal arm in `execute_delegation`).
+fn finalize(
+    event_tx: &broadcast::Sender<SpurEvent>,
+    worker_session: SessionId,
+    final_status: DelegationStatus,
+    diff: Option<String>,
+    summary: Option<String>,
+    total_cost: f64,
+) -> DelegationResult {
+    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
+        worker_session,
+        status: final_status.clone(),
+    }));
+    DelegationResult {
+        status: final_status,
+        diff,
+        summary,
+        estimated_cost_usd: total_cost,
+    }
+}
+
+/// Setup-level error during a worker-spawn attempt. Distinct from the
+/// worker's own output-level outcome (which lives in
+/// `WorkerAttemptOutcome`). Setup errors short-circuit the entire
+/// delegation without retry — retrying a worktree-creation failure is
+/// not a spec'd behavior.
+#[derive(Debug)]
+enum AttemptSetupError {
+    SnapshotFailed(String),
+    WorktreeFailed(String),
+    InitFailed(String),
+    SessionFailed(String),
+}
+
+impl std::fmt::Display for AttemptSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SnapshotFailed(e) => write!(f, "Failed to snapshot brain state: {e}"),
+            Self::WorktreeFailed(e) => write!(f, "Failed to create worktree: {e}"),
+            Self::InitFailed(e) => write!(f, "Failed to initialize worker: {e}"),
+            Self::SessionFailed(e) => write!(f, "Failed to create worker session: {e}"),
+        }
+    }
+}
+
+/// Outcome of one worker attempt: whatever we'd need to close out the
+/// delegation OR feed into the review gate.
+struct WorkerAttemptOutcome {
+    worker_session: SessionId,
+    candidate_status: DelegationStatus,
+    diff: Option<String>,
+    summary: Option<String>,
+    cost: f64,
+    /// Path to the worktree that holds this attempt's diff.
+    /// Used by `execute_delegation` to log a preserved path on
+    /// `Rejected` / `TimedOut` — worktree removal is deferred to
+    /// after the review gate.
+    worktree_path: PathBuf,
+}
+
+/// Run a single worker attempt: snapshot brain state, create worktree,
+/// spawn agent, prompt, collect diff.
+///
+/// `worker_session` is provided by the caller (rather than generated
+/// inside) so `execute_delegation`'s Retry arm can announce the next
+/// attempt's session id in `ExecutorRetryStarted.new_session_id` and
+/// have it match what this function actually uses — closing the lineage
+/// `Attempt.session_id ↔ worker event` linkage gap.
+///
+/// **Worktree lifecycle**: this function creates the worktree and
+/// collects the diff, but does NOT commit or remove the worktree.
+/// Commit and removal are deferred to `execute_delegation` so the
+/// post-gate decision can determine whether to preserve
+/// (`Rejected`/`TimedOut`) or remove (all other terminal statuses).
+/// Exception: if a setup failure occurs AFTER the worktree is created
+/// (e.g., agent init failure), the worktree IS cleaned up here
+/// immediately — setup failures short-circuit without retry and the
+/// caller's `finalize` records the error status.
+///
+/// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
+/// worker candidate status — success OR worker-reported errors — both
+/// of which are retry-eligible (the human reviewer decides).
+///
+/// Returns `Err(AttemptSetupError)` only for pre-worker setup failures
+/// (worktree creation, agent initialization, session creation). The
+/// caller short-circuits the delegation without retry — consistent
+/// with pre-T10 behavior. Per-attempt error shape is decoupled from
+/// the public `DelegationResult` type.
+async fn run_one_worker_attempt(
+    worker_session: SessionId,
+    agent: &str,
+    task: &str,
+    agent_config: &spur_acp::config::AgentConfig,
+    worktrees: &mut WorktreeManager,
+    event_tx: &broadcast::Sender<SpurEvent>,
+) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
+    // NOTE: DelegationRequested is emitted per-attempt here. The legacy
+    // lineage adapter (lineage/adapter.rs) keys task_spec population to
+    // the FIRST matching empty-task_spec executor, so on retry the
+    // constraint-augmented task silently drops at the adapter boundary.
+    // This is part of the broader "adapter keys off worker_session, not
+    // stable executor_id" limitation documented for follow-up work.
+    // The projection path (apply_inner) sees each event correctly.
+    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: worker_session.clone(),
+        to_agent: agent.to_string(),
+        task: task.to_string(),
+    }));
+
+    let start = Instant::now();
+
+    // 1. Snapshot brain state and create worktree.
+    let snapshot_branch = worktrees
+        .snapshot_brain_state()
+        .await
+        .map_err(|e| AttemptSetupError::SnapshotFailed(e.to_string()))?;
+
+    let worktree_info = worktrees
+        .create_worktree(&worker_session, agent, &snapshot_branch)
+        .await
+        .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
+
+    // 2. Spawn worker agent in worktree via AgentConnection.
+    let mut connection: Box<dyn AgentConnection> = match agent_config.transport {
+        TransportKind::Acp => Box::new(NativeAcpConnection::new(
+            agent_config.name.clone(),
+            agent_config.command.clone(),
+            agent_config.args.clone(),
+            None,
+        )),
+        TransportKind::Stdio => Box::new(StdioAdapter::new(
+            agent_config.name.clone(),
+            agent_config.command.clone(),
+            agent_config.args.clone(),
+        )),
+        TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
+            agent_config.name.clone(),
+            agent_config.command.clone(),
+            agent_config.args.clone(),
+        )),
+        TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
+            agent_config.name.clone(),
+            agent_config.command.clone(),
+            agent_config.args.clone(),
+        )),
+    };
+
+    let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+    if let Err(e) = connection.initialize(init_request).await {
+        let _ = worktrees.remove_worktree(&worker_session).await;
+        return Err(AttemptSetupError::InitFailed(e.to_string()));
+    }
+
+    // Emit WorkerSpawned event.
+    let _ = event_tx.send(SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: agent.to_string(),
+        session: worker_session.clone(),
+        worktree: worktree_info.path.clone(),
+    }));
+
+    // Workers get no MCP servers (per spec).
+    let session_response = match connection
+        .new_session(worktree_info.path.clone(), vec![])
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = connection.shutdown().await;
+            let _ = worktrees.remove_worktree(&worker_session).await;
+            return Err(AttemptSetupError::SessionFailed(e.to_string()));
+        }
+    };
+
+    // 3. Send task to worker.
+    let prompt_text = format!(
+        "Working directory: {}\n\nTask: {}",
+        worktree_info.path.display(),
+        task
+    );
+    let prompt_request = PromptRequest::new(
+        session_response.session_id.clone(),
+        vec![ContentBlock::Text(TextContent::new(prompt_text))],
+    );
+
+    let mut output_text = String::new();
+    let mut worker_success = true;
+
+    match connection.prompt(prompt_request).await {
+        Ok(mut stream) => {
+            while let Some(notification) = stream.next().await {
+                match &notification.update {
+                    SessionUpdate::AgentThoughtChunk(chunk)
+                    | SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let ContentBlock::Text(tc) = &chunk.content {
+                            output_text.push_str(&tc.text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err(e) => {
+            worker_success = false;
+            output_text = format!("Failed to prompt worker: {e}");
+        }
+    }
+
+    let _ = connection.shutdown().await;
+
+    // 4. Collect diff.
+    let diff = worktrees
+        .collect_diff(&worker_session)
+        .await
+        .unwrap_or(None);
+
+    // 5. Capture worktree path for execute_delegation's post-gate cleanup.
+    // Commit and removal are deferred — see function doc.
+    let worktree_path = worktrees
+        .active
+        .get(&worker_session.to_string())
+        .map(|i| i.path.clone())
+        .unwrap_or_default();
+
+    let duration = start.elapsed();
+    let cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
+
+    let summary = if output_text.len() > 500 {
+        Some(format!("{}...", &output_text[..500]))
+    } else if output_text.is_empty() {
+        None
+    } else {
+        Some(output_text)
+    };
+
+    let candidate_status = if worker_success {
+        DelegationStatus::Success
+    } else {
+        DelegationStatus::Failed {
+            error: "Worker reported errors".into(),
+        }
+    };
+
+    Ok(WorkerAttemptOutcome {
+        worker_session,
+        candidate_status,
+        diff,
+        summary,
+        cost,
+        worktree_path,
+    })
 }
 
 /// Expand ~ to home directory.
@@ -1727,4 +2380,232 @@ fn strip_bang_prefix(mut blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
         }
     }
     blocks
+}
+
+// ─── Review dispatcher ────────────────────────────────────────────────
+
+/// Dispatcher loop: forwards `SubmitReview` messages to the `ReviewSink`.
+/// All other `InteractiveInput` variants are ignored by this loop (they
+/// are consumed by `run_interactive`'s own loop, not this one).
+///
+/// This is spawned as a separate task so review-decision latency is
+/// decoupled from brain-turn I/O latency — see spec "Unit 3" for
+/// rationale.
+pub async fn review_dispatcher_loop(
+    mut rx: mpsc::Receiver<InteractiveInput>,
+    sink: ReviewSink,
+) {
+    while let Some(input) = rx.recv().await {
+        if let InteractiveInput::SubmitReview { executor_id, attempt_n, decision } = input {
+            let _ = sink.submit(ExecutorId::new(executor_id), attempt_n, decision).await;
+        }
+        // All other variants: noop in this loop.
+    }
+}
+
+// ─── Review gate helper ───────────────────────────────────────────────
+
+/// Register a pending review on the sink. Returns the receiver the
+/// caller awaits.
+///
+/// MUST be called BEFORE emitting `ExecutorReviewRequested` so the TUI
+/// cannot race a `SubmitReview` past an unregistered sink — see
+/// `ReviewSink` docs for the invariant.
+pub async fn register_gate(
+    executor_id: ExecutorId,
+    attempt_n: u32,
+    review_sink: &ReviewSink,
+) -> Result<tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>, ReviewSinkError> {
+    review_sink.register(executor_id, attempt_n).await
+}
+
+/// Wait for a review decision (or timeout) and shape the final
+/// `DelegationStatus`. The caller MUST have already called
+/// `register_gate` and MUST pass the receiver returned from that call.
+///
+/// **Does NOT handle `Retry`** — if a `ReviewDecision::Retry` arrives,
+/// this function returns a `DelegationStatus::Failed` with an
+/// explanatory message. Task 10 wraps this helper in a retry loop that
+/// intercepts `Retry` decisions before they reach this function, so in
+/// practice this arm is unreachable once Task 10 is integrated; the
+/// explicit arm exists for safety if someone calls this helper
+/// directly without a wrapper.
+///
+/// On timeout or sender-drop: explicitly removes the sink entry (to
+/// prevent stale entries per the spec's error-handling
+/// "explicit-remove" contract) and returns
+/// `TimedOut { waited_for, fallback }`.
+pub async fn wait_gate(
+    rx: tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>,
+    executor_id: ExecutorId,
+    candidate_status: DelegationStatus,
+    review_timeout: std::time::Duration,
+    timeout_fallback: TimeoutFallback,
+    review_sink: ReviewSink,
+) -> DelegationStatus {
+    tokio::select! {
+        recv_result = rx => {
+            match recv_result {
+                Ok(decision) => apply_decision_to_candidate(decision, candidate_status),
+                Err(_) => {
+                    // Sender dropped before sending — treat as timeout.
+                    review_sink.remove(&executor_id).await;
+                    DelegationStatus::TimedOut {
+                        waited_for: review_timeout,
+                        fallback: timeout_fallback,
+                    }
+                }
+            }
+        }
+        _ = tokio::time::sleep(review_timeout) => {
+            // Explicit-remove contract (spec error-handling section).
+            review_sink.remove(&executor_id).await;
+            DelegationStatus::TimedOut {
+                waited_for: review_timeout,
+                fallback: timeout_fallback,
+            }
+        }
+    }
+}
+
+/// Register + wait composition. Exists primarily for unit tests that
+/// want to exercise the full gate shape in one call; production code
+/// in `execute_delegation` calls `register_gate` and `wait_gate`
+/// separately so event emission can be sequenced between them (the
+/// register-before-emit ordering the `ReviewSink` invariant requires).
+///
+/// On register failure (already-registered double-register): returns
+/// `Failed` with an explanatory error.
+pub async fn run_gate_for_candidate(
+    executor_id: ExecutorId,
+    attempt_n: u32,
+    candidate_status: DelegationStatus,
+    review_timeout: std::time::Duration,
+    timeout_fallback: TimeoutFallback,
+    review_sink: ReviewSink,
+) -> DelegationStatus {
+    let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::error!(
+                executor_id = %executor_id.0,
+                error = %e,
+                "review_sink registration failed"
+            );
+            return DelegationStatus::Failed {
+                error: format!("review registration failed: {e}"),
+            };
+        }
+    };
+    wait_gate(
+        rx,
+        executor_id,
+        candidate_status,
+        review_timeout,
+        timeout_fallback,
+        review_sink,
+    )
+    .await
+}
+
+/// Test helper: wraps `register_gate` + `wait_gate` in a retry loop,
+/// re-using the same `candidate_status` for each attempt (since this
+/// helper doesn't spawn workers — production code in `execute_delegation`
+/// respawns the worker and produces a fresh candidate each iteration).
+///
+/// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
+/// `max_review_retries`. On exceed, returns
+/// `Failed { error: "retry limit exceeded after N attempts" }`.
+///
+/// NOTE: this mirrors execute_delegation's production retry loop. See
+/// the cross-reference comment at the Retry match arm there for
+/// invariants. Drift hazard: tests passing here do not guarantee the
+/// production loop behaves the same. Changes to retry semantics
+/// should touch both.
+pub async fn run_gate_with_retries(
+    executor_id: ExecutorId,
+    candidate_status: DelegationStatus,
+    review_timeout: std::time::Duration,
+    timeout_fallback: TimeoutFallback,
+    max_review_retries: u32,
+    review_sink: ReviewSink,
+) -> DelegationStatus {
+    let mut attempt_n: u32 = 1;
+    loop {
+        let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                return DelegationStatus::Failed {
+                    error: format!("review registration failed: {e}"),
+                };
+            }
+        };
+
+        // One iteration of the gate. We inline the select! here (rather than
+        // calling wait_gate) so we can intercept Retry BEFORE it gets mapped
+        // to Failed by apply_decision_to_candidate.
+        use spur_acp::ReviewDecision;
+        let decision_result = tokio::select! {
+            r = rx => r.ok(),
+            _ = tokio::time::sleep(review_timeout) => {
+                review_sink.remove(&executor_id).await;
+                return DelegationStatus::TimedOut {
+                    waited_for: review_timeout,
+                    fallback: timeout_fallback,
+                };
+            }
+        };
+
+        match decision_result {
+            Some(ReviewDecision::Approve) => return candidate_status,
+            Some(ReviewDecision::Reject { reason }) => {
+                return DelegationStatus::Rejected { reason }
+            }
+            Some(ReviewDecision::Modify { note }) => {
+                return DelegationStatus::Modified { reviewer_note: note }
+            }
+            Some(ReviewDecision::Retry { .. }) => {
+                // `>` (not `>=`): see execute_delegation for rationale.
+                // Error message reports `attempt_n` (the actual attempt
+                // count that ran), NOT `max_review_retries`. See the
+                // execute_delegation cross-reference for the worked
+                // example.
+                if attempt_n > max_review_retries {
+                    return DelegationStatus::Failed {
+                        error: format!(
+                            "retry limit exceeded after {} attempts",
+                            attempt_n
+                        ),
+                    };
+                }
+                attempt_n += 1;
+                continue;
+            }
+            None => {
+                // Sender dropped — treat as timeout.
+                review_sink.remove(&executor_id).await;
+                return DelegationStatus::TimedOut {
+                    waited_for: review_timeout,
+                    fallback: timeout_fallback,
+                };
+            }
+        }
+    }
+}
+
+fn apply_decision_to_candidate(
+    decision: spur_acp::ReviewDecision,
+    candidate: DelegationStatus,
+) -> DelegationStatus {
+    use spur_acp::ReviewDecision;
+    match decision {
+        ReviewDecision::Approve => candidate,
+        ReviewDecision::Reject { reason } => DelegationStatus::Rejected { reason },
+        ReviewDecision::Modify { note } => DelegationStatus::Modified { reviewer_note: note },
+        ReviewDecision::Retry { .. } => DelegationStatus::Failed {
+            error: "internal: Retry reached run_gate_for_candidate \
+                    (caller must wrap with retry loop)"
+                .into(),
+        },
+    }
 }
