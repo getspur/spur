@@ -128,9 +128,11 @@ pub enum SpurEventBody {
     },
     ExecutorReviewRequested {
         id: String,
+        /// Which attempt this review gates. Propagated back via
+        /// `UserInput::SubmitReview` for supersession guard.
+        attempt_n: u32,
         kind: ReviewKind,
         payload: ReviewPayload,
-        // Note: requested_at removed — envelope `occurred_at` carries it now.
     },
     ExecutorReviewResolved {
         id: String,

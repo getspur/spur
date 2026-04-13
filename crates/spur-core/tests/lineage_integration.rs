@@ -35,6 +35,7 @@ fn full_flow_brain_to_review_to_resolved() {
     // Checkpoint: review requested
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w1".into(),
+        attempt_n: 1,
         kind: ReviewKind::Completion,
         payload: ReviewPayload {
             summary: "PR ready".into(),
@@ -195,6 +196,7 @@ fn replay_produces_byte_identical_state() {
         }),
         mk(5, SpurEventBody::ExecutorReviewRequested {
             id: "w1".into(),
+            attempt_n: 1,
             kind: ReviewKind::Completion,
             payload: ReviewPayload {
                 summary: "".into(), diff_summary: None, pr_url: None, error: None,

@@ -92,6 +92,7 @@ fn review_requested_populates_pending_review_and_phase() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w".into(),
+        attempt_n: 1,
         kind: ReviewKind::Completion,
         payload: ReviewPayload {
             summary: "done".into(),
@@ -112,6 +113,7 @@ fn review_resolved_clears_pending_review() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w".into(),
+        attempt_n: 1,
         kind: ReviewKind::Completion,
         payload: ReviewPayload {
             summary: "done".into(),

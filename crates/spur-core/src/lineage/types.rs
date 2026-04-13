@@ -29,6 +29,9 @@ pub struct ReviewRequest {
     pub kind: ReviewKind,        // from spur_acp
     pub payload: ReviewPayload,  // from spur_acp
     pub requested_at: SystemTime,
+    /// Carried from the event; used by the dispatcher to reject stale
+    /// decisions targeting a superseded attempt.
+    pub attempt_n: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -23,6 +23,7 @@ fn spawn(id: &str) -> SpurEvent {
 fn review_req(id: &str) -> SpurEvent {
     SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: id.into(),
+        attempt_n: 1,
         kind: ReviewKind::Completion,
         payload: ReviewPayload {
             summary: "s".into(),
