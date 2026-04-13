@@ -616,3 +616,35 @@ pub async fn run_tui(
     tui::teardown(&mut terminal)?;
     Ok(())
 }
+
+// ─── Free helpers ──────────────────────────────────────────────────────
+
+/// Apply read-only session-scoped `SessionUpdate` variants to a
+/// `SessionDetailView`. Variants not handled here are intentionally left to
+/// the trace-rendering code in `session_detail::handle_spur_event`. Unknown
+/// variants log at TRACE so future protocol additions don't crash the UI.
+pub(crate) fn apply_session_update(
+    state: &mut SessionDetailView,
+    update: &spur_acp::SessionUpdate,
+) {
+    use spur_acp::SessionUpdate::*;
+    match update {
+        CurrentModeUpdate(u) => {
+            state.current_mode = Some(u.current_mode_id.to_string());
+        }
+        AvailableCommandsUpdate(u) => {
+            state.available_commands = u
+                .available_commands
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+        }
+        UsageUpdate(u) => {
+            state.context_used = Some(u.used);
+            state.context_size = Some(u.size);
+        }
+        _ => {
+            tracing::trace!("apply_session_update: unhandled variant");
+        }
+    }
+}

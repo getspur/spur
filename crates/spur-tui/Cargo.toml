@@ -17,3 +17,6 @@ chrono = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+agent-client-protocol = { workspace = true }

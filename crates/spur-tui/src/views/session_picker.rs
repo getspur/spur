@@ -131,7 +131,16 @@ impl SessionPickerView {
             height: chunks[0].height.saturating_sub(v_pad),
         };
         frame.render_widget(Paragraph::new(lines), content_area);
-        StatusBar::render(frame, chunks[1], &ViewId::SessionPicker, 0.0, "0m 00s");
+        StatusBar::render(
+            frame,
+            chunks[1],
+            &ViewId::SessionPicker,
+            0.0,
+            "0m 00s",
+            None,
+            None,
+            None,
+        );
     }
 
     fn render_populated(
@@ -221,7 +230,16 @@ impl SessionPickerView {
 
         let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
         frame.render_widget(Paragraph::new(lines), chunks[0]);
-        StatusBar::render(frame, chunks[1], &ViewId::SessionPicker, 0.0, "0m 00s");
+        StatusBar::render(
+            frame,
+            chunks[1],
+            &ViewId::SessionPicker,
+            0.0,
+            "0m 00s",
+            None,
+            None,
+            None,
+        );
     }
 
     fn render_empty(&self, frame: &mut Frame, area: Rect, agent: &str) {
@@ -255,7 +273,16 @@ impl SessionPickerView {
             height: chunks[0].height.saturating_sub(v_pad),
         };
         frame.render_widget(Paragraph::new(lines), content_area);
-        StatusBar::render(frame, chunks[1], &ViewId::SessionPicker, 0.0, "0m 00s");
+        StatusBar::render(
+            frame,
+            chunks[1],
+            &ViewId::SessionPicker,
+            0.0,
+            "0m 00s",
+            None,
+            None,
+            None,
+        );
     }
 
     fn render_error(&self, frame: &mut Frame, area: Rect, message: &str) {
@@ -283,7 +310,16 @@ impl SessionPickerView {
             height: chunks[0].height.saturating_sub(v_pad),
         };
         frame.render_widget(Paragraph::new(lines), content_area);
-        StatusBar::render(frame, chunks[1], &ViewId::SessionPicker, 0.0, "0m 00s");
+        StatusBar::render(
+            frame,
+            chunks[1],
+            &ViewId::SessionPicker,
+            0.0,
+            "0m 00s",
+            None,
+            None,
+            None,
+        );
     }
 }
 

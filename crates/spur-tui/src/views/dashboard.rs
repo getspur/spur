@@ -622,6 +622,9 @@ impl View for DashboardView {
                 &ViewId::Dashboard,
                 self.total_cost(),
                 &self.elapsed(),
+                None,
+                None,
+                None,
             );
             return;
         }
@@ -649,6 +652,9 @@ impl View for DashboardView {
             &ViewId::Dashboard,
             self.total_cost(),
             &self.elapsed(),
+            None,
+            None,
+            None,
         );
     }
 }
