@@ -418,6 +418,22 @@ impl App {
                     self.current_view = ViewId::SessionDetail(session.clone());
                 }
             }
+            SpurEventBody::AgentSessionReady {
+                session,
+                acp_session_id,
+                brain,
+                resumed: _,
+            } => {
+                self.metadata_store
+                    .set_acp_mapping(&session.0, acp_session_id, brain);
+                if let Err(e) = self.metadata_store.save() {
+                    tracing::warn!(
+                        error = %e,
+                        session = %session.0,
+                        "failed to persist AgentSessionReady metadata"
+                    );
+                }
+            }
             SpurEventBody::AgentNotification { session: _, .. } => {
                 // Transition Thinking → Streaming on first output
                 if self.brain_status == BrainStatus::Thinking {
