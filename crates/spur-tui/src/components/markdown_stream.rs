@@ -17,19 +17,30 @@ pub const DEBOUNCE: Duration = Duration::from_millis(50);
 /// placeholder can reflect error/pending distinctions.
 pub struct StateLookup<'a> {
     pub errors: &'a std::collections::HashSet<MermaidId>,
+    pub pending: &'a std::collections::HashSet<MermaidId>,
 }
 
 impl<'a> StateLookup<'a> {
-    /// A lookup with no error entries — use when no error state is known.
+    /// A lookup with no error or pending entries — use when no state is known.
     pub fn empty() -> Self {
-        static EMPTY: std::sync::OnceLock<std::collections::HashSet<MermaidId>> =
+        static EMPTY_ERRORS: std::sync::OnceLock<std::collections::HashSet<MermaidId>> =
             std::sync::OnceLock::new();
-        Self { errors: EMPTY.get_or_init(std::collections::HashSet::new) }
+        static EMPTY_PENDING: std::sync::OnceLock<std::collections::HashSet<MermaidId>> =
+            std::sync::OnceLock::new();
+        Self {
+            errors: EMPTY_ERRORS.get_or_init(std::collections::HashSet::new),
+            pending: EMPTY_PENDING.get_or_init(std::collections::HashSet::new),
+        }
     }
 
     /// Returns true if the given fence id is in the error state.
     pub fn is_err(&self, id: MermaidId) -> bool {
         self.errors.contains(&id)
+    }
+
+    /// Returns true if the given fence id is in the pending/rendering state.
+    pub fn is_pending(&self, id: MermaidId) -> bool {
+        self.pending.contains(&id)
     }
 }
 
@@ -209,29 +220,32 @@ impl MarkdownStream {
                 .and_then(|s| s.strip_suffix('\u{0000}'))
                 .and_then(|s| s.strip_prefix("MERMAID:"))
             {
-                // Parse the numeric id from the sentinel to check error state.
-                let id_num: Option<u64> = rest.parse().ok();
-                let is_error = id_num
-                    .map(|n| states.is_err(MermaidId(n)))
-                    .unwrap_or(false);
+                let id_num: u64 = rest.parse().unwrap_or(0);
+                let id = MermaidId(id_num);
 
-                let (placeholder, color) = if is_error {
+                let (placeholder, style) = if states.is_err(id) {
                     (
-                        format!("[⚠ mermaid #{rest} error · press Alt-v to view]"),
-                        ratatui::style::Color::Yellow,
+                        format!("[⚠ mermaid #{id_num} error · press Alt-v to view]"),
+                        ratatui::style::Style::default()
+                            .fg(ratatui::style::Color::Yellow)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    )
+                } else if states.is_pending(id) {
+                    (
+                        format!("[⏳ mermaid #{id_num} rendering…]"),
+                        ratatui::style::Style::default()
+                            .fg(ratatui::style::Color::DarkGray)
+                            .add_modifier(ratatui::style::Modifier::DIM),
                     )
                 } else {
                     (
-                        format!("[📊 mermaid #{rest} · press Alt-v to view]"),
-                        ratatui::style::Color::Magenta,
+                        format!("[📊 mermaid #{id_num} · press Alt-v to view]"),
+                        ratatui::style::Style::default()
+                            .fg(ratatui::style::Color::Magenta)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
                     )
                 };
-                *line = ratatui::text::Line::from(ratatui::text::Span::styled(
-                    placeholder,
-                    ratatui::style::Style::default()
-                        .fg(color)
-                        .add_modifier(ratatui::style::Modifier::BOLD),
-                ));
+                *line = ratatui::text::Line::from(ratatui::text::Span::styled(placeholder, style));
             }
         }
 

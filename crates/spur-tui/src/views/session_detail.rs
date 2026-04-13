@@ -253,7 +253,6 @@ impl SessionDetailView {
         result: Result<std::sync::Arc<image::DynamicImage>, String>,
     ) {
         use crate::components::mermaid::MermaidState;
-        let is_error = result.is_err();
         let state = match result {
             // The registry stores owned `DynamicImage`, unwrap the Arc via clone
             // of the underlying data. If the Arc has a single ref, this is O(1);
@@ -264,11 +263,9 @@ impl SessionDetailView {
         };
         self.mermaid_registry.insert(ref_id, state);
 
-        // On error, mark every markdown stream dirty so the next tick's
-        // maybe_flush rebuilds placeholders with the error indicator.
-        if is_error {
-            self.react_trace.mark_all_streams_dirty();
-        }
+        // Mark every markdown stream dirty so the next tick's maybe_flush
+        // rebuilds placeholders — transitions Pending→Ready (📊) or →Error (⚠).
+        self.react_trace.mark_all_streams_dirty();
     }
 
     #[cfg(feature = "markdown")]
@@ -401,6 +398,26 @@ impl SessionDetailView {
                 None
             }
         }
+    }
+
+    /// Build (error_ids, pending_ids) sets from the mermaid registry for use
+    /// in constructing a `StateLookup`.
+    #[cfg(feature = "markdown")]
+    fn build_state_lookup_sets(&self) -> (
+        std::collections::HashSet<crate::components::mermaid::MermaidId>,
+        std::collections::HashSet<crate::components::mermaid::MermaidId>,
+    ) {
+        use crate::components::mermaid::MermaidState;
+        let mut errors = std::collections::HashSet::new();
+        let mut pending = std::collections::HashSet::new();
+        for (id, state) in &self.mermaid_registry {
+            match state {
+                MermaidState::Error { .. } => { errors.insert(*id); }
+                MermaidState::Pending { .. } | MermaidState::Rendering => { pending.insert(*id); }
+                MermaidState::Ready { .. } => {}
+            }
+        }
+        (errors, pending)
     }
 }
 
@@ -737,8 +754,26 @@ impl View for SessionDetailView {
 
             SpurEventBody::TurnComplete { session } => {
                 if session.0 == self.session_id.0 {
-                    // No trace entry — the InputBar status indicator shows "ready".
-                    // A separator is enough to visually divide turns.
+                    #[cfg(feature = "markdown")]
+                    {
+                        use crate::components::markdown_stream::StateLookup;
+
+                        let (error_ids, pending_ids) = self.build_state_lookup_sets();
+                        let states = StateLookup { errors: &error_ids, pending: &pending_ids };
+                        for (_entry_idx, fence) in self.react_trace.force_flush_all(&states) {
+                            self.mermaid_registry.insert(
+                                fence.id,
+                                crate::components::mermaid::MermaidState::Pending { code: fence.code.clone() },
+                            );
+                            self.pending_fence_actions.push_back(
+                                crate::action::Action::MermaidRenderRequest {
+                                    session: self.session_id.clone(),
+                                    ref_id: fence.id,
+                                    code: fence.code,
+                                },
+                            );
+                        }
+                    }
                 }
             }
 
@@ -783,28 +818,15 @@ impl View for SessionDetailView {
         self.react_trace.tick();
         #[cfg(feature = "markdown")]
         {
-            use crate::components::mermaid::MermaidState;
             use crate::components::markdown_stream::StateLookup;
 
-            // Build the set of fence ids currently in error state so that
-            // rebuilt placeholders reflect error vs pending.
-            let error_ids: std::collections::HashSet<crate::components::mermaid::MermaidId> =
-                self.mermaid_registry
-                    .iter()
-                    .filter_map(|(id, state)| {
-                        if matches!(state, MermaidState::Error { .. }) {
-                            Some(*id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-            let states = StateLookup { errors: &error_ids };
+            let (error_ids, pending_ids) = self.build_state_lookup_sets();
+            let states = StateLookup { errors: &error_ids, pending: &pending_ids };
 
             for (_entry_idx, fence) in self.react_trace.drain_fence_dispatches(&states) {
                 self.mermaid_registry.insert(
                     fence.id,
-                    MermaidState::Pending { code: fence.code.clone() },
+                    crate::components::mermaid::MermaidState::Pending { code: fence.code.clone() },
                 );
                 self.pending_fence_actions.push_back(
                     crate::action::Action::MermaidRenderRequest {

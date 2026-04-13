@@ -280,6 +280,31 @@ impl ReactTrace {
         Vec::new()
     }
 
+    /// Force an immediate rebuild of every markdown stream, bypassing the
+    /// 50ms debounce. Returns fences newly discovered during the flush.
+    /// Used on TurnComplete so the final chunk of a turn is rendered without
+    /// the debounce-window lag.
+    #[cfg(feature = "markdown")]
+    pub fn force_flush_all(
+        &mut self,
+        states: &super::markdown_stream::StateLookup<'_>,
+    ) -> Vec<(usize, super::markdown_stream::FenceRef)> {
+        let mut out = Vec::new();
+        for (idx, entry) in self.entries.iter_mut().enumerate() {
+            if let Some(stream) = entry.markdown.as_mut() {
+                for fence in stream.flush_now(states) {
+                    out.push((idx, fence));
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(not(feature = "markdown"))]
+    pub fn force_flush_all(&mut self) -> Vec<(usize, ())> {
+        Vec::new()
+    }
+
     /// Mark every `AgentMessage` markdown stream as dirty so that the next
     /// `drain_fence_dispatches` / `maybe_flush` rebuilds all placeholders.
     /// Called when external state changes (e.g. a mermaid render error arrives)

@@ -115,11 +115,61 @@ fn error_state_emits_warning_placeholder() {
 
     // Now simulate that this fence errored
     let errors: HashSet<MermaidId> = std::iter::once(id).collect();
-    let states = StateLookup { errors: &errors };
+    let pending: HashSet<MermaidId> = HashSet::new();
+    let states = StateLookup { errors: &errors, pending: &pending };
     s.mark_dirty_now();
     s.flush_now(&states);
 
     let rendered: String = s.cached_lines_debug().join("\n");
     assert!(rendered.contains('⚠'), "expected warning glyph, got: {rendered}");
     assert!(rendered.contains("error"), "expected 'error' in placeholder");
+}
+
+#[test]
+fn pending_state_emits_rendering_placeholder() {
+    use spur_tui::components::mermaid::MermaidId;
+    use std::collections::HashSet;
+
+    let mut s = MarkdownStream::new();
+    s.append("```mermaid\nflowchart LR\nA-->B\n```\n");
+    let fences = s.flush_now(&StateLookup::empty());
+    assert_eq!(fences.len(), 1);
+    let id = fences[0].id;
+
+    // Now mark this fence as pending and rebuild.
+    let errors = HashSet::new();
+    let pending: HashSet<MermaidId> = std::iter::once(id).collect();
+    let states = StateLookup { errors: &errors, pending: &pending };
+    s.mark_dirty_now();
+    s.flush_now(&states);
+
+    let rendered: String = s.cached_lines_debug().join("\n");
+    assert!(rendered.contains('⏳'), "expected hourglass glyph, got: {rendered}");
+    assert!(rendered.contains("rendering"), "expected 'rendering' text");
+}
+
+#[test]
+fn pending_to_ready_transition_flips_placeholder() {
+    use spur_tui::components::mermaid::MermaidId;
+    use std::collections::HashSet;
+
+    let mut s = MarkdownStream::new();
+    s.append("```mermaid\nflowchart LR\nA-->B\n```\n");
+    let fences = s.flush_now(&StateLookup::empty());
+    let id = fences[0].id;
+
+    // 1st pass: pending.
+    let errors = HashSet::new();
+    let pending: HashSet<MermaidId> = std::iter::once(id).collect();
+    s.mark_dirty_now();
+    s.flush_now(&StateLookup { errors: &errors, pending: &pending });
+    assert!(s.cached_lines_debug().join("\n").contains('⏳'));
+
+    // 2nd pass: ready (empty pending set simulates completion).
+    let pending_empty = HashSet::new();
+    s.mark_dirty_now();
+    s.flush_now(&StateLookup { errors: &errors, pending: &pending_empty });
+    let rendered = s.cached_lines_debug().join("\n");
+    assert!(!rendered.contains('⏳'), "should no longer say rendering: {rendered}");
+    assert!(rendered.contains('📊'), "should show ready placeholder: {rendered}");
 }
