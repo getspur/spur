@@ -1,10 +1,17 @@
-//! `StreamJsonAdapter` — connects to Claude Code via one-shot stream-json mode.
+//! `StreamJsonAdapter` — one-shot invocations of CLI tools that emit Claude-style
+//! `stream-json` on stdout. One `claude -p --output-format stream-json …` process
+//! per prompt; `--resume <sid>` links turns.
 //!
-//! Each `prompt()` call spawns a fresh `claude -p --output-format stream-json`
-//! process with the prompt as a CLI argument. Multi-turn uses `--resume <session_id>`.
+//! **Scope:** non-Claude-Code agents whose CLI speaks this format. For Claude
+//! Code itself, prefer the `claude-code-acp` profile in `.spur/config.toml`,
+//! which routes through `NativeAcpConnection` and the upstream ACP wrapper —
+//! richer features (plan mode, usage, commands, fork/resume) and a stable
+//! protocol frame (ndjson), in contrast to this adapter's limited
+//! 3-event / 4-content-block mapping in `protocol/claude_events.rs`.
 //!
-//! This avoids the stdout buffering issue with `--input-format stream-json`
-//! (Node.js fully buffers stdout when piped; one-shot mode flushes per-line).
+//! This adapter uses one-shot mode specifically because `--input-format
+//! stream-json` exposes a Node stdout-buffering bug when piped; one-shot
+//! flushes per line.
 
 use std::path::PathBuf;
 use std::pin::Pin;

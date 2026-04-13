@@ -15,6 +15,11 @@ role = "both"
 capabilities = []
 cost_tier = "medium"
 
+# DEPRECATED: prefer the `claude-code-acp` profile below. This stream-json
+# transport is feature-capped (no plan mode, no slash-command discovery,
+# no UsageUpdate) and will be removed in a future release. Kept for
+# environments without Node.js, which should be rare since Claude Code
+# itself requires Node.
 [[agents.entries]]
 name = "claude-code"
 command = "claude"
