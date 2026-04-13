@@ -344,6 +344,8 @@ impl App {
                         "brain".to_string(),
                         std::env::current_dir().unwrap_or_default(),
                     );
+                    #[cfg(feature = "markdown")]
+                    view.set_render_picker(self.mermaid_picker.clone());
                     // Replay any user messages that were buffered before the view existed.
                     for msg in self.pending_user_messages.drain(..) {
                         view.push_user_message(&msg);

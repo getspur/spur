@@ -64,6 +64,11 @@ pub struct SessionDetailView {
     >,
     #[cfg(feature = "markdown")]
     pub pending_fence_actions: std::collections::VecDeque<crate::action::Action>,
+    /// Graphics `Picker` used to build inline mermaid image protocols during
+    /// render. Set once from `App` when the view is created; `None` when no
+    /// graphics protocol is available (text fallback kicks in).
+    #[cfg(feature = "markdown")]
+    render_picker: Option<ratatui_image::picker::Picker>,
 }
 
 impl SessionDetailView {
@@ -97,7 +102,16 @@ impl SessionDetailView {
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
             pending_fence_actions: std::collections::VecDeque::new(),
+            #[cfg(feature = "markdown")]
+            render_picker: None,
         }
+    }
+
+    /// Install the graphics `Picker` used to build inline mermaid protocols.
+    /// Called by `App` once after view construction. Cheap clone of a small value.
+    #[cfg(feature = "markdown")]
+    pub fn set_render_picker(&mut self, picker: Option<ratatui_image::picker::Picker>) {
+        self.render_picker = picker;
     }
 
     /// The session ID this view tracks.
@@ -919,6 +933,15 @@ impl View for SessionDetailView {
         frame.render_widget(Paragraph::new(header), chunks[0]);
 
         // ── React trace ─────────────────────────────────────────────────
+        #[cfg(feature = "markdown")]
+        {
+            let ctx = crate::components::react_trace::RenderContext {
+                mermaid_registry: &self.mermaid_registry,
+                picker: self.render_picker.as_ref(),
+            };
+            self.react_trace.render_with_ctx(frame, chunks[1], &ctx);
+        }
+        #[cfg(not(feature = "markdown"))]
         self.react_trace.render(frame, chunks[1]);
 
         // ── Input bar ───────────────────────────────────────────────────
