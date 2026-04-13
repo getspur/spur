@@ -16,7 +16,7 @@ pub mod test_support {
     //! integration tests in `tests/` can exercise `apply_session_update`.
 
     use crate::views::session_detail::SessionDetailView;
-    use spur_acp::{SessionId, SessionNotification};
+    use spur_acp::{SessionId, SessionNotification, SpurEvent};
 
     /// Build a fresh `SessionDetailView` with placeholder identity fields so
     /// tests can apply session updates to it.
@@ -33,5 +33,22 @@ pub mod test_support {
     /// `app::apply_session_update` for assertions in tests.
     pub fn apply_notification(state: &mut SessionDetailView, notif: &SessionNotification) {
         crate::app::apply_session_update(state, &notif.update);
+    }
+
+    /// Build a fresh `App` with no user-input channel (actions emitted by
+    /// `App::process_action` will silently drop). Intended for assertions
+    /// that don't exercise the outbound channel.
+    pub fn new_app() -> crate::app::App {
+        crate::app::App::new(None, false)
+    }
+
+    /// Dispatch a `SpurEvent` into the app exactly as the runtime loop would.
+    pub fn push_event(app: &mut crate::app::App, ev: SpurEvent) {
+        app.handle_spur_event(ev);
+    }
+
+    /// Borrow the current `SessionDetailView`, if one exists.
+    pub fn session_detail(app: &crate::app::App) -> Option<&SessionDetailView> {
+        app.session_detail_for_test()
     }
 }

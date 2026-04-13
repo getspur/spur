@@ -90,8 +90,6 @@ pub struct App {
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     brain_status: BrainStatus,
     brain_name: Option<String>,
-    /// User messages buffered before session_detail exists.
-    pending_user_messages: Vec<String>,
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
     /// Event-sourced projection of brain → executor lineage.
     lineage: ExecutorLineage,
@@ -136,7 +134,6 @@ impl App {
             user_input_tx,
             brain_status: BrainStatus::Idle,
             brain_name: None,
-            pending_user_messages: Vec::new(),
             pending_permission: None,
             lineage: ExecutorLineage::new(),
             #[cfg(feature = "markdown")]
@@ -157,6 +154,12 @@ impl App {
         }
 
         app
+    }
+
+    /// Test-only accessor: borrow the current `SessionDetailView`.
+    #[doc(hidden)]
+    pub fn session_detail_for_test(&self) -> Option<&crate::views::session_detail::SessionDetailView> {
+        self.session_detail.as_ref()
     }
 
     /// Dispatch a crossterm event (keyboard, resize, mouse, etc.) to the active view.
@@ -366,10 +369,6 @@ impl App {
                     );
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
-                    // Replay any user messages that were buffered before the view existed.
-                    for msg in self.pending_user_messages.drain(..) {
-                        view.push_user_message(&msg);
-                    }
                     // Restore draft from metadata, if any.
                     if let Some(entry) = self.metadata_store.entry(&session.0) {
                         view.restore_draft(&entry.draft);
@@ -495,8 +494,9 @@ impl App {
                 );
 
                 // Add user message to Session Detail trace for instant feedback.
-                // If session_detail doesn't exist yet (first message before
-                // BrainSpawned), buffer it for replay when the view is created.
+                // If session_detail doesn't exist yet, the caller should have
+                // used NewSessionWithMessage; the dropped-message warning
+                // above covers that path.
                 if let Some(ref mut detail) = self.session_detail {
                     detail.push_user_message(&preview);
                     tracing::info!(
@@ -504,8 +504,9 @@ impl App {
                         "SendMessage: pushed to session_detail"
                     );
                 } else {
-                    tracing::warn!("SendMessage: session_detail is None, buffering");
-                    self.pending_user_messages.push(preview.clone());
+                    tracing::warn!(
+                        "SendMessage: session_detail is None — no local echo (orchestrator owns the prompt)"
+                    );
                 }
 
                 if let Some(ref tx) = self.user_input_tx {
@@ -531,13 +532,13 @@ impl App {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
-                // Buffer the preview so it replays into session_detail once
-                // BrainSpawned creates the view.
-                if !blocks.is_empty() {
-                    let preview =
-                        crate::commands::submit_router::blocks_preview(&blocks);
-                    self.pending_user_messages.push(preview);
-                }
+                // Note: we do NOT buffer the preview locally. The
+                // orchestrator owns the typed text from here on and will
+                // deliver it to the brain atomically when the session spawns.
+                // The first-turn user message will appear in the trace via
+                // the normal AgentNotification stream once the agent echoes
+                // or acts on it. Buffering here caused BUG-1 (cross-session
+                // replay into an unrelated session that happens to spawn next).
 
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::NewSessionWithMessage {
