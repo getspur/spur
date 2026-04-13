@@ -139,8 +139,9 @@ pub fn blocks_preview(blocks: &[ContentBlock]) -> String {
     s
 }
 
-/// Flatten blocks into a plain text string (e.g. for consumers that only
-/// carry text). Currently identical to `blocks_preview`.
+/// Flatten blocks into a plain text string (e.g. for CLI that forwards text).
+/// Currently identical to `blocks_preview` — kept as a distinct entry point
+/// so future divergence (e.g. CLI-specific serialization) is cheap.
 pub fn blocks_to_text(blocks: &[ContentBlock]) -> String {
     blocks_preview(blocks)
 }
