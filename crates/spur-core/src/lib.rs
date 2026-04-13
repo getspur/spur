@@ -1,9 +1,8 @@
 pub mod lineage;
 pub mod orchestrator;
 
+pub use spur_acp::{Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role};
 pub use lineage::{
-    Artifact, Attempt, AttemptStatus, ExecutorId, ExecutorLineage, ExecutorNode,
-    ReviewDecision, ReviewKind, ReviewPayload, ReviewRequest,
+    Attempt, AttemptStatus, ExecutorId, ExecutorLineage, ExecutorNode, ReviewRequest,
 };
-pub use spur_acp::{LifecycleState, Role};
 pub use orchestrator::{BrainSession, InteractiveInput, Orchestrator, RunOpts, RunResult};

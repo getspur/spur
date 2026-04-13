@@ -9,7 +9,7 @@ use crate::domain::delegation::DelegationStatus;
 
 /// Review kind for `ExecutorReviewRequested`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ExecutorReviewKind {
+pub enum ReviewKind {
     Completion,
     Failure,
     Conflict,
@@ -18,15 +18,15 @@ pub enum ExecutorReviewKind {
 
 /// Payload carried with a review request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutorReviewPayload {
+pub struct ReviewPayload {
     pub summary: String,
-    pub diff_summary: Option<ExecutorDiffSummary>,
+    pub diff_summary: Option<DiffSummary>,
     pub pr_url: Option<String>,
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutorDiffSummary {
+pub struct DiffSummary {
     pub files_changed: usize,
     pub insertions: usize,
     pub deletions: usize,
@@ -35,8 +35,8 @@ pub struct ExecutorDiffSummary {
 
 /// Artifact kinds emitted by an executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ExecutorArtifactPayload {
-    Diff(ExecutorDiffSummary),
+pub enum Artifact {
+    Diff(DiffSummary),
     PrUrl(String),
     FileList(Vec<PathBuf>),
     Text(String),
@@ -44,7 +44,7 @@ pub enum ExecutorArtifactPayload {
 
 /// User's decision on a review request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ExecutorReviewDecision {
+pub enum ReviewDecision {
     Approve,
     Reject { reason: String },
     Modify { note: String },
@@ -124,17 +124,17 @@ pub enum SpurEventBody {
     },
     ExecutorArtifact {
         id: String,
-        artifact: ExecutorArtifactPayload,
+        artifact: Artifact,
     },
     ExecutorReviewRequested {
         id: String,
-        kind: ExecutorReviewKind,
-        payload: ExecutorReviewPayload,
+        kind: ReviewKind,
+        payload: ReviewPayload,
         // Note: requested_at removed — envelope `occurred_at` carries it now.
     },
     ExecutorReviewResolved {
         id: String,
-        decision: ExecutorReviewDecision,
+        decision: ReviewDecision,
     },
     ExecutorRetryStarted {
         id: String,

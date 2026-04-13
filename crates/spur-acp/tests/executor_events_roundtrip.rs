@@ -1,8 +1,7 @@
 //! Verifies new executor lineage events round-trip through serde JSON.
 
 use spur_acp::{
-    ExecutorReviewDecision, ExecutorReviewKind, ExecutorReviewPayload, Role, SessionId, SpurEvent,
-    SpurEventBody,
+    ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
 };
 
 #[test]
@@ -48,7 +47,7 @@ fn executor_spawned_roundtrips() {
 fn executor_review_resolved_roundtrips() {
     let ev = SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
         id: "exec-1".into(),
-        decision: ExecutorReviewDecision::Reject {
+        decision: ReviewDecision::Reject {
             reason: "tests fail".into(),
         },
     });
@@ -61,8 +60,8 @@ fn executor_review_resolved_roundtrips() {
 fn executor_review_requested_roundtrips() {
     let ev = SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "exec-1".into(),
-        kind: ExecutorReviewKind::Completion,
-        payload: ExecutorReviewPayload {
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
             summary: "done".into(),
             diff_summary: None,
             pr_url: None,

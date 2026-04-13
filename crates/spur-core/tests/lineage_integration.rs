@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use spur_acp::{
-    DelegationStatus, ExecutorArtifactPayload, ExecutorReviewDecision, ExecutorReviewKind,
-    ExecutorReviewPayload, LifecycleState, Role, SessionId, SpurEvent, SpurEventBody,
+    Artifact, DelegationStatus, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
+    SessionId, SpurEvent, SpurEventBody,
 };
 use spur_core::{ExecutorId, ExecutorLineage};
 
@@ -30,13 +30,13 @@ fn full_flow_brain_to_review_to_resolved() {
     // Executor produces an artifact
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorArtifact {
         id: "w1".into(),
-        artifact: ExecutorArtifactPayload::PrUrl("https://x/42".into()),
+        artifact: Artifact::PrUrl("https://x/42".into()),
     }));
     // Checkpoint: review requested
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w1".into(),
-        kind: ExecutorReviewKind::Completion,
-        payload: ExecutorReviewPayload {
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
             summary: "PR ready".into(),
             diff_summary: None,
             pr_url: Some("https://x/42".into()),
@@ -52,7 +52,7 @@ fn full_flow_brain_to_review_to_resolved() {
     // User approves
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
         id: "w1".into(),
-        decision: ExecutorReviewDecision::Approve,
+        decision: ReviewDecision::Approve,
     }));
     l.apply(&SpurEvent::now(SpurEventBody::DelegationCompleted {
         worker_session: SessionId("w1".into()),

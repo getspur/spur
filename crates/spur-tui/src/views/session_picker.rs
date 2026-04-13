@@ -136,6 +136,8 @@ impl SessionPickerView {
             chunks[1],
             StatusBarProps {
                 view: &ViewId::SessionPicker,
+                running: 0,
+                pending_review: 0,
                 total_cost: 0.0,
                 elapsed: "0m 00s",
                 current_mode: None,
@@ -237,6 +239,8 @@ impl SessionPickerView {
             chunks[1],
             StatusBarProps {
                 view: &ViewId::SessionPicker,
+                running: 0,
+                pending_review: 0,
                 total_cost: 0.0,
                 elapsed: "0m 00s",
                 current_mode: None,
@@ -282,6 +286,8 @@ impl SessionPickerView {
             chunks[1],
             StatusBarProps {
                 view: &ViewId::SessionPicker,
+                running: 0,
+                pending_review: 0,
                 total_cost: 0.0,
                 elapsed: "0m 00s",
                 current_mode: None,
@@ -321,6 +327,8 @@ impl SessionPickerView {
             chunks[1],
             StatusBarProps {
                 view: &ViewId::SessionPicker,
+                running: 0,
+                pending_review: 0,
                 total_cost: 0.0,
                 elapsed: "0m 00s",
                 current_mode: None,

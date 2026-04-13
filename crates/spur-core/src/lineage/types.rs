@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::time::SystemTime;
 
 use spur_acp::SessionId;
+
+pub use spur_acp::{Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role};
 
 /// Stable identifier for a logical executor. Survives retries (retries produce
 /// a new `Attempt` under the same `ExecutorId`).
@@ -15,8 +16,6 @@ impl ExecutorId {
     }
 }
 
-pub use spur_acp::{LifecycleState, Role};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttemptStatus {
     Running,
@@ -25,51 +24,11 @@ pub enum AttemptStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ReviewKind {
-    Completion,
-    Failure,
-    Conflict,
-    Checkpoint,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReviewPayload {
-    pub summary: String,
-    pub diff_summary: Option<DiffSummary>,
-    pub pr_url: Option<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiffSummary {
-    pub files_changed: usize,
-    pub insertions: usize,
-    pub deletions: usize,
-    pub files: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ReviewDecision {
-    Approve,
-    Reject { reason: String },
-    Modify { note: String },
-    Retry { new_constraints: String },
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewRequest {
-    pub kind: ReviewKind,
-    pub payload: ReviewPayload,
+    pub kind: ReviewKind,        // from spur_acp
+    pub payload: ReviewPayload,  // from spur_acp
     pub requested_at: SystemTime,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Artifact {
-    Diff(DiffSummary),
-    PrUrl(String),
-    FileList(Vec<PathBuf>),
-    Text(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

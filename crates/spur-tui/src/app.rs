@@ -786,13 +786,6 @@ pub(crate) fn apply_session_update(
     }
 }
 
-fn to_wire_decision(d: &spur_core::ReviewDecision) -> spur_acp::ExecutorReviewDecision {
-    use spur_core::ReviewDecision as L;
-    use spur_acp::ExecutorReviewDecision as W;
-    match d {
-        L::Approve => W::Approve,
-        L::Reject { reason } => W::Reject { reason: reason.clone() },
-        L::Modify { note } => W::Modify { note: note.clone() },
-        L::Retry { new_constraints } => W::Retry { new_constraints: new_constraints.clone() },
-    }
+fn to_wire_decision(d: &spur_core::ReviewDecision) -> spur_acp::ReviewDecision {
+    d.clone()
 }
