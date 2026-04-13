@@ -7,6 +7,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 
 use spur_acp::{SessionId, SpurEvent};
+use spur_core::ExecutorLineage;
 
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
@@ -62,6 +63,8 @@ pub struct App {
     /// User messages buffered before session_detail exists.
     pending_user_messages: Vec<String>,
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
+    /// Event-sourced projection of brain → executor lineage.
+    lineage: ExecutorLineage,
 }
 
 impl App {
@@ -85,6 +88,7 @@ impl App {
             brain_name: None,
             pending_user_messages: Vec::new(),
             pending_permission: None,
+            lineage: ExecutorLineage::new(),
         };
 
         if start_in_picker {
@@ -175,6 +179,10 @@ impl App {
 
     /// Forward a SpurEvent to all views that need it.
     pub fn handle_spur_event(&mut self, event: SpurEvent) {
+        // Always fold into the lineage projection first. The projection is a
+        // pure function of the event stream — view code reads from it later.
+        self.lineage.apply(&event);
+
         self.dirty = true;
 
         // Handle session list responses before forwarding to views
