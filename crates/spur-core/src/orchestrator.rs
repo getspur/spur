@@ -1649,6 +1649,12 @@ impl Orchestrator {
                         waited_for: agent_config.review.review_timeout,
                         fallback: agent_config.review.review_timeout_default.clone(),
                     };
+                    // Emit cancellation so the lineage projection clears
+                    // pending_review (DelegationCompleted alone does not).
+                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+                        id: eid.0.clone(),
+                        reason: "review timeout".to_string(),
+                    }));
                     // TimedOut → preserve worktree (no commit).
                     apply_worktree_cleanup(
                         &mut worktrees,
@@ -1858,6 +1864,12 @@ impl Orchestrator {
                         waited_for: agent_config.review.review_timeout,
                         fallback: agent_config.review.review_timeout_default.clone(),
                     };
+                    // Emit cancellation so the lineage projection clears
+                    // pending_review (DelegationCompleted alone does not).
+                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+                        id: eid.0.clone(),
+                        reason: "review sender dropped".to_string(),
+                    }));
                     // Sender-drop TimedOut → preserve worktree (no commit).
                     apply_worktree_cleanup(
                         &mut worktrees,

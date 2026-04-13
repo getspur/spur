@@ -443,6 +443,112 @@ fn should_commit_worker_diff_matches_expected_variants() {
     assert!(!should_commit_worker_diff(&DelegationStatus::Timeout));
 }
 
+// ─── Fix 1: ExecutorReviewCancelled on timeout / sender-drop ─────────
+
+/// Verifies that applying `ExecutorReviewCancelled { reason: "review timeout" }`
+/// clears `pending_review` in the lineage projection — the guard against the
+/// TUI review card staying open indefinitely after a review timeout.
+#[test]
+fn review_cancelled_with_timeout_reason_clears_pending_review() {
+    use spur_acp::{ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody};
+    use spur_core::{ExecutorId, ExecutorLineage};
+
+    let mut lineage = ExecutorLineage::new();
+
+    // Spawn an executor.
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "exec-timeout".into(),
+        parent_id: None,
+        session_id: SessionId::new(),
+        agent: "worker".into(),
+        role: Role::Executor,
+        task_spec: "some task".into(),
+    }));
+
+    // Request review — simulates the orchestrator entering the review gate.
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+        id: "exec-timeout".into(),
+        attempt_n: 1,
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
+            summary: "ready".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+        },
+    }));
+
+    let n = lineage.node(&ExecutorId::new("exec-timeout")).unwrap();
+    assert!(n.pending_review.is_some(), "pending_review must be set after review requested");
+    assert_eq!(lineage.pending_reviews().len(), 1);
+
+    // Simulate the timeout branch emitting ExecutorReviewCancelled.
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+        id: "exec-timeout".into(),
+        reason: "review timeout".to_string(),
+    }));
+
+    let n = lineage.node(&ExecutorId::new("exec-timeout")).unwrap();
+    assert!(
+        n.pending_review.is_none(),
+        "pending_review must be cleared after ExecutorReviewCancelled(timeout)"
+    );
+    assert_eq!(
+        lineage.pending_reviews().len(),
+        0,
+        "executor must be removed from pending_review_order"
+    );
+}
+
+/// Verifies that applying `ExecutorReviewCancelled { reason: "review sender dropped" }`
+/// also clears `pending_review` — covers the sender-drop branch.
+#[test]
+fn review_cancelled_with_sender_dropped_reason_clears_pending_review() {
+    use spur_acp::{ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody};
+    use spur_core::{ExecutorId, ExecutorLineage};
+
+    let mut lineage = ExecutorLineage::new();
+
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "exec-drop".into(),
+        parent_id: None,
+        session_id: SessionId::new(),
+        agent: "worker".into(),
+        role: Role::Executor,
+        task_spec: "task".into(),
+    }));
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+        id: "exec-drop".into(),
+        attempt_n: 1,
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
+            summary: "ok".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+        },
+    }));
+
+    assert!(
+        lineage.node(&ExecutorId::new("exec-drop")).unwrap().pending_review.is_some()
+    );
+
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+        id: "exec-drop".into(),
+        reason: "review sender dropped".to_string(),
+    }));
+
+    let n = lineage.node(&ExecutorId::new("exec-drop")).unwrap();
+    assert!(
+        n.pending_review.is_none(),
+        "pending_review must be cleared after ExecutorReviewCancelled(sender dropped)"
+    );
+    assert!(
+        !lineage.pending_reviews().iter().any(|e| e.0 == "exec-drop"),
+        "executor must be removed from pending_review_order"
+    );
+}
+
 // ─── Task 12: brain-cancellation audit event ──────────────────────────
 
 #[tokio::test(start_paused = true)]
