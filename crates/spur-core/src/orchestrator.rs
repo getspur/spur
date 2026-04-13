@@ -288,6 +288,7 @@ impl Orchestrator {
             self.config.agents.entries.clone(),
             max_concurrent,
             self.event_tx.clone(),
+            self.review_sink.clone(),
         ));
 
         // Stream brain output.
@@ -971,6 +972,7 @@ impl Orchestrator {
             self.config.agents.entries.clone(),
             max_concurrent,
             self.event_tx.clone(),
+            self.review_sink.clone(),
         ));
 
         Ok(BrainSession {
@@ -1075,6 +1077,7 @@ impl Orchestrator {
             self.config.agents.entries.clone(),
             max_concurrent,
             self.event_tx.clone(),
+            self.review_sink.clone(),
         ));
 
         let brain_session = BrainSession {
@@ -1337,6 +1340,7 @@ impl Orchestrator {
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         max_concurrent: usize,
         event_tx: broadcast::Sender<SpurEvent>,
+        review_sink: ReviewSink,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
@@ -1360,6 +1364,7 @@ impl Orchestrator {
             let agent_configs = agent_configs.clone();
             let semaphore = Arc::clone(&semaphore);
             let event_tx = event_tx.clone();
+            let review_sink = review_sink.clone();
 
             tokio::spawn(async move {
                 // Acquire a permit before starting the delegation.
@@ -1380,6 +1385,7 @@ impl Orchestrator {
                         repo_root,
                         agent_configs,
                         event_tx,
+                        review_sink,
                     ),
                 )
                 .await
@@ -1410,6 +1416,7 @@ impl Orchestrator {
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         event_tx: broadcast::Sender<SpurEvent>,
+        _review_sink: ReviewSink,
     ) -> DelegationResult {
         // Special agent names for PM operations (from MCP server).
         if agent.starts_with("__") {
