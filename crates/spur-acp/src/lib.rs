@@ -6,12 +6,12 @@ pub mod protocol;
 pub mod registry;
 pub mod types;
 
-pub use config::AgentConfig;
+pub use config::{AgentConfig, AgentReviewPolicy};
 pub use connection::{AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 pub use registry::AgentRegistry;
 
 // Re-export domain types
-pub use domain::{DelegationResult, DelegationStatus, HistoryEntry, SpurEvent, SpurEventBody};
+pub use domain::{DelegationResult, DelegationStatus, HistoryEntry, SpurEvent, SpurEventBody, TimeoutFallback};
 pub use crate::domain::events::{
     Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };

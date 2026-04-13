@@ -137,16 +137,28 @@ pub enum SpurEventBody {
     },
     ExecutorReviewRequested {
         id: String,
+        /// Which attempt this review gates. Propagated back via
+        /// `UserInput::SubmitReview` for supersession guard.
+        attempt_n: u32,
         kind: ReviewKind,
         payload: ReviewPayload,
-        // Note: requested_at removed — envelope `occurred_at` carries it now.
     },
     ExecutorReviewResolved {
         id: String,
         decision: ReviewDecision,
     },
+    /// The orchestrator abandoned a pending review (e.g., because the
+    /// brain's tool call was cancelled). Emitted so the lineage
+    /// projection records the abandonment rather than showing a silent
+    /// disappearance.
+    ExecutorReviewCancelled {
+        id: String,
+        reason: String,
+    },
     ExecutorRetryStarted {
         id: String,
+        /// 1-based index of the new attempt; validated against the projection's
+        /// current attempt count to detect dropped retry events.
         attempt_n: u32,
         reason: String,
         new_session_id: SessionId,

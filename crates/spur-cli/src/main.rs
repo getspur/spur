@@ -359,21 +359,32 @@ async fn main() -> Result<()> {
             let orch = load_orchestrator(repo_root)?;
             let event_rx = orch.subscribe();
 
+            // Clone the review_sink BEFORE orch is moved.
+            let review_sink_for_dispatcher = orch.review_sink.clone();
+
             // Create permission channel
             let (perm_tx, perm_rx) =
                 tokio::sync::mpsc::unbounded_channel::<spur_acp::types::PermissionRequest>();
 
-            // Create user input channel
+            // Channel feeding run_interactive (non-review InteractiveInput variants).
             let (user_tx, user_rx) = tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
 
-            // Spawn interactive orchestrator with permission channel (moves ownership)
+            // Channel feeding the review dispatcher (SubmitReview only).
+            let (dispatch_tx, dispatch_rx) = tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
+
+            // Spawn the review dispatcher task.
+            tokio::spawn(spur_core::review_dispatcher_loop(dispatch_rx, review_sink_for_dispatcher));
+
+            // Spawn interactive orchestrator (moves orch). `mut` so we can
+            // `&mut orch_handle` inside a timeout for graceful shutdown below.
             let mut orch_handle = tokio::spawn(async move {
                 if let Err(e) = orch.run_interactive(user_rx, brain, Some(perm_tx)).await {
                     tracing::error!(error = %e, "Interactive session error");
                 }
             });
 
-            // Create a wrapper sender that converts TUI's UserInput to InteractiveInput
+            // TUI → spur-cli translation task: routes review decisions to dispatch_tx,
+            // everything else to user_tx.
             let (tui_tx, mut tui_rx) = tokio::sync::mpsc::channel::<spur_tui::UserInput>(32);
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
@@ -390,39 +401,56 @@ async fn main() -> Result<()> {
                         spur_tui::UserInput::SetSessionMode { mode_id } => {
                             spur_core::InteractiveInput::SetSessionMode { mode_id }
                         }
-                        spur_tui::UserInput::SubmitReview { executor_id, .. } => {
-                            // TODO(follow-up spec): orchestrator converts decision to
-                            // the tool-call result that unblocks brain's delegate tool.
-                            tracing::info!(?executor_id, "review decision captured (orchestrator plumbing pending)");
-                            continue;
+                        spur_tui::UserInput::SubmitReview { executor_id, attempt_n, decision } => {
+                            spur_core::InteractiveInput::SubmitReview { executor_id, attempt_n, decision }
                         }
                         spur_tui::UserInput::KiroExecute { session, command, args } => {
                             spur_core::InteractiveInput::KiroExecute { session, command, args }
                         }
                     };
-                    let _ = user_tx.send(converted).await;
+
+                    // SubmitReview → dispatch_tx; everything else → user_tx.
+                    if matches!(converted, spur_core::InteractiveInput::SubmitReview { .. }) {
+                        if let Err(e) = dispatch_tx.send(converted).await {
+                            tracing::warn!(error = %e, "review decision dropped — dispatcher channel closed");
+                        }
+                    } else {
+                        if let Err(e) = user_tx.send(converted).await {
+                            tracing::warn!(error = %e, "user input dropped — orchestrator channel closed");
+                        }
+                    }
                 }
             });
 
-            // Run TUI with permission channel (blocks main task)
-            spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), sessions).await?;
+            // Run TUI (blocks). Capture the result so we can run structured
+            // shutdown before propagating any error — otherwise `?` would
+            // leak the orchestrator/dispatcher/translator tasks.
+            let tui_result = spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), sessions).await;
 
             // TUI exited — its `user_input_tx` is dropped, which causes the
-            // wrapper task above to exit, which drops `user_tx`, which causes
-            // `run_interactive`'s `user_input_rx.recv()` to return `None` and
-            // the orchestrator's cleanup path (`connection.shutdown()` →
-            // `killpg` on the agent's pgid) to run.
+            // translator task to exit, which drops `user_tx` and `dispatch_tx`,
+            // which causes `run_interactive`'s `user_input_rx.recv()` and the
+            // `review_dispatcher_loop` to return, letting the orchestrator's
+            // cleanup path (`connection.shutdown()` → `killpg` on the agent's
+            // pgid) run to completion.
             //
-            // Wait up to 5s for that graceful chain to finish; if it doesn't,
-            // abort the task — `Drop for NativeAcpConnection` will still
-            // SIGKILL the process group, preventing zombie descendants.
+            // Wait up to 5s for that graceful chain; if it stalls, abort the
+            // task — `Drop for NativeAcpConnection` will still SIGKILL the
+            // process group, preventing zombie descendants.
             match tokio::time::timeout(std::time::Duration::from_secs(5), &mut orch_handle).await {
                 Ok(_) => tracing::info!("orchestrator shut down gracefully"),
                 Err(_) => {
                     tracing::warn!("orchestrator shutdown timed out after 5s; aborting");
                     orch_handle.abort();
+                    // Swallow JoinError::Cancelled so we can surface the TUI
+                    // error (if any) instead of the abort-induced cancellation.
+                    let _ = (&mut orch_handle).await;
                 }
             }
+
+            // Propagate the TUI error (if any) after structured shutdown.
+            tui_result?;
+
             Ok(())
         }
     }

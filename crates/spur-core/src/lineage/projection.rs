@@ -154,6 +154,7 @@ impl ExecutorLineage {
 
             SpurEventBody::ExecutorReviewRequested {
                 id,
+                attempt_n,
                 kind,
                 payload,
             } => {
@@ -164,6 +165,7 @@ impl ExecutorLineage {
                         kind: kind.clone(),
                         payload: payload.clone(),
                         requested_at: event.occurred_at,
+                        attempt_n: *attempt_n,
                     });
                     if !self.pending_review_order.contains(&eid) {
                         self.pending_review_order.push_back(eid.clone());
@@ -181,6 +183,21 @@ impl ExecutorLineage {
                     // PhaseChanged or RetryStarted moves it. Orchestrator owns
                     // that transition.
                     self.pending_review_order.retain(|x| x != &eid);
+                } else {
+                    self.buffer_orphan(eid, event.clone());
+                }
+            }
+
+            SpurEventBody::ExecutorReviewCancelled { id, reason } => {
+                let eid = ExecutorId::new(id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    node.pending_review = None;
+                    self.pending_review_order.retain(|x| x != &eid);
+                    tracing::info!(
+                        executor_id = %id,
+                        reason = %reason,
+                        "review cancelled — pending_review cleared"
+                    );
                 } else {
                     self.buffer_orphan(eid, event.clone());
                 }

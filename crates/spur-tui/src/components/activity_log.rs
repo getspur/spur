@@ -131,4 +131,11 @@ impl ActivityLog {
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Read-only access to all log entries. Intended for tests and
+    /// introspection; prefer `entry_count` in production rendering paths.
+    pub fn entries(&self) -> &[LogEntry] {
+        &self.entries
+    }
 }
+

@@ -89,6 +89,11 @@ impl DashboardView {
         &mut self.agents_tree
     }
 
+    /// Read-only access to the activity log. Intended for tests.
+    pub fn activity_log(&self) -> &ActivityLog {
+        &self.activity_log
+    }
+
     pub fn set_focused_node(&mut self, id: Option<ExecutorId>) {
         self.focused_node = id;
     }
@@ -268,8 +273,23 @@ impl DashboardView {
     }
 }
 
-impl View for DashboardView {
-    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+impl DashboardView {
+    /// Handle a key event with access to the lineage projection so that the
+    /// emitted `Action::SubmitReview` can carry the correct `attempt_n`.
+    /// Called by `App` instead of the `View::handle_key` trait method.
+    pub fn handle_key_with_lineage(
+        &mut self,
+        key: KeyEvent,
+        lineage: &ExecutorLineage,
+    ) -> Option<Action> {
+        self.handle_key_inner(key, Some(lineage))
+    }
+
+    fn handle_key_inner(
+        &mut self,
+        key: KeyEvent,
+        lineage: Option<&ExecutorLineage>,
+    ) -> Option<Action> {
         // Priority 0: Tab-cycling in detail pane when a node is focused and
         // the input bar is empty. Must be checked before the editing-key block
         // so that Left/Right are not consumed by InputBar cursor movement.
@@ -327,8 +347,13 @@ impl View for DashboardView {
                             crate::components::review_card::decision_for_key(ch, None)
                         {
                             if let Some(id) = self.focused_node.clone() {
+                                let attempt_n = lineage
+                                    .and_then(|l| l.node(&id))
+                                    .and_then(|n| n.pending_review.as_ref().map(|r| r.attempt_n))
+                                    .unwrap_or(1);
                                 return Some(Action::SubmitReview {
                                     executor_id: id.0,
+                                    attempt_n,
                                     decision,
                                 });
                             }
@@ -443,6 +468,16 @@ impl View for DashboardView {
 
         None
     }
+}
+
+impl View for DashboardView {
+    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        debug_assert!(
+            false,
+            "DashboardView::handle_key called via trait — use handle_key_with_lineage; attempt_n will default to 1"
+        );
+        self.handle_key_inner(key, None)
+    }
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {
         match &event.body {
@@ -526,21 +561,43 @@ impl View for DashboardView {
                 status,
             } => {
                 let prefix = Self::prefix_for_session(&worker_session.0);
-                let msg = match status {
-                    DelegationStatus::Success => {
-                        "Delegation completed successfully".to_string()
+                let (msg, kind) = match status {
+                    DelegationStatus::Success => (
+                        "Delegation completed successfully".to_string(),
+                        LogEntryKind::Complete,
+                    ),
+                    DelegationStatus::Failed { error } => (
+                        format!("Delegation failed: {}", error),
+                        LogEntryKind::Error,
+                    ),
+                    DelegationStatus::Conflict { files } => (
+                        format!("Delegation conflict in {} files", files.len()),
+                        LogEntryKind::Error,
+                    ),
+                    DelegationStatus::Timeout => (
+                        "Delegation timed out".to_string(),
+                        LogEntryKind::Error,
+                    ),
+                    DelegationStatus::Rejected { reason } => (
+                        format!("Delegation rejected: {}", reason),
+                        LogEntryKind::Error,
+                    ),
+                    DelegationStatus::Modified { reviewer_note } => (
+                        format!("Delegation modified: {}", reviewer_note),
+                        LogEntryKind::Complete,
+                    ),
+                    DelegationStatus::TimedOut { waited_for, fallback } => (
+                        format!(
+                            "Delegation review timed out after {}s (fallback: {:?})",
+                            waited_for.as_secs(),
+                            fallback
+                        ),
+                        LogEntryKind::Error,
+                    ),
+                    _ => {
+                        tracing::warn!("unknown DelegationStatus variant in dashboard activity log — update needed");
+                        ("Delegation completed".to_string(), LogEntryKind::Error)
                     }
-                    DelegationStatus::Failed { error } => {
-                        format!("Delegation failed: {}", error)
-                    }
-                    DelegationStatus::Conflict { files } => {
-                        format!("Delegation conflict in {} files", files.len())
-                    }
-                    DelegationStatus::Timeout => "Delegation timed out".to_string(),
-                };
-                let kind = match status {
-                    DelegationStatus::Success => LogEntryKind::Complete,
-                    _ => LogEntryKind::Error,
                 };
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),

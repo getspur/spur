@@ -50,6 +50,7 @@ pub enum Action {
     /// Submit a review decision for the given executor.
     SubmitReview {
         executor_id: String,
+        attempt_n: u32,
         decision: spur_core::ReviewDecision,
     },
     /// Request the app to render a mermaid diagram on a blocking worker.
