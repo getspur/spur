@@ -90,6 +90,14 @@ impl SessionMetadataStore {
         self.metadata.last_active_at = Some(at);
     }
 
+    /// Clear the last-active pointer (used after an auto-resume banner has
+    /// been shown so a subsequent session spawn in the same run doesn't
+    /// re-trigger the banner).
+    pub fn clear_last_active(&mut self) {
+        self.metadata.last_active_session_id = None;
+        self.metadata.last_active_at = None;
+    }
+
     /// Remove entries for sessions no longer present in `live_ids`. If the
     /// `last_active_session_id` points to a removed entry, clear it too.
     /// Returns the session ids that were removed.

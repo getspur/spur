@@ -102,6 +102,9 @@ enum Commands {
         /// Show session picker on launch
         #[arg(long)]
         sessions: bool,
+        /// Land on Dashboard instead of auto-resuming last session.
+        #[arg(long)]
+        dashboard: bool,
     },
 }
 
@@ -355,8 +358,8 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Watch { brain, sessions } => {
-            let orch = load_orchestrator(repo_root)?;
+        Commands::Watch { brain, sessions, dashboard } => {
+            let orch = load_orchestrator(repo_root.clone())?;
             let event_rx = orch.subscribe();
 
             // Clone the review_sink BEFORE orch is moved.
@@ -425,10 +428,36 @@ async fn main() -> Result<()> {
                 }
             });
 
+            // Landing decision: auto-resume last active session, or land in
+            // the picker, or land on Dashboard. `--dashboard` forces Dashboard,
+            // `--sessions` forces the picker, and otherwise we auto-resume
+            // whichever session the metadata pointer names.
+            let metadata_path = repo_root.join(".spur").join("session_metadata.json");
+            let meta = spur_tui::session_metadata::SessionMetadataStore::load(&metadata_path);
+
+            let force_picker = sessions && !dashboard;
+            let auto_resume_id = if dashboard || sessions {
+                None
+            } else {
+                meta.metadata().last_active_session_id.clone()
+            };
+
+            if let Some(sid) = auto_resume_id {
+                // Queue a ResumeSession before TUI starts. The translator
+                // task above will forward it to the orchestrator, which emits
+                // BrainSpawned; the App then attaches the resume banner.
+                let resume_tx = tui_tx.clone();
+                tokio::spawn(async move {
+                    let _ = resume_tx
+                        .send(spur_tui::UserInput::ResumeSession { session_id: sid })
+                        .await;
+                });
+            }
+
             // Run TUI (blocks). Capture the result so we can run structured
             // shutdown before propagating any error — otherwise `?` would
             // leak the orchestrator/dispatcher/translator tasks.
-            let tui_result = spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), sessions).await;
+            let tui_result = spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), force_picker).await;
 
             // TUI exited — its `user_input_tx` is dropped, which causes the
             // translator task to exit, which drops `user_tx` and `dispatch_tx`,
