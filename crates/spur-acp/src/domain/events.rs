@@ -138,6 +138,14 @@ pub enum SpurEventBody {
         id: String,
         decision: ReviewDecision,
     },
+    /// The orchestrator abandoned a pending review (e.g., because the
+    /// brain's tool call was cancelled). Emitted so the lineage
+    /// projection records the abandonment rather than showing a silent
+    /// disappearance.
+    ExecutorReviewCancelled {
+        id: String,
+        reason: String,
+    },
     ExecutorRetryStarted {
         id: String,
         /// 1-based index of the new attempt; validated against the projection's

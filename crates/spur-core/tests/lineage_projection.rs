@@ -353,6 +353,51 @@ fn attempt_n_mismatch_still_appends_attempt() {
 }
 
 #[test]
+fn review_cancelled_clears_pending_review() {
+    use spur_acp::{ReviewKind, ReviewPayload, SpurEvent, SpurEventBody};
+    use spur_core::{ExecutorId, ExecutorLineage};
+    let mut lineage = ExecutorLineage::default();
+    // Spawn + request review first (uses existing helpers if present; else construct events inline).
+    let spawn = SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "exec-1".into(),
+        parent_id: None,
+        session_id: spur_acp::SessionId::new(),
+        agent: "worker".into(),
+        role: spur_acp::Role::Executor,
+        task_spec: "t".into(),
+    });
+    lineage.apply(&spawn);
+    let req = SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+        id: "exec-1".into(),
+        attempt_n: 1,
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
+            summary: "ok".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+        },
+    });
+    lineage.apply(&req);
+    assert!(lineage
+        .node(&ExecutorId("exec-1".into()))
+        .unwrap()
+        .pending_review
+        .is_some());
+
+    let cancel = SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+        id: "exec-1".into(),
+        reason: "brain cancel".into(),
+    });
+    lineage.apply(&cancel);
+    assert!(lineage
+        .node(&ExecutorId("exec-1".into()))
+        .unwrap()
+        .pending_review
+        .is_none());
+}
+
+#[test]
 fn orphan_replay_does_not_retrigger_legacy_adapter() {
     // Buffer a child-orphan phase change, then trigger spawn. Legacy adapter
     // must NOT fire on the replay (today's apply_legacy is a no-op for
