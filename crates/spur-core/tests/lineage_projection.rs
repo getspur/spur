@@ -284,3 +284,66 @@ fn replay_equals_live() {
         assert!(b.contains(x), "replayed state missing {:?}", x);
     }
 }
+
+#[test]
+fn child_spawn_before_parent_spawn_attaches_on_parent_arrival() {
+    let mut l = ExecutorLineage::new();
+
+    // Child arrives FIRST — names parent that doesn't yet exist.
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "child".into(),
+        parent_id: Some("parent".into()),
+        session_id: SessionId("s-child".into()),
+        agent: "c".into(),
+        role: Role::Executor,
+        task_spec: "".into(),
+    }));
+
+    // Before parent exists, child must NOT be a root.
+    assert!(l.node(&ExecutorId::new("child")).is_none(),
+            "child should be buffered, not attached as root");
+    assert_eq!(l.root_ids().len(), 0);
+
+    // Parent arrives.
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "parent".into(),
+        parent_id: None,
+        session_id: SessionId("s-parent".into()),
+        agent: "p".into(),
+        role: Role::Brain,
+        task_spec: "".into(),
+    }));
+
+    // Now both exist and child is attached under parent.
+    let p = l.node(&ExecutorId::new("parent")).unwrap();
+    let c = l.node(&ExecutorId::new("child")).unwrap();
+    assert_eq!(p.child_ids.len(), 1);
+    assert_eq!(p.child_ids[0], ExecutorId::new("child"));
+    assert_eq!(c.parent_id, Some(ExecutorId::new("parent")));
+    assert_eq!(l.root_ids().len(), 1, "only parent is a root");
+}
+
+#[test]
+fn orphan_replay_does_not_retrigger_legacy_adapter() {
+    // Buffer a child-orphan phase change, then trigger spawn. Legacy adapter
+    // must NOT fire on the replay (today's apply_legacy is a no-op for
+    // Executor* variants, but a future change must not break this).
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
+        id: "x".into(),
+        phase: LifecycleState::Running,
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "x".into(),
+        parent_id: None,
+        session_id: SessionId("s".into()),
+        agent: "a".into(),
+        role: Role::Brain,
+        task_spec: "".into(),
+    }));
+
+    let n = l.node(&ExecutorId::new("x")).unwrap();
+    // One attempt only — no legacy-path duplicate spawn.
+    assert_eq!(n.attempts.len(), 1);
+    assert_eq!(n.phase, LifecycleState::Running);
+}
