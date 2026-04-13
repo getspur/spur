@@ -128,3 +128,31 @@ fn p_key_on_new_session_row_is_noop() {
     let action = picker.handle_key(key('p'));
     assert!(action.is_none());
 }
+
+#[test]
+fn d_key_emits_toggle_archive_for_highlighted_session() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let action = picker.handle_key(key('d'));
+    match action {
+        Some(Action::ToggleSessionArchive { session_id }) => assert_eq!(session_id, "a1"),
+        other => panic!("expected ToggleSessionArchive, got {other:?}"),
+    }
+}
+
+#[test]
+fn d_key_on_new_session_row_is_noop() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    let action = picker.handle_key(key('d'));
+    assert!(action.is_none());
+}
+
+#[test]
+fn a_key_toggles_show_archived() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    let action = picker.handle_key(key('a'));
+    assert!(matches!(action, Some(Action::ToggleShowArchived)));
+}
