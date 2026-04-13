@@ -427,6 +427,12 @@ impl App {
                 self.help_visible = false;
             }
 
+            Action::ShowSessionCost => {
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.push_cost_note();
+                }
+            }
+
             Action::PermissionGrant(choice) => {
                 use crate::action::PermissionChoice;
                 if let Some((perm, _)) = self.pending_permission.take() {

@@ -19,6 +19,8 @@ pub enum Action {
     CycleFocus,
     ShowHelp,
     HideHelp,
+    /// Push a trace entry showing the current session cost.
+    ShowSessionCost,
     Tick,
     PermissionGrant(PermissionChoice),
     RequestSessions,
@@ -43,6 +45,21 @@ pub enum Action {
         executor_id: String,
         decision: spur_core::ReviewDecision,
     },
+    /// Request the app to render a mermaid diagram on a blocking worker.
+    /// Emitted by `SessionDetailView::tick` when a new fence closes.
+    #[cfg(feature = "markdown")]
+    MermaidRenderRequest {
+        session: SessionId,
+        ref_id: crate::components::mermaid::MermaidId,
+        code: String,
+    },
+    /// Completion of a previously-dispatched render request.
+    #[cfg(feature = "markdown")]
+    MermaidRenderCompleted {
+        session: SessionId,
+        ref_id: crate::components::mermaid::MermaidId,
+        result: Result<std::sync::Arc<image::DynamicImage>, String>,
+    },
 }
 
 /// Which permission option the user selected.
@@ -62,4 +79,6 @@ pub enum ViewId {
     Dashboard,
     SessionDetail(SessionId),
     SessionPicker,
+    #[cfg(feature = "markdown")]
+    MermaidOverlay(SessionId),
 }

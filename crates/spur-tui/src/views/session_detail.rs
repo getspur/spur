@@ -126,6 +126,16 @@ impl SessionDetailView {
         });
     }
 
+    /// Push a trace entry showing the current session cost.
+    pub fn push_cost_note(&mut self) {
+        let msg = format!("Session cost: ${:.2}", self.cost);
+        self.react_trace.push(TraceEntry {
+            kind: TraceKind::Think,
+            text: msg,
+            timestamp: Self::now_stamp(),
+        });
+    }
+
     /// Replay conversation history from disk into the trace.
     pub fn replay_history(&mut self, entries: &[spur_acp::HistoryEntry]) {
         // Header to distinguish replayed history from live conversation.
