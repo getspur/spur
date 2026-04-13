@@ -40,9 +40,8 @@ async fn load_session_propagates_agent_error() {
 
     let err_msg = result.err().unwrap().to_string();
     assert!(
-        err_msg.to_lowercase().contains("resource not found")
-            || err_msg.to_lowercase().contains("load_session failed"),
-        "error message should mention the upstream failure; got: {err_msg}"
+        err_msg.to_lowercase().contains("resource not found"),
+        "error message should surface the upstream -32002 failure; got: {err_msg}"
     );
 
     let _ = conn.shutdown().await;

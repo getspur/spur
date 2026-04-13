@@ -38,3 +38,4 @@ process.stdin.on("data", (chunk) => {
     // Ignore everything else.
   }
 });
+process.stdin.on("end", () => process.exit(0));
