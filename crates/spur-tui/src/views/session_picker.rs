@@ -64,6 +64,9 @@ pub struct SessionPickerView {
     /// `Some` when the user pressed `R`; intercepts all keys until
     /// `Enter` commits or `Esc` cancels.
     rename_state: Option<RenameState>,
+    /// Toggled via uppercase `P`; when true, renders a metadata preview
+    /// pane below the list.
+    preview_visible: bool,
 }
 
 impl SessionPickerView {
@@ -74,11 +77,16 @@ impl SessionPickerView {
             metadata: SessionMetadata::default(),
             show_archived: false,
             rename_state: None,
+            preview_visible: false,
         }
     }
 
     pub fn is_rename_active(&self) -> bool {
         self.rename_state.is_some()
+    }
+
+    pub fn is_preview_visible(&self) -> bool {
+        self.preview_visible
     }
 
     pub fn set_metadata(&mut self, metadata: SessionMetadata) {
@@ -510,13 +518,90 @@ impl SessionPickerView {
             lines.push(Line::from(spans));
         }
 
-        let chunks = Layout::vertical([
-            Constraint::Min(4),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
+        let preview_height: u16 = 8;
+        let chunks = if self.preview_visible {
+            Layout::vertical([
+                Constraint::Min(4),
+                Constraint::Length(preview_height),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area)
+        } else {
+            Layout::vertical([
+                Constraint::Min(4),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area)
+        };
         frame.render_widget(Paragraph::new(lines), chunks[0]);
+
+        // When preview is visible, the status/footer chunks shift by one.
+        let (status_idx, footer_idx) = if self.preview_visible {
+            (2, 3)
+        } else {
+            (1, 2)
+        };
+
+        if self.preview_visible {
+            use crate::components::session_preview::{PreviewContent, SessionPreview};
+            let content = if cursor == 0 {
+                PreviewContent {
+                    placeholder: Some(
+                        "Press Enter to start a new session \u{00b7} any unsent draft will be saved"
+                            .to_string(),
+                    ),
+                    ..Default::default()
+                }
+            } else {
+                let indices = Self::filtered_indices(
+                    sessions,
+                    filter,
+                    &self.metadata,
+                    self.show_archived,
+                );
+                let real_idx = indices.get(cursor - 1).copied();
+                if let Some(i) = real_idx {
+                    let session = &sessions[i];
+                    let id = session.session_id.0.as_ref().to_string();
+                    let cwd = session.cwd.display().to_string();
+                    let updated = session.updated_at.clone().unwrap_or_default();
+                    let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
+                    let pinned = entry.map(|e| e.pinned).unwrap_or(false);
+                    let archived = entry.map(|e| e.archived).unwrap_or(false);
+                    let draft = entry.map(|e| e.draft.clone()).unwrap_or_default();
+
+                    let mut rows = vec![
+                        ("Session".into(), id),
+                        ("CWD".into(), cwd),
+                    ];
+                    if !updated.is_empty() {
+                        rows.push(("Updated".into(), updated));
+                    }
+                    if pinned {
+                        rows.push(("Pinned".into(), "\u{2b50}".into()));
+                    }
+                    if archived {
+                        rows.push(("Archived".into(), "yes".into()));
+                    }
+                    if !draft.is_empty() {
+                        let truncated = if draft.chars().count() > 80 {
+                            let t: String = draft.chars().take(80).collect();
+                            format!("{t}\u{2026}")
+                        } else {
+                            draft.clone()
+                        };
+                        rows.push(("Draft".into(), truncated));
+                    }
+                    PreviewContent { rows, placeholder: None }
+                } else {
+                    PreviewContent::default()
+                }
+            };
+            SessionPreview::render(frame, chunks[1], &content);
+        }
+
         if let Some(ref rs) = self.rename_state {
             let prompt = format!("Rename \u{2192} {}_", rs.buffer);
             frame.render_widget(
@@ -524,12 +609,12 @@ impl SessionPickerView {
                     prompt,
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 )),
-                chunks[1],
+                chunks[status_idx],
             );
         } else {
             StatusBar::render(
                 frame,
-                chunks[1],
+                chunks[status_idx],
                 StatusBarProps {
                     view: &ViewId::SessionPicker,
                     running: 0,
@@ -542,7 +627,7 @@ impl SessionPickerView {
                 },
             );
         }
-        render_footer_hint(frame, chunks[2]);
+        render_footer_hint(frame, chunks[footer_idx]);
     }
 
     fn render_error(&self, frame: &mut Frame, area: Rect, message: &str) {
@@ -619,6 +704,19 @@ impl View for SessionPickerView {
                     return None;
                 }
                 _ => return None,
+            }
+        }
+
+        // Preview toggle intercepts before list-mode logic. Only valid when
+        // search isn't focused (so capital P typed in search box still filters).
+        let can_toggle_preview = matches!(
+            &self.state,
+            PickerState::Populated { search_focused: false, .. }
+        );
+        if can_toggle_preview {
+            if let KeyCode::Char('P') = key.code {
+                self.preview_visible = !self.preview_visible;
+                return None;
             }
         }
 
