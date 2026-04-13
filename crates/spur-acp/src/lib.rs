@@ -11,6 +11,10 @@ pub use registry::AgentRegistry;
 
 // Re-export domain types
 pub use domain::{DelegationResult, DelegationStatus, HistoryEntry, SpurEvent};
+pub use crate::domain::events::{
+    ExecutorArtifactPayload, ExecutorDiffSummary, ExecutorReviewDecision, ExecutorReviewKind,
+    ExecutorReviewPayload,
+};
 
 // Re-export all remaining types for backward compatibility
 pub use types::*;
