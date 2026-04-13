@@ -240,3 +240,80 @@ fn picker_preserves_cursor_and_filter_across_set_sessions() {
     assert_eq!(picker.cursor(), 0);
     assert_eq!(picker.filter(), "b");
 }
+
+#[test]
+fn enter_switching_session_with_current_draft_shows_confirm() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+    );
+    // Tell picker that session a1 has an unsent draft (simulates the App's
+    // coordination — picker doesn't look up metadata itself).
+    picker.set_current_session_has_draft(Some("a1".to_string()));
+
+    // Move cursor to a2 (cursor 2 in virtual layout: [+ New]=0, a1=1, a2=2).
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+    // Enter should NOT immediately emit ResumeSession — it should open the confirm.
+    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(action.is_none());
+    assert!(picker.is_confirm_switch_visible());
+
+    // Pressing 'y' commits the switch.
+    let action = picker.handle_key(key('y'));
+    match action {
+        Some(Action::ResumeSession { session_id }) => assert_eq!(session_id, "a2"),
+        other => panic!("expected ResumeSession, got {other:?}"),
+    }
+    assert!(!picker.is_confirm_switch_visible());
+}
+
+#[test]
+fn esc_cancels_confirm_switch() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+    );
+    picker.set_current_session_has_draft(Some("a1".to_string()));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(action.is_none());
+    assert!(!picker.is_confirm_switch_visible());
+}
+
+#[test]
+fn enter_on_same_session_id_does_not_show_confirm() {
+    // If user picks the session they're already in, no confirm needed.
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+    );
+    picker.set_current_session_has_draft(Some("a1".to_string()));
+    // Cursor on a1 (cursor=1).
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    // Should emit ResumeSession directly (same session, no switch).
+    assert!(matches!(action, Some(Action::ResumeSession { session_id }) if session_id == "a1"));
+    assert!(!picker.is_confirm_switch_visible());
+}
+
+#[test]
+fn enter_on_new_session_row_with_draft_shows_confirm() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_current_session_has_draft(Some("a1".to_string()));
+    // Cursor is at [+ New session] (cursor=0).
+    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    // [+ New] with a current draft should also show confirm.
+    assert!(action.is_none());
+    assert!(picker.is_confirm_switch_visible());
+
+    let action = picker.handle_key(key('y'));
+    assert!(matches!(action, Some(Action::NewSessionRequested)));
+}

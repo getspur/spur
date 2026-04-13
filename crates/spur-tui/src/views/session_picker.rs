@@ -54,6 +54,13 @@ struct RenameState {
     buffer: String,
 }
 
+/// Pending switch-confirm target. `Some` on the view means the banner is up
+/// and the next `y`/`Enter` commits the encoded action.
+enum ConfirmSwitchTarget {
+    Resume(String),
+    NewSession,
+}
+
 pub struct SessionPickerView {
     state: PickerState,
     /// Interior-mutable so render(&self) can adjust scroll position.
@@ -67,6 +74,13 @@ pub struct SessionPickerView {
     /// Toggled via uppercase `P`; when true, renders a metadata preview
     /// pane below the list.
     preview_visible: bool,
+    /// ID of the current session if it has an unsent draft; None otherwise.
+    /// Used to decide whether Enter on a different session (or [+ New])
+    /// should show the switch-safety confirm banner.
+    current_session_with_draft: Option<String>,
+    /// `Some` when the confirm-switch banner is up. Encodes what to do on
+    /// `y`/`Enter` confirm: resume the given id, or start a new session.
+    confirm_switch: Option<ConfirmSwitchTarget>,
 }
 
 impl SessionPickerView {
@@ -78,6 +92,8 @@ impl SessionPickerView {
             show_archived: false,
             rename_state: None,
             preview_visible: false,
+            current_session_with_draft: None,
+            confirm_switch: None,
         }
     }
 
@@ -87,6 +103,16 @@ impl SessionPickerView {
 
     pub fn is_preview_visible(&self) -> bool {
         self.preview_visible
+    }
+
+    /// Called by App whenever metadata changes OR picker is opened. Passes in
+    /// the id of the current session if it has an unsent draft, else None.
+    pub fn set_current_session_has_draft(&mut self, session_id: Option<String>) {
+        self.current_session_with_draft = session_id;
+    }
+
+    pub fn is_confirm_switch_visible(&self) -> bool {
+        self.confirm_switch.is_some()
     }
 
     pub fn set_metadata(&mut self, metadata: SessionMetadata) {
@@ -602,7 +628,28 @@ impl SessionPickerView {
             SessionPreview::render(frame, chunks[1], &content);
         }
 
-        if let Some(ref rs) = self.rename_state {
+        if let Some(ref target) = self.confirm_switch {
+            let current = self
+                .current_session_with_draft
+                .as_deref()
+                .unwrap_or("current session");
+            let action_desc = match target {
+                ConfirmSwitchTarget::Resume(id) => format!("resume {}", id),
+                ConfirmSwitchTarget::NewSession => "start a new session".to_string(),
+            };
+            let prompt = format!(
+                "Session \"{current}\" has an unsent draft — save and {action_desc}? [y/N]"
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    prompt,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                chunks[status_idx],
+            );
+        } else if let Some(ref rs) = self.rename_state {
             let prompt = format!("Rename \u{2192} {}_", rs.buffer);
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -680,6 +727,27 @@ impl SessionPickerView {
 
 impl View for SessionPickerView {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // 0. Confirm-switch intercepts all keys until y/Enter commits or anything else cancels.
+        if let Some(ref target) = self.confirm_switch {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    let out = match target {
+                        ConfirmSwitchTarget::Resume(id) => {
+                            Action::ResumeSession { session_id: id.clone() }
+                        }
+                        ConfirmSwitchTarget::NewSession => Action::NewSessionRequested,
+                    };
+                    self.confirm_switch = None;
+                    return Some(out);
+                }
+                _ => {
+                    // n / N / Esc / anything else cancels.
+                    self.confirm_switch = None;
+                    return None;
+                }
+            }
+        }
+
         // 1. Rename-mode intercepts all keys until Enter/Esc.
         if let Some(rs) = self.rename_state.as_mut() {
             match key.code {
@@ -727,6 +795,7 @@ impl View for SessionPickerView {
         enum Post {
             None,
             StartRename { session_id: String, buffer: String },
+            StartConfirmSwitch(ConfirmSwitchTarget),
         }
         let mut post = Post::None;
 
@@ -737,6 +806,7 @@ impl View for SessionPickerView {
                 state,
                 metadata,
                 show_archived,
+                current_session_with_draft,
                 ..
             } = self;
             match state {
@@ -802,7 +872,16 @@ impl View for SessionPickerView {
                             KeyCode::Char('n') => Some(Action::NewSessionRequested),
                             KeyCode::Enter => {
                                 if *cursor == 0 {
-                                    Some(Action::NewSessionRequested)
+                                    // [+ New session] row: if the current session has a
+                                    // draft, ask the user to confirm switching away.
+                                    if current_session_with_draft.is_some() {
+                                        post = Post::StartConfirmSwitch(
+                                            ConfirmSwitchTarget::NewSession,
+                                        );
+                                        None
+                                    } else {
+                                        Some(Action::NewSessionRequested)
+                                    }
                                 } else {
                                     let indices = Self::filtered_indices(
                                         sessions,
@@ -812,8 +891,21 @@ impl View for SessionPickerView {
                                     );
                                     let real_idx = indices.get(*cursor - 1).copied()?;
                                     let sid = sessions[real_idx].session_id.0.to_string();
-                                    *resuming = true;
-                                    Some(Action::ResumeSession { session_id: sid })
+                                    // Confirm only when the draft belongs to a DIFFERENT
+                                    // session than the one being resumed.
+                                    let draft_elsewhere = current_session_with_draft
+                                        .as_ref()
+                                        .map(|cur| cur != &sid)
+                                        .unwrap_or(false);
+                                    if draft_elsewhere {
+                                        post = Post::StartConfirmSwitch(
+                                            ConfirmSwitchTarget::Resume(sid),
+                                        );
+                                        None
+                                    } else {
+                                        *resuming = true;
+                                        Some(Action::ResumeSession { session_id: sid })
+                                    }
                                 }
                             }
                             KeyCode::Esc => {
@@ -859,8 +951,14 @@ impl View for SessionPickerView {
         };
 
         // Apply deferred state transitions.
-        if let Post::StartRename { session_id, buffer } = post {
-            self.rename_state = Some(RenameState { session_id, buffer });
+        match post {
+            Post::None => {}
+            Post::StartRename { session_id, buffer } => {
+                self.rename_state = Some(RenameState { session_id, buffer });
+            }
+            Post::StartConfirmSwitch(target) => {
+                self.confirm_switch = Some(target);
+            }
         }
 
         action

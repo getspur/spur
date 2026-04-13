@@ -571,9 +571,7 @@ impl App {
                 if self.session_picker.is_none() {
                     self.session_picker = Some(SessionPickerView::new());
                 }
-                if let Some(ref mut picker) = self.session_picker {
-                    picker.set_metadata(self.metadata_store.metadata().clone());
-                }
+                self.refresh_picker_metadata();
                 self.current_view = ViewId::SessionPicker;
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ListSessions);
@@ -593,9 +591,7 @@ impl App {
                 if let Err(e) = self.metadata_store.save() {
                     tracing::warn!(error = %e, "failed to persist pin toggle");
                 }
-                if let Some(ref mut picker) = self.session_picker {
-                    picker.set_metadata(self.metadata_store.metadata().clone());
-                }
+                self.refresh_picker_metadata();
                 self.dirty = true;
             }
 
@@ -605,9 +601,7 @@ impl App {
                 if let Err(e) = self.metadata_store.save() {
                     tracing::warn!(error = %e, "failed to persist archive toggle");
                 }
-                if let Some(ref mut picker) = self.session_picker {
-                    picker.set_metadata(self.metadata_store.metadata().clone());
-                }
+                self.refresh_picker_metadata();
                 self.dirty = true;
             }
 
@@ -631,9 +625,7 @@ impl App {
                 if let Err(e) = self.metadata_store.save() {
                     tracing::warn!(error = %e, "failed to persist rename");
                 }
-                if let Some(ref mut picker) = self.session_picker {
-                    picker.set_metadata(self.metadata_store.metadata().clone());
-                }
+                self.refresh_picker_metadata();
                 self.dirty = true;
             }
 
@@ -861,6 +853,34 @@ impl App {
     fn clear_pending_permission_trace(&mut self) {
         if let Some(ref mut detail) = self.session_detail {
             detail.resolve_pending_permissions();
+        }
+    }
+
+    /// Returns `Some(sid)` if the currently-active session has a non-empty
+    /// persisted draft; else `None`. Used by the picker to decide whether to
+    /// show the switch-safety confirm banner.
+    fn compute_draft_session(&self) -> Option<String> {
+        let detail = self.session_detail.as_ref()?;
+        let sid = detail.session_id().0.clone();
+        let has = self
+            .metadata_store
+            .entry(&sid)
+            .map(|e| !e.draft.is_empty())
+            .unwrap_or(false);
+        if has {
+            Some(sid)
+        } else {
+            None
+        }
+    }
+
+    /// Push the current metadata snapshot AND current-draft awareness into the
+    /// picker if one exists. Call from any action that mutates metadata.
+    fn refresh_picker_metadata(&mut self) {
+        let draft = self.compute_draft_session();
+        if let Some(ref mut picker) = self.session_picker {
+            picker.set_metadata(self.metadata_store.metadata().clone());
+            picker.set_current_session_has_draft(draft);
         }
     }
 
