@@ -132,14 +132,26 @@ async fn authenticate(&mut self, req: AuthenticateRequest)
     -> anyhow::Result<AuthenticateResponse>;
 ```
 
-**`NativeAcpConnection` — implement the new trait methods.** Each method:
+**Scope of trait extensions in this spec (YAGNI-narrowed).**
+
+Only the methods with a concrete consumer in the milestones below are
+implemented now: `set_session_mode` (drives plan-mode toggle) and
+`authenticate` (needed to surface `RequestError::authRequired` as a
+clear user message even before an in-TUI auth flow exists).
+
+The remaining methods — `fork_session`, `resume_session`,
+`close_session`, `set_session_model`, `set_session_config_option` —
+are declared in the trait but left as default-unsupported stubs and
+implemented in follow-up specs when a TUI consumer requires them.
+
+**`NativeAcpConnection` — implement the two in-scope trait methods.** Each:
 
 1. Adds an `AcpCommand::*` variant (existing pattern, `native.rs:59-89`).
 2. Adds a dispatcher arm on the LocalSet thread that calls the SDK's
    corresponding method on `ClientSideConnection`.
 3. Forwards the response via `oneshot::Sender`.
 
-Estimated ~50 LoC per method × 7 methods = ~350 LoC.
+Estimated ~50 LoC per method × 2 methods = ~100 LoC in this spec's scope.
 
 **Client capability advertisement.** In `NativeAcpConnection::initialize`,
 advertise capabilities that activate the reference's full feature surface:
@@ -161,6 +173,21 @@ methods (`acp-agent.ts:326-396`).
 header that this adapter serves non-Claude stream-json agents. No code
 changes.
 
+**Subprocess stderr capture (must-have correction).**
+`NativeAcpConnection` currently configures the child process with
+`stderr(Stdio::inherit())` (`native.rs:486`). For `claude-agent-acp` the
+child emits SDK logs, unhandled-rejection traces, and progress lines to
+stderr by design (reference `index.ts:18-21` redirects `console.log` to
+stderr). Inherited into Spur's TUI-owning parent process, that output
+will corrupt the terminal or disappear silently depending on the
+frontend.
+
+Change `NativeAcpConnection` to pipe the child's stderr into a
+per-session log file at `.spur/logs/<agent>-<session_id>-acp.log`
+(overwriting on session start, appending within a session). Surface the
+path in a tracing event at `new_session` time so users can tail it when
+debugging.
+
 ### spur-core (orchestrator)
 
 **Agent dispatch.** Already routes `TransportKind::Acp` to `NativeAcpConnection`
@@ -181,15 +208,25 @@ currently ignore:
 - `ModelState` → current-model label, picker
 - `AvailableCommands` → slash-command autocomplete in the input area
 
-New interactive surfaces:
+New interactive surfaces (in scope for this spec):
 
-- Mode switcher (e.g. `Esc-m` cycles mode) — wires `set_session_mode`
-- Model picker — wires `set_session_model`
-- Slash-command menu — wires through the existing prompt path
-- Auth dialog invoked on `RequestError::authRequired` — launches the
-  terminal-auth command advertised by the server's `authMethods`
+- **Plan-mode toggle** (e.g. `Esc-m`) — wires `set_session_mode` between
+  the default mode and `plan`. Mode indicator reflects current state.
+- **Auth-required error surfacing** — when the subprocess throws
+  `RequestError::authRequired`, the TUI shows a clear, dismissable
+  message instructing the user to run `claude /login` and restart the
+  session. No interactive login flow in this spec.
 
-Estimated ~500-800 LoC across view + state modules.
+Deferred to follow-up specs:
+
+- In-TUI auth dialog that launches `authMethods` terminal-auth commands
+- Model picker (`set_session_model`)
+- Slash-command autocomplete execution
+- Fork-from-session UI
+- Resume-by-id UI (the picker exists; wiring to `resume_session` is new)
+
+Estimated ~250-400 LoC across view + state modules for the in-scope
+surfaces.
 
 ## Data flow — representative turn
 
@@ -246,20 +283,74 @@ and the stream-json Claude profile is marked deprecated.
 
 ## Milestones
 
-The implementation plan (produced next) will sequence work as:
+Sequenced to kill highest-consequence unknowns first, then deliver
+user-visible value, keeping scope tight enough to ship in ~5
+engineer-days.
 
-- **M1** — Agent profile + smoke test (config only + manual verification)
-- **M2** — Permission round-trip verified end to end
-- **M3** — `AgentConnection` trait extensions + dispatcher wiring
-  (fork / resume / close / set_mode / set_model / set_config_option /
-  authenticate)
-- **M4** — TUI handlers for UsageUpdate / ModeState / ModelState /
-  AvailableCommands + interactive switchers
-- **M5** — Auth flow (authMethods discovery, terminal-auth launcher)
-- **M6** — Docs, version pin policy, deprecation note on stream-json
-  Claude profile
+- **M0 — Protocol-compat spike (~0.5d).** Standalone Rust harness (not
+  in the Spur tree) that instantiates `NativeAcpConnection`, launches
+  `claude-agent-acp` via `npx`, and round-trips `initialize →
+  new_session → prompt → set_session_mode → close_session` plus a
+  `fork_session` attempt. Records whether each method succeeds, the
+  cold-start time, and behavior when offline. Gate: if any core
+  round-trip fails, stop and revisit pinned version before proceeding.
 
-Each milestone is independently shippable and independently valuable.
+- **M1 — Agent profile + smoke + permission + version pin + stderr
+  capture (~1-1.5d).**
+  1. Add `claude-code-acp` profile to the example config with a pinned
+     `claude-agent-acp` version.
+  2. Flip `NativeAcpConnection`'s child spawn from `Stdio::inherit()`
+     to a per-session log file at
+     `.spur/logs/<agent>-<session_id>-acp.log`; emit the path via
+     tracing.
+  3. Manually exercise a prompt end to end through the TUI.
+  4. Trigger a tool-use (e.g. file write) and confirm the permission
+     round-trip (claude-agent-acp → `request_permission` → TUI →
+     selection → back to subprocess) works out of the box using the
+     existing `SpurAcpClientDynamic` impl.
+
+- **M2 — Read-only TUI notifications (~1.5d).** Add handlers for:
+  `UsageUpdate` (status-bar: context %, running cost),
+  `ModeState` (mode indicator), `AvailableCommands` (rendered as a
+  hint list in the input area — display only, no execution wiring
+  yet). Use a catchall arm with debug logging for unknown variants to
+  avoid regressions.
+
+- **M3 — Narrow trait extensions (~0.5d).** Add `set_session_mode` and
+  `authenticate` to `AgentConnection`, with default
+  `"not supported by this transport"` implementations. Implement both
+  in `NativeAcpConnection` using the established `AcpCommand` +
+  LocalSet dispatcher pattern (~100 LoC).
+
+- **M4 — Plan-mode toggle + auth-error surfacing (~1d).** Bind a
+  keystroke in the TUI to call `set_session_mode` and cycle between
+  default and `plan`. On any `RequestError::authRequired` from session
+  creation or prompt, render a clear message telling the user to run
+  `claude /login` and restart.
+
+- **M5 — Docs, version-pin policy, deprecation note (~0.5d).** Write a
+  short operator guide: how to switch a Claude profile to the new
+  transport, how to pin/bump the `claude-agent-acp` version, where to
+  find the per-session log. Add a deprecation notice on the Claude
+  `stream_json` profile in the default config.
+
+Each milestone is independently shippable. M0 gates the rest.
+
+## Follow-up work (explicitly out of scope)
+
+These are known valuable extensions; each gets its own spec when a
+concrete consumer need materializes:
+
+- In-TUI auth flow: discover `authMethods`, launch `terminal-auth`
+  commands, observe completion, retry session creation.
+- Trait extensions and TUI for `fork_session`, `resume_session`,
+  `close_session`, `set_session_model`, `set_session_config_option`.
+- Slash-command execution wiring (autocomplete already in M2).
+- Model picker UI.
+- Observability dashboard: per-session cost aggregation, subprocess
+  health metrics.
+- Bundled / vendored `claude-agent-acp` install to remove the
+  `npx --yes` network requirement.
 
 ## Risks & open questions
 
