@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use spur_acp::{
     DelegationStatus, ExecutorArtifactPayload, ExecutorReviewDecision, ExecutorReviewKind,
-    ExecutorReviewPayload, SessionId, SpurEvent, SpurEventBody,
+    ExecutorReviewPayload, LifecycleState, Role, SessionId, SpurEvent, SpurEventBody,
 };
-use spur_core::{Artifact, ExecutorId, ExecutorLineage, LifecycleState};
+use spur_core::{Artifact, ExecutorId, ExecutorLineage};
 
 fn spawn(id: &str, parent: Option<&str>) -> SpurEvent {
     SpurEvent::now(SpurEventBody::ExecutorSpawned {
@@ -12,11 +12,7 @@ fn spawn(id: &str, parent: Option<&str>) -> SpurEvent {
         parent_id: parent.map(|s| s.into()),
         session_id: SessionId(format!("sess-{}", id)),
         agent: "kiro".into(),
-        role: if parent.is_none() {
-            "Brain".into()
-        } else {
-            "Executor".into()
-        },
+        role: if parent.is_none() { Role::Brain } else { Role::Executor },
         task_spec: format!("task for {}", id),
     })
 }
@@ -54,7 +50,7 @@ fn phase_change_updates_node_phase() {
     l.apply(&spawn("brain-1", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "brain-1".into(),
-        phase: "Running".into(),
+        phase: LifecycleState::Running,
     }));
 
     let n = l.node(&ExecutorId::new("brain-1")).unwrap();
@@ -67,24 +63,12 @@ fn phase_change_terminal_sets_attempt_ended() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "w".into(),
-        phase: "Succeeded".into(),
+        phase: LifecycleState::Succeeded,
     }));
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
     let a = n.current_attempt().unwrap();
     assert!(a.ended_at.is_some(), "terminal phase must close the attempt");
-}
-
-#[test]
-fn unknown_phase_string_is_ignored() {
-    let mut l = ExecutorLineage::new();
-    l.apply(&spawn("w", None));
-    l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
-        id: "w".into(),
-        phase: "Bogus".into(),
-    }));
-    let n = l.node(&ExecutorId::new("w")).unwrap();
-    assert_eq!(n.phase, LifecycleState::Spawning, "unchanged on unknown phase");
 }
 
 #[test]
@@ -156,7 +140,7 @@ fn retry_started_pushes_new_attempt() {
     l.apply(&spawn("w", None));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "w".into(),
-        phase: "Failed".into(),
+        phase: LifecycleState::Failed,
     }));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorRetryStarted {
         id: "w".into(),
@@ -177,7 +161,7 @@ fn orphan_phase_event_is_replayed_after_spawn() {
     // Phase arrives BEFORE spawn — must be buffered.
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "late".into(),
-        phase: "Running".into(),
+        phase: LifecycleState::Running,
     }));
     assert!(l.node(&ExecutorId::new("late")).is_none());
 

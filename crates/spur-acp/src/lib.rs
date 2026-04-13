@@ -13,7 +13,7 @@ pub use registry::AgentRegistry;
 pub use domain::{DelegationResult, DelegationStatus, HistoryEntry, SpurEvent, SpurEventBody};
 pub use crate::domain::events::{
     ExecutorArtifactPayload, ExecutorDiffSummary, ExecutorReviewDecision, ExecutorReviewKind,
-    ExecutorReviewPayload,
+    ExecutorReviewPayload, LifecycleState, Role,
 };
 
 // Re-export all remaining types for backward compatibility

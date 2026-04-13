@@ -5,7 +5,7 @@
 //! - pending_reviews must return insertion order.
 
 use spur_acp::{
-    ExecutorReviewKind, ExecutorReviewPayload, SessionId, SpurEvent, SpurEventBody,
+    ExecutorReviewKind, ExecutorReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
 };
 use spur_core::{ExecutorId, ExecutorLineage};
 
@@ -15,7 +15,7 @@ fn spawn(id: &str) -> SpurEvent {
         parent_id: None,
         session_id: SessionId::new(),
         agent: id.into(),
-        role: "Brain".into(),
+        role: Role::Brain,
         task_spec: String::new(),
     })
 }

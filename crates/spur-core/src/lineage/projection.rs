@@ -3,8 +3,10 @@ use std::time::SystemTime;
 
 use spur_acp::{SpurEvent, SpurEventBody};
 
+use spur_acp::LifecycleState;
+
 use super::types::{
-    Attempt, AttemptStatus, ExecutorId, ExecutorNode, LifecycleState, ReviewRequest, Role,
+    Attempt, AttemptStatus, ExecutorId, ExecutorNode, ReviewRequest,
 };
 
 const MAX_ORPHAN_BUFFER_PER_EXEC: usize = 128;
@@ -40,7 +42,6 @@ impl ExecutorLineage {
             } => {
                 let eid = ExecutorId::new(id);
                 let parent = parent_id.as_ref().map(ExecutorId::new);
-                let parsed_role = parse_role(role);
                 let attempt = Attempt {
                     session_id: session_id.clone(),
                     started_at: SystemTime::now(),
@@ -55,7 +56,7 @@ impl ExecutorLineage {
                     parent_id: parent.clone(),
                     child_ids: Vec::new(),
                     agent: agent.clone(),
-                    role: parsed_role,
+                    role: *role,
                     task_spec: task_spec.clone(),
                     phase: LifecycleState::Spawning,
                     attempts: vec![attempt],
@@ -81,18 +82,16 @@ impl ExecutorLineage {
 
             SpurEventBody::ExecutorPhaseChanged { id, phase } => {
                 let eid = ExecutorId::new(id);
-                if let Some(new_phase) = parse_phase(phase) {
-                    if let Some(node) = self.nodes.get_mut(&eid) {
-                        node.phase = new_phase;
-                        if let Some(status) = terminal_attempt_status(new_phase) {
-                            if let Some(a) = node.current_attempt_mut() {
-                                a.ended_at = Some(SystemTime::now());
-                                a.status = status;
-                            }
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    node.phase = *phase;
+                    if let Some(status) = terminal_attempt_status(*phase) {
+                        if let Some(a) = node.current_attempt_mut() {
+                            a.ended_at = Some(SystemTime::now());  // task-4 TODO
+                            a.status = status;
                         }
-                    } else {
-                        self.buffer_orphan(eid, event.clone());
                     }
+                } else {
+                    self.buffer_orphan(eid, event.clone());
                 }
             }
 
@@ -226,27 +225,6 @@ impl ExecutorLineage {
     pub(crate) fn nodes_mut_vec(&mut self) -> Vec<&mut ExecutorNode> {
         self.nodes.values_mut().collect()
     }
-}
-
-fn parse_role(s: &str) -> Role {
-    match s {
-        "Brain" => Role::Brain,
-        "SubExecutor" => Role::SubExecutor,
-        _ => Role::Executor,
-    }
-}
-
-fn parse_phase(s: &str) -> Option<LifecycleState> {
-    Some(match s {
-        "Spawning" => LifecycleState::Spawning,
-        "Running" => LifecycleState::Running,
-        "AwaitingReview" => LifecycleState::AwaitingReview,
-        "Resuming" => LifecycleState::Resuming,
-        "Succeeded" => LifecycleState::Succeeded,
-        "Failed" => LifecycleState::Failed,
-        "Cancelled" => LifecycleState::Cancelled,
-        _ => return None,
-    })
 }
 
 fn terminal_attempt_status(p: LifecycleState) -> Option<AttemptStatus> {
