@@ -95,6 +95,23 @@ impl SpurEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpurEventBody {
     BrainSpawned { agent: String, session: SessionId },
+    /// Emitted AFTER a brain session is established (fresh or resumed) and
+    /// the agent-authoritative ACP session id is known. The TUI persists
+    /// the (spur_id → acp_id, brain) mapping so the next `spur watch` run
+    /// can resume by the real ACP id.
+    ///
+    /// - `session`: the SPUR session id (matches the earlier `BrainSpawned`).
+    /// - `acp_session_id`: the id the agent assigned (stable across runs
+    ///   where the agent supports `session/load`).
+    /// - `brain`: the brain agent name that owns this ACP id.
+    /// - `resumed`: `true` iff `session/load` succeeded. `false` when the
+    ///   path fell back to `new_session` or spawned fresh.
+    AgentSessionReady {
+        session: SessionId,
+        acp_session_id: String,
+        brain: String,
+        resumed: bool,
+    },
     WorkerSpawned { agent: String, session: SessionId, worktree: PathBuf },
     SessionCompleted { session: SessionId, success: bool },
     AgentNotification { session: SessionId, notification: SessionNotification },
