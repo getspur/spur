@@ -57,6 +57,13 @@ pub struct SessionDetailView {
     /// Mention hits currently shown in the popup, parallel to popup rows.
     /// Used on accept to retrieve the URI/display name.
     active_mention_hits: Vec<crate::mentions::MentionEntry>,
+    #[cfg(feature = "markdown")]
+    pub mermaid_registry: std::collections::HashMap<
+        crate::components::mermaid::MermaidId,
+        crate::components::mermaid::MermaidState,
+    >,
+    #[cfg(feature = "markdown")]
+    pub pending_fence_actions: std::collections::VecDeque<crate::action::Action>,
 }
 
 impl SessionDetailView {
@@ -86,6 +93,10 @@ impl SessionDetailView {
             mention_registry: crate::mentions::MentionRegistry::new(),
             cwd,
             active_mention_hits: Vec::new(),
+            #[cfg(feature = "markdown")]
+            mermaid_registry: std::collections::HashMap::new(),
+            #[cfg(feature = "markdown")]
+            pending_fence_actions: std::collections::VecDeque::new(),
         }
     }
 
@@ -167,6 +178,8 @@ impl SessionDetailView {
             kind: TraceKind::Observe,
             text: msg.into(),
             timestamp: Self::now_stamp(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
         });
     }
 
@@ -177,6 +190,8 @@ impl SessionDetailView {
             kind: TraceKind::Think,
             text: msg,
             timestamp: Self::now_stamp(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
         });
     }
 
@@ -229,6 +244,29 @@ impl SessionDetailView {
 
     pub fn resolve_pending_permissions(&mut self) {
         self.react_trace.resolve_pending_permissions();
+    }
+
+    #[cfg(feature = "markdown")]
+    pub fn handle_mermaid_completed(
+        &mut self,
+        ref_id: crate::components::mermaid::MermaidId,
+        result: Result<std::sync::Arc<image::DynamicImage>, String>,
+    ) {
+        use crate::components::mermaid::MermaidState;
+        let state = match result {
+            // The registry stores owned `DynamicImage`, unwrap the Arc via clone
+            // of the underlying data. If the Arc has a single ref, this is O(1);
+            // otherwise it copies pixels once (still rare — Arc is typically
+            // single-owner at this point).
+            Ok(image_arc) => MermaidState::Ready { image: (*image_arc).clone() },
+            Err(message) => MermaidState::Error { message },
+        };
+        self.mermaid_registry.insert(ref_id, state);
+    }
+
+    #[cfg(feature = "markdown")]
+    pub fn take_pending_actions(&mut self) -> Vec<crate::action::Action> {
+        self.pending_fence_actions.drain(..).collect()
     }
 
     pub fn push_permission(&mut self, description: &str, countdown: u8) {
@@ -375,6 +413,11 @@ impl View for SessionDetailView {
         // Matched early so it works even while the input bar has focus.
         if matches!(key.code, KeyCode::Char('m')) && key.modifiers.contains(KeyModifiers::ALT) {
             return Some(Action::TogglePlanMode);
+        }
+
+        #[cfg(feature = "markdown")]
+        if matches!(key.code, KeyCode::Char('v')) && key.modifiers.contains(KeyModifiers::ALT) {
+            return Some(Action::NavigateTo(ViewId::MermaidOverlay(self.session_id.clone())));
         }
 
         // Priority 1: Permission handling when a permission is pending.
@@ -742,6 +785,23 @@ impl View for SessionDetailView {
 
     fn tick(&mut self) {
         self.react_trace.tick();
+        #[cfg(feature = "markdown")]
+        {
+            use crate::components::mermaid::MermaidState;
+            for (_entry_idx, fence) in self.react_trace.drain_fence_dispatches() {
+                self.mermaid_registry.insert(
+                    fence.id,
+                    MermaidState::Pending { code: fence.code.clone() },
+                );
+                self.pending_fence_actions.push_back(
+                    crate::action::Action::MermaidRenderRequest {
+                        session: self.session_id.clone(),
+                        ref_id: fence.id,
+                        code: fence.code,
+                    },
+                );
+            }
+        }
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
