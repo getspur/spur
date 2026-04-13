@@ -143,6 +143,16 @@ impl SessionDetailView {
         });
     }
 
+    /// Push a system-note trace entry (informational message from the TUI
+    /// itself, e.g. stubbed kiro execution).
+    pub fn push_system_note(&mut self, msg: impl Into<String>) {
+        self.react_trace.push(TraceEntry {
+            kind: TraceKind::Observe,
+            text: msg.into(),
+            timestamp: Self::now_stamp(),
+        });
+    }
+
     /// Push a trace entry showing the current session cost.
     pub fn push_cost_note(&mut self) {
         let msg = format!("Session cost: ${:.2}", self.cost);
@@ -364,12 +374,31 @@ impl View for SessionDetailView {
         );
 
         if is_editing_key {
-            if let Some((text, interrupt)) = self.input_bar.handle_key(key) {
-                return Some(Action::SendMessage {
-                    session: self.session_id.clone(),
-                    text,
-                    interrupt,
-                });
+            if self.input_bar.handle_key(key).is_some() {
+                // Enter fired. Take the capture and route through SubmitRouter.
+                if let Some((text, ranges, interrupt)) = self.input_bar.take_submit_capture() {
+                    use crate::commands::submit_router::{route, SubmitDecision};
+                    let dec = route(&text, &ranges, &self.command_registry, interrupt);
+                    return match dec {
+                        SubmitDecision::Empty => None,
+                        SubmitDecision::Send { blocks, interrupt } => {
+                            Some(Action::SendMessage {
+                                session: self.session_id.clone(),
+                                blocks,
+                                interrupt,
+                            })
+                        }
+                        SubmitDecision::Local { action } => Some(action),
+                        SubmitDecision::KiroExecute { command, args } => {
+                            Some(Action::KiroExecute {
+                                session: self.session_id.clone(),
+                                command,
+                                args,
+                            })
+                        }
+                    };
+                }
+                return None;
             }
 
             // Key was an ordinary edit (insert/delete/arrow). Re-evaluate popup state.
