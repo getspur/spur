@@ -36,7 +36,6 @@ pub struct TraceEntry {
     pub markdown: Option<super::markdown_stream::MarkdownStream>,
 }
 
-/// A flattened unit of rendered output: one visual row per variant.
 #[cfg(feature = "markdown")]
 #[derive(Debug, Clone)]
 pub(crate) enum VirtualRow {
@@ -48,8 +47,6 @@ pub(crate) enum VirtualRow {
     },
 }
 
-/// Borrowed context passed to `render_with_ctx` so the render walker can
-/// consult the mermaid registry and build `StatefulProtocol`s lazily.
 #[cfg(feature = "markdown")]
 pub struct RenderContext<'a> {
     pub mermaid_registry: &'a std::collections::HashMap<
@@ -59,8 +56,6 @@ pub struct RenderContext<'a> {
     pub picker: Option<&'a ratatui_image::picker::Picker>,
 }
 
-/// One output batch produced by `segment_visible_rows`. Holds indices into
-/// the virtual-row slice, not Rects — Rect computation happens at render.
 #[cfg(feature = "markdown")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Segment {
@@ -149,7 +144,7 @@ fn compute_heights(
     let mut heights = std::collections::HashMap::new();
     for (id, state) in ctx.mermaid_registry.iter() {
         if let MermaidState::Ready { image, .. } = state {
-            heights.insert(*id, compute_inline_height_rows(image, ctx.picker));
+            heights.insert(*id, compute_inline_height_rows(image.as_ref(), ctx.picker));
         }
     }
     heights
@@ -179,7 +174,9 @@ fn render_inline_image(
 
     let mut slot = inline_protocol.borrow_mut();
     if slot.is_none() {
-        *slot = Some(picker.new_resize_protocol(image.clone()));
+        // Unavoidable pixel copy: ratatui_image takes DynamicImage by value
+        // to build the protocol. Arc prevents repeated deep-copies elsewhere.
+        *slot = Some(picker.new_resize_protocol((**image).clone()));
     }
     let Some(proto) = slot.as_mut() else {
         return false;
@@ -753,16 +750,6 @@ impl ReactTrace {
         lines
     }
 
-    /// Flatten display lines into virtual rows (one row per unit).
-    /// Backward-compatible wrapper: produces no `ImageRow` entries, since
-    /// no heights are known. Fences fall back to single-row Text placeholders.
-    #[cfg(feature = "markdown")]
-    #[allow(dead_code)] // Consumed in Task 4/6; exercised now by test helper.
-    pub(crate) fn build_virtual_rows(&self, effective_width: u16) -> Vec<VirtualRow> {
-        let empty = std::collections::HashMap::new();
-        self.build_virtual_rows_with_heights(effective_width, &empty)
-    }
-
     /// Items-aware virtual row builder. Walks entries directly, and for
     /// `AgentMessage` entries iterates the markdown stream's items so
     /// `StreamItem::Fence(id)` can be expanded into N `ImageRow` entries
@@ -1309,21 +1296,8 @@ impl Default for ReactTrace {
 
 #[cfg(all(test, feature = "markdown"))]
 impl ReactTrace {
-    pub(crate) fn total_virtual_rows_for_test(&self, effective_width: u16) -> usize {
-        self.build_virtual_rows(effective_width).len()
-    }
-
-    pub(crate) fn build_virtual_rows_with_heights_for_test(
-        &self,
-        effective_width: u16,
-        heights: &std::collections::HashMap<crate::components::mermaid::MermaidId, u16>,
-    ) -> Vec<VirtualRow> {
-        self.build_virtual_rows_with_heights(effective_width, heights)
-    }
-
     /// Test helper: compute the render segmentation without a real frame.
-    /// Mirrors what `render_with_ctx` computes internally. Returns the
-    /// segments for the visible slice `[offset, offset + visible_height)`.
+    /// Mirrors what `render_with_ctx` computes internally.
     pub(crate) fn render_plan_for_test(
         &self,
         effective_width: u16,
@@ -1514,7 +1488,9 @@ mod virtual_row_tests {
         use crate::components::markdown_stream::StateLookup;
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
-        let total = trace.total_virtual_rows_for_test(60);
+        let total = trace
+            .build_virtual_rows_with_heights(60, &std::collections::HashMap::new())
+            .len();
         // Header (1) + 3 body lines + blank separator (1) = 5
         assert_eq!(total, 5, "unexpected virtual row count: {total}");
     }
@@ -1537,7 +1513,7 @@ mod virtual_row_tests {
         let mut heights: HashMap<crate::components::mermaid::MermaidId, u16> = HashMap::new();
         heights.insert(crate::components::mermaid::MermaidId(0), 12);
 
-        let rows = trace.build_virtual_rows_with_heights_for_test(60, &heights);
+        let rows = trace.build_virtual_rows_with_heights(60, &heights);
 
         let image_rows: Vec<_> = rows
             .iter()
@@ -1568,7 +1544,7 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         let empty = std::collections::HashMap::new();
-        let rows = trace.build_virtual_rows_with_heights_for_test(60, &empty);
+        let rows = trace.build_virtual_rows_with_heights(60, &empty);
 
         let image_rows = rows
             .iter()

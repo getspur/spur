@@ -52,8 +52,8 @@ pub struct FenceRef {
     pub code: String,
 }
 
-/// Structured output of a rebuilt markdown stream. Preserves fence boundaries
-/// so the render layer can allocate sub-Rects for image widgets.
+/// Preserves fence boundaries so the render layer can allocate sub-Rects for
+/// image widgets rather than folding fences into text placeholders.
 #[derive(Debug, Clone)]
 pub enum StreamItem {
     Text(Vec<Line<'static>>),
