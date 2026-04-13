@@ -91,6 +91,8 @@ pub enum Artifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attempt {
     pub session_id: SessionId,
+    // SystemTime (not Instant) so the projection is serde-serializable for
+    // SessionHistory replay. Events crossing process boundaries require this.
     pub started_at: SystemTime,
     pub ended_at: Option<SystemTime>,
     pub status: AttemptStatus,
