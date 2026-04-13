@@ -29,6 +29,11 @@ pub struct TraceEntry {
     pub kind: TraceKind,
     pub text: String,
     pub timestamp: String,
+    /// Per-entry markdown renderer, populated only for `TraceKind::AgentMessage`
+    /// when the `markdown` feature is enabled. `text` is kept in sync with the
+    /// stream's `raw_text` so non-markdown rendering paths still work.
+    #[cfg(feature = "markdown")]
+    pub markdown: Option<super::markdown_stream::MarkdownStream>,
 }
 
 /// Spinner frames for delegation animation.
@@ -98,28 +103,55 @@ impl ReactTrace {
             kind: TraceKind::Think,
             text: text.to_string(),
             timestamp,
+            #[cfg(feature = "markdown")]
+            markdown: None,
         });
     }
 
     /// Append text to the most recent AgentMessage entry, or create a new one.
     /// Same accumulation pattern as append_think but for agent responses.
     pub fn append_message(&mut self, text: &str, agent: &str, timestamp: String) {
-        if let Some(last) = self.entries.last_mut() {
-            if matches!(last.kind, TraceKind::AgentMessage { .. }) {
-                last.text.push_str(text);
-                if self.is_following {
-                    self.scroll_to_bottom();
+        #[cfg(feature = "markdown")]
+        {
+            if let Some(last) = self.entries.last_mut() {
+                if let TraceKind::AgentMessage { .. } = last.kind {
+                    last.text.push_str(text);
+                    if let Some(stream) = last.markdown.as_mut() {
+                        stream.append(text);
+                    }
+                    if self.is_following {
+                        self.scroll_to_bottom();
+                    }
+                    return;
                 }
-                return;
             }
+            let mut stream = super::markdown_stream::MarkdownStream::new();
+            stream.append(text);
+            self.push(TraceEntry {
+                kind: TraceKind::AgentMessage { agent: agent.to_string() },
+                text: text.to_string(),
+                timestamp,
+                markdown: Some(stream),
+            });
+            return;
         }
-        self.push(TraceEntry {
-            kind: TraceKind::AgentMessage {
-                agent: agent.to_string(),
-            },
-            text: text.to_string(),
-            timestamp,
-        });
+        #[cfg(not(feature = "markdown"))]
+        {
+            if let Some(last) = self.entries.last_mut() {
+                if matches!(last.kind, TraceKind::AgentMessage { .. }) {
+                    last.text.push_str(text);
+                    if self.is_following {
+                        self.scroll_to_bottom();
+                    }
+                    return;
+                }
+            }
+            self.push(TraceEntry {
+                kind: TraceKind::AgentMessage { agent: agent.to_string() },
+                text: text.to_string(),
+                timestamp,
+            });
+        }
     }
 
     /// Push a new trace entry, evicting oldest if over capacity, and
@@ -222,6 +254,27 @@ impl ReactTrace {
         }
     }
 
+    /// Drain any mermaid fences detected during the last debounce window.
+    /// Returns (entry_index, FenceRef) pairs. Empty if the `markdown` feature
+    /// is disabled.
+    #[cfg(feature = "markdown")]
+    pub fn drain_fence_dispatches(&mut self) -> Vec<(usize, super::markdown_stream::FenceRef)> {
+        let mut out = Vec::new();
+        for (idx, entry) in self.entries.iter_mut().enumerate() {
+            if let Some(stream) = entry.markdown.as_mut() {
+                for fence in stream.maybe_flush() {
+                    out.push((idx, fence));
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(not(feature = "markdown"))]
+    pub fn drain_fence_dispatches(&mut self) -> Vec<(usize, ())> {
+        Vec::new()
+    }
+
     /// Returns true if any entry has a pending permission request.
     pub fn has_pending_permission(&self) -> bool {
         self.entries.iter().any(|e| {
@@ -296,20 +349,40 @@ impl ReactTrace {
                         ts_span.clone(),
                         Span::styled(
                             format!("✉ {}", agent),
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                         ),
                     ]));
-                    // Body lines indented 3 spaces, bright white
-                    for text_line in entry.text.lines() {
-                        lines.push(Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(
-                                text_line.to_string(),
-                                Style::default().fg(Color::White),
-                            ),
-                        ]));
+
+                    #[cfg(feature = "markdown")]
+                    let used_markdown = {
+                        if let Some(stream) = entry.markdown.as_ref() {
+                            for line in stream.lines() {
+                                // Indent markdown lines by 3 spaces to match existing format.
+                                let mut spans = vec![Span::raw("   ")];
+                                spans.extend(line.spans.iter().cloned());
+                                let mut new_line = Line::from(spans);
+                                new_line.style = line.style;
+                                new_line.alignment = line.alignment;
+                                lines.push(new_line);
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    #[cfg(not(feature = "markdown"))]
+                    let used_markdown = false;
+
+                    if !used_markdown {
+                        for text_line in entry.text.lines() {
+                            lines.push(Line::from(vec![
+                                Span::raw("   "),
+                                Span::styled(
+                                    text_line.to_string(),
+                                    Style::default().fg(Color::White),
+                                ),
+                            ]));
+                        }
                     }
                 }
 

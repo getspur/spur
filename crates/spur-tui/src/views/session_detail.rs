@@ -155,6 +155,8 @@ impl SessionDetailView {
             kind: TraceKind::UserMessage,
             text: text.to_string(),
             timestamp: Self::now_stamp(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
         });
     }
 
@@ -185,6 +187,8 @@ impl SessionDetailView {
             kind: TraceKind::Think,
             text: "--- Session history (replayed from disk) ---".to_string(),
             timestamp: String::new(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
         });
 
         for entry in entries {
@@ -194,6 +198,8 @@ impl SessionDetailView {
                         kind: TraceKind::UserMessage,
                         text: entry.text.clone(),
                         timestamp: String::new(),
+                        #[cfg(feature = "markdown")]
+                        markdown: None,
                     });
                 }
                 "assistant" => {
@@ -203,6 +209,8 @@ impl SessionDetailView {
                         },
                         text: entry.text.clone(),
                         timestamp: String::new(),
+                        #[cfg(feature = "markdown")]
+                        markdown: None,
                     });
                 }
                 _ => {}
@@ -214,6 +222,8 @@ impl SessionDetailView {
             kind: TraceKind::Think,
             text: "--- End of history. New messages below ---".to_string(),
             timestamp: String::new(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
         });
     }
 
@@ -230,6 +240,8 @@ impl SessionDetailView {
             },
             text: String::new(),
             timestamp: Self::now_stamp(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
         });
     }
 
@@ -582,6 +594,8 @@ impl View for SessionDetailView {
                             },
                             text: String::new(),
                             timestamp: Self::now_stamp(),
+                            #[cfg(feature = "markdown")]
+                            markdown: None,
                         });
                     }
                     spur_acp::SessionUpdate::ToolCallUpdate(tcu) => {
@@ -591,6 +605,8 @@ impl View for SessionDetailView {
                             kind: TraceKind::Observe,
                             text,
                             timestamp: Self::now_stamp(),
+                            #[cfg(feature = "markdown")]
+                            markdown: None,
                         });
                     }
                     spur_acp::SessionUpdate::Plan(plan) => {
@@ -606,6 +622,8 @@ impl View for SessionDetailView {
                             kind: TraceKind::Think,
                             text,
                             timestamp: Self::now_stamp(),
+                            #[cfg(feature = "markdown")]
+                            markdown: None,
                         });
                     }
                     _ => {}
@@ -628,6 +646,8 @@ impl View for SessionDetailView {
                     },
                     text: String::new(),
                     timestamp: Self::now_stamp(),
+                    #[cfg(feature = "markdown")]
+                    markdown: None,
                 });
             }
 
@@ -653,6 +673,8 @@ impl View for SessionDetailView {
                     kind: TraceKind::Think,
                     text: format!("Delegation completed: {}", status_str),
                     timestamp: Self::now_stamp(),
+                    #[cfg(feature = "markdown")]
+                    markdown: None,
                 });
             }
 
@@ -679,6 +701,8 @@ impl View for SessionDetailView {
                         kind: TraceKind::Observe,
                         text: format!("BRAIN ERROR: {}", message),
                         timestamp: Self::now_stamp(),
+                        #[cfg(feature = "markdown")]
+                        markdown: None,
                     });
                 }
             }
