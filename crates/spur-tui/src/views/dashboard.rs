@@ -210,7 +210,25 @@ impl DashboardView {
                 height: chunks[0].height.saturating_sub(v_pad),
             };
             frame.render_widget(paragraph, content_area);
-            self.input_bar.render(frame, chunks[1]);
+            let input_bar_area = chunks[1];
+            // Empty-state hint shown only when no brain has spawned and user hasn't typed.
+            if !self.input_bar.has_status() && self.input_bar.text().is_empty() {
+                let hint_y = input_bar_area.y.saturating_sub(1);
+                if hint_y >= area.y {
+                    let hint_area = ratatui::layout::Rect {
+                        x: input_bar_area.x,
+                        y: hint_y,
+                        width: input_bar_area.width,
+                        height: 1,
+                    };
+                    let hint = ratatui::widgets::Paragraph::new(ratatui::text::Span::styled(
+                        " Type to start a new session \u{00b7} s for sessions \u{00b7} ? for help",
+                        ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                    ));
+                    frame.render_widget(hint, hint_area);
+                }
+            }
+            self.input_bar.render(frame, input_bar_area);
             StatusBar::render(
                 frame,
                 chunks[2],
@@ -255,7 +273,25 @@ impl DashboardView {
                 self.activity_log.render(frame, chunks[1]);
             }
         }
-        self.input_bar.render(frame, chunks[2]);
+        let input_bar_area = chunks[2];
+        // Empty-state hint shown only when no brain has spawned and user hasn't typed.
+        if !self.input_bar.has_status() && self.input_bar.text().is_empty() {
+            let hint_y = input_bar_area.y.saturating_sub(1);
+            if hint_y >= area.y {
+                let hint_area = ratatui::layout::Rect {
+                    x: input_bar_area.x,
+                    y: hint_y,
+                    width: input_bar_area.width,
+                    height: 1,
+                };
+                let hint = ratatui::widgets::Paragraph::new(ratatui::text::Span::styled(
+                    " Type to start a new session \u{00b7} s for sessions \u{00b7} ? for help",
+                    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                ));
+                frame.render_widget(hint, hint_area);
+            }
+        }
+        self.input_bar.render(frame, input_bar_area);
         StatusBar::render(
             frame,
             chunks[3],

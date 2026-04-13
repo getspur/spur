@@ -234,6 +234,12 @@ impl InputBar {
         self.status = status;
     }
 
+    /// Whether a brain-status label is currently set. Used by the dashboard
+    /// empty-state hint to decide whether to render the onboarding prompt.
+    pub fn has_status(&self) -> bool {
+        self.status.is_some()
+    }
+
     /// Required render height based on text length.
     ///
     /// The returned value includes the border lines (top + bottom), so the
