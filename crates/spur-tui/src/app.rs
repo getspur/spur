@@ -581,6 +581,17 @@ impl App {
                 self.dirty = true;
             }
 
+            Action::SaveDraft { session_id, draft } => {
+                let entry = self.metadata_store.entry_mut(&session_id);
+                if entry.draft != draft {
+                    entry.draft = draft;
+                    if let Err(e) = self.metadata_store.save() {
+                        tracing::warn!(error = %e, "failed to persist draft");
+                    }
+                }
+                // Don't set self.dirty — this is a disk write, no UI change.
+            }
+
             Action::RefreshSessions => {
                 if let Some(tx) = self.user_input_tx.as_ref() {
                     let _ = tx.try_send(crate::UserInput::ListSessions);
@@ -866,6 +877,15 @@ impl App {
                     for action in pending {
                         self.process_action(action);
                     }
+                }
+                // Debounced draft persistence — fires ~500ms after the last
+                // InputBar keystroke, then no-ops until the next change.
+                let draft_action = self
+                    .session_detail
+                    .as_mut()
+                    .and_then(|d| d.draft_save_action());
+                if let Some(action) = draft_action {
+                    self.process_action(action);
                 }
             }
             ViewId::SessionPicker => {

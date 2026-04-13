@@ -36,6 +36,8 @@ pub enum Action {
         session_id: String,
         new_title: String,
     },
+    /// Persist a session's unsent InputBar text to metadata.
+    SaveDraft { session_id: String, draft: String },
     /// User requested spawning a new session from the picker.
     NewSessionRequested,
     /// Re-issue `ListSessions` to refresh the picker's agent-side state.
