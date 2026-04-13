@@ -373,6 +373,34 @@ impl App {
                     if let Some(entry) = self.metadata_store.entry(&session.0) {
                         view.restore_draft(&entry.draft);
                     }
+                    // Auto-resume banner: if this session matches the
+                    // last_active pointer read at startup, show the banner.
+                    // Clear the pointer afterward so a second spawn this run
+                    // doesn't re-trigger the banner.
+                    if self
+                        .metadata_store
+                        .metadata()
+                        .last_active_session_id
+                        .as_deref()
+                        == Some(session.0.as_str())
+                    {
+                        let title = self
+                            .metadata_store
+                            .entry(&session.0)
+                            .and_then(|e| e.title_override.clone())
+                            .unwrap_or_else(|| agent.clone());
+                        let quit_ago = humanize_since(
+                            self.metadata_store
+                                .metadata()
+                                .last_active_at
+                                .as_deref(),
+                        );
+                        view.show_resume_banner(title, quit_ago);
+                        self.metadata_store.clear_last_active();
+                        if let Err(e) = self.metadata_store.save() {
+                            tracing::warn!(error = %e, "failed to persist cleared last_active");
+                        }
+                    }
                     self.session_detail = Some(view);
                 }
 
@@ -387,8 +415,14 @@ impl App {
                     self.brain_status = BrainStatus::Streaming;
                 }
             }
-            SpurEventBody::TurnComplete { .. } => {
+            SpurEventBody::TurnComplete { session } => {
                 self.brain_status = BrainStatus::Ready;
+                let now = chrono::Utc::now().to_rfc3339();
+                self.metadata_store
+                    .set_last_active(session.0.clone(), now);
+                if let Err(e) = self.metadata_store.save() {
+                    tracing::warn!(error = %e, "failed to persist last_active on TurnComplete");
+                }
             }
             SpurEventBody::BrainError { message, .. } => {
                 self.brain_status = BrainStatus::Error(message.clone());
@@ -1234,4 +1268,25 @@ fn render_mermaid_overlay(
         ))),
         chunks[2],
     );
+}
+
+/// Human-friendly relative time for the resume banner ("5m ago", "2h ago").
+/// Returns "recently" if the input is missing or unparseable.
+fn humanize_since(iso: Option<&str>) -> String {
+    let Some(iso) = iso else {
+        return "recently".into();
+    };
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return "recently".into();
+    };
+    let secs = chrono::Utc::now().signed_duration_since(dt).num_seconds();
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
 }
