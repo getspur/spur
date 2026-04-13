@@ -167,6 +167,115 @@ async fn modify_decision_produces_modified_status() {
     }
 }
 
+// ─── Task 10: run_gate_with_retries tests ──────────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn retry_then_approve_produces_success() {
+    use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
+    use spur_core::{orchestrator::run_gate_with_retries, ExecutorId, ReviewSink};
+    use std::time::Duration;
+
+    let sink = ReviewSink::new();
+
+    let (decisions_tx, mut decisions_rx) = tokio::sync::mpsc::channel::<ReviewDecision>(8);
+    decisions_tx
+        .send(ReviewDecision::Retry {
+            new_constraints: "try harder".into(),
+        })
+        .await
+        .unwrap();
+    decisions_tx
+        .send(ReviewDecision::Retry {
+            new_constraints: "try harder 2".into(),
+        })
+        .await
+        .unwrap();
+    decisions_tx.send(ReviewDecision::Approve).await.unwrap();
+    drop(decisions_tx);
+
+    let sink_for_task = sink.clone();
+    tokio::spawn(async move {
+        let mut attempt = 1u32;
+        while let Some(d) = decisions_rx.recv().await {
+            loop {
+                tokio::task::yield_now().await;
+                if sink_for_task
+                    .submit(ExecutorId::new("e1"), attempt, d.clone())
+                    .await
+                {
+                    break;
+                }
+            }
+            if matches!(d, ReviewDecision::Retry { .. }) {
+                attempt += 1;
+            }
+        }
+    });
+
+    let final_status = run_gate_with_retries(
+        ExecutorId::new("e1"),
+        DelegationStatus::Success,
+        Duration::from_secs(60),
+        TimeoutFallback::Reject { reason: "t".into() },
+        3,
+        sink,
+    )
+    .await;
+    assert!(matches!(final_status, DelegationStatus::Success));
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_limit_exceeded_produces_failed() {
+    use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
+    use spur_core::{orchestrator::run_gate_with_retries, ExecutorId, ReviewSink};
+    use std::time::Duration;
+
+    let sink = ReviewSink::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ReviewDecision>(8);
+    for i in 0..4 {
+        tx.send(ReviewDecision::Retry {
+            new_constraints: format!("try {}", i + 1),
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+
+    let sink_for_task = sink.clone();
+    tokio::spawn(async move {
+        let mut attempt = 1u32;
+        while let Some(d) = rx.recv().await {
+            loop {
+                tokio::task::yield_now().await;
+                if sink_for_task
+                    .submit(ExecutorId::new("e1"), attempt, d.clone())
+                    .await
+                {
+                    break;
+                }
+            }
+            attempt += 1;
+        }
+    });
+
+    let final_status = run_gate_with_retries(
+        ExecutorId::new("e1"),
+        DelegationStatus::Success,
+        Duration::from_secs(60),
+        TimeoutFallback::Reject { reason: "t".into() },
+        3,
+        sink,
+    )
+    .await;
+    match final_status {
+        DelegationStatus::Failed { error } => {
+            assert!(error.contains("retry limit exceeded"), "got: {}", error);
+            assert!(error.contains("3"), "got: {}", error);
+        }
+        other => panic!("expected Failed, got {:?}", other),
+    }
+}
+
 #[tokio::test]
 async fn dispatcher_routes_submit_review_to_sink() {
     let sink = ReviewSink::new();
