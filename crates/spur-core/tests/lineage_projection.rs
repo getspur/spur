@@ -1,14 +1,13 @@
-use std::time::SystemTime;
+use std::path::PathBuf;
 
 use spur_acp::{
     DelegationStatus, ExecutorArtifactPayload, ExecutorReviewDecision, ExecutorReviewKind,
-    ExecutorReviewPayload, SessionId, SpurEvent,
+    ExecutorReviewPayload, SessionId, SpurEvent, SpurEventBody,
 };
 use spur_core::{Artifact, ExecutorId, ExecutorLineage, LifecycleState};
-use std::path::PathBuf;
 
 fn spawn(id: &str, parent: Option<&str>) -> SpurEvent {
-    SpurEvent::ExecutorSpawned {
+    SpurEvent::now(SpurEventBody::ExecutorSpawned {
         id: id.into(),
         parent_id: parent.map(|s| s.into()),
         session_id: SessionId(format!("sess-{}", id)),
@@ -19,7 +18,7 @@ fn spawn(id: &str, parent: Option<&str>) -> SpurEvent {
             "Executor".into()
         },
         task_spec: format!("task for {}", id),
-    }
+    })
 }
 
 #[test]
@@ -53,10 +52,10 @@ fn spawn_links_child_under_parent() {
 fn phase_change_updates_node_phase() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("brain-1", None));
-    l.apply(&SpurEvent::ExecutorPhaseChanged {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "brain-1".into(),
         phase: "Running".into(),
-    });
+    }));
 
     let n = l.node(&ExecutorId::new("brain-1")).unwrap();
     assert_eq!(n.phase, LifecycleState::Running);
@@ -66,10 +65,10 @@ fn phase_change_updates_node_phase() {
 fn phase_change_terminal_sets_attempt_ended() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("w", None));
-    l.apply(&SpurEvent::ExecutorPhaseChanged {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "w".into(),
         phase: "Succeeded".into(),
-    });
+    }));
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
     let a = n.current_attempt().unwrap();
@@ -80,10 +79,10 @@ fn phase_change_terminal_sets_attempt_ended() {
 fn unknown_phase_string_is_ignored() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("w", None));
-    l.apply(&SpurEvent::ExecutorPhaseChanged {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "w".into(),
         phase: "Bogus".into(),
-    });
+    }));
     let n = l.node(&ExecutorId::new("w")).unwrap();
     assert_eq!(n.phase, LifecycleState::Spawning, "unchanged on unknown phase");
 }
@@ -92,10 +91,10 @@ fn unknown_phase_string_is_ignored() {
 fn artifact_appends_to_current_attempt() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("w", None));
-    l.apply(&SpurEvent::ExecutorArtifact {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorArtifact {
         id: "w".into(),
         artifact: ExecutorArtifactPayload::PrUrl("https://x/1".into()),
-    });
+    }));
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
     let a = n.current_attempt().unwrap();
@@ -107,7 +106,7 @@ fn artifact_appends_to_current_attempt() {
 fn review_requested_populates_pending_review_and_phase() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("w", None));
-    l.apply(&SpurEvent::ExecutorReviewRequested {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w".into(),
         kind: ExecutorReviewKind::Completion,
         payload: ExecutorReviewPayload {
@@ -116,8 +115,7 @@ fn review_requested_populates_pending_review_and_phase() {
             pr_url: None,
             error: None,
         },
-        requested_at: SystemTime::now(),
-    });
+    }));
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
     assert!(n.pending_review.is_some());
@@ -128,7 +126,7 @@ fn review_requested_populates_pending_review_and_phase() {
 fn review_resolved_clears_pending_review() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("w", None));
-    l.apply(&SpurEvent::ExecutorReviewRequested {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
         id: "w".into(),
         kind: ExecutorReviewKind::Completion,
         payload: ExecutorReviewPayload {
@@ -137,12 +135,11 @@ fn review_resolved_clears_pending_review() {
             pr_url: None,
             error: None,
         },
-        requested_at: SystemTime::now(),
-    });
-    l.apply(&SpurEvent::ExecutorReviewResolved {
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
         id: "w".into(),
         decision: ExecutorReviewDecision::Approve,
-    });
+    }));
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
     assert!(n.pending_review.is_none());
@@ -157,16 +154,16 @@ fn review_resolved_clears_pending_review() {
 fn retry_started_pushes_new_attempt() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("w", None));
-    l.apply(&SpurEvent::ExecutorPhaseChanged {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "w".into(),
         phase: "Failed".into(),
-    });
-    l.apply(&SpurEvent::ExecutorRetryStarted {
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorRetryStarted {
         id: "w".into(),
         attempt_n: 2,
         reason: "timeout".into(),
         new_session_id: SessionId("sess-w-2".into()),
-    });
+    }));
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
     assert_eq!(n.attempts.len(), 2);
@@ -178,10 +175,10 @@ fn retry_started_pushes_new_attempt() {
 fn orphan_phase_event_is_replayed_after_spawn() {
     let mut l = ExecutorLineage::new();
     // Phase arrives BEFORE spawn — must be buffered.
-    l.apply(&SpurEvent::ExecutorPhaseChanged {
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
         id: "late".into(),
         phase: "Running".into(),
-    });
+    }));
     assert!(l.node(&ExecutorId::new("late")).is_none());
 
     l.apply(&spawn("late", None));
@@ -192,10 +189,10 @@ fn orphan_phase_event_is_replayed_after_spawn() {
 #[test]
 fn brain_spawned_creates_root_node() {
     let mut l = ExecutorLineage::new();
-    l.apply(&SpurEvent::BrainSpawned {
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
         agent: "kiro".into(),
         session: SessionId("s1".into()),
-    });
+    }));
     assert_eq!(l.root_ids().len(), 1);
     assert!(l.node(&ExecutorId::new("s1")).is_some());
 }
@@ -203,15 +200,15 @@ fn brain_spawned_creates_root_node() {
 #[test]
 fn worker_spawned_attaches_under_latest_brain() {
     let mut l = ExecutorLineage::new();
-    l.apply(&SpurEvent::BrainSpawned {
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
         agent: "kiro".into(),
         session: SessionId("b1".into()),
-    });
-    l.apply(&SpurEvent::WorkerSpawned {
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
         agent: "worker".into(),
         session: SessionId("w1".into()),
         worktree: PathBuf::from("/tmp/wt"),
-    });
+    }));
 
     let brain = l.node(&ExecutorId::new("b1")).unwrap();
     assert_eq!(brain.child_ids.len(), 1);
@@ -221,19 +218,19 @@ fn worker_spawned_attaches_under_latest_brain() {
 #[test]
 fn delegation_completed_success_moves_phase_to_succeeded() {
     let mut l = ExecutorLineage::new();
-    l.apply(&SpurEvent::BrainSpawned {
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
         agent: "kiro".into(),
         session: SessionId("b1".into()),
-    });
-    l.apply(&SpurEvent::WorkerSpawned {
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
         agent: "w".into(),
         session: SessionId("w1".into()),
         worktree: PathBuf::from("/tmp/wt"),
-    });
-    l.apply(&SpurEvent::DelegationCompleted {
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationCompleted {
         worker_session: SessionId("w1".into()),
         status: DelegationStatus::Success,
-    });
+    }));
 
     let n = l.node(&ExecutorId::new("w1")).unwrap();
     assert_eq!(n.phase, LifecycleState::Succeeded);
@@ -242,20 +239,20 @@ fn delegation_completed_success_moves_phase_to_succeeded() {
 #[test]
 fn cost_update_accumulates_on_current_attempt() {
     let mut l = ExecutorLineage::new();
-    l.apply(&SpurEvent::BrainSpawned {
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
         agent: "kiro".into(),
         session: SessionId("b1".into()),
-    });
-    l.apply(&SpurEvent::CostUpdate {
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::CostUpdate {
         session: SessionId("b1".into()),
         agent: "kiro".into(),
         estimated_cost_usd: 0.10,
-    });
-    l.apply(&SpurEvent::CostUpdate {
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::CostUpdate {
         session: SessionId("b1".into()),
         agent: "kiro".into(),
         estimated_cost_usd: 0.05,
-    });
+    }));
 
     let n = l.node(&ExecutorId::new("b1")).unwrap();
     let a = n.current_attempt().unwrap();
@@ -265,29 +262,29 @@ fn cost_update_accumulates_on_current_attempt() {
 #[test]
 fn replay_equals_live() {
     let events: Vec<SpurEvent> = vec![
-        SpurEvent::BrainSpawned {
+        SpurEvent::now(SpurEventBody::BrainSpawned {
             agent: "kiro".into(),
             session: SessionId("b".into()),
-        },
-        SpurEvent::WorkerSpawned {
+        }),
+        SpurEvent::now(SpurEventBody::WorkerSpawned {
             agent: "w1".into(),
             session: SessionId("w1".into()),
             worktree: PathBuf::from("/tmp"),
-        },
-        SpurEvent::DelegationRequested {
+        }),
+        SpurEvent::now(SpurEventBody::DelegationRequested {
             from: SessionId("b".into()),
             to_agent: "w1".into(),
             task: "task-1".into(),
-        },
-        SpurEvent::CostUpdate {
+        }),
+        SpurEvent::now(SpurEventBody::CostUpdate {
             session: SessionId("w1".into()),
             agent: "w1".into(),
             estimated_cost_usd: 0.25,
-        },
-        SpurEvent::DelegationCompleted {
+        }),
+        SpurEvent::now(SpurEventBody::DelegationCompleted {
             worker_session: SessionId("w1".into()),
             status: DelegationStatus::Success,
-        },
+        }),
     ];
 
     let mut live = ExecutorLineage::new();

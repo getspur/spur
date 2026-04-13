@@ -10,7 +10,7 @@ pub use connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, Stdio
 pub use registry::AgentRegistry;
 
 // Re-export domain types
-pub use domain::{DelegationResult, DelegationStatus, HistoryEntry, SpurEvent};
+pub use domain::{DelegationResult, DelegationStatus, HistoryEntry, SpurEvent, SpurEventBody};
 pub use crate::domain::events::{
     ExecutorArtifactPayload, ExecutorDiffSummary, ExecutorReviewDecision, ExecutorReviewKind,
     ExecutorReviewPayload,

@@ -51,9 +51,25 @@ pub enum ExecutorReviewDecision {
     Retry { new_constraints: String },
 }
 
-/// Events emitted by the orchestrator for TUI/cost-tracker consumption.
+/// Envelope wrapping every domain event with an occurrence timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SpurEvent {
+pub struct SpurEvent {
+    pub occurred_at: SystemTime,
+    pub body: SpurEventBody,
+}
+
+impl SpurEvent {
+    /// Convenience constructor. Use at emission sites. Do NOT call inside
+    /// `apply` / projection code — timestamps there must come from the
+    /// arriving event.
+    pub fn now(body: SpurEventBody) -> Self {
+        Self { occurred_at: SystemTime::now(), body }
+    }
+}
+
+/// The discriminated payload of a [`SpurEvent`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SpurEventBody {
     BrainSpawned { agent: String, session: SessionId },
     WorkerSpawned { agent: String, session: SessionId, worktree: PathBuf },
     SessionCompleted { session: SessionId, success: bool },
@@ -96,7 +112,7 @@ pub enum SpurEvent {
         id: String,
         kind: ExecutorReviewKind,
         payload: ExecutorReviewPayload,
-        requested_at: SystemTime,
+        // Note: requested_at removed — envelope `occurred_at` carries it now.
     },
     ExecutorReviewResolved {
         id: String,
