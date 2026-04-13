@@ -72,6 +72,32 @@ fn usage_update_sets_context() {
 }
 
 #[test]
+fn new_session_with_message_does_not_leak_into_later_sessions() {
+    // Regression for BUG-1: after Task 15's NewSessionWithMessage plumbing,
+    // a typed dashboard message must NOT get replayed into an unrelated
+    // session that happens to spawn later. The `pending_user_messages`
+    // buffer has been removed, so the only cross-session-replay vector
+    // is gone — this test asserts a fresh BrainSpawned produces a trace
+    // with zero user entries.
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+
+    let mut app = spur_tui::test_support::new_app();
+    let sid = SessionId("unrelated".to_string());
+    let ev = SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "agent".to_string(),
+        session: sid.clone(),
+    });
+    spur_tui::test_support::push_event(&mut app, ev);
+
+    let detail = spur_tui::test_support::session_detail(&app).expect("has detail");
+    assert_eq!(
+        detail.trace_entry_count(),
+        0,
+        "buffered text leaked into unrelated session"
+    );
+}
+
+#[test]
 fn kiro_available_notification_populates_registry() {
     use spur_acp::{SessionId, SpurEvent, SpurEventBody};
     use spur_tui::views::View;
