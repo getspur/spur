@@ -24,7 +24,8 @@ async fn approve_decision_produces_success_status() {
         .await
     });
 
-    // Let the gate register before submitting.
+    // Yield so the spawned gate task gets polled and reaches
+    // `register_gate` before we submit.
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
 
@@ -59,6 +60,8 @@ async fn timeout_produces_timed_out_status_and_removes_entry() {
         .await
     });
 
+    // Yield so the spawned gate task registers and begins its select!
+    // loop before we advance virtual time past the timeout.
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
     tokio::time::advance(std::time::Duration::from_secs(120)).await;

@@ -31,7 +31,7 @@ use spur_pm::adapter::PmAdapter;
 use spur_pm::GitHubAdapter;
 use spur_worktree::WorktreeManager;
 
-use crate::review_sink::ReviewSink;
+use crate::review_sink::{ReviewSink, ReviewSinkError};
 use crate::lineage::ExecutorId;
 
 // ─── Run options ─────────────────────────────────────────────────────
@@ -1642,6 +1642,39 @@ impl Orchestrator {
             // `ExecutorId::new(worker_session.0)`.
             let executor_id = ExecutorId::new(worker_session.0.clone());
 
+            // Register FIRST — before any event that could prompt the
+            // TUI to submit a decision. `ReviewSink` documents a
+            // register-before-emit invariant: if we emitted
+            // `ExecutorReviewRequested` first, a TUI consuming the
+            // broadcast could race a `SubmitReview` past an
+            // unregistered sink (decision silently dropped, only
+            // recoverable via review_timeout).
+            let rx = match register_gate(executor_id.clone(), 1, &review_sink).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    tracing::error!(
+                        executor_id = %executor_id.0,
+                        error = %e,
+                        "review_sink registration failed — skipping review gate"
+                    );
+                    // Don't emit `ExecutorReviewRequested` — we couldn't
+                    // register, so the TUI would show an orphan review
+                    // card. Return Failed so the brain sees a clear
+                    // signal. `diff`/`summary` preserved for inspection.
+                    return DelegationResult {
+                        status: DelegationStatus::Failed {
+                            error: format!("review registration failed: {e}"),
+                        },
+                        diff,
+                        summary,
+                        estimated_cost_usd: cost,
+                    };
+                }
+            };
+
+            // NOW emit events. The TUI can submit a decision and it
+            // will route correctly because `register_gate` already
+            // placed the sender.
             let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
                 id: executor_id.0.clone(),
                 phase: LifecycleState::AwaitingReview,
@@ -1660,9 +1693,9 @@ impl Orchestrator {
                 payload: review_payload,
             }));
 
-            let resolved = run_gate_for_candidate(
+            let resolved = wait_gate(
+                rx,
                 executor_id.clone(),
-                1,
                 candidate_status.clone(),
                 agent_config.review.review_timeout,
                 agent_config.review.review_timeout_default.clone(),
@@ -1709,6 +1742,11 @@ impl Orchestrator {
             status: final_status.clone(),
         }));
 
+        // NOTE: `diff` and `summary` are preserved verbatim from the
+        // worker, regardless of the gate's decision. Only `status` is
+        // re-shaped by the gate. For `Modified { reviewer_note }`
+        // specifically, this means the brain receives the worker's
+        // diff alongside the reviewer's note.
         DelegationResult {
             status: final_status,
             diff,
@@ -1755,9 +1793,23 @@ pub async fn review_dispatcher_loop(
 
 // ─── Review gate helper ───────────────────────────────────────────────
 
-/// Run the review gate on a candidate `DelegationStatus`. Returns the
-/// final status. Handles `Approve`/`Reject`/`Modify` as terminal
-/// decisions.
+/// Register a pending review on the sink. Returns the receiver the
+/// caller awaits.
+///
+/// MUST be called BEFORE emitting `ExecutorReviewRequested` so the TUI
+/// cannot race a `SubmitReview` past an unregistered sink — see
+/// `ReviewSink` docs for the invariant.
+pub async fn register_gate(
+    executor_id: ExecutorId,
+    attempt_n: u32,
+    review_sink: &ReviewSink,
+) -> Result<tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>, ReviewSinkError> {
+    review_sink.register(executor_id, attempt_n).await
+}
+
+/// Wait for a review decision (or timeout) and shape the final
+/// `DelegationStatus`. The caller MUST have already called
+/// `register_gate` and MUST pass the receiver returned from that call.
 ///
 /// **Does NOT handle `Retry`** — if a `ReviewDecision::Retry` arrives,
 /// this function returns a `DelegationStatus::Failed` with an
@@ -1767,34 +1819,18 @@ pub async fn review_dispatcher_loop(
 /// explicit arm exists for safety if someone calls this helper
 /// directly without a wrapper.
 ///
-/// On timeout: explicitly removes the sink entry (to prevent stale
-/// entries per the spec's error-handling "explicit-remove" contract)
-/// and returns `TimedOut { waited_for, fallback }`.
-///
-/// On register failure (already-registered double-register): returns
-/// `Failed` with an explanatory error.
-pub async fn run_gate_for_candidate(
+/// On timeout or sender-drop: explicitly removes the sink entry (to
+/// prevent stale entries per the spec's error-handling
+/// "explicit-remove" contract) and returns
+/// `TimedOut { waited_for, fallback }`.
+pub async fn wait_gate(
+    rx: tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>,
     executor_id: ExecutorId,
-    attempt_n: u32,
     candidate_status: DelegationStatus,
     review_timeout: std::time::Duration,
     timeout_fallback: TimeoutFallback,
     review_sink: ReviewSink,
 ) -> DelegationStatus {
-    let rx = match review_sink.register(executor_id.clone(), attempt_n).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(
-                executor_id = %executor_id.0,
-                error = %e,
-                "review_sink registration failed"
-            );
-            return DelegationStatus::Failed {
-                error: format!("review registration failed: {e}"),
-            };
-        }
-    };
-
     tokio::select! {
         recv_result = rx => {
             match recv_result {
@@ -1818,6 +1854,46 @@ pub async fn run_gate_for_candidate(
             }
         }
     }
+}
+
+/// Register + wait composition. Exists primarily for unit tests that
+/// want to exercise the full gate shape in one call; production code
+/// in `execute_delegation` calls `register_gate` and `wait_gate`
+/// separately so event emission can be sequenced between them (the
+/// register-before-emit ordering the `ReviewSink` invariant requires).
+///
+/// On register failure (already-registered double-register): returns
+/// `Failed` with an explanatory error.
+pub async fn run_gate_for_candidate(
+    executor_id: ExecutorId,
+    attempt_n: u32,
+    candidate_status: DelegationStatus,
+    review_timeout: std::time::Duration,
+    timeout_fallback: TimeoutFallback,
+    review_sink: ReviewSink,
+) -> DelegationStatus {
+    let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::error!(
+                executor_id = %executor_id.0,
+                error = %e,
+                "review_sink registration failed"
+            );
+            return DelegationStatus::Failed {
+                error: format!("review registration failed: {e}"),
+            };
+        }
+    };
+    wait_gate(
+        rx,
+        executor_id,
+        candidate_status,
+        review_timeout,
+        timeout_fallback,
+        review_sink,
+    )
+    .await
 }
 
 fn apply_decision_to_candidate(
