@@ -62,6 +62,20 @@ pub struct AgentConfig {
     pub skip_permissions_session_mode: Option<String>,
 }
 
+impl AgentConfig {
+    /// Args to pass when spawning this agent. Concatenates `args` with
+    /// `skip_permissions_args` iff `skip_permissions` is true. This is the
+    /// single source of truth used by `spur_core`'s spawn paths — do not
+    /// read `self.args` directly when spawning.
+    pub fn effective_args(&self) -> Vec<String> {
+        let mut out = self.args.clone();
+        if self.skip_permissions {
+            out.extend(self.skip_permissions_args.iter().cloned());
+        }
+        out
+    }
+}
+
 fn default_role() -> AgentRole {
     AgentRole::Worker
 }
