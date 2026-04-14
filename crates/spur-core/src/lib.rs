@@ -1,6 +1,7 @@
 pub mod event_funnel;
 pub mod event_sink;
 pub mod lineage;
+pub(crate) mod notification_drain;
 pub mod orchestrator;
 mod review_sink;
 pub mod skip_perm;

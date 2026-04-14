@@ -329,16 +329,12 @@ impl Orchestrator {
             vec![ContentBlock::Text(TextContent::new(prompt_text.clone()))],
         );
 
-        let mut stream = connection
-            .prompt(prompt_request)
-            .await
-            .context("Failed to send prompt to brain")?;
-
         // 8. Process brain output + delegation callbacks concurrently.
         let pr_url: Option<String> = None;
         let success = true;
 
-        // Spawn delegation handler.
+        // Spawn delegation handler BEFORE prompt so delegation requests
+        // that arrive during the prompt turn are not queued indefinitely.
         let max_concurrent = self.config.worktree.max_concurrent;
         let delegation_handle = tokio::spawn(Self::handle_delegations(
             delegation_channel,
@@ -349,26 +345,36 @@ impl Orchestrator {
             self.review_sink.clone(),
         ));
 
-        // Stream brain output.
-        while let Some(notification) = stream.next().await {
-            match &notification.update {
-                SessionUpdate::AgentThoughtChunk(chunk)
-                | SessionUpdate::AgentMessageChunk(chunk) => {
-                    if let ContentBlock::Text(tc) = &chunk.content {
-                        print!("{}", tc.text);
+        // Stream brain output. For native (ACP-transport) agents prompt()
+        // returns an empty stream; notifications arrive via the
+        // connection-scoped broadcast instead. drive_prompt_notifications
+        // handles both paths transparently.
+        let funnel_for_notif = self.funnel.clone();
+        let session_id_for_notif = session_id.clone();
+        crate::notification_drain::drive_prompt_notifications(
+            &mut *connection,
+            prompt_request,
+            |notification| {
+                match &notification.update {
+                    SessionUpdate::AgentThoughtChunk(chunk)
+                    | SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let ContentBlock::Text(tc) = &chunk.content {
+                            print!("{}", tc.text);
+                        }
                     }
+                    SessionUpdate::ToolCall(tc) => {
+                        debug!(tool = %tc.title, "Brain calling tool");
+                    }
+                    _ => {}
                 }
-                SessionUpdate::ToolCall(tc) => {
-                    debug!(tool = %tc.title, "Brain calling tool");
-                }
-                _ => {}
-            }
-
-            self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
-                session: session_id.clone(),
-                notification: Box::new(notification),
-            }));
-        }
+                funnel_for_notif.emit(SpurEventBody::AgentNotification {
+                    session: session_id_for_notif.clone(),
+                    notification: Box::new(notification),
+                });
+            },
+        )
+        .await
+        .context("Failed to send prompt to brain")?;
 
         // 9. Clean up.
         let _ = connection.shutdown().await;
@@ -910,20 +916,23 @@ impl Orchestrator {
             vec![ContentBlock::Text(TextContent::new(task.to_string()))],
         );
 
-        let mut stream = connection.prompt(prompt_request).await?;
-
         let success = true;
-        while let Some(notification) = stream.next().await {
-            match &notification.update {
-                SessionUpdate::AgentThoughtChunk(chunk)
-                | SessionUpdate::AgentMessageChunk(chunk) => {
-                    if let ContentBlock::Text(tc) = &chunk.content {
-                        print!("{}", tc.text);
+        crate::notification_drain::drive_prompt_notifications(
+            &mut *connection,
+            prompt_request,
+            |notification| {
+                match &notification.update {
+                    SessionUpdate::AgentThoughtChunk(chunk)
+                    | SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let ContentBlock::Text(tc) = &chunk.content {
+                            print!("{}", tc.text);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
-            }
-        }
+            },
+        )
+        .await?;
 
         let _ = connection.shutdown().await;
         let duration = start.elapsed();
@@ -2747,33 +2756,37 @@ async fn run_one_worker_attempt(
     // stream loop — nothing else clones or moves the instance.
     let file_touch_dedup = FileTouchDedup::new();
 
-    match connection.prompt(prompt_request).await {
-        Ok(mut stream) => {
-            while let Some(notification) = stream.next().await {
-                // S5 — synthesize WorkerFileTouched from file-op ToolCalls
-                // before any other notification handling.
-                maybe_synthesize_file_touch(
-                    &notification,
-                    brain_session_id,
-                    &worker_session.0,
-                    &file_touch_dedup,
-                    funnel,
-                );
-                match &notification.update {
-                    SessionUpdate::AgentThoughtChunk(chunk)
-                    | SessionUpdate::AgentMessageChunk(chunk) => {
-                        if let ContentBlock::Text(tc) = &chunk.content {
-                            output_text.push_str(&tc.text);
-                        }
+    // For native (ACP-transport) workers prompt() returns an empty stream;
+    // notifications arrive via the connection-scoped broadcast instead.
+    // drive_prompt_notifications handles both paths transparently.
+    if let Err(e) = crate::notification_drain::drive_prompt_notifications(
+        &mut *connection,
+        prompt_request,
+        |notification| {
+            // S5 — synthesize WorkerFileTouched from file-op ToolCalls
+            // before any other notification handling.
+            maybe_synthesize_file_touch(
+                &notification,
+                brain_session_id,
+                &worker_session.0,
+                &file_touch_dedup,
+                funnel,
+            );
+            match &notification.update {
+                SessionUpdate::AgentThoughtChunk(chunk)
+                | SessionUpdate::AgentMessageChunk(chunk) => {
+                    if let ContentBlock::Text(tc) = &chunk.content {
+                        output_text.push_str(&tc.text);
                     }
-                    _ => {}
                 }
+                _ => {}
             }
-        }
-        Err(e) => {
-            worker_success = false;
-            output_text = format!("Failed to prompt worker: {e}");
-        }
+        },
+    )
+    .await
+    {
+        worker_success = false;
+        output_text = format!("Failed to prompt worker: {e}");
     }
 
     let _ = connection.shutdown().await;
