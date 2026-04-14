@@ -497,7 +497,11 @@ impl DashboardView {
                 KeyCode::Esc if self.focused_node.is_some() => {
                     return Some(Action::UnfocusNode);
                 }
-                KeyCode::Esc => return Some(Action::Quit),
+                // Esc is the universal "back" key. App decides: if an
+                // active SessionDetail is alive, Esc returns to it; if
+                // not, Esc quits (possibly through the quit-confirm
+                // dialog when a brain is attached).
+                KeyCode::Esc => return Some(Action::NavigateBack),
                 _ => {}
             }
         }

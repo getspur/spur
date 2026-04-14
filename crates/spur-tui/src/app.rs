@@ -512,6 +512,23 @@ impl App {
                     self.dirty = true;
                     return;
                 }
+                // From Dashboard: if an active session exists, return to it
+                // (the natural "back" from the activity log); if not, fall
+                // back to Quit — matching the previous `Esc = Quit on an
+                // empty Dashboard` behavior. Quit still respects the
+                // quit-confirm dialog when a brain is attached.
+                if matches!(self.current_view, ViewId::Dashboard) {
+                    if let Some(ref detail) = self.session_detail {
+                        self.current_view = ViewId::SessionDetail(detail.session_id().clone());
+                        self.dirty = true;
+                    } else if self.brain_name.is_some() {
+                        self.quit_confirm_visible = true;
+                    } else {
+                        self.should_quit = true;
+                    }
+                    return;
+                }
+                // From SessionDetail (or any other view): go to Dashboard.
                 self.current_view = ViewId::Dashboard;
                 // Note: session_detail is intentionally kept alive so it
                 // continues accumulating events while the Dashboard is shown.
