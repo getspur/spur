@@ -1507,29 +1507,7 @@ impl Orchestrator {
         // callbacks (ACP native); other transports ignore the value.
         let perm_tx = if config.skip_permissions { None } else { permission_tx };
 
-        match config.transport {
-            TransportKind::Acp => Box::new(NativeAcpConnection::new(
-                config.name.clone(),
-                config.command.clone(),
-                args.clone(),
-                perm_tx,
-            )),
-            TransportKind::Stdio => Box::new(StdioAdapter::new(
-                config.name.clone(),
-                config.command.clone(),
-                args.clone(),
-            )),
-            TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
-                config.name.clone(),
-                config.command.clone(),
-                args.clone(),
-            )),
-            TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
-                config.name.clone(),
-                config.command.clone(),
-                args,
-            )),
-        }
+        build_connection_from_transport(config, args, perm_tx)
     }
 
     fn build_brain_prompt(&self, task: &str, issue: Option<&Issue>) -> String {
@@ -2368,6 +2346,46 @@ struct WorkerAttemptOutcome {
 /// caller short-circuits the delegation without retry — consistent
 /// with pre-T10 behavior. Per-attempt error shape is decoupled from
 /// the public `DelegationResult` type.
+/// Build a boxed `AgentConnection` from the transport declared in `config`.
+///
+/// Single source of truth for the `match transport { Acp/Stdio/CliWrap/StreamJson }`
+/// arms. Both `Orchestrator::create_connection` (brain + resume paths) and
+/// `run_one_worker_attempt` (worker spawn) call this — previously each had
+/// its own copy of the match, and would drift when transports changed.
+///
+/// `spawn_args` is the final, bypass-aware spawn argv (callers invoke
+/// `config.effective_args()` before passing them in). `permission_tx` is
+/// honored only by the ACP transport; other transports ignore it.
+fn build_connection_from_transport(
+    config: &spur_acp::config::AgentConfig,
+    spawn_args: Vec<String>,
+    permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+) -> Box<dyn AgentConnection> {
+    match config.transport {
+        TransportKind::Acp => Box::new(NativeAcpConnection::new(
+            config.name.clone(),
+            config.command.clone(),
+            spawn_args,
+            permission_tx,
+        )),
+        TransportKind::Stdio => Box::new(StdioAdapter::new(
+            config.name.clone(),
+            config.command.clone(),
+            spawn_args,
+        )),
+        TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
+            config.name.clone(),
+            config.command.clone(),
+            spawn_args,
+        )),
+        TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
+            config.name.clone(),
+            config.command.clone(),
+            spawn_args,
+        )),
+    }
+}
+
 async fn run_one_worker_attempt(
     worker_session: SessionId,
     agent: &str,
@@ -2409,29 +2427,8 @@ async fn run_one_worker_attempt(
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
     let spawn_args = agent_config.effective_args();
-    let mut connection: Box<dyn AgentConnection> = match agent_config.transport {
-        TransportKind::Acp => Box::new(NativeAcpConnection::new(
-            agent_config.name.clone(),
-            agent_config.command.clone(),
-            spawn_args.clone(),
-            None,
-        )),
-        TransportKind::Stdio => Box::new(StdioAdapter::new(
-            agent_config.name.clone(),
-            agent_config.command.clone(),
-            spawn_args.clone(),
-        )),
-        TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
-            agent_config.name.clone(),
-            agent_config.command.clone(),
-            spawn_args.clone(),
-        )),
-        TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
-            agent_config.name.clone(),
-            agent_config.command.clone(),
-            spawn_args,
-        )),
-    };
+    let mut connection: Box<dyn AgentConnection> =
+        build_connection_from_transport(agent_config, spawn_args, None);
 
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
     if let Err(e) = connection.initialize(init_request).await {
