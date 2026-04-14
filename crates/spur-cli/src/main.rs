@@ -30,6 +30,31 @@ fn init_tracing(
     }
 }
 
+/// User-facing install commands per seed agent. Surfaced by `spur init`
+/// when a seed agent's binary is not on $PATH. Kept here (not in the
+/// schema) because hints are onboarding copy — they don't belong in
+/// every user's round-tripped `.spur/config.toml`.
+///
+/// Contract: every agent in `spur_acp::config::load_seed_template()`
+/// must have an entry here. Enforced by `tests/init_ux.rs`.
+#[allow(dead_code)]
+const INSTALL_HINTS: &[(&str, &str)] = &[
+    ("claude-code",     "npm install -g @anthropic-ai/claude-code"),
+    ("kiro",            "brew install kiro-cli"),
+    ("claude-code-acp", "npm install -g npx   # then re-run `spur init`"),
+    ("codex",           "https://docs.openai.com/codex/install"),
+    ("gemini",          "npm install -g @google/gemini-cli"),
+];
+
+#[allow(dead_code)]
+fn install_hint(name: &str) -> &'static str {
+    INSTALL_HINTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, h)| *h)
+        .unwrap_or("see docs/spur/agent-onboarding-cookbook.md")
+}
+
 #[derive(Parser)]
 #[command(name = "spur", about = "Multi-agent orchestrator — issue in, PR out")]
 #[command(version)]
