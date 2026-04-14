@@ -1647,6 +1647,7 @@ impl Orchestrator {
                         error: format!("PM operations not yet wired: {}", agent),
                     },
                     diff: None,
+                    diff_summary: None,
                     summary: None,
                     estimated_cost_usd: 0.0,
                 },
@@ -1665,6 +1666,7 @@ impl Orchestrator {
                             error: format!("Worker agent '{}' not found", agent),
                         },
                         diff: None,
+                        diff_summary: None,
                         summary: None,
                         estimated_cost_usd: 0.0,
                     },
@@ -1725,6 +1727,7 @@ impl Orchestrator {
                             },
                             None,
                             None,
+                            None,
                             total_cost,
                         ),
                         executor_id.clone(),
@@ -1757,6 +1760,7 @@ impl Orchestrator {
                         outcome.worker_session,
                         outcome.candidate_status,
                         outcome.diff,
+                        outcome.diff_summary,
                         outcome.summary,
                         total_cost,
                     ),
@@ -1800,6 +1804,7 @@ impl Orchestrator {
                             outcome.worker_session,
                             failed_status,
                             outcome.diff,
+                            outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
                         ),
@@ -1815,7 +1820,7 @@ impl Orchestrator {
 
             let review_payload = ReviewPayload {
                 summary: outcome.summary.clone().unwrap_or_default(),
-                diff_summary: None,
+                diff_summary: outcome.diff_summary.clone(),
                 pr_url: None,
                 error: None,
             };
@@ -1859,6 +1864,7 @@ impl Orchestrator {
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
+                            outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
                         ),
@@ -1890,6 +1896,7 @@ impl Orchestrator {
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
+                            outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
                         ),
@@ -1918,6 +1925,7 @@ impl Orchestrator {
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
+                            outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
                         ),
@@ -1946,6 +1954,7 @@ impl Orchestrator {
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
+                            outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
                         ),
@@ -1994,6 +2003,7 @@ impl Orchestrator {
                                 outcome.worker_session,
                                 final_status,
                                 outcome.diff,
+                                outcome.diff_summary.clone(),
                                 outcome.summary,
                                 total_cost,
                             ),
@@ -2074,6 +2084,7 @@ impl Orchestrator {
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
+                            outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
                         ),
@@ -2207,6 +2218,7 @@ fn finalize(
     worker_session: SessionId,
     final_status: DelegationStatus,
     diff: Option<String>,
+    diff_summary: Option<spur_acp::DiffSummary>,
     summary: Option<String>,
     total_cost: f64,
 ) -> DelegationResult {
@@ -2217,6 +2229,7 @@ fn finalize(
     DelegationResult {
         status: final_status,
         diff,
+        diff_summary,
         summary,
         estimated_cost_usd: total_cost,
     }
@@ -2256,6 +2269,7 @@ struct WorkerAttemptOutcome {
     worker_session: SessionId,
     candidate_status: DelegationStatus,
     diff: Option<String>,
+    diff_summary: Option<spur_acp::DiffSummary>,
     summary: Option<String>,
     cost: f64,
     /// Path to the worktree that holds this attempt's diff.
@@ -2490,6 +2504,15 @@ async fn run_one_worker_attempt(
         .map(|i| i.path.clone())
         .unwrap_or_default();
 
+    // Compute structured diff stats alongside the raw diff text.
+    // `None` if numstat errors OR reports zero files — non-fatal,
+    // we still return the raw diff.
+    let diff_summary = if diff.is_some() {
+        build_diff_summary(&worktree_path).await.ok().filter(|s| s.files_changed > 0)
+    } else {
+        None
+    };
+
     let duration = start.elapsed();
     let cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
 
@@ -2513,6 +2536,7 @@ async fn run_one_worker_attempt(
         worker_session,
         candidate_status,
         diff,
+        diff_summary,
         summary,
         cost,
         worktree_path,
@@ -2571,7 +2595,6 @@ fn truncate_summary_env_default(text: &str) -> String {
 /// renames, and mode-only changes without ambiguity.
 ///
 /// Cost: ~10-100ms. Same budget as `collect_diff`.
-#[allow(dead_code)] // TODO(Task 5): remove once wired at run_one_worker_attempt
 async fn build_diff_summary(
     worktree_path: &std::path::Path,
 ) -> anyhow::Result<spur_acp::DiffSummary> {

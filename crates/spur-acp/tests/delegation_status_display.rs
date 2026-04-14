@@ -10,6 +10,7 @@ fn base(status: DelegationStatus) -> DelegationResult {
     DelegationResult {
         status,
         diff: None,
+        diff_summary: None,
         summary: Some("s".into()),
         estimated_cost_usd: 0.0,
     }
