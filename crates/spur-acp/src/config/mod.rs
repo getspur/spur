@@ -434,6 +434,29 @@ mod optional_duration_serde {
     }
 }
 
+/// Embedded seed template. Parsed by `load_seed_template()`. Source of
+/// truth is `crates/spur-acp/src/seed_agents.toml`.
+const SEED_TOML: &str = include_str!("../seed_agents.toml");
+
+/// Parse the embedded seed template. Returns the pre-known agent set
+/// that `spur init` discovers on $PATH.
+///
+/// Errors are unreachable in production thanks to the compile-time
+/// parse test (`seed_template_parses_and_has_five_agents`). If a
+/// maintainer skips tests and commits a bad edit, users see a clear
+/// diagnostic instead of a raw panic.
+pub fn load_seed_template() -> AgentsConfig {
+    #[derive(serde::Deserialize)]
+    struct SeedFile { agents: AgentsConfig }
+    let parsed: SeedFile = toml::from_str(SEED_TOML).unwrap_or_else(|e| {
+        panic!(
+            "embedded seed_agents.toml failed to parse (this is a spur bug, \
+             please report): {e}"
+        )
+    });
+    parsed.agents
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +472,39 @@ mod tests {
     fn effective_handle_falls_back_to_lowercased_name() {
         let cfg = AgentConfig::with_defaults("ClaudeCode");
         assert_eq!(cfg.effective_handle(), "claudecode");
+    }
+
+    #[test]
+    fn seed_template_parses_and_has_five_agents() {
+        let seeds = load_seed_template();
+        assert!(seeds.entries.len() >= 5,
+            "seed template must have ≥5 agents, got {}", seeds.entries.len());
+        let names: Vec<_> = seeds.entries.iter().map(|a| a.name.as_str()).collect();
+        for expected in ["kiro", "claude-code", "claude-code-acp", "codex", "gemini"] {
+            assert!(names.contains(&expected),
+                "missing seed agent: {expected} (got {names:?})");
+        }
+    }
+
+    #[test]
+    fn seed_template_codex_has_static_commands() {
+        let seeds = load_seed_template();
+        let codex = seeds.entries.iter().find(|a| a.name == "codex")
+            .expect("codex should be in seed template");
+        assert!(!codex.commands.static_commands.is_empty(),
+            "codex must have at least one static command (proves Spec 2)");
+    }
+
+    #[test]
+    fn seed_template_passes_validator() {
+        let seeds = load_seed_template();
+        for agent in &seeds.entries {
+            let errs = crate::config::validate_agent_config(agent);
+            let fatal: Vec<_> = errs.err().unwrap_or_default()
+                .into_iter().filter(|e| e.is_fatal()).collect();
+            assert!(fatal.is_empty(),
+                "seed agent `{}` has fatal validator errors: {fatal:?}",
+                agent.name);
+        }
     }
 }
