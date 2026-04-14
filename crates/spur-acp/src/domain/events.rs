@@ -4,7 +4,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use agent_client_protocol::{SessionNotification, SessionInfo};
-use crate::types::SessionId;
+use crate::types::{CancelMode, SessionId};
 use crate::domain::delegation::DelegationStatus;
 
 /// Review kind for `ExecutorReviewRequested`.
@@ -113,7 +113,7 @@ pub enum SpurEventBody {
         resumed: bool,
         /// How `session/cancel` is implemented for this session's transport.
         /// The TUI uses this to render transport-aware cancel feedback.
-        cancel_mode: crate::CancelMode,
+        cancel_mode: CancelMode,
     },
     WorkerSpawned { agent: String, session: SessionId, worktree: PathBuf },
     SessionCompleted { session: SessionId, success: bool },
