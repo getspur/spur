@@ -9,6 +9,20 @@
 **Tech Stack:** Rust, tokio (`broadcast`, `mpsc`, `sync::AtomicU64`), serde_json, ACP (agent_client_protocol crate), chrono (existing).
 
 **Spec:** `docs/superpowers/specs/2026-04-14-spurevent-stream-backbone-design.md`
+**Companion architecture:** `docs/spur/brain-worker-architecture.md` (§1 Channels, §2 Delegation Lifecycle, §6.1 Event Variants)
+
+---
+
+## Revision log
+
+**2026-04-14 rev 2 — MCTS cross-check against `docs/spur/brain-worker-architecture.md`:**
+
+1. **Removed Task 17** (extend `report_progress` MCP tool). The arch doc §1.1 lists MCP tools on Channel A as **brain-facing only** — workers do not connect to the MCP callback server. `report_progress` is called by the brain, not by workers; it cannot emit `WorkerProgress { executor_id, .. }` because the brain isn't an executor. **Worker-progress-via-MCP requires first adding a worker-side MCP path**, which is a Phase 2 capability not in scope. `_spur/*` vocabulary remains defined in Task 14 as a wire format for future SPUR-aware agents; only `_spur/file_touched` is exercised in v1 via the server-side ToolCall synthesis path (Task 17 — renumbered from 18).
+2. **Scoped Task 14 vocabulary** to be explicit: v1 emitters for `WorkerHeartbeat` and `WorkerProgress` = NONE. Only `WorkerFileTouched` is produced (by server-side synthesis). The other two variants are forward-compatible placeholders.
+3. **Task 12 (JSONL sink) trade-off documented**: v1 uses direct broadcast subscribe (best-effort durability — events can be lost if sink lags). The spec's mpsc-bridge-with-backpressure pattern is a Phase 2 upgrade path, not a v1 blocker.
+4. **Added arch-doc invariant notes** at Task 11 (S2 funnel preserves Channel D's `register_gate BEFORE emit` ordering invariant from §1.4) and at Task 2 (grace window latency respects §2 await-point budgets — adds <1% overhead to worker spawn time).
+
+Total tasks: 19 (was 20). No change to phase structure or checkpoint tags.
 
 ---
 
@@ -200,6 +214,8 @@ If the assertion "expected first chunk" also fails, the fixture / API shape does
 **Files:**
 - Modify: `crates/spur-acp/src/connection/native.rs:860-903` (Prompt handler block)
 - Modify: `crates/spur-acp/src/connection/native.rs:980-998` (LoadSession handler block)
+
+**Latency impact (arch doc §2 cross-check):** the grace window can delay the ACP thread's command loop by up to 1s. The orchestrator's retry loop respawns a new worker on a fresh `NativeAcpConnection` (separate thread), so retry spawn (T5b=1-3s per arch doc §2) is NOT serialized against the old worker's grace window. The serial cost is only on the old worker's teardown — <1% of typical T5c (worker execution). Within budget.
 
 Strategy: after `connection.prompt()` returns, instead of immediately swapping to `dead_tx`, enter a polling loop that:
 1. Tracks `last_notification_at` (monotonic Instant, updated by `session_notification`)
@@ -1010,6 +1026,11 @@ Every `self.emit(SpurEvent::now(body))` call now has a type mismatch (expecting 
 **Files:**
 - Modify: `crates/spur-core/src/orchestrator.rs` (15+ call sites per earlier grep)
 
+**Arch doc invariants preserved (§1.4 and §6.1):**
+- **Channel D ordering** — `register_gate()` MUST be called BEFORE emitting `ExecutorReviewRequested`. Orchestrator code already does this synchronously at the call site. The funnel's mpsc→singleton-task→broadcast path adds only latency; it cannot reorder. By the time `funnel.emit(ExecutorReviewRequested)` is called, `register_gate()` has already executed.
+- **"Exactly one DelegationCompleted" per delegation** — `finalize()` remains a single call site per terminal arm. The funnel changes HOW emit happens, not how many times.
+- **Broadcast send order preserved for lineage** — the singleton emitter task reads mpsc FIFO and calls `broadcast.send` serially. Events reach subscribers in emitter-task order.
+
 - [ ] **Step 11.1: Find all sites**
 
 Run: `grep -n 'self\.emit(SpurEvent::now' crates/spur-core/src/orchestrator.rs`
@@ -1128,6 +1149,13 @@ EOF
 **Files:**
 - Create: `crates/spur-core/src/event_sink.rs`
 - Modify: `crates/spur-core/src/lib.rs`
+
+**Backpressure trade-off (MCTS rev 2):** the spec's §"Durability vs. lag" prescribes a hot-path mpsc bridge with a threshold-based emit-funnel block to near-guarantee durability. V1 ships the simpler design below — the sink directly subscribes to the broadcast. Consequences:
+- Under typical load (streaming peaks ~100 evt/s), sink keeps up comfortably.
+- Under pathological load (>4096 events queued while the sink is blocked on a slow disk write), the sink receives `RecvError::Lagged(n)` and some events are LOST from the JSONL log. They still reach TUI and lineage via their own broadcast subscriptions — only the durable log has gaps.
+- The WARN log from Lagged arms (Task 7) makes any gap observable.
+
+**Phase 2 upgrade path** (when a concrete durability SLA exists): insert an unbounded mpsc between the broadcast subscriber and the sink file writer. A hot-path task subscribes to broadcast and forwards to the mpsc with minimal work. The sink drains mpsc FIFO. If mpsc queue depth exceeds a threshold, log WARN and optionally block the emit funnel momentarily to apply backpressure. ~40 additional LoC.
 
 - [ ] **Step 12.1: Create the module**
 
@@ -1429,6 +1457,18 @@ EOF
 ---
 
 ## Phase S5 — `_spur/*` ACP ExtNotification vocabulary
+
+**Vocabulary scope for v1 (MCTS rev 2):**
+
+| Variant | Wire format (ACP ExtNotification) | V1 emitter |
+|---|---|---|
+| `WorkerFileTouched` | `_spur/file_touched` | **Server-side synthesis from ToolCall** (Task 17). Explicit ACP emission also supported via Task 15 interpreter. |
+| `WorkerProgress` | `_spur/progress_milestone` | **None in v1.** Wire format ready; no current agent emits it. Requires SPUR-aware worker OR future worker-side MCP. |
+| `WorkerHeartbeat` | `_spur/heartbeat` | **None in v1.** Wire format ready; no current agent emits it. |
+
+Arch doc §1.1 clarifies that MCP tools (including `report_progress`) are **brain-facing** — workers have no MCP connection. V1 therefore cannot bridge brain-called tools to worker-scoped events. See the "~~Task 17~~ removed" entry in the revision log for details.
+
+**Phase 1 refinement compatibility:** All three variants use `executor_id` as the correlation key. Brain correlation is derivable by joining against `DelegationRequested` / `DelegationDispatched` events (which will carry `brain_session_id` after the refinement spec ships at `docs/superpowers/specs/2026-04-14-brain-worker-refinement-design.md`). Lineage already performs this join.
 
 ### Task 14: Add SpurEventBody variants
 
@@ -1771,88 +1811,25 @@ EOF
 )"
 ```
 
-### Task 17: Extend `report_progress` MCP tool
+### ~~Task 17: Extend `report_progress` MCP tool~~ — REMOVED in rev 2
 
-**Files:**
-- Modify: `crates/spur-mcp/src/tools.rs` (report_progress tool definition + handler)
+**Reason for removal** (MCTS cross-check against arch doc §1.1): the `report_progress` MCP tool is brain-facing. Workers do not connect to the MCP callback server; they communicate with the orchestrator only via ACP stdio. Extending `report_progress` to emit `WorkerProgress { executor_id, .. }` conflates two semantic layers — the brain is not an executor, so `executor_id` has no valid value at the call site.
 
-Currently `report_progress` is described in the architecture doc as fire-and-forget to the event bus. Extend it to accept optional `name` and `pct` params and internally cause the `_spur/progress_milestone` ExtNotification to fire (via the worker's side of the ACP connection).
+**Implication for v1:** the `_spur/*` vocabulary is defined (Task 14) and interpreted (Task 15) as forward-compatible wire format, but the only v1 emitter is the server-side ToolCall synthesis path for `WorkerFileTouched` (Task 17, renumbered from Task 18).
 
-- [ ] **Step 17.1: Locate the tool**
+**Future work** (new spec, not this plan):
+- Brain-progress via `report_progress` → new variant `SpurEventBody::BrainProgress { session, .. }` (not `WorkerProgress`).
+- Worker-progress via ACP — requires SPUR-aware agents that emit `_spur/progress_milestone` ExtNotifications directly.
+- Worker-side MCP access — requires extending the MCP callback server to accept worker connections in addition to the brain.
 
-Run: `grep -n 'report_progress' crates/spur-mcp/src/tools.rs crates/spur-mcp/src/server.rs`
-
-- [ ] **Step 17.2: Extend the tool schema and handler**
-
-This is specific to the current `report_progress` implementation (which I haven't fully read). The spec says "extend its parameters to accept `{name, pct}` optionally, and internally emit the `_spur/progress_milestone` ExtNotification."
-
-A pragmatic minimum is:
-
-1. Accept optional `name: String` and `pct: u8` input params.
-2. When present, the tool's handler constructs an `ExtNotification` with method `_spur/progress_milestone` and forwards it through whatever path workers already have for ACP-side notifications.
-
-If the current MCP tool doesn't have a path to the worker's ACP channel, this task becomes too large and is better deferred to a follow-up (workers can instead emit `_spur/*` directly via `ExtNotification` if they have the capability — Zed's ACP spec supports it).
-
-**Fallback (simpler for v1):** extend `report_progress` to take `name` and `pct` as optional, and have the MCP server emit a `SpurEventBody::WorkerProgress` directly from the tool handler (not through ACP ExtNotification). This bypasses the ACP escape hatch and uses the in-process path. The `_spur/*` vocabulary remains defined for agents that emit it directly via ACP; the MCP tool is an alternative path to the same SpurEvent.
-
-For v1, go with the fallback: add optional `name`, `pct` to `report_progress` input; emit `WorkerProgress` directly.
-
-- [ ] **Step 17.3: Implement the fallback**
-
-Read the existing `report_progress` handler, then extend its input schema:
-
-```rust
-// Input type (location depends on current structure):
-pub struct ReportProgressInput {
-    pub message: String,          // existing
-    pub name: Option<String>,     // NEW
-    pub pct: Option<u8>,          // NEW
-}
-```
-
-In the handler, if `name.is_some()`, emit (via the orchestrator's funnel, accessible through whatever channel the MCP server already uses to emit events):
-
-```rust
-SpurEventBody::WorkerProgress {
-    executor_id: /* resolve from current session context */,
-    name: input.name.clone().unwrap_or_default(),
-    pct: input.pct,
-}
-```
-
-If the MCP server doesn't have a direct `FunnelHandle`, it does have the event_tx (for the existing `report_progress`) — use whatever pattern is already there.
-
-- [ ] **Step 17.4: Build + run MCP tests**
-
-Run: `cargo test -p spur-mcp --lib`
-Expected: pre-existing tests still pass; no new tests required for this thin wrapper.
-
-- [ ] **Step 17.5: Commit**
-
-```bash
-git add crates/spur-mcp/src/tools.rs crates/spur-mcp/src/server.rs
-git commit -m "$(cat <<'EOF'
-feat(spur-mcp): S5 extend report_progress with name/pct
-
-report_progress now accepts optional `name` and `pct` params and,
-when present, fires a WorkerProgress SpurEvent. MCP-tool path
-complements the ACP ExtNotification path — agents with ACP ext
-support can emit _spur/progress_milestone directly; those using
-SPUR's MCP tool get the same resulting SpurEvent via this handler.
-
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
-EOF
-)"
-```
-
-### Task 18: Server-side file_touched synthesis from ToolCall events
+### Task 17: Server-side file_touched synthesis from ToolCall events
 
 **Files:**
 - Modify: `crates/spur-core/src/orchestrator.rs` — AgentNotification handler
 
 When the orchestrator receives an `AgentNotification` whose body is a `ToolCall` with name matching common file operations (`read_file`, `write_file`, `edit_file`, `Read`, `Edit`, `Write`), synthesize a `WorkerFileTouched` event. De-dupe with a 200ms window on `(executor_id, path, kind)`.
 
-- [ ] **Step 18.1: Define de-dup helper (module-local)**
+- [ ] **Step 17.1: Define de-dup helper (module-local)**
 
 Near the orchestrator AgentNotification handling code, add:
 
@@ -1913,7 +1890,7 @@ Initialize in `new()`:
 file_touch_dedup: std::sync::Arc::new(FileTouchDedup::new()),
 ```
 
-- [ ] **Step 18.2: Hook into AgentNotification emit path**
+- [ ] **Step 17.2: Hook into AgentNotification emit path**
 
 Find where the orchestrator receives a `SessionNotification` and emits `SpurEventBody::AgentNotification` (grep confirms this happens at orchestrator.rs:337, 500, 725). For EACH of these sites, BEFORE the `funnel.emit(SpurEventBody::AgentNotification { .. })`, inspect the notification for a file-op ToolCall and synthesize if present.
 
@@ -1966,7 +1943,7 @@ fn maybe_synthesize_file_touch(
 
 The exact SessionUpdate field names (`name`, `input`, `path`, `file_path`) must match the `agent_client_protocol` crate's current shape. Confirm via `grep -rn 'SessionUpdate::ToolCall' crates/` or by reading the ACP crate's source.
 
-- [ ] **Step 18.3: Call the synthesizer at every AgentNotification emit site**
+- [ ] **Step 17.3: Call the synthesizer at every AgentNotification emit site**
 
 Before each `funnel.emit(SpurEventBody::AgentNotification { session, notification })`, insert:
 
@@ -1979,12 +1956,12 @@ funnel.emit(SpurEventBody::AgentNotification { session, notification });
 
 `session_to_executor` is a placeholder: the orchestrator must already have a lookup from session id to executor id (used for correlation elsewhere). Find and reuse it; if no equivalent exists, skip synthesis for the brain's own session (only worker sessions map to executor ids).
 
-- [ ] **Step 18.4: Build + test**
+- [ ] **Step 17.4: Build + test**
 
 Run: `cargo build -p spur-core && cargo test -p spur-core --lib 2>&1 | tail -10`
 Expected: success.
 
-- [ ] **Step 18.5: Commit**
+- [ ] **Step 17.5: Commit**
 
 ```bash
 git add crates/spur-core/src/orchestrator.rs
@@ -2006,14 +1983,14 @@ EOF
 
 ## Phase S2+S3+S5 integration test
 
-### Task 19: End-to-end integration test
+### Task 18: End-to-end integration test
 
 **Files:**
 - Create: `crates/spur-core/tests/event_stream_e2e.rs`
 
 Verify the full pipeline: emit via funnel → see event on broadcast + in JSONL file, with correct seq monotonicity and content.
 
-- [ ] **Step 19.1: Write the test**
+- [ ] **Step 18.1: Write the test**
 
 ```rust
 //! End-to-end test: emit events via the funnel, verify broadcast
@@ -2078,14 +2055,14 @@ async fn funnel_plus_sink_round_trip() {
 }
 ```
 
-- [ ] **Step 19.2: Run the test**
+- [ ] **Step 18.2: Run the test**
 
 Run: `cargo test -p spur-core --test event_stream_e2e -- --nocapture`
 Expected: PASS. Both the broadcast subscriber and the JSONL file contain seq 0..10.
 
 If it fails with "current dir change" issues (tests run in parallel), either serialize with a Mutex / use `--test-threads=1`, or set a custom events dir via a config option (requires a tiny refactor to `event_sink::events_dir` to read from an env var — acceptable extension).
 
-- [ ] **Step 19.3: Commit**
+- [ ] **Step 18.3: Commit**
 
 ```bash
 git add crates/spur-core/tests/event_stream_e2e.rs
@@ -2106,9 +2083,9 @@ EOF
 
 ## Post-implementation verification
 
-### Task 20: Manual smoke test
+### Task 19: Manual smoke test
 
-- [ ] **Step 20.1: Run a real session with streaming diagnostics**
+- [ ] **Step 19.1: Run a real session with streaming diagnostics**
 
 ```bash
 SPUR_LOG=debug cargo run -p spur-cli -- watch 2> /tmp/spur-stream.log
@@ -2116,7 +2093,7 @@ SPUR_LOG=debug cargo run -p spur-cli -- watch 2> /tmp/spur-stream.log
 # with a long answer). Let it complete.
 ```
 
-- [ ] **Step 20.2: Verify streaming probes show healthy behavior**
+- [ ] **Step 19.2: Verify streaming probes show healthy behavior**
 
 ```bash
 rg 'streaming_probe' /tmp/spur-stream.log | tail -40
@@ -2127,7 +2104,7 @@ Expected observations:
 - `B_dead_tx_swap` rows show `grace_elapsed_ms` field (S1.a fix is live).
 - No `TUI broadcast lagged` warnings under light load. If any appear with `n > 0`, the subscriber is lagging — investigate.
 
-- [ ] **Step 20.3: Verify JSONL sink produced a file**
+- [ ] **Step 19.3: Verify JSONL sink produced a file**
 
 ```bash
 ls -la .spur/events/
@@ -2136,7 +2113,7 @@ head -3 .spur/events/*.ndjson
 
 Expected: at least one `.ndjson` file exists; first 3 lines parse as valid JSON with `seq`, `occurred_at`, `body` fields.
 
-- [ ] **Step 20.4: Verify seq monotonicity in the file**
+- [ ] **Step 19.4: Verify seq monotonicity in the file**
 
 ```bash
 jq -c '.seq' .spur/events/*.ndjson | awk 'BEGIN{prev=-1} {if ($1 != prev+1) print "GAP at", NR, "prev", prev, "curr", $1; prev=$1}' | head -20
@@ -2144,7 +2121,7 @@ jq -c '.seq' .spur/events/*.ndjson | awk 'BEGIN{prev=-1} {if ($1 != prev+1) prin
 
 Expected: zero "GAP" lines. Every seq = previous + 1.
 
-- [ ] **Step 20.5: Verify WorkerFileTouched events fire when worker reads/writes**
+- [ ] **Step 19.5: Verify WorkerFileTouched events fire when worker reads/writes**
 
 Run a delegation that writes a file. Then:
 
@@ -2172,10 +2149,10 @@ Expected: one or more lines per write. Each with `executor_id`, `path`, `kind: "
 | 14 | `crates/spur-acp/src/domain/events.rs` (variants) |
 | 15 | `crates/spur-core/src/spur_ext_interp.rs` (new) + `lib.rs` |
 | 16 | `crates/spur-core/src/orchestrator.rs` (per-worker consumer) |
-| 17 | `crates/spur-mcp/src/tools.rs` (+ server.rs if needed) |
-| 18 | `crates/spur-core/src/orchestrator.rs` (file_touch synthesis + dedup) |
-| 19 | `crates/spur-core/tests/event_stream_e2e.rs` (new) |
-| 20 | manual smoke — no code |
+| ~~17~~ | ~~removed in rev 2 (see revision log)~~ |
+| 17 | `crates/spur-core/src/orchestrator.rs` (file_touch synthesis + dedup) |
+| 18 | `crates/spur-core/tests/event_stream_e2e.rs` (new) |
+| 19 | manual smoke — no code |
 
 ---
 
@@ -2190,9 +2167,9 @@ git tag spurevent-stream-s1-done
 git tag spurevent-stream-s2-done
 # After Phase S3 (Task 13 complete):
 git tag spurevent-stream-s3-done
-# After Phase S5 (Task 18 complete):
+# After Phase S5 (Task 17 complete):
 git tag spurevent-stream-s5-done
-# After integration test (Task 19):
+# After integration test (Task 18):
 git tag spurevent-stream-complete
 ```
 
@@ -2201,8 +2178,15 @@ git tag spurevent-stream-complete
 ## Notes and gotchas collected during planning
 
 - **Buffer vs. grace window (S1.a):** the spec preferred the buffer pattern but it has a session-mixing issue — stragglers from turn N would replay into turn N+1's receiver. Plan uses the spec's alternative (grace window).
+- **Grace window latency vs arch doc budgets (S1.a — MCTS rev 2):** the grace window adds up to 1s to the old worker's ACP-thread teardown. Arch doc §2 budgets T5b (worker spawn) at 1-3s. Since the new worker's spawn runs on a separate thread in parallel with the old worker's grace window, retry latency is unaffected. The serial cost is only on the old worker's teardown — at ~1% of T5c (worker execution), it's noise.
 - **Emit funnel channel hop (Pitfall P1):** we chose Option B (mpsc → singleton task) for strict ordering. Cost is one mpsc hop per emit; at 1600 evt/s this is ~16ms/s of CPU — negligible.
+- **S2 funnel preserves arch doc §1.4 invariant (MCTS rev 2):** `register_gate()` MUST be called BEFORE emitting `ExecutorReviewRequested`. Orchestrator code does this synchronously at the call site; the funnel's mpsc→task→broadcast path only adds latency to when the TUI sees the event — the gate is already registered by the time the funnel's emit completes. TUI's subsequent `SubmitReview` always finds the gate.
+- **S2 funnel preserves "exactly one DelegationCompleted" (arch doc §6.1):** `finalize()` remains a single call site; the funnel changes HOW emit happens, not how many times.
+- **JSONL sink backpressure — v1 accepts best-effort durability (MCTS rev 2):** the spec's design has a hot-path mpsc bridge with threshold-based emit-funnel backpressure to guarantee durability. V1 ships the simpler direct-broadcast-subscribe design. Consequence: if the sink lags (disk I/O spike), events are dropped from the log and logged via `RecvError::Lagged`. Events still reach the TUI and lineage via their own broadcast subscriptions. Phase 2 upgrade path is documented; upgrade when a concrete durability SLA exists.
 - **Pattern-match breakage after seq field (Task 8):** some projection code may pattern-match `SpurEvent { occurred_at, body }` exhaustively. Use `{ seq: _, occurred_at, body }` or destructure with `..` where semantically correct.
 - **ExtNotification crate API shape (Task 15):** `ExtNotificationPayload` is defined in `crates/spur-acp/src/connection/` — inspect the actual struct before writing the interpreter. The plan assumes `{ method: String, params: serde_json::Value }` based on grep findings.
-- **ACP ToolCall field names (Task 18):** the `input` / `path` / `file_path` conventions differ by agent. Plan handles both; may need to extend as new agents ship.
+- **ACP ToolCall field names (Task 17):** the `input` / `path` / `file_path` conventions differ by agent. Plan handles both; may need to extend as new agents ship.
 - **Events directory path** is hardcoded to `.spur/events` (cwd-relative, same convention as `.spur/logs`). If global config has a different root, update `event_sink::events_dir()`.
+- **Task 14 vocabulary scope (MCTS rev 2):** the `SpurEventBody::WorkerHeartbeat`, `WorkerProgress`, and `WorkerFileTouched` variants are all defined. Only `WorkerFileTouched` has a v1 emitter (server-side synthesis in Task 17). `WorkerHeartbeat` and `WorkerProgress` are forward-compatible wire formats — no production emitter exists until SPUR-aware agents emit `_spur/heartbeat` or `_spur/progress_milestone` via ACP directly, or until worker-side MCP access is introduced in a future spec.
+- **Phase 1 refinement compatibility (MCTS rev 2):** the new Worker* variants use `executor_id: String` as the correlation key. Brain correlation is available by joining against `DelegationRequested` / `DelegationDispatched` (which carry `brain_session_id` after the refinement spec at `docs/superpowers/specs/2026-04-14-brain-worker-refinement-design.md` ships). Lineage does this join today for worker_session → brain_session mapping.
+- **Darwin-first cross-platform (MCTS rev 2):** Task 1's fixture uses a bash script. SPUR is darwin-first (macOS 25.1.0); Windows CI is not in scope. If Linux CI is added later, the bash fixture ports trivially.
