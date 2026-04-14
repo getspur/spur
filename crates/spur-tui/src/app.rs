@@ -102,10 +102,26 @@ pub struct App {
     #[cfg(feature = "markdown")]
     pub(crate) mermaid_viewer: Option<crate::views::mermaid_viewer::MermaidViewerView>,
     metadata_store: SessionMetadataStore,
+    /// Loaded Spur configuration. Used to resolve per-agent `AgentConfig`
+    /// at session-creation time (see `resolve_agent_config`). Defaults to
+    /// `SpurConfig::default()` when no config is supplied.
+    config: std::sync::Arc<spur_acp::SpurConfig>,
 }
 
 impl App {
     pub fn new(user_input_tx: Option<mpsc::Sender<UserInput>>, start_in_picker: bool) -> Self {
+        Self::new_with_config(
+            user_input_tx,
+            start_in_picker,
+            std::sync::Arc::new(spur_acp::SpurConfig::default()),
+        )
+    }
+
+    pub fn new_with_config(
+        user_input_tx: Option<mpsc::Sender<UserInput>>,
+        start_in_picker: bool,
+        config: std::sync::Arc<spur_acp::SpurConfig>,
+    ) -> Self {
         let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
         let metadata_store = SessionMetadataStore::load(&metadata_path);
 
@@ -145,6 +161,7 @@ impl App {
             #[cfg(feature = "markdown")]
             mermaid_viewer: None,
             metadata_store,
+            config,
         };
 
         if start_in_picker {
@@ -160,6 +177,41 @@ impl App {
     #[doc(hidden)]
     pub fn session_detail_for_test(&self) -> Option<&crate::views::session_detail::SessionDetailView> {
         self.session_detail.as_ref()
+    }
+
+    /// Look up the `AgentConfig` for an agent by name (`AgentConfig::name`)
+    /// in the loaded `SpurConfig`. Falls back to a minimal synthesized
+    /// config when the agent isn't declared — this preserves startup
+    /// behavior when no `.spur/config.toml` is present.
+    fn resolve_agent_config(&self, name: &str) -> std::sync::Arc<spur_acp::AgentConfig> {
+        self.config
+            .agents
+            .entries
+            .iter()
+            .find(|e| e.name == name)
+            .cloned()
+            .map(std::sync::Arc::new)
+            .unwrap_or_else(|| std::sync::Arc::new(Self::fallback_agent_config(name)))
+    }
+
+    fn fallback_agent_config(name: &str) -> spur_acp::AgentConfig {
+        spur_acp::AgentConfig {
+            name: name.to_string(),
+            command: String::new(),
+            args: vec![],
+            transport: spur_acp::types::TransportKind::Acp,
+            role: spur_acp::types::AgentRole::Both,
+            capabilities: vec![],
+            cost_tier: spur_acp::types::CostTier::Medium,
+            rate_limit_window: None,
+            review: Default::default(),
+            display: Default::default(),
+            commands: Default::default(),
+            permissions: Default::default(),
+            skip_permissions: false,
+            skip_permissions_args: vec![],
+            skip_permissions_session_mode: None,
+        }
     }
 
     /// Dispatch a crossterm event (keyboard, resize, mouse, etc.) to the active view.
@@ -370,11 +422,13 @@ impl App {
                     // recoverable under the old id rather than vanishing with
                     // the old view.
                     self.force_flush_active_draft();
+                    let agent_cfg = self.resolve_agent_config(agent);
                     let mut view = SessionDetailView::new(
                         session.clone(),
                         agent.clone(),
                         "brain".to_string(),
                         std::env::current_dir().unwrap_or_default(),
+                        agent_cfg,
                     );
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
@@ -1163,11 +1217,28 @@ impl App {
 pub async fn run_tui(
     event_rx: broadcast::Receiver<SpurEvent>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
-    mut perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
+    perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
     start_in_picker: bool,
 ) -> anyhow::Result<()> {
+    run_tui_with_config(
+        event_rx,
+        user_input_tx,
+        perm_rx,
+        start_in_picker,
+        std::sync::Arc::new(spur_acp::SpurConfig::default()),
+    )
+    .await
+}
+
+pub async fn run_tui_with_config(
+    event_rx: broadcast::Receiver<SpurEvent>,
+    user_input_tx: Option<mpsc::Sender<UserInput>>,
+    mut perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
+    start_in_picker: bool,
+    config: std::sync::Arc<spur_acp::SpurConfig>,
+) -> anyhow::Result<()> {
     let mut terminal = tui::setup()?;
-    let mut app = App::new(user_input_tx, start_in_picker);
+    let mut app = App::new_with_config(user_input_tx, start_in_picker, config);
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
     let mut event_rx = event_rx;
@@ -1287,22 +1358,7 @@ pub(crate) fn apply_session_update(
             state.current_mode = Some(u.current_mode_id.to_string());
         }
         AvailableCommandsUpdate(u) => {
-            let handle = state.agent_handle_for_commands();
-            // Transitional: standard ACP AvailableCommandsUpdate always
-            // routes through prompt_text dispatch today. Task 5 plumbs the
-            // owning AgentConfig through so the dispatch is config-driven.
-            let cfg = spur_acp::CommandsConfig {
-                dispatch: spur_acp::DispatchKind::PromptText,
-                ..Default::default()
-            };
-            let entries: Vec<_> = u
-                .available_commands
-                .iter()
-                .map(|c| crate::agents::build_entry(&handle, &cfg, c))
-                .collect();
-            state
-                .command_registry
-                .set_agent_commands(&handle, entries);
+            state.apply_available_commands(&u.available_commands);
         }
         UsageUpdate(u) => {
             state.context_used = Some(u.used);

@@ -16,6 +16,7 @@ fn tick_emits_save_draft_after_debounce() {
         "claude-code-acp".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
 
     // Type a few characters.
@@ -45,6 +46,7 @@ fn tick_does_not_emit_save_draft_within_debounce_window() {
         "claude-code-acp".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     for c in "hi".chars() {
         let _ = view.handle_key(key(c));
@@ -61,6 +63,7 @@ fn save_draft_only_fires_once_per_change() {
         "claude-code-acp".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     for c in "abc".chars() {
         let _ = view.handle_key(key(c));
@@ -78,6 +81,7 @@ fn session_view_restores_draft_from_metadata() {
         "claude-code-acp".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     view.restore_draft("previous unsent text");
     assert_eq!(view.input_bar_text(), "previous unsent text");
@@ -91,6 +95,7 @@ fn force_save_draft_emits_action_without_debounce() {
         "claude-code-acp".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     for c in "foo".chars() {
         let _ = view.handle_key(key(c));
@@ -118,6 +123,7 @@ fn force_save_draft_is_noop_when_unchanged() {
         "claude-code-acp".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     // Empty and never persisted — unchanged, should be None.
     assert!(view.force_save_draft().is_none());
@@ -140,6 +146,7 @@ fn force_save_draft_clears_debounce_timer() {
         "claude-code-acp".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     for c in "bar".chars() {
         let _ = view.handle_key(key(c));
@@ -159,6 +166,7 @@ fn restore_draft_with_empty_string_is_noop() {
         "claude-code-acp".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     view.restore_draft("");
     assert_eq!(view.input_bar_text(), "");

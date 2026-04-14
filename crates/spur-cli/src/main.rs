@@ -359,7 +359,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Watch { brain, sessions, dashboard } => {
-            let orch = load_orchestrator(repo_root.clone())?;
+            let config = load_config().unwrap_or_default();
+            let config_arc = std::sync::Arc::new(config.clone());
+            let orch = Orchestrator::new(repo_root.clone(), config)?;
             let event_rx = orch.subscribe();
 
             // Clone the review_sink BEFORE orch is moved.
@@ -481,7 +483,14 @@ async fn main() -> Result<()> {
             // Run TUI (blocks). Capture the result so we can run structured
             // shutdown before propagating any error — otherwise `?` would
             // leak the orchestrator/dispatcher/translator tasks.
-            let tui_result = spur_tui::run_tui(event_rx, Some(tui_tx), Some(perm_rx), force_picker).await;
+            let tui_result = spur_tui::app::run_tui_with_config(
+                event_rx,
+                Some(tui_tx),
+                Some(perm_rx),
+                force_picker,
+                config_arc,
+            )
+            .await;
 
             // TUI exited — its `user_input_tx` is dropped, which causes the
             // translator task to exit, which drops `user_tx` and `dispatch_tx`,

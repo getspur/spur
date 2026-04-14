@@ -23,6 +23,7 @@ fn plain_text_submit_produces_text_block() {
         "claude".into(),
         "brain".into(),
         tmp.path().to_path_buf(),
+        spur_tui::test_support::default_agent_config("claude"),
     );
     type_str(&mut v, "hello");
     let act = press(&mut v, KeyCode::Enter).expect("action");
@@ -47,6 +48,7 @@ fn slash_help_fires_show_help_action() {
         "claude".into(),
         "brain".into(),
         tmp.path().to_path_buf(),
+        spur_tui::test_support::default_agent_config("claude"),
     );
     type_str(&mut v, "/");
     // popup is open; Enter accepts the first row (which is /help from spur-local)

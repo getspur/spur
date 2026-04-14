@@ -103,11 +103,42 @@ fn kiro_available_notification_populates_registry() {
     use spur_tui::views::View;
 
     let sid = SessionId("kiro-test-session".to_string());
+
+    let kiro_cfg = std::sync::Arc::new(spur_acp::AgentConfig {
+        name: "kiro".into(),
+        command: "kiro-cli".into(),
+        args: vec!["acp".into()],
+        transport: spur_acp::types::TransportKind::Acp,
+        role: spur_acp::types::AgentRole::Both,
+        capabilities: vec![],
+        cost_tier: spur_acp::types::CostTier::Medium,
+        rate_limit_window: None,
+        review: Default::default(),
+        display: Default::default(),
+        commands: spur_acp::CommandsConfig {
+            dispatch: spur_acp::DispatchKind::VendorExec,
+            exec_method: Some(spur_acp::ext::KIRO_COMMANDS_EXECUTE.to_string()),
+            args_template: spur_acp::ArgsTemplateKind::RawRest,
+            ingest: vec![spur_acp::IngestBinding {
+                method: spur_acp::ext::KIRO_COMMANDS_AVAILABLE.to_string(),
+                parser: spur_acp::IngestParserKind::JsonPathList,
+                path: "availableCommands".to_string(),
+                item_schema: spur_acp::ItemSchemaKind::AcpAvailableCommand,
+            }],
+            response: vec![],
+        },
+        permissions: Default::default(),
+        skip_permissions: false,
+        skip_permissions_args: vec![],
+        skip_permissions_session_mode: None,
+    });
+
     let mut view = spur_tui::views::session_detail::SessionDetailView::new(
         sid.clone(),
         "kiro".to_string(),
         "brain".to_string(),
         std::path::PathBuf::from("."),
+        kiro_cfg,
     );
 
     let params = serde_json::json!({
@@ -135,5 +166,61 @@ fn kiro_available_notification_populates_registry() {
             .iter()
             .map(|e| (e.name.clone(), e.source.clone()))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn kiro_execute_response_renders_as_system_note() {
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+    use spur_tui::views::View;
+
+    let sid = SessionId("kiro-exec-session".to_string());
+
+    let kiro_cfg = std::sync::Arc::new(spur_acp::AgentConfig {
+        name: "kiro".into(),
+        command: "kiro-cli".into(),
+        args: vec!["acp".into()],
+        transport: spur_acp::types::TransportKind::Acp,
+        role: spur_acp::types::AgentRole::Both,
+        capabilities: vec![],
+        cost_tier: spur_acp::types::CostTier::Medium,
+        rate_limit_window: None,
+        review: Default::default(),
+        display: Default::default(),
+        commands: spur_acp::CommandsConfig {
+            dispatch: spur_acp::DispatchKind::VendorExec,
+            exec_method: Some(spur_acp::ext::KIRO_COMMANDS_EXECUTE.to_string()),
+            args_template: spur_acp::ArgsTemplateKind::RawRest,
+            ingest: vec![],
+            response: vec![spur_acp::ResponseBinding {
+                method: spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE.to_string(),
+                render: spur_acp::ResponseRenderKind::SystemNote,
+            }],
+        },
+        permissions: Default::default(),
+        skip_permissions: false,
+        skip_permissions_args: vec![],
+        skip_permissions_session_mode: None,
+    });
+
+    let mut view = spur_tui::views::session_detail::SessionDetailView::new(
+        sid.clone(),
+        "kiro".to_string(),
+        "brain".to_string(),
+        std::path::PathBuf::from("."),
+        kiro_cfg,
+    );
+
+    let ev = SpurEvent::now(SpurEventBody::AgentExtNotification {
+        session: sid,
+        method: spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE.to_string(),
+        params: serde_json::json!({"stdout": "ok"}),
+    });
+    view.handle_spur_event(&ev);
+
+    let last_trace = view.trace_snapshot_for_test();
+    assert!(
+        last_trace.iter().any(|t| t.contains("kiro") && t.contains("response")),
+        "expected a kiro-tagged response system note; got {last_trace:?}"
     );
 }
