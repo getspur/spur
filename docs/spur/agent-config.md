@@ -60,7 +60,7 @@ item_schema = "acp_available_command"
 
 ```toml
 [[agents.entries.commands.response]]
-method = "_kiro.dev/commands/execute"
+method = "_kiro.dev/commands/execute/response"
 render = "system_note"
 ```
 
