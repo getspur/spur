@@ -8,6 +8,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use tokio::sync::broadcast;
@@ -19,6 +20,10 @@ use spur_acp::domain::events::SpurEvent;
 const DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
 const FLUSH_BYTES: usize = 64 * 1024;              // 64 KB buffer threshold
 const FLUSH_INTERVAL_MS: u64 = 100;
+
+/// Per-process rotation counter. Guarantees unique filenames even when
+/// two rotations happen within the same millisecond.
+static ROTATION_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Spawn the sink task. Returns immediately; the task runs until the
 /// broadcast channel closes (orchestrator shutdown).
@@ -137,7 +142,8 @@ fn rotated_path(dir: &PathBuf) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    dir.join(format!("{pid}-{ts}.ndjson"))
+    let n = ROTATION_SEQ.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!("{pid}-{ts}-{n}.ndjson"))
 }
 
 #[cfg(test)]
@@ -203,10 +209,8 @@ mod tests {
             body: SpurEventBody::TurnComplete { session: SessionId("s1".to_string()) },
         };
         state.write_event(&event).unwrap();
-        // Small sleep so the rotated path's millisecond timestamp
-        // differs from the first file (avoids filename collision on
-        // fast hosts).
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        // No sleep needed — `rotated_path()`'s ROTATION_SEQ counter
+        // guarantees unique filenames per-process even within one ms.
         state.write_event(&event).unwrap();
         state.flush().unwrap();
 
