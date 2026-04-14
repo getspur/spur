@@ -89,6 +89,12 @@ pub struct SessionPickerView {
     confirm_switch: Option<ConfirmSwitchTarget>,
 }
 
+impl Default for SessionPickerView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionPickerView {
     pub fn new() -> Self {
         Self {
@@ -386,6 +392,10 @@ impl SessionPickerView {
         render_footer_hint(frame, chunks[2]);
     }
 
+    // Refactoring to a props struct is deferred — the signature is stable and
+    // every caller already passes every arg. See `StatusBarProps` for the
+    // pattern if/when we do fold these.
+    #[allow(clippy::too_many_arguments)]
     fn render_populated(
         &self,
         frame: &mut Frame,
