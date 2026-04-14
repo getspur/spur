@@ -134,7 +134,7 @@ pub enum TransportKind {
 ///
 /// Used by the TUI to show transport-aware cancel feedback. See
 /// `docs/superpowers/specs/2026-04-14-session-detail-esc-cancel-design.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CancelMode {
     /// ACP `session/cancel` notification; process stays alive.
     AcpSoft,
