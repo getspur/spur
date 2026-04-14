@@ -66,6 +66,31 @@ render = "system_note"
 
 **ResponseRenderKind:** `system_note`
 
+#### `[[agents.entries.commands.static]]` — config-declared commands
+
+Static commands appear in the `/` popup at startup, before the agent
+connects. Each entry is a triple:
+
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | Command name without leading `/` |
+| `description` | yes | Shown in popup |
+| `hint` | no | Argument placeholder, e.g. `[model-name]` |
+
+Dispatch is inherited from the parent `[commands]` block — static decls
+don't repeat it. For `dispatch = "vendor_exec"`, static commands dispatch
+via the same `exec_method` + `args_template` as dynamic ones. When an
+agent advertises a command with the same name (via the `ingest` hook),
+the dynamic entry overrides the static one on `(handle, name)` match.
+
+#### Response-method convention
+
+For `dispatch = "vendor_exec"`, `[[commands.response]]` methods follow
+`{exec_method}/response` — e.g. exec `_kiro.dev/commands/execute`
+produces responses at `_kiro.dev/commands/execute/response`. The
+orchestrator appends `/response` to the method string when re-emitting
+the call result as an `AgentExtNotification`.
+
 ## `[agents.entries.permissions]`
 
 Replaces the three flat `skip_permissions*` fields. Old flat fields

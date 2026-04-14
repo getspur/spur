@@ -35,8 +35,7 @@ pub enum Dispatch {
     /// Send the normalized text as a `ContentBlock::Text` to the current agent.
     /// `normalized` is the bare form with leading slash (e.g. "/help").
     PromptText { normalized: String },
-    /// Invoke an agent-specific vendor extension RPC. Generic replacement
-    /// for the previous KiroExecute variant.
+    /// Invoke an agent-specific vendor extension RPC.
     VendorExec {
         /// Full wire method (e.g. `"_kiro.dev/commands/execute"`).
         method: String,

@@ -51,10 +51,37 @@ parser = "json_path_list"
 path = "availableCommands"
 item_schema = "acp_available_command"
 
+[[agents.entries.commands.static]]
+name = "help"
+description = "Show kiro help"
+
 [[agents.entries.commands.response]]
-method = "_kiro.dev/commands/execute"
+method = "_kiro.dev/commands/execute/response"
 render = "system_note"
 
 [agents.entries.permissions]
 skip = true
 args = ["--trust-all-tools"]
+
+# # Codex — zero-Rust onboarding example. Uncomment to enable.
+# [[agents.entries]]
+# name = "codex"
+# command = "codex"
+# args = ["--full-auto"]
+# transport = "stream_json"
+# role = "worker"
+#
+# [agents.entries.display]
+# handle = "codex"
+#
+# [agents.entries.commands]
+# dispatch = "prompt_text"
+#
+# [[agents.entries.commands.static]]
+# name = "compact"
+# description = "Compact conversation history"
+#
+# [[agents.entries.commands.static]]
+# name = "model"
+# description = "Switch model"
+# hint = "[model-name]"
