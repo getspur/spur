@@ -111,6 +111,9 @@ pub enum SpurEventBody {
         acp_session_id: String,
         brain: String,
         resumed: bool,
+        /// How `session/cancel` is implemented for this session's transport.
+        /// The TUI uses this to render transport-aware cancel feedback.
+        cancel_mode: crate::CancelMode,
     },
     WorkerSpawned { agent: String, session: SessionId, worktree: PathBuf },
     SessionCompleted { session: SessionId, success: bool },
@@ -227,4 +230,27 @@ pub enum SpurEventBody {
 pub struct HistoryEntry {
     pub role: String,
     pub text: String,
+}
+
+#[cfg(test)]
+mod cancel_mode_field_tests {
+    use super::{SpurEvent, SpurEventBody};
+    use crate::{CancelMode, SessionId};
+
+    #[test]
+    fn agent_session_ready_carries_cancel_mode() {
+        let ev = SpurEvent::now(SpurEventBody::AgentSessionReady {
+            session: SessionId("s".to_string()),
+            acp_session_id: "acp-1".to_string(),
+            brain: "kiro".to_string(),
+            resumed: false,
+            cancel_mode: CancelMode::AcpSoft,
+        });
+        match ev.body {
+            SpurEventBody::AgentSessionReady { cancel_mode, .. } => {
+                assert_eq!(cancel_mode, CancelMode::AcpSoft);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 }
