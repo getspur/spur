@@ -164,6 +164,26 @@ impl App {
             config,
         };
 
+        // Validate every agent entry. Fatal errors abort the agent (but we don't
+        // crash the whole TUI — other agents may still work). Warnings are logged
+        // and we continue.
+        for entry in &app.config.agents.entries {
+            match spur_acp::validate_agent_config(entry) {
+                Ok(()) => {}
+                Err(errors) => {
+                    for e in errors {
+                        if e.is_fatal() {
+                            tracing::error!(agent = %entry.name, error = %e,
+                                "agent config validation failed; this agent will not be usable");
+                        } else {
+                            tracing::warn!(agent = %entry.name, warning = %e,
+                                "agent config validation warning");
+                        }
+                    }
+                }
+            }
+        }
+
         if start_in_picker {
             if let Some(ref tx) = app.user_input_tx {
                 let _ = tx.try_send(UserInput::ListSessions);

@@ -1,5 +1,6 @@
 pub mod entries;
 pub mod hooks;
+pub mod validator;
 
 pub use entries::{
     CommandsConfig, DisplayConfig, IngestBinding, PermissionsConfig, ResponseBinding,
@@ -7,6 +8,7 @@ pub use entries::{
 pub use hooks::{
     ArgsTemplateKind, DispatchKind, IngestParserKind, ItemSchemaKind, ResponseRenderKind,
 };
+pub use validator::{validate_agent_config, ConfigError};
 
 use crate::domain::delegation::TimeoutFallback;
 use crate::types::{AgentRole, CostTier, TransportKind};
