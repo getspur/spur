@@ -66,7 +66,7 @@ Replace per-turn mpsc channels + grace window + `dead_tx` swap with a single con
 
 ### Broadcast capacity and lag
 
-`broadcast::channel(1024)` is sized to absorb bursty history replay from `load_session`. If the subscriber falls behind, `broadcast::Receiver::recv()` returns `RecvError::Lagged(skipped)`; the orchestrator task logs a warning and continues. Lag is not expected under normal load (TUI drain rate >> agent emission rate); the log is a diagnostic for future regressions, not part of the hot path.
+`broadcast::channel(4096)` — sized above the invariant floor (anchor `3ff4e86`) to absorb bursty history replay from `load_session`. If the subscriber falls behind, `broadcast::Receiver::recv()` returns `RecvError::Lagged(skipped)`; the orchestrator task logs a warning and continues. Lag is not expected under normal load (TUI drain rate >> agent emission rate); the log is a diagnostic for future regressions, not part of the hot path.
 
 ### Error and shutdown handling
 
