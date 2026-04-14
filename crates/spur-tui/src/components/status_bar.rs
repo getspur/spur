@@ -10,6 +10,20 @@ use crate::action::ViewId;
 
 pub struct StatusBar;
 
+/// Returns the status-bar hint string for the SessionDetail view.
+///
+/// When `stream_in_flight` is true the hint shows `[Esc]stop`; when the
+/// stream is idle it shows `[Esc]back`.  The caller is responsible for
+/// AND-ing with `!cancelling_in_flight` before passing the flag so the
+/// misleading `[Esc]stop` disappears once a cancel is already in progress.
+pub(crate) fn hint_for_session_detail(stream_in_flight: bool) -> &'static str {
+    if stream_in_flight {
+        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [?]help"
+    } else {
+        " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [?]help"
+    }
+}
+
 /// Everything the status bar needs to render one frame.
 #[derive(Clone, Copy)]
 pub struct StatusBarProps<'a> {
@@ -21,13 +35,16 @@ pub struct StatusBarProps<'a> {
     pub current_mode: Option<&'a str>,
     pub context_used: Option<u64>,
     pub context_size: Option<u64>,
+    /// True when the SessionDetail view has an in-flight stream; toggles
+    /// the status-bar hint between `[Esc]back` (idle) and `[Esc]stop` (live).
+    pub stream_in_flight: bool,
 }
 
 impl StatusBar {
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         let hints = match props.view {
             ViewId::Dashboard => " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [?]help [q]uit",
-            ViewId::SessionDetail(_) => " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [?]help",
+            ViewId::SessionDetail(_) => hint_for_session_detail(props.stream_in_flight),
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => " [Esc]close",
@@ -103,5 +120,24 @@ impl StatusBar {
 
         frame.render_widget(Paragraph::new(hints_line), hints_area);
         frame.render_widget(Paragraph::new(right).right_aligned(), right_area);
+    }
+}
+
+#[cfg(test)]
+mod status_bar_hint_tests {
+    use super::hint_for_session_detail;
+
+    #[test]
+    fn hint_shows_stop_when_stream_in_flight() {
+        let hint = hint_for_session_detail(true);
+        assert!(hint.contains("[Esc]stop"), "got: {hint}");
+        assert!(!hint.contains("[Esc]back"));
+    }
+
+    #[test]
+    fn hint_shows_back_when_idle() {
+        let hint = hint_for_session_detail(false);
+        assert!(hint.contains("[Esc]back"), "got: {hint}");
+        assert!(!hint.contains("[Esc]stop"));
     }
 }

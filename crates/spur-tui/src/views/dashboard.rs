@@ -248,6 +248,7 @@ impl DashboardView {
                     current_mode: None,
                     context_used: None,
                     context_size: None,
+                    stream_in_flight: false,
                 },
             );
             return;
@@ -295,6 +296,7 @@ impl DashboardView {
                 current_mode: None,
                 context_used: None,
                 context_size: None,
+                stream_in_flight: false,
             },
         );
     }
