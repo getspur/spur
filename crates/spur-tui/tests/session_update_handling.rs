@@ -117,7 +117,7 @@ fn kiro_available_notification_populates_registry() {
         display: Default::default(),
         commands: spur_acp::CommandsConfig {
             dispatch: spur_acp::DispatchKind::VendorExec,
-            exec_method: Some(spur_acp::ext::KIRO_COMMANDS_EXECUTE.to_string()),
+            exec_method: Some("_kiro.dev/commands/execute".to_string()),
             args_template: spur_acp::ArgsTemplateKind::RawRest,
             ingest: vec![spur_acp::IngestBinding {
                 method: spur_acp::ext::KIRO_COMMANDS_AVAILABLE.to_string(),
@@ -190,7 +190,7 @@ fn kiro_execute_response_renders_as_system_note() {
         display: Default::default(),
         commands: spur_acp::CommandsConfig {
             dispatch: spur_acp::DispatchKind::VendorExec,
-            exec_method: Some(spur_acp::ext::KIRO_COMMANDS_EXECUTE.to_string()),
+            exec_method: Some("_kiro.dev/commands/execute".to_string()),
             args_template: spur_acp::ArgsTemplateKind::RawRest,
             ingest: vec![],
             response: vec![spur_acp::ResponseBinding {

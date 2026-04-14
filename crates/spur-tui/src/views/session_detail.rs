@@ -90,6 +90,9 @@ impl SessionDetailView {
         cwd: std::path::PathBuf,
         agent_cfg: std::sync::Arc<spur_acp::AgentConfig>,
     ) -> Self {
+        let command_registry = crate::commands::CommandRegistry::from_configs(
+            std::slice::from_ref(&*agent_cfg),
+        );
         Self {
             session_id,
             agent_name,
@@ -100,7 +103,7 @@ impl SessionDetailView {
             cost: 0.0,
             started_at: Instant::now(),
             current_mode: None,
-            command_registry: crate::commands::CommandRegistry::new(),
+            command_registry,
             context_used: None,
             context_size: None,
             auth_error: None,
@@ -1415,5 +1418,43 @@ mod invalidate_protocols_tests {
             Some(Action::NavigateTo(ViewId::MermaidOverlay(_))) => {}
             other => panic!("expected NavigateTo(MermaidOverlay), got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod static_command_seeding_tests {
+    use super::*;
+    use spur_acp::{
+        AgentConfig, CommandsConfig, DispatchKind, SessionId, StaticCommandDecl,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn session_view_constructor_seeds_static_commands_from_config() {
+        let mut cfg = AgentConfig::with_defaults("codex");
+        cfg.display.handle = Some("codex".into());
+        cfg.commands = CommandsConfig {
+            dispatch: DispatchKind::PromptText,
+            static_commands: vec![StaticCommandDecl {
+                name: "compact".into(),
+                description: "Compact history".into(),
+                hint: None,
+            }],
+            ..Default::default()
+        };
+        let view = SessionDetailView::new(
+            SessionId("test".into()),
+            "codex".into(),
+            "brain".into(),
+            std::path::PathBuf::from("."),
+            Arc::new(cfg),
+        );
+        let names: Vec<_> = view
+            .command_registry
+            .list()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert!(names.contains(&"compact".to_string()), "static /compact should be visible at startup, got {names:?}");
     }
 }
