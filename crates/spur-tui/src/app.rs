@@ -1278,6 +1278,8 @@ pub async fn run_tui_with_config(
                             streaming_probe = true,
                             site = "E_broadcast_lag",
                             lagged_n = n,
+                            source = file!(),
+                            line = line!(),
                             "TUI broadcast receiver lagged — events dropped"
                         );
                     }

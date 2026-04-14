@@ -136,7 +136,10 @@ impl Orchestrator {
             }
         };
 
-        let (event_tx, _) = broadcast::channel(256);
+        // S1.d — 4096 supports ~2.5s of events at 1600 evt/s peak
+        // (20 workers × 80 evt/s). Subscribers that still lag get
+        // RecvError::Lagged (logged at WARN; see S1.d Lagged audit).
+        let (event_tx, _) = broadcast::channel(4096);
         let review_sink = ReviewSink::new();
 
         Ok(Self {
