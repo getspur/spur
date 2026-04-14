@@ -1,40 +1,36 @@
-//! Regression test for H5 — the `dead_tx` race in `NativeAcpConnection`
-//! that drops trailing `session/update` notifications arriving after the
-//! corresponding `session/prompt` response frame has been consumed.
+//! Regression test for H5 — notifications arriving after the corresponding
+//! `session/prompt` response frame must still reach the caller.
 //!
-//! ## Bug reproduction
+//! ## Original bug
 //!
-//! The ACP thread swaps `notification_tx` for a throwaway `dead_tx` as
-//! soon as `connection.prompt().await` returns. If the ACP SDK schedules
-//! any `session_notification` callback on its LocalSet *after* that swap,
-//! the notification is sent to the dead channel and silently dropped.
+//! The ACP thread used to swap `notification_tx` for a throwaway `dead_tx` as
+//! soon as `connection.prompt().await` returned. If the ACP SDK scheduled any
+//! `session_notification` callback on its LocalSet *after* that swap, the
+//! notification was sent to the dead channel and silently dropped.
 //!
-//! User-visible symptom: the tail of a worker's output is truncated
-//! ("the message breaks at the end").
+//! ## Current architecture
+//!
+//! Notifications are now published into a connection-scoped
+//! `broadcast::Sender<SessionNotification>` owned by `NativeAcpConnection`.
+//! The per-turn `Stream` returned by `prompt()` is always empty for this
+//! transport; callers that need notifications subscribe via
+//! `conn.subscribe_session_notifications()` **before** calling `prompt()`.
 //!
 //! ## Test design
 //!
-//! We drive the real `NativeAcpConnection` against a deterministic mock
-//! agent (`tests/fixtures/agent_trailing_notification.sh`) that:
+//! Same fixture as before (`tests/fixtures/agent_trailing_notification.sh`):
 //!   1. emits a `session/update` (chunk: "first") BEFORE the prompt response,
 //!   2. emits the `session/prompt` response (stopReason: end_turn),
 //!   3. sleeps 200 ms,
 //!   4. emits a trailing `session/update` (chunk: "second").
 //!
-//! Expected (correct) behavior: the caller's stream yields BOTH chunks.
-//! Current (buggy) behavior: the "second" chunk is dropped because it
-//! arrives after the dead_tx swap.
-//!
-//! Task 2 of the SpurEvent Stream Backbone plan implements a 250 ms grace
-//! window after `prompt()` returns so stragglers like this are still
-//! forwarded — at which point this test will pass.
+//! Expected behavior: the caller observes BOTH chunks via the broadcast receiver.
 
 use std::time::Duration;
 
 use agent_client_protocol::{
     ContentBlock, InitializeRequest, PromptRequest, ProtocolVersion, TextContent,
 };
-use futures::StreamExt;
 use spur_acp::connection::{native::NativeAcpConnection, AgentConnection};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -59,17 +55,22 @@ async fn trailing_notification_reaches_caller() {
         .await
         .expect("new_session should succeed against mock");
 
+    // Subscribe BEFORE prompt() so we don't miss any notifications.
+    let mut rx = conn
+        .subscribe_session_notifications()
+        .expect("NativeAcpConnection must provide a session-notification subscriber");
+
     let prompt_req = PromptRequest::new(
         session.session_id.clone(),
         vec![ContentBlock::Text(TextContent::new("any-prompt".to_string()))],
     );
 
-    let mut stream = conn.prompt(prompt_req).await.expect("prompt");
+    // Fire prompt() — the returned stream is always empty for this transport;
+    // notifications arrive on the broadcast receiver `rx` instead.
+    let _stream = conn.prompt(prompt_req).await.expect("prompt");
 
-    // Drain for up to 1 s — long enough for the 200 ms sleep in the fixture
-    // plus handler scheduling slop. A correct implementation emits "second"
-    // well within this window; the buggy dead_tx swap silently drops it,
-    // and our bounded drain will fall off the deadline.
+    // Drain from the broadcast receiver for up to 1 s — long enough for the
+    // 200 ms sleep in the fixture plus handler scheduling slop.
     let mut chunks: Vec<String> = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
     loop {
@@ -77,10 +78,10 @@ async fn trailing_notification_reaches_caller() {
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining, stream.next()).await {
-            Ok(Some(notif)) => chunks.push(format!("{notif:?}")),
-            Ok(None) => break, // stream closed (sender dropped)
-            Err(_) => break,   // deadline
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(notif)) => chunks.push(format!("{notif:?}")),
+            Ok(Err(_)) => break, // broadcast sender dropped (connection torn down)
+            Err(_) => break,     // deadline
         }
     }
 
@@ -89,14 +90,14 @@ async fn trailing_notification_reaches_caller() {
 
     assert!(
         chunks.iter().any(|s| s.contains("first")),
-        "expected leading chunk \"first\" in stream, got: {chunks:?} \
+        "expected leading chunk \"first\" in broadcast, got: {chunks:?} \
          — fixture/API wiring is wrong (this must pass regardless of H5)"
     );
     assert!(
         chunks.iter().any(|s| s.contains("second")),
-        "expected trailing chunk \"second\" in stream, got: {chunks:?} \
-         — H5 regressed: notifications arriving after prompt() returns are \
-         being routed to dead_tx and dropped. Implement a grace window on \
-         notification_tx swap (see SpurEvent Stream Backbone plan, Task 2)."
+        "expected trailing chunk \"second\" in broadcast, got: {chunks:?} \
+         — H5 regressed: trailing notifications are being dropped. \
+         Ensure the broadcast sender in SpurAcpClientDynamic is alive \
+         for the full connection lifetime."
     );
 }

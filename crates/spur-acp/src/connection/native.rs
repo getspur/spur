@@ -651,6 +651,12 @@ impl AgentConnection for NativeAcpConnection {
     ) -> Option<mpsc::UnboundedReceiver<ExtNotificationPayload>> {
         self.ext_notification_rx.take()
     }
+
+    fn subscribe_session_notifications(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<SessionNotification>> {
+        Some(self.session_notif_tx.subscribe())
+    }
 }
 
 // ─── Dedicated ACP thread ───────────────────────────────────────────────────
@@ -667,7 +673,7 @@ fn acp_thread_main(
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
-    _session_notif_tx: tokio::sync::broadcast::Sender<agent_client_protocol::SessionNotification>,
+    session_notif_tx: tokio::sync::broadcast::Sender<agent_client_protocol::SessionNotification>,
     child_pgid: Arc<Mutex<Option<i32>>>,
 ) {
     // Build a single-threaded runtime for this thread.
@@ -796,34 +802,18 @@ fn acp_thread_main(
         let stdout_compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(child_stdout);
         let stdin_compat = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(child_stdin);
 
-        // Create the notification channel for bridging session updates.
-        // We use a shared sender so the SpurAcpClient can clone it per-prompt.
-        let (notification_tx, _initial_rx) = mpsc::unbounded_channel::<SessionNotification>();
-
-        // Hold the current notification sender in an Rc<RefCell> so we can swap
-        // it per-prompt call.
-        let notification_tx = std::rc::Rc::new(std::cell::RefCell::new(notification_tx));
-        let notification_tx_for_client = notification_tx.clone();
-
-        // NEW: grace-window support for H5 fix.
-        // Shared monotonic timestamp updated on every `session_notification`
-        // call. The ACP thread reads it after `prompt()` returns to decide
-        // when idle has elapsed and the dead_tx swap is safe.
-        let last_notification_at = std::rc::Rc::new(std::cell::RefCell::new(
-            std::time::Instant::now(),
-        ));
-        let last_notification_at_for_client = last_notification_at.clone();
-        let last_notification_at_for_thread = last_notification_at.clone();
-
-        // Build the SpurAcpClient that handles callbacks from the agent.
-        // We use a wrapper that reads the current notification_tx from the RefCell.
+        // Session notifications are published into the connection-scoped
+        // broadcast (`session_notif_tx`). `SpurAcpClientDynamic` holds a
+        // clone; subscribers obtained via
+        // `NativeAcpConnection::subscribe_session_notifications` live for
+        // the whole connection — no per-turn channel, no grace window, no
+        // dead_tx. The broadcast sender is passed in as a parameter.
         let spur_client = SpurAcpClientDynamic {
-            notification_tx: notification_tx_for_client,
+            session_notif_tx: session_notif_tx.clone(),
             cwd: std::rc::Rc::new(std::cell::RefCell::new(PathBuf::from("."))),
             permission_tx,
             terminals: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
             ext_notification_tx: ext_notification_tx.clone(),
-            last_notification_at: last_notification_at_for_client,
         };
         let cwd_ref = spur_client.cwd.clone();
         let terminals_ref = spur_client.terminals.clone();
@@ -882,64 +872,34 @@ fn acp_thread_main(
                     }));
                 }
                 AcpCommand::Prompt { request, reply } => {
-                    // Create a fresh notification channel for this prompt.
-                    let (tx, rx) = mpsc::unbounded_channel::<SessionNotification>();
-                    *notification_tx.borrow_mut() = tx;
+                    // Notifications flow out-of-band via the
+                    // `session_notif_tx` broadcast. The `Stream` returned
+                    // here is a live but-empty `UnboundedReceiver` so the
+                    // trait contract still compiles; it closes when we
+                    // drop `tx_empty` after `prompt()` returns, which
+                    // signals turn completion to the caller.
+                    let (tx_empty, rx_empty) =
+                        mpsc::unbounded_channel::<SessionNotification>();
+                    let _ = reply.send(Ok(rx_empty));
 
-                    // Send the receiver back immediately so the caller can
-                    // start consuming notifications.
-                    let _ = reply.send(Ok(rx));
-
-                    // Now call prompt — this blocks until the turn completes.
-                    // During this time, session_notification() calls will
-                    // forward to the channel above.
                     let agent_name_prompt = agent_name.clone();
                     let session_id_for_probe = request.session_id.clone();
-                    let _prompt_result = connection.prompt(request).await;
-                    match &_prompt_result {
-                        Ok(_) => {
-                            tracing::debug!(
-                                agent = %agent_name_prompt,
-                                "NativeAcpConnection: prompt completed successfully"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                agent = %agent_name_prompt,
-                                "NativeAcpConnection: prompt failed: {e}"
-                            );
-                        }
+                    let prompt_result = connection.prompt(request).await;
+                    match &prompt_result {
+                        Ok(_) => tracing::debug!(
+                            agent = %agent_name_prompt,
+                            session = %session_id_for_probe,
+                            "NativeAcpConnection: prompt completed"
+                        ),
+                        Err(e) => tracing::warn!(
+                            agent = %agent_name_prompt,
+                            session = %session_id_for_probe,
+                            "NativeAcpConnection: prompt failed: {e}"
+                        ),
                     }
-
-                    // S1.a — grace window for trailing session_notification chunks
-                    // (fixes H5 dead-tx race). Wait for 250ms of idle OR 1s absolute
-                    // deadline, whichever comes first, before swapping to dead_tx.
-                    // During this window, any trailing notification lands on the live
-                    // tx and is drained by the caller's still-active receiver.
-                    let grace_start = std::time::Instant::now();
-                    let idle_threshold = std::time::Duration::from_millis(250);
-                    let absolute_cap = std::time::Duration::from_secs(1);
-                    loop {
-                        let since_last = last_notification_at_for_thread
-                            .borrow()
-                            .elapsed();
-                        let total_wait = grace_start.elapsed();
-                        if since_last >= idle_threshold || total_wait >= absolute_cap {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                    tracing::debug!(
-                        streaming_probe = true,
-                        site = "B_dead_tx_swap",
-                        which = "prompt_end",
-                        agent = %agent_name_prompt,
-                        session = %session_id_for_probe,
-                        grace_elapsed_ms = grace_start.elapsed().as_millis() as u64,
-                        "notification_tx -> dead_tx (post-grace)"
-                    );
-                    let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
-                    *notification_tx.borrow_mut() = dead_tx;
+                    // Drop the empty sender so the caller's stream terminates,
+                    // signalling turn completion.
+                    drop(tx_empty);
                 }
                 AcpCommand::Cancel { session_id, reply } => {
                     let cancel = CancelNotification::new(session_id);
@@ -1017,52 +977,13 @@ fn acp_thread_main(
                     break;
                 }
                 AcpCommand::LoadSession { request, reply } => {
-                    // Update cwd to match the loaded session's cwd.
                     *cwd_ref.borrow_mut() = request.cwd.clone();
 
-                    // Install a fresh notification channel before calling
-                    // load_session so historical notifications delivered via
-                    // Client::session_notification land in `tx`. The receiver
-                    // `rx` buffers (unbounded) until we hand it to the caller.
-                    let (tx, rx) = mpsc::unbounded_channel::<SessionNotification>();
-                    *notification_tx.borrow_mut() = tx;
-
+                    let (tx_empty, rx_empty) =
+                        mpsc::unbounded_channel::<SessionNotification>();
                     let agent_name_load = agent_name.clone();
                     let session_id_for_probe = request.session_id.clone();
                     let load_result = connection.load_session(request).await;
-
-                    // S1.a — grace window for trailing session_notification chunks
-                    // (fixes H5 dead-tx race, mirrored from the Prompt handler).
-                    // Wait for 250ms of idle OR 1s absolute deadline before swapping
-                    // to dead_tx so stragglers scheduled on the LocalSet after
-                    // load_session() returns are still forwarded to the caller.
-                    let grace_start = std::time::Instant::now();
-                    let idle_threshold = std::time::Duration::from_millis(250);
-                    let absolute_cap = std::time::Duration::from_secs(1);
-                    loop {
-                        let since_last = last_notification_at_for_thread
-                            .borrow()
-                            .elapsed();
-                        let total_wait = grace_start.elapsed();
-                        if since_last >= idle_threshold || total_wait >= absolute_cap {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                    tracing::debug!(
-                        streaming_probe = true,
-                        site = "B_dead_tx_swap",
-                        which = "load_session_end",
-                        agent = %agent_name_load,
-                        session = %session_id_for_probe,
-                        grace_elapsed_ms = grace_start.elapsed().as_millis() as u64,
-                        "notification_tx -> dead_tx (post-grace)"
-                    );
-                    // Swap notification_tx to a dead channel regardless of
-                    // outcome — history streaming is over.
-                    let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
-                    *notification_tx.borrow_mut() = dead_tx;
-
                     match load_result {
                         Ok(_) => {
                             tracing::debug!(
@@ -1070,7 +991,7 @@ fn acp_thread_main(
                                 session = %session_id_for_probe,
                                 "NativeAcpConnection: load_session completed"
                             );
-                            let _ = reply.send(Ok(rx));
+                            let _ = reply.send(Ok(rx_empty));
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -1084,6 +1005,7 @@ fn acp_thread_main(
                             )));
                         }
                     }
+                    drop(tx_empty);
                 }
                 AcpCommand::ListSessions { request, reply } => {
                     let result = connection.list_sessions(request).await;
@@ -1128,14 +1050,11 @@ struct TerminalState {
     pid: u32,
 }
 
-/// A variant of `SpurAcpClient` that reads the notification sender and cwd
-/// from `Rc<RefCell<_>>` so they can be swapped per-prompt.
-///
-/// This is necessary because `ClientSideConnection::new` takes ownership of
-/// the client, but we need to change the notification destination for each
-/// prompt call.
+/// A variant of `SpurAcpClient` that holds a connection-scoped broadcast
+/// sender so every session notification is published to all subscribers
+/// for the lifetime of the connection — no per-turn channel swap needed.
 struct SpurAcpClientDynamic {
-    notification_tx: std::rc::Rc<std::cell::RefCell<mpsc::UnboundedSender<SessionNotification>>>,
+    session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     cwd: std::rc::Rc<std::cell::RefCell<PathBuf>>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     terminals: std::rc::Rc<std::cell::RefCell<HashMap<String, TerminalState>>>,
@@ -1143,8 +1062,6 @@ struct SpurAcpClientDynamic {
     /// `NativeAcpConnection` so the orchestrator can pump them as
     /// `SpurEventBody::AgentExtNotification`.
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
-    // NEW: grace-window support for H5 fix.
-    last_notification_at: std::rc::Rc<std::cell::RefCell<std::time::Instant>>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -1208,11 +1125,12 @@ impl Client for SpurAcpClientDynamic {
             _ => 0,
         };
         let session = args.session_id.to_string();
-        // NEW: stamp the last-notification timestamp before sending so the
-        // ACP thread's grace-window loop (post-prompt) can see it and know
-        // another chunk just arrived.
-        *self.last_notification_at.borrow_mut() = std::time::Instant::now();
-        let send_result = self.notification_tx.borrow().send(args);
+        // `broadcast::Sender::send` returns `Err(SendError)` only when every
+        // receiver has been dropped. In our topology the orchestrator's
+        // pump task subscribes at connection setup and stays alive for the
+        // connection's lifetime — so `Err` here indicates the connection
+        // is tearing down and we can safely ignore it.
+        let send_result = self.session_notif_tx.send(args);
         let send_result_str = if send_result.is_ok() { "ok" } else { "err" };
         tracing::debug!(
             streaming_probe = true,
@@ -1221,7 +1139,7 @@ impl Client for SpurAcpClientDynamic {
             text_len = text_len,
             session = %session,
             send_result = send_result_str,
-            "ACP session_notification"
+            "ACP session_notification (broadcast)"
         );
         Ok(())
     }
