@@ -445,6 +445,11 @@ impl Orchestrator {
 
                 // ── ResumeSession ───────────────────────────────────────
                 InteractiveInput::ResumeSession { session_id } => {
+                    // If a brain is already active, retire its session-level state so
+                    // the incoming ResumeSession replaces it cleanly. The initialized
+                    // connection is preserved in `agent_connection` for reuse below.
+                    Self::retire_active_brain(&mut brain, &mut agent_connection);
+
                     // Use pre-connected or connect fresh.
                     let (connection, brain_name) = match agent_connection.take() {
                         Some(existing) => existing,
@@ -746,14 +751,13 @@ impl Orchestrator {
                 // Empty `blocks` means spawn-only (no first prompt) — we still
                 // re-queue so the Message arm owns the spawn logic uniformly.
                 InteractiveInput::NewSessionWithMessage { blocks, interrupt } => {
-                    if let Some(mut b) = brain.take() {
-                        b.delegation_handle.abort();
-                        let _ = b.connection.shutdown().await;
-                        let _ = b.mcp_server.shutdown();
-                    }
+                    // Retire the active brain (if any) but preserve the initialized
+                    // connection for the next Message arm's lazy-spawn to reuse.
+                    Self::retire_active_brain(&mut brain, &mut agent_connection);
+
                     if blocks.is_empty() {
-                        // Spawn-only: no prompt. Leave brain=None; the next
-                        // Message will lazy-spawn. (No-op here; intent recorded.)
+                        // Spawn-only: no prompt. Leave brain=None; the next Message
+                        // will lazy-spawn using the preserved agent_connection.
                         info!("NewSessionWithMessage with empty blocks — spawn deferred to next Message");
                     } else {
                         pending_messages.push_back(InteractiveInput::Message { blocks, interrupt });
@@ -945,6 +949,31 @@ impl Orchestrator {
     }
 
     // ─── Private helpers ─────────────────────────────────────────────
+
+    /// Retire the currently-active brain session's ephemeral state
+    /// (delegation handler task, MCP server) while preserving the
+    /// initialized ACP connection in `agent_connection` for reuse by the
+    /// next `load_brain_session` / `create_brain_session`.
+    ///
+    /// Called at the top of any arm that replaces the current brain
+    /// (`ResumeSession`, `NewSessionWithMessage`). Saves the cost of
+    /// tearing down and reinitializing the agent subprocess on every
+    /// session switch — for claude-code-acp that's ~1-3s of node startup
+    /// per switch.
+    ///
+    /// The old ACP session id on the agent side is abandoned silently;
+    /// the ACP protocol has no `close_session` and most agents treat
+    /// unreferenced sessions as inert.
+    fn retire_active_brain(
+        brain: &mut Option<BrainSession>,
+        agent_connection: &mut Option<(Box<dyn spur_acp::AgentConnection>, String)>,
+    ) {
+        if let Some(b) = brain.take() {
+            b.delegation_handle.abort();
+            let _ = b.mcp_server.shutdown();
+            *agent_connection = Some((b.connection, b.brain_name));
+        }
+    }
 
     /// Resolve and initialize a brain agent connection without starting a full session.
     ///
