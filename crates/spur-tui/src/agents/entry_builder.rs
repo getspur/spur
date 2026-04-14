@@ -72,6 +72,19 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "validator guarantees exec_method for vendor_exec")]
+    fn vendor_exec_without_exec_method_panics() {
+        // Task 6's validator is the real guard; this test documents the
+        // current contract and protects against someone removing the expect.
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::VendorExec,
+            exec_method: None,
+            ..Default::default()
+        };
+        build_entry("kiro", &cfg, &cmd("foo"));
+    }
+
+    #[test]
     fn vendor_exec_config_builds_vendor_exec_dispatch() {
         let cfg = CommandsConfig {
             dispatch: DispatchKind::VendorExec,

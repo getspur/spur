@@ -26,6 +26,9 @@ pub fn run_ingest_hook(binding: &IngestBinding, params: &Value) -> Option<Vec<Av
 /// — `binding.path` is expected to be a field-name path like
 /// `"availableCommands"` or `"result.items"`.
 fn lookup_dotted_path(root: &Value, path: &str) -> Option<Value> {
+    // Empty path ("") yields a single empty segment from `.split('.')`;
+    // `.get("")` on any JSON object returns None, so an empty path
+    // returns None (not the root). Treat empty path as a config error.
     let mut current = root;
     for segment in path.split('.') {
         current = current.get(segment)?;
