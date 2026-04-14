@@ -1,9 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use spur_acp::{AvailableCommand, AvailableCommandInput};
-
-use super::entry::{CommandEntry, CommandSource, Dispatch};
+use super::entry::{CommandEntry, CommandSource};
 use super::spur_local::SpurLocalSource;
 
 /// Merges spur-local and agent-advertised slash commands.
@@ -15,7 +13,7 @@ use super::spur_local::SpurLocalSource;
 /// explicit prefixes first, then falls back to spur-local-wins for
 /// ambiguous bare names.
 pub struct CommandRegistry {
-    agent_commands: Vec<(String, Vec<AvailableCommand>)>,
+    agent_commands: Vec<(String, Vec<CommandEntry>)>,
     /// Lazy merged view. Rebuilt only on `set_agent_commands`.
     cache: RefCell<Option<CacheSnapshot>>,
 }
@@ -34,11 +32,13 @@ impl CommandRegistry {
         }
     }
 
-    pub fn set_agent_commands(&mut self, handle: &str, cmds: Vec<AvailableCommand>) {
+    /// Replace the full command set for an agent handle. Entries are
+    /// pre-built by the caller via `agents::build_entry`.
+    pub fn set_agent_commands(&mut self, handle: &str, entries: Vec<CommandEntry>) {
         if let Some(slot) = self.agent_commands.iter_mut().find(|(h, _)| h == handle) {
-            slot.1 = cmds;
+            slot.1 = entries;
         } else {
-            self.agent_commands.push((handle.to_string(), cmds));
+            self.agent_commands.push((handle.to_string(), entries));
         }
         *self.cache.borrow_mut() = None;
     }
@@ -49,10 +49,8 @@ impl CommandRegistry {
             return;
         }
         let mut entries = SpurLocalSource::entries();
-        for (handle, cmds) in &self.agent_commands {
-            for c in cmds {
-                entries.push(agent_entry(handle, c));
-            }
+        for (_handle, agent_entries) in &self.agent_commands {
+            entries.extend(agent_entries.iter().cloned());
         }
         let mut seen: HashSet<String> = HashSet::new();
         let mut colliding: HashSet<String> = HashSet::new();
@@ -119,31 +117,5 @@ impl CommandRegistry {
 impl Default for CommandRegistry {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn agent_entry(handle: &str, c: &AvailableCommand) -> CommandEntry {
-    let hint = match &c.input {
-        Some(AvailableCommandInput::Unstructured(u)) => Some(u.hint.clone()),
-        _ => None,
-    };
-    let dispatch = if handle == "kiro" {
-        Dispatch::KiroExecute {
-            command: c.name.clone(),
-            args: serde_json::json!({}),
-        }
-    } else {
-        Dispatch::PromptText {
-            normalized: format!("/{}", c.name),
-        }
-    };
-    CommandEntry {
-        name: c.name.clone(),
-        description: c.description.clone(),
-        hint,
-        source: CommandSource::Agent {
-            handle: handle.to_string(),
-        },
-        dispatch,
     }
 }

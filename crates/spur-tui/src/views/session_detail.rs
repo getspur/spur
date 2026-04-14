@@ -653,9 +653,10 @@ impl SessionDetailView {
                             })
                         }
                         SubmitDecision::Local { action } => Some(action),
-                        SubmitDecision::KiroExecute { command, args } => {
-                            Some(Action::KiroExecute {
+                        SubmitDecision::VendorExec { method, command, args } => {
+                            Some(Action::VendorExec {
                                 session: self.session_id.clone(),
+                                method,
                                 command,
                                 args,
                             })
@@ -981,7 +982,23 @@ impl View for SessionDetailView {
                         if let Ok(parsed) =
                             serde_json::from_value::<Vec<spur_acp::AvailableCommand>>(arr)
                         {
-                            self.command_registry.set_agent_commands("kiro", parsed);
+                            // Transitional: build entries through the new pure
+                            // helper using a synthetic kiro CommandsConfig. Task 5
+                            // replaces this block entirely with a config-driven loop.
+                            let kiro_cfg = spur_acp::CommandsConfig {
+                                dispatch: spur_acp::DispatchKind::VendorExec,
+                                exec_method: Some(
+                                    spur_acp::ext::KIRO_COMMANDS_EXECUTE.to_string(),
+                                ),
+                                args_template: spur_acp::ArgsTemplateKind::RawRest,
+                                ingest: vec![],
+                                response: vec![],
+                            };
+                            let entries: Vec<_> = parsed
+                                .iter()
+                                .map(|c| crate::agents::build_entry("kiro", &kiro_cfg, c))
+                                .collect();
+                            self.command_registry.set_agent_commands("kiro", entries);
                         }
                     }
                 } else if method == spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE {

@@ -414,8 +414,13 @@ async fn main() -> Result<()> {
                         spur_tui::UserInput::SubmitReview { executor_id, attempt_n, decision } => {
                             spur_core::InteractiveInput::SubmitReview { executor_id, attempt_n, decision }
                         }
-                        spur_tui::UserInput::KiroExecute { session, command, args } => {
-                            spur_core::InteractiveInput::KiroExecute { session, command, args }
+                        spur_tui::UserInput::VendorExec { session, method, command, args } => {
+                            spur_core::InteractiveInput::VendorExec {
+                                session,
+                                method,
+                                command,
+                                args,
+                            }
                         }
                     };
 

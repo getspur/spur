@@ -52,10 +52,11 @@ pub enum Action {
     /// Cycle the active Claude session between `default` and `plan` mode.
     /// Dispatched by `Alt-m` in `SessionDetailView`.
     TogglePlanMode,
-    /// Invoke the kiro vendor extension `_kiro.dev/commands/execute`.
-    /// Full plumbing in Task 11; this task adds a stub handler in `app.rs`.
-    KiroExecute {
+    /// Invoke an agent vendor-extension RPC.
+    VendorExec {
         session: SessionId,
+        /// Full wire method (e.g. `"_kiro.dev/commands/execute"`).
+        method: String,
         command: String,
         args: serde_json::Value,
     },

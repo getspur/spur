@@ -55,10 +55,10 @@ pub enum UserInput {
         attempt_n: u32,
         decision: spur_core::ReviewDecision,
     },
-    /// Invoke the kiro vendor extension `_kiro.dev/commands/execute` on
-    /// the active brain session.
-    KiroExecute {
+    /// Invoke an agent vendor-extension RPC on the active brain session.
+    VendorExec {
         session: SessionId,
+        method: String,
         command: String,
         args: serde_json::Value,
     },
@@ -626,16 +626,18 @@ impl App {
                 self.dirty = true;
             }
 
-            Action::KiroExecute { session, command, args } => {
+            Action::VendorExec { session, method, command, args } => {
                 if let Some(ref mut detail) = self.session_detail {
+                    let handle = detail.agent_handle_for_commands();
                     detail.push_system_note(format!(
-                        "\u{27e8}kiro\u{27e9} /{} queued",
+                        "\u{27e8}{handle}\u{27e9} /{} queued",
                         command
                     ));
                 }
                 if let Some(ref tx) = self.user_input_tx {
-                    let _ = tx.try_send(UserInput::KiroExecute {
+                    let _ = tx.try_send(UserInput::VendorExec {
                         session,
+                        method,
                         command,
                         args,
                     });
@@ -1286,9 +1288,21 @@ pub(crate) fn apply_session_update(
         }
         AvailableCommandsUpdate(u) => {
             let handle = state.agent_handle_for_commands();
+            // Transitional: standard ACP AvailableCommandsUpdate always
+            // routes through prompt_text dispatch today. Task 5 plumbs the
+            // owning AgentConfig through so the dispatch is config-driven.
+            let cfg = spur_acp::CommandsConfig {
+                dispatch: spur_acp::DispatchKind::PromptText,
+                ..Default::default()
+            };
+            let entries: Vec<_> = u
+                .available_commands
+                .iter()
+                .map(|c| crate::agents::build_entry(&handle, &cfg, c))
+                .collect();
             state
                 .command_registry
-                .set_agent_commands(&handle, u.available_commands.clone());
+                .set_agent_commands(&handle, entries);
         }
         UsageUpdate(u) => {
             state.context_used = Some(u.used);

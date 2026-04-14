@@ -1,5 +1,5 @@
 use crate::action::Action;
-use serde_json::Value;
+use spur_acp::ArgsTemplateKind;
 
 /// An entry displayed in the slash-command popup.
 #[derive(Debug, Clone)]
@@ -35,6 +35,14 @@ pub enum Dispatch {
     /// Send the normalized text as a `ContentBlock::Text` to the current agent.
     /// `normalized` is the bare form with leading slash (e.g. "/help").
     PromptText { normalized: String },
-    /// Invoke the kiro vendor extension `_kiro.dev/commands/execute`.
-    KiroExecute { command: String, args: Value },
+    /// Invoke an agent-specific vendor extension RPC. Generic replacement
+    /// for the previous KiroExecute variant.
+    VendorExec {
+        /// Full wire method (e.g. `"_kiro.dev/commands/execute"`).
+        method: String,
+        /// The command name (no leading slash).
+        command: String,
+        /// How to shape rest-of-line text into the RPC args payload.
+        args_template: ArgsTemplateKind,
+    },
 }

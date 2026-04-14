@@ -7,7 +7,7 @@
 //! * `Empty`         — nothing to do.
 //! * `Send`          — forward `Vec<ContentBlock>` to the agent.
 //! * `Local`         — fire an `Action` without sending a message.
-//! * `KiroExecute`   — invoke the kiro vendor extension (Task 11 stub).
+//! * `VendorExec`    — invoke an agent-specific vendor extension RPC.
 //!
 //! Non-slash text routes to `Send`, assembling blocks by interleaving
 //! `Text` with `ResourceLink` blocks from `ranges`.
@@ -31,7 +31,11 @@ pub enum SubmitDecision {
     Local {
         action: Action,
     },
-    KiroExecute {
+    /// Generic vendor-extension dispatch. Carries the full wire method and
+    /// the rendered args payload — the consumer (app.rs → orchestrator)
+    /// calls `connection.call_ext(method, args)`.
+    VendorExec {
+        method: String,
         command: String,
         args: Value,
     },
@@ -65,14 +69,18 @@ pub fn route(
                         interrupt,
                     }
                 }
-                Dispatch::KiroExecute { command, args: _seed } => {
+                Dispatch::VendorExec { method, command, args_template } => {
                     let rest = rest_after_first_token(text);
-                    let args = if rest.is_empty() {
-                        serde_json::json!({})
-                    } else {
-                        serde_json::json!({ "args": { "raw": rest } })
+                    let args = match args_template {
+                        spur_acp::ArgsTemplateKind::RawRest => {
+                            if rest.is_empty() {
+                                serde_json::json!({})
+                            } else {
+                                serde_json::json!({ "args": { "raw": rest } })
+                            }
+                        }
                     };
-                    SubmitDecision::KiroExecute { command, args }
+                    SubmitDecision::VendorExec { method, command, args }
                 }
             };
         }
