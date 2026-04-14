@@ -46,6 +46,28 @@ role = "both"
 capabilities = []
 cost_tier = "medium"
 
+[agents.entries.display]
+handle = "kiro"
+
+[agents.entries.commands]
+dispatch = "vendor_exec"
+exec_method = "_kiro.dev/commands/execute"
+args_template = "raw_rest"
+
+[[agents.entries.commands.ingest]]
+method = "_kiro.dev/commands/available"
+parser = "json_path_list"
+path = "commands"
+item_schema = "acp_available_command"
+
+[[agents.entries.commands.response]]
+method = "_kiro.dev/commands/execute/response"
+render = "system_note"
+
+[agents.entries.permissions]
+skip = true
+args = ["--trust-all-tools"]
+
 # Claude Code via the upstream ACP wrapper. Preferred transport: gives us
 # plan mode, usage tracking, slash-command discovery, and full permission
 # gating via the SDK. Requires Node.js on PATH.
@@ -60,6 +82,81 @@ transport = "acp"
 role = "both"
 capabilities = []
 cost_tier = "medium"
+
+# Codex via zed-industries/codex-acp — ACP adapter for OpenAI Codex.
+# Install binary from https://github.com/zed-industries/codex-acp/releases
+# or use the codex-acp npx entry below instead.
+[[agents.entries]]
+name = "codex"
+command = "codex-acp"
+args = []
+transport = "acp"
+role = "both"
+capabilities = []
+cost_tier = "low"
+
+[agents.entries.display]
+handle = "codex"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[[agents.entries.commands.static]]
+name = "review"
+description = "Review current changes and find issues"
+hint = "[optional instructions]"
+
+[[agents.entries.commands.static]]
+name = "review-branch"
+description = "Review code changes against a specific branch"
+hint = "[branch name]"
+
+[[agents.entries.commands.static]]
+name = "review-commit"
+description = "Review code changes introduced by a commit"
+hint = "[commit sha]"
+
+[[agents.entries.commands.static]]
+name = "init"
+description = "Create an AGENTS.md with repository guidance"
+
+[[agents.entries.commands.static]]
+name = "compact"
+description = "Summarize conversation to prevent hitting context limit"
+
+[[agents.entries.commands.static]]
+name = "undo"
+description = "Undo Codex's most recent turn"
+
+[[agents.entries.commands.static]]
+name = "logout"
+description = "Logout of Codex"
+
+[agents.entries.permissions]
+skip = true
+session_mode = "full-auto"
+
+# Codex via npx wrapper — no pre-installed binary needed, version-pinned.
+# Pinned version is critical: @latest would silently pull breaking
+# changes mid-session. Bump deliberately and retest after each bump.
+[[agents.entries]]
+name = "codex-acp"
+command = "npx"
+args = ["--yes", "@zed-industries/codex-acp@0.11.1"]
+transport = "acp"
+role = "both"
+capabilities = []
+cost_tier = "low"
+
+[agents.entries.display]
+handle = "codex"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[agents.entries.permissions]
+skip = true
+session_mode = "full-auto"
 
 [failover]
 cooldown_minutes = 30
