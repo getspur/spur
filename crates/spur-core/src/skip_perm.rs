@@ -30,11 +30,14 @@ pub async fn new_session_with_bypass(
 
     if cfg.skip_permissions {
         if let Some(mode) = cfg.skip_permissions_session_mode.as_deref() {
+            // SessionModeId's From<&str> requires 'static; convert via
+            // String so a runtime-provided mode name compiles.
             let req = SetSessionModeRequest::new(resp.session_id.clone(), mode.to_string());
             if let Err(e) = conn.set_session_mode(req).await {
                 tracing::warn!(
                     agent = %cfg.name,
-                    mode = %mode,
+                    session_id = %resp.session_id.0,
+                    mode_id = %mode,
                     error = %e,
                     "skip_permissions: set_session_mode failed; \
                      relying on L2 auto-approve"
@@ -42,7 +45,8 @@ pub async fn new_session_with_bypass(
             } else {
                 tracing::debug!(
                     agent = %cfg.name,
-                    mode = %mode,
+                    session_id = %resp.session_id.0,
+                    mode_id = %mode,
                     "skip_permissions: set_session_mode applied"
                 );
             }
