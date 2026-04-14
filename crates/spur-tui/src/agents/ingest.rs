@@ -15,7 +15,7 @@ pub fn run_ingest_hook(binding: &IngestBinding, params: &Value) -> Option<Vec<Av
             let list = lookup_dotted_path(params, &binding.path)?;
             match binding.item_schema {
                 ItemSchemaKind::AcpAvailableCommand => {
-                    serde_json::from_value::<Vec<AvailableCommand>>(list.clone()).ok()
+                    serde_json::from_value::<Vec<AvailableCommand>>(list).ok()
                 }
             }
         }

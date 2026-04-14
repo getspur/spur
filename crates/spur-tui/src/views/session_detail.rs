@@ -1006,20 +1006,15 @@ impl View for SessionDetailView {
                 if session.0 != self.session_id.0 {
                     return;
                 }
-                let handle = self.agent_handle_for_commands();
                 let cfg = self.agent_cfg.clone();
 
-                // Ingest bindings: decode params → CommandEntry list → registry.
+                // Ingest bindings: decode params → delegate to apply_available_commands.
                 for binding in &cfg.commands.ingest {
                     if &binding.method != method {
                         continue;
                     }
                     if let Some(parsed) = crate::agents::run_ingest_hook(binding, params) {
-                        let entries: Vec<_> = parsed
-                            .iter()
-                            .map(|c| crate::agents::build_entry(&handle, &cfg.commands, c))
-                            .collect();
-                        self.command_registry.set_agent_commands(&handle, entries);
+                        self.apply_available_commands(&parsed);
                     }
                 }
 
@@ -1030,6 +1025,7 @@ impl View for SessionDetailView {
                     }
                     match binding.render {
                         spur_acp::ResponseRenderKind::SystemNote => {
+                            let handle = self.agent_handle_for_commands();
                             self.push_system_note(format!(
                                 "\u{27e8}{handle}\u{27e9} response: {}",
                                 params
@@ -1343,23 +1339,7 @@ mod invalidate_protocols_tests {
             "claude".to_string(),
             "brain".to_string(),
             std::path::PathBuf::from("/tmp"),
-            std::sync::Arc::new(spur_acp::AgentConfig {
-                name: "claude".into(),
-                command: String::new(),
-                args: vec![],
-                transport: spur_acp::types::TransportKind::Acp,
-                role: spur_acp::types::AgentRole::Both,
-                capabilities: vec![],
-                cost_tier: spur_acp::types::CostTier::Medium,
-                rate_limit_window: None,
-                review: Default::default(),
-                display: Default::default(),
-                commands: Default::default(),
-                permissions: Default::default(),
-                skip_permissions: false,
-                skip_permissions_args: vec![],
-                skip_permissions_session_mode: None,
-            }),
+            std::sync::Arc::new(spur_acp::AgentConfig::with_defaults("claude")),
         )
     }
 
