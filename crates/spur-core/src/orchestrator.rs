@@ -2514,6 +2514,47 @@ async fn run_one_worker_attempt(
     })
 }
 
+/// Tail-weighted, UTF-8-safe truncation for worker summaries.
+///
+/// Why tail-weighted: LLM worker output opens with task restatement
+/// and closes with a crisp conclusion + file list. The middle holds
+/// verbose tool-call transcripts with low decision-density. Brain-
+/// relevant information is concentrated at the tail.
+///
+/// Returns `text` unchanged if `text.len() <= cap`. Otherwise keeps
+/// `cap/4` head bytes and `cap - cap/4` tail bytes (both aligned to
+/// char boundaries), joined by an omission marker.
+fn truncate_summary(text: &str, cap: usize) -> String {
+    if text.len() <= cap {
+        return text.to_string();
+    }
+    let head_budget = cap / 4;
+    let tail_budget = cap - head_budget;
+
+    let head_end = text.floor_char_boundary(head_budget.min(text.len()));
+    let tail_start = text.ceil_char_boundary(text.len().saturating_sub(tail_budget));
+
+    // Clamp degenerate case where head and tail would overlap.
+    let tail_start = tail_start.max(head_end);
+
+    let omitted = tail_start - head_end;
+    format!(
+        "{}\n\n[... {} chars omitted ...]\n\n{}",
+        &text[..head_end],
+        omitted,
+        &text[tail_start..]
+    )
+}
+
+/// Reads `SPUR_SUMMARY_MAX_BYTES` (default 4000) and applies `truncate_summary`.
+fn truncate_summary_env_default(text: &str) -> String {
+    let cap: usize = std::env::var("SPUR_SUMMARY_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4000);
+    truncate_summary(text, cap)
+}
+
 /// Expand ~ to home directory.
 fn shellexpand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -2825,5 +2866,66 @@ mod cancel_deadline_arm_tests {
         let mut deadline = Some(old);
         arm_cancel_deadline(&mut deadline);
         assert!(deadline.unwrap() > old + std::time::Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod truncate_summary_tests {
+    use super::truncate_summary;
+
+    #[test]
+    fn under_cap_returns_unchanged() {
+        let input = "short text";
+        assert_eq!(truncate_summary(input, 4000), "short text");
+    }
+
+    #[test]
+    fn exact_cap_returns_unchanged() {
+        let input = "x".repeat(100);
+        assert_eq!(truncate_summary(&input, 100), input);
+    }
+
+    #[test]
+    fn over_cap_preserves_head_and_tail_with_marker() {
+        let input: String = (0..5000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        let cap = 4000;
+        let out = truncate_summary(&input, cap);
+        assert!(out.len() < input.len(), "output must be shorter than input");
+        assert!(out.contains("chars omitted"), "omission marker must appear");
+        let tail_start = input.len() - 3000;
+        assert!(
+            out.ends_with(&input[tail_start..]),
+            "output must end with the last 3000 chars of input"
+        );
+        assert!(
+            out.starts_with(&input[..1000]),
+            "output must start with the first 1000 chars of input"
+        );
+    }
+
+    #[test]
+    fn utf8_boundary_does_not_panic() {
+        let input = "—".repeat(20);
+        let out = truncate_summary(&input, 10);
+        assert!(out.chars().count() > 0);
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert_eq!(truncate_summary("", 4000), "");
+    }
+
+    #[test]
+    fn env_var_overrides_default_cap() {
+        let prev = std::env::var("SPUR_SUMMARY_MAX_BYTES").ok();
+        unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", "50") };
+        let input = "x".repeat(200);
+        let out = super::truncate_summary_env_default(&input);
+        assert!(out.len() < input.len());
+        assert!(out.len() <= 100, "output must respect env override, got {}", out.len());
+        match prev {
+            Some(v) => unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", v) },
+            None => unsafe { std::env::remove_var("SPUR_SUMMARY_MAX_BYTES") },
+        }
     }
 }
