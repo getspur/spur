@@ -792,6 +792,16 @@ fn acp_thread_main(
         let notification_tx = std::rc::Rc::new(std::cell::RefCell::new(notification_tx));
         let notification_tx_for_client = notification_tx.clone();
 
+        // NEW: grace-window support for H5 fix.
+        // Shared monotonic timestamp updated on every `session_notification`
+        // call. The ACP thread reads it after `prompt()` returns to decide
+        // when idle has elapsed and the dead_tx swap is safe.
+        let last_notification_at = std::rc::Rc::new(std::cell::RefCell::new(
+            std::time::Instant::now(),
+        ));
+        let last_notification_at_for_client = last_notification_at.clone();
+        let last_notification_at_for_thread = last_notification_at.clone();
+
         // Build the SpurAcpClient that handles callbacks from the agent.
         // We use a wrapper that reads the current notification_tx from the RefCell.
         let spur_client = SpurAcpClientDynamic {
@@ -800,6 +810,7 @@ fn acp_thread_main(
             permission_tx,
             terminals: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
             ext_notification_tx: ext_notification_tx.clone(),
+            last_notification_at: last_notification_at_for_client,
         };
         let cwd_ref = spur_client.cwd.clone();
         let terminals_ref = spur_client.terminals.clone();
@@ -887,17 +898,32 @@ fn acp_thread_main(
                         }
                     }
 
-                    // When prompt() returns, the notification channel sender
-                    // gets replaced on the next prompt call (or dropped on
-                    // shutdown), which will close the stream for the consumer.
-                    // We explicitly drop the current sender to signal completion.
+                    // S1.a — grace window for trailing session_notification chunks
+                    // (fixes H5 dead-tx race). Wait for 250ms of idle OR 1s absolute
+                    // deadline, whichever comes first, before swapping to dead_tx.
+                    // During this window, any trailing notification lands on the live
+                    // tx and is drained by the caller's still-active receiver.
+                    let grace_start = std::time::Instant::now();
+                    let idle_threshold = std::time::Duration::from_millis(250);
+                    let absolute_cap = std::time::Duration::from_secs(1);
+                    loop {
+                        let since_last = last_notification_at_for_thread
+                            .borrow()
+                            .elapsed();
+                        let total_wait = grace_start.elapsed();
+                        if since_last >= idle_threshold || total_wait >= absolute_cap {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
                     tracing::debug!(
                         streaming_probe = true,
                         site = "B_dead_tx_swap",
                         which = "prompt_end",
                         agent = %agent_name_prompt,
                         session = %session_id_for_probe,
-                        "notification_tx -> dead_tx (prompt returned)"
+                        grace_elapsed_ms = grace_start.elapsed().as_millis() as u64,
+                        "notification_tx -> dead_tx (post-grace)"
                     );
                     let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
                     *notification_tx.borrow_mut() = dead_tx;
@@ -992,6 +1018,33 @@ fn acp_thread_main(
                     let session_id_for_probe = request.session_id.clone();
                     let load_result = connection.load_session(request).await;
 
+                    // S1.a — grace window for trailing session_notification chunks
+                    // (fixes H5 dead-tx race, mirrored from the Prompt handler).
+                    // Wait for 250ms of idle OR 1s absolute deadline before swapping
+                    // to dead_tx so stragglers scheduled on the LocalSet after
+                    // load_session() returns are still forwarded to the caller.
+                    let grace_start = std::time::Instant::now();
+                    let idle_threshold = std::time::Duration::from_millis(250);
+                    let absolute_cap = std::time::Duration::from_secs(1);
+                    loop {
+                        let since_last = last_notification_at_for_thread
+                            .borrow()
+                            .elapsed();
+                        let total_wait = grace_start.elapsed();
+                        if since_last >= idle_threshold || total_wait >= absolute_cap {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    tracing::debug!(
+                        streaming_probe = true,
+                        site = "B_dead_tx_swap",
+                        which = "load_session_end",
+                        agent = %agent_name_load,
+                        session = %session_id_for_probe,
+                        grace_elapsed_ms = grace_start.elapsed().as_millis() as u64,
+                        "notification_tx -> dead_tx (post-grace)"
+                    );
                     // Swap notification_tx to a dead channel regardless of
                     // outcome — history streaming is over.
                     let (dead_tx, _) = mpsc::unbounded_channel::<SessionNotification>();
@@ -1077,6 +1130,8 @@ struct SpurAcpClientDynamic {
     /// `NativeAcpConnection` so the orchestrator can pump them as
     /// `SpurEventBody::AgentExtNotification`.
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    // NEW: grace-window support for H5 fix.
+    last_notification_at: std::rc::Rc<std::cell::RefCell<std::time::Instant>>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -1140,6 +1195,10 @@ impl Client for SpurAcpClientDynamic {
             _ => 0,
         };
         let session = args.session_id.to_string();
+        // NEW: stamp the last-notification timestamp before sending so the
+        // ACP thread's grace-window loop (post-prompt) can see it and know
+        // another chunk just arrived.
+        *self.last_notification_at.borrow_mut() = std::time::Instant::now();
         let send_result = self.notification_tx.borrow().send(args);
         let send_result_str = if send_result.is_ok() { "ok" } else { "err" };
         tracing::debug!(
