@@ -20,9 +20,9 @@ use spur_acp::{
 use spur_pm::Issue;
 
 use agent_client_protocol::{
-    ContentBlock, InitializeRequest, ListSessionsRequest, LoadSessionRequest, McpServer,
-    McpServerStdio, PromptRequest, ProtocolVersion, SessionInfo, SessionUpdate, TextContent,
-    SetSessionModeRequest,
+    ContentBlock, InitializeRequest, ListSessionsRequest, McpServer, McpServerStdio,
+    PromptRequest, ProtocolVersion, SessionInfo, SessionUpdate, SetSessionModeRequest,
+    TextContent,
 };
 
 use spur_cost::CostTracker;
@@ -1270,12 +1270,14 @@ impl Orchestrator {
         // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
         // fall back to new_session so we have a working session for subsequent prompts.
         // The historical conversation is displayed from the disk fallback in either case.
-        let (final_acp_session_id, history_stream, resumed) = match connection
-            .load_session(
-                LoadSessionRequest::new(acp_session_id.clone(), self.repo_root.clone())
-                    .mcp_servers(mcp_servers.clone()),
-            )
-            .await
+        let (final_acp_session_id, history_stream, resumed) = match crate::skip_perm::load_session_with_bypass(
+            &mut *connection,
+            &brain_cfg,
+            acp_session_id.clone(),
+            self.repo_root.clone(),
+            mcp_servers.clone(),
+        )
+        .await
         {
             Ok(stream) => {
                 debug!(brain = %brain_name, "load_session succeeded");

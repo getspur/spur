@@ -6,15 +6,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::{
-    InitializeRequest, InitializeResponse, McpServer, NewSessionResponse, PromptRequest,
-    SessionId, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, McpServer, NewSessionResponse,
+    PromptRequest, SessionId, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
 };
 use async_trait::async_trait;
 use futures::Stream;
 use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
 use spur_acp::types::{AgentHealth, AgentRole, CostTier, TransportKind};
-use spur_core::skip_perm::new_session_with_bypass;
+use spur_core::skip_perm::{load_session_with_bypass, new_session_with_bypass};
 
 #[derive(Default)]
 struct MockConn {
@@ -74,6 +74,17 @@ impl AgentConnection for MockConn {
         } else {
             Ok(SetSessionModeResponse::new())
         }
+    }
+
+    async fn load_session(
+        &mut self,
+        req: LoadSessionRequest,
+    ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("load_session".into(), req.session_id.0.to_string()));
+        Ok(Box::pin(futures::stream::empty()))
     }
 }
 
@@ -152,4 +163,92 @@ async fn set_session_mode_error_is_non_fatal() {
         .await
         .expect("ok despite mode failure");
     assert_eq!(resp.session_id.0.as_ref(), "mock-session");
+}
+
+// ─── load_session_with_bypass ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn load_session_skips_set_session_mode_when_flag_off() {
+    let mut conn = MockConn::default();
+    let calls = conn.calls.clone();
+    let cfg = cfg(false, Some("bypassPermissions"));
+    load_session_with_bypass(
+        &mut conn,
+        &cfg,
+        "acp-sess-1".to_string(),
+        PathBuf::from("/cwd"),
+        vec![],
+    )
+    .await
+    .expect("ok");
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec![("load_session".into(), "acp-sess-1".into())],
+        "set_session_mode must not be called when skip_permissions = false",
+    );
+}
+
+#[tokio::test]
+async fn load_session_skips_set_session_mode_when_mode_absent() {
+    let mut conn = MockConn::default();
+    let calls = conn.calls.clone();
+    let cfg = cfg(true, None);
+    load_session_with_bypass(
+        &mut conn,
+        &cfg,
+        "acp-sess-3".to_string(),
+        PathBuf::from("/cwd"),
+        vec![],
+    )
+    .await
+    .expect("ok");
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec![("load_session".into(), "acp-sess-3".into())],
+        "set_session_mode must not be called when no mode configured",
+    );
+}
+
+#[tokio::test]
+async fn load_session_calls_set_session_mode_when_bypass_and_mode_present() {
+    let mut conn = MockConn::default();
+    let calls = conn.calls.clone();
+    let cfg = cfg(true, Some("bypassPermissions"));
+    load_session_with_bypass(
+        &mut conn,
+        &cfg,
+        "acp-sess-2".to_string(),
+        PathBuf::from("/cwd"),
+        vec![],
+    )
+    .await
+    .expect("ok");
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec![
+            ("load_session".into(), "acp-sess-2".into()),
+            ("set_session_mode".into(), "bypassPermissions".into()),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn load_session_set_session_mode_error_is_non_fatal() {
+    let mut conn = MockConn {
+        fail_set_session_mode: true,
+        calls: Arc::default(),
+    };
+    let cfg = cfg(true, Some("bypassPermissions"));
+    let res = load_session_with_bypass(
+        &mut conn,
+        &cfg,
+        "acp-sess-4".to_string(),
+        PathBuf::from("/cwd"),
+        vec![],
+    )
+    .await;
+    assert!(res.is_ok(), "load_session must succeed even if set_session_mode errors");
 }
