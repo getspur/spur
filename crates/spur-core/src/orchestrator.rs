@@ -1534,6 +1534,7 @@ impl Orchestrator {
                 task,
                 context_files,
                 respond_to,
+                brain_session_id,
             } = request;
 
             debug!(
@@ -1576,6 +1577,7 @@ impl Orchestrator {
                     task,
                     context_files,
                     request_id,
+                    brain_session_id,
                     repo_root,
                     agent_configs,
                     event_tx.clone(),
@@ -1631,6 +1633,7 @@ impl Orchestrator {
         original_task: String,
         _context_files: Vec<String>,
         request_id: String,
+        brain_session_id: SessionId,
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         event_tx: broadcast::Sender<SpurEvent>,
@@ -1694,6 +1697,7 @@ impl Orchestrator {
         loop {
             let outcome = match run_one_worker_attempt(
                 next_worker_session.clone(),
+                &brain_session_id,
                 &agent,
                 &current_task,
                 &request_id,
@@ -2356,6 +2360,7 @@ fn build_connection_from_transport(
 /// the public `DelegationResult` type.
 async fn run_one_worker_attempt(
     worker_session: SessionId,
+    brain_session_id: &SessionId,
     agent: &str,
     task: &str,
     request_id: &str,
@@ -2371,7 +2376,7 @@ async fn run_one_worker_attempt(
     // stable executor_id" limitation documented for follow-up work.
     // The projection path (apply_inner) sees each event correctly.
     let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationRequested {
-        from: worker_session.clone(),
+        from: brain_session_id.clone(),
         to_agent: agent.to_string(),
         task: task.to_string(),
         request_id: request_id.to_string(),
@@ -2413,7 +2418,7 @@ async fn run_one_worker_attempt(
     // Correlate this executor with the brain's delegate_to_worker call
     // so the brain-side session_detail view can render an inline card.
     let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationDispatched {
-        from: worker_session.clone(),
+        from: brain_session_id.clone(),
         request_id: request_id.to_string(),
         executor_id: worker_session.0.clone(),
     }));
