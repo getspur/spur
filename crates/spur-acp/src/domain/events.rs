@@ -82,6 +82,11 @@ pub struct SpurEvent {
     /// Monotonic sequence number assigned by the orchestrator's emit
     /// funnel (S2). Direct constructors set this to 0; the funnel
     /// overwrites. Subscribers can detect gaps and order chronologically.
+    ///
+    /// `#[serde(default)]` so pre-S2 event logs (no `seq` field) deserialize
+    /// with `seq = 0` — the same sentinel the funnel uses for un-stamped
+    /// events. Keeps Phase S3 JSONL replay backward-compatible.
+    #[serde(default)]
     pub seq: u64,
     pub body: SpurEventBody,
 }
