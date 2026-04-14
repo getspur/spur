@@ -32,12 +32,11 @@ pub enum SubmitDecision {
         action: Action,
     },
     /// Generic vendor-extension dispatch. Carries the full wire method and
-    /// the rendered args payload — the consumer (app.rs → orchestrator)
-    /// calls `connection.call_ext(method, args)`.
+    /// the rendered params payload — the consumer (app.rs → orchestrator)
+    /// calls `connection.call_ext(method, params)`.
     VendorExec {
         method: String,
-        command: String,
-        args: Value,
+        params: Value,
     },
     Empty,
 }
@@ -71,16 +70,19 @@ pub fn route(
                 }
                 Dispatch::VendorExec { method, command, args_template } => {
                     let rest = rest_after_first_token(text);
-                    let args = match args_template {
+                    let params = match args_template {
                         spur_acp::ArgsTemplateKind::RawRest => {
                             if rest.is_empty() {
-                                serde_json::json!({})
+                                serde_json::json!({ "command": command })
                             } else {
-                                serde_json::json!({ "args": { "raw": rest } })
+                                serde_json::json!({
+                                    "command": command,
+                                    "args": { "raw": rest },
+                                })
                             }
                         }
                     };
-                    SubmitDecision::VendorExec { method, command, args }
+                    SubmitDecision::VendorExec { method, params }
                 }
             };
         }
@@ -171,6 +173,67 @@ mod sessions_slash_tests {
         match decision {
             SubmitDecision::Local { action: Action::RequestSessions } => {}
             other => panic!("expected Local {{ action: RequestSessions }}, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn vendor_exec_raw_rest_produces_params_with_command_and_args() {
+        use spur_acp::{ArgsTemplateKind, AvailableCommand, CommandsConfig, DispatchKind};
+
+        let mut registry = CommandRegistry::new();
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::VendorExec,
+            exec_method: Some("_kiro.dev/commands/execute".into()),
+            args_template: ArgsTemplateKind::RawRest,
+            ..Default::default()
+        };
+        let entry = crate::agents::build_entry(
+            "kiro",
+            &cfg,
+            &AvailableCommand::new("context", "Show context"),
+        );
+        registry.set_agent_commands("kiro", vec![entry]);
+
+        let decision = route("/context some rest", &[], &registry, false);
+        match decision {
+            SubmitDecision::VendorExec { method, params } => {
+                assert_eq!(method, "_kiro.dev/commands/execute");
+                assert_eq!(
+                    params,
+                    serde_json::json!({
+                        "command": "context",
+                        "args": { "raw": "some rest" },
+                    })
+                );
+            }
+            other => panic!("expected VendorExec, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn vendor_exec_raw_rest_empty_args_still_includes_command() {
+        use spur_acp::{ArgsTemplateKind, AvailableCommand, CommandsConfig, DispatchKind};
+
+        let mut registry = CommandRegistry::new();
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::VendorExec,
+            exec_method: Some("_kiro.dev/commands/execute".into()),
+            args_template: ArgsTemplateKind::RawRest,
+            ..Default::default()
+        };
+        let entry = crate::agents::build_entry(
+            "kiro",
+            &cfg,
+            &AvailableCommand::new("compact", "compact context"),
+        );
+        registry.set_agent_commands("kiro", vec![entry]);
+
+        let decision = route("/kiro:compact", &[], &registry, false);
+        match decision {
+            SubmitDecision::VendorExec { params, .. } => {
+                assert_eq!(params, serde_json::json!({ "command": "compact" }));
+            }
+            other => panic!("expected VendorExec, got {:?}", other),
         }
     }
 }

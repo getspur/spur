@@ -443,12 +443,11 @@ async fn main() -> Result<()> {
                         spur_tui::UserInput::SubmitReview { executor_id, attempt_n, decision } => {
                             spur_core::InteractiveInput::SubmitReview { executor_id, attempt_n, decision }
                         }
-                        spur_tui::UserInput::VendorExec { session, method, command, args } => {
+                        spur_tui::UserInput::VendorExec { session, method, params } => {
                             spur_core::InteractiveInput::VendorExec {
                                 session,
                                 method,
-                                command,
-                                args,
+                                params,
                             }
                         }
                     };
