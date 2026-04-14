@@ -2457,6 +2457,26 @@ async fn run_one_worker_attempt(
     let mut connection: Box<dyn AgentConnection> =
         build_connection_from_transport(agent_config, spawn_args, None);
 
+    // S5 — consume `_spur/*` ExtNotifications from this worker and
+    // translate them into SpurEvent variants via the funnel. Must run
+    // before `connection` is moved; `take_ext_notification_rx` only
+    // needs `&mut self` but can be called exactly once per connection.
+    if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
+        let funnel_for_ext = funnel.clone();
+        let executor_id_for_ext = worker_session.0.clone();
+        let brain_session_for_ext = brain_session_id.clone();
+        tokio::spawn(async move {
+            while let Some(payload) = ext_rx.recv().await {
+                crate::spur_ext_interp::interpret(
+                    payload,
+                    brain_session_for_ext.clone(),
+                    executor_id_for_ext.clone(),
+                    &funnel_for_ext,
+                );
+            }
+        });
+    }
+
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
     if let Err(e) = connection.initialize(init_request).await {
         let _ = worktrees.remove_worktree(&worker_session).await;
