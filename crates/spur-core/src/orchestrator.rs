@@ -526,10 +526,18 @@ impl Orchestrator {
                 InteractiveInput::VendorExec { session, method, mut params } => {
                     if let Some(b) = brain.as_mut() {
                         // Inject ACP session ID — TUI doesn't know it.
+                        // Contract: submit_router always produces a JSON object.
+                        // Warn (don't fail) if a future args_template emits a
+                        // non-object — the call still goes through, minus sessionId.
                         if let Some(obj) = params.as_object_mut() {
                             obj.insert(
                                 "sessionId".into(),
                                 serde_json::json!(b.acp_session_id),
+                            );
+                        } else {
+                            warn!(
+                                method = %method,
+                                "VendorExec params is not a JSON object; sessionId not injected"
                             );
                         }
                         match b.connection.call_ext(&method, params).await {
