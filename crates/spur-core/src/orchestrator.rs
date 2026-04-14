@@ -2335,35 +2335,6 @@ struct WorkerAttemptOutcome {
     worktree_path: PathBuf,
 }
 
-/// Run a single worker attempt: snapshot brain state, create worktree,
-/// spawn agent, prompt, collect diff.
-///
-/// `worker_session` is provided by the caller (rather than generated
-/// inside) so `execute_delegation`'s Retry arm can announce the next
-/// attempt's session id in `ExecutorRetryStarted.new_session_id` and
-/// have it match what this function actually uses — closing the lineage
-/// `Attempt.session_id ↔ worker event` linkage gap.
-///
-/// **Worktree lifecycle**: this function creates the worktree and
-/// collects the diff, but does NOT commit or remove the worktree.
-/// Commit and removal are deferred to `execute_delegation` so the
-/// post-gate decision can determine whether to preserve
-/// (`Rejected`/`TimedOut`) or remove (all other terminal statuses).
-/// Exception: if a setup failure occurs AFTER the worktree is created
-/// (e.g., agent init failure), the worktree IS cleaned up here
-/// immediately — setup failures short-circuit without retry and the
-/// caller's `finalize` records the error status.
-///
-/// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
-/// worker candidate status — success OR worker-reported errors — both
-/// of which are retry-eligible (the human reviewer decides).
-///
-/// Returns `Err(AttemptSetupError)` only for pre-worker setup failures
-/// (worktree creation, agent initialization, session creation). The
-/// caller short-circuits the delegation without retry — consistent
-/// with pre-T10 behavior. Per-attempt error shape is decoupled from
-/// the public `DelegationResult` type.
-
 /// Map a transport kind to its `CancelMode`. Single source of truth used
 /// by `AgentSessionReady` emitters so the TUI can render transport-aware
 /// cancel feedback without re-inspecting `AgentConfig`.
@@ -2417,6 +2388,34 @@ fn build_connection_from_transport(
     }
 }
 
+/// Run a single worker attempt: snapshot brain state, create worktree,
+/// spawn agent, prompt, collect diff.
+///
+/// `worker_session` is provided by the caller (rather than generated
+/// inside) so `execute_delegation`'s Retry arm can announce the next
+/// attempt's session id in `ExecutorRetryStarted.new_session_id` and
+/// have it match what this function actually uses — closing the lineage
+/// `Attempt.session_id ↔ worker event` linkage gap.
+///
+/// **Worktree lifecycle**: this function creates the worktree and
+/// collects the diff, but does NOT commit or remove the worktree.
+/// Commit and removal are deferred to `execute_delegation` so the
+/// post-gate decision can determine whether to preserve
+/// (`Rejected`/`TimedOut`) or remove (all other terminal statuses).
+/// Exception: if a setup failure occurs AFTER the worktree is created
+/// (e.g., agent init failure), the worktree IS cleaned up here
+/// immediately — setup failures short-circuit without retry and the
+/// caller's `finalize` records the error status.
+///
+/// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
+/// worker candidate status — success OR worker-reported errors — both
+/// of which are retry-eligible (the human reviewer decides).
+///
+/// Returns `Err(AttemptSetupError)` only for pre-worker setup failures
+/// (worktree creation, agent initialization, session creation). The
+/// caller short-circuits the delegation without retry — consistent
+/// with pre-T10 behavior. Per-attempt error shape is decoupled from
+/// the public `DelegationResult` type.
 async fn run_one_worker_attempt(
     worker_session: SessionId,
     agent: &str,
