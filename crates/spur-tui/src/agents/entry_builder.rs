@@ -49,10 +49,48 @@ pub fn build_entry(
     }
 }
 
+/// Like `build_entry` but sourced from a config-declared
+/// `StaticCommandDecl`. The dispatch is derived from the parent
+/// `CommandsConfig` — static decls inherit dispatch semantics from their
+/// agent's `[commands]` block.
+pub fn build_static_entry(
+    handle: &str,
+    cfg: &CommandsConfig,
+    decl: &spur_acp::StaticCommandDecl,
+) -> CommandEntry {
+    let dispatch = match cfg.dispatch {
+        DispatchKind::PromptText => Dispatch::PromptText {
+            normalized: format!("/{}", decl.name),
+        },
+        DispatchKind::VendorExec => {
+            let method = cfg
+                .exec_method
+                .clone()
+                .expect("validator guarantees exec_method for vendor_exec");
+            Dispatch::VendorExec {
+                method,
+                command: decl.name.clone(),
+                args_template: cfg.args_template,
+            }
+        }
+    };
+
+    CommandEntry {
+        name: decl.name.clone(),
+        description: decl.description.clone(),
+        hint: decl.hint.clone(),
+        source: CommandSource::Agent {
+            handle: handle.to_string(),
+        },
+        dispatch,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use spur_acp::{ArgsTemplateKind, CommandsConfig, DispatchKind};
+
 
     fn cmd(name: &str) -> AvailableCommand {
         AvailableCommand::new(name, "desc")
@@ -101,5 +139,64 @@ mod tests {
             }
             other => panic!("expected VendorExec, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_static_entry_prompt_text_dispatch() {
+        use spur_acp::StaticCommandDecl;
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::PromptText,
+            ..Default::default()
+        };
+        let decl = StaticCommandDecl {
+            name: "compact".into(),
+            description: "Compact history".into(),
+            hint: None,
+        };
+        let entry = build_static_entry("codex", &cfg, &decl);
+        assert_eq!(entry.name, "compact");
+        assert_eq!(entry.description, "Compact history");
+        match entry.dispatch {
+            Dispatch::PromptText { normalized } => assert_eq!(normalized, "/compact"),
+            other => panic!("expected PromptText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_static_entry_vendor_exec_dispatch() {
+        use spur_acp::{ArgsTemplateKind, StaticCommandDecl};
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::VendorExec,
+            exec_method: Some("_kiro.dev/commands/execute".into()),
+            args_template: ArgsTemplateKind::RawRest,
+            ..Default::default()
+        };
+        let decl = StaticCommandDecl {
+            name: "help".into(),
+            description: "Help".into(),
+            hint: None,
+        };
+        let entry = build_static_entry("kiro", &cfg, &decl);
+        match entry.dispatch {
+            Dispatch::VendorExec { method, command, args_template } => {
+                assert_eq!(method, "_kiro.dev/commands/execute");
+                assert_eq!(command, "help");
+                assert_eq!(args_template, ArgsTemplateKind::RawRest);
+            }
+            other => panic!("expected VendorExec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_static_entry_preserves_hint() {
+        use spur_acp::StaticCommandDecl;
+        let cfg = CommandsConfig::default();
+        let decl = StaticCommandDecl {
+            name: "model".into(),
+            description: "Switch model".into(),
+            hint: Some("[name]".into()),
+        };
+        let entry = build_static_entry("codex", &cfg, &decl);
+        assert_eq!(entry.hint.as_deref(), Some("[name]"));
     }
 }
