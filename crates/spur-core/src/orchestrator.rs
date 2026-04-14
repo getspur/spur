@@ -2391,8 +2391,17 @@ fn build_connection_from_transport(
 // orchestrator synthesizes `WorkerFileTouched` events by observing
 // the worker's ToolCall stream for known file-op tool names and
 // extracting the `path`/`file_path` input field. A 200ms de-dup
-// window prevents double-counting if a SPUR-aware worker ever emits
-// both an explicit `_spur/file_touched` and a matching ToolCall.
+// window coalesces repeated ToolCall / ToolCallUpdate events for the
+// same (executor, path, kind) so a single logical file operation
+// emits at most one `WorkerFileTouched` per 200ms window.
+//
+// Note: this dedup is local to the synthesizer's stream loop. It
+// does NOT coordinate with `spur_ext_interp::interpret`, which
+// handles the explicit `_spur/file_touched` ExtNotification path —
+// if a SPUR-aware worker ever emits both an explicit event AND a
+// matching ToolCall, the subscriber would see two events. Future
+// work: share an `Arc<FileTouchDedup>` across both paths to
+// guarantee at-most-one emit per (executor, path, kind).
 
 /// De-dup key for the 200ms file-touch window.
 #[derive(Hash, Eq, PartialEq, Clone)]
@@ -2402,9 +2411,13 @@ struct FileTouchKey {
     kind: spur_acp::domain::events::FileTouchKind,
 }
 
-/// Single-worker-or-multi-worker de-dup for WorkerFileTouched synthesis.
-/// Prevents emitting two WorkerFileTouched events when a worker both
-/// emits _spur/file_touched AND issues a matching ToolCall within 200ms.
+/// Per-worker-attempt de-dup for `WorkerFileTouched` synthesis.
+/// Coalesces repeated ToolCall / ToolCallUpdate events for the same
+/// (executor, path, kind) within a 200ms window, so a single logical
+/// file operation emits at most one `WorkerFileTouched` per window.
+///
+/// Scope is a single `run_one_worker_attempt` invocation; cross-worker
+/// coordination isn't needed because `executor_id` is unique per worker.
 struct FileTouchDedup {
     last_seen: std::sync::Mutex<std::collections::HashMap<FileTouchKey, std::time::Instant>>,
     ttl: std::time::Duration,
@@ -2636,13 +2649,10 @@ async fn run_one_worker_attempt(
     let mut output_text = String::new();
     let mut worker_success = true;
 
-    // S5 — Per-worker-attempt file-touch dedup. Scope is local because
-    // the dedup key `(executor_id, path, kind)` is already
-    // executor-unique; a cross-worker shared Arc would not collide.
-    // Keeping the instance here avoids threading a new parameter
-    // through `execute_delegation` → `run_one_worker_attempt`.
-    let file_touch_dedup = std::sync::Arc::new(FileTouchDedup::new());
-    let executor_id_for_synth = worker_session.0.clone();
+    // S5 — Per-worker-attempt file-touch dedup. Owned locally (no Arc
+    // needed) because the synthesizer is called synchronously from the
+    // stream loop — nothing else clones or moves the instance.
+    let file_touch_dedup = FileTouchDedup::new();
 
     match connection.prompt(prompt_request).await {
         Ok(mut stream) => {
@@ -2652,7 +2662,7 @@ async fn run_one_worker_attempt(
                 maybe_synthesize_file_touch(
                     &notification,
                     brain_session_id,
-                    &executor_id_for_synth,
+                    &worker_session.0,
                     &file_touch_dedup,
                     funnel,
                 );
