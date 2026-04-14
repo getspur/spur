@@ -359,7 +359,15 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Watch { brain, sessions, dashboard } => {
-            let config = load_config().unwrap_or_default();
+            let config = match load_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "[spur] warning: failed to load config.toml: {e}; using defaults"
+                    );
+                    Default::default()
+                }
+            };
             let config_arc = std::sync::Arc::new(config.clone());
             let orch = Orchestrator::new(repo_root.clone(), config)?;
             let event_rx = orch.subscribe();
