@@ -1,3 +1,5 @@
+mod commands;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -94,6 +96,11 @@ enum Commands {
         #[command(subcommand)]
         command: WorkflowCommands,
     },
+    /// Validate .spur/config.toml shape
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// Launch interactive TUI dashboard
     Watch {
         /// Override the brain agent (default from config)
@@ -136,6 +143,12 @@ enum WorkflowCommands {
         #[arg(long)]
         issue: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Validate that every [agents.entries] block has a coherent configuration.
+    Check,
 }
 
 #[tokio::main]
@@ -358,6 +371,12 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Config { command } => match command {
+            ConfigCommands::Check => {
+                let exit = commands::config_check::run(&repo_root)?;
+                std::process::exit(exit);
+            }
+        },
         Commands::Watch { brain, sessions, dashboard } => {
             let config = match load_config() {
                 Ok(c) => c,

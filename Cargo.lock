@@ -2152,6 +2152,7 @@ dependencies = [
  "spur-cost",
  "spur-pm",
  "spur-tui",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
