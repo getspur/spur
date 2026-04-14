@@ -477,10 +477,10 @@ mod tests {
     #[test]
     fn seed_template_parses_and_has_five_agents() {
         let seeds = load_seed_template();
-        assert!(seeds.entries.len() >= 5,
-            "seed template must have ≥5 agents, got {}", seeds.entries.len());
+        assert!(seeds.entries.len() >= 6,
+            "seed template must have ≥6 agents, got {}", seeds.entries.len());
         let names: Vec<_> = seeds.entries.iter().map(|a| a.name.as_str()).collect();
-        for expected in ["kiro", "claude-code", "claude-code-acp", "codex", "gemini"] {
+        for expected in ["kiro", "claude-code", "claude-code-acp", "codex", "codex-acp", "gemini"] {
             assert!(names.contains(&expected),
                 "missing seed agent: {expected} (got {names:?})");
         }
