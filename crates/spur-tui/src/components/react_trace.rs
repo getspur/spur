@@ -1781,3 +1781,80 @@ mod virtual_row_tests {
         assert!(saw_partial, "expected some offset to produce partial image segment");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H2 regression: when a non-AgentMessage entry (e.g. a tool call
+    /// → `TraceKind::Act`) lands between two `AgentMessageChunk` events
+    /// from the same agent, `append_message` today creates a NEW
+    /// `AgentMessage` entry instead of continuing the previous one.
+    /// The user sees one logical assistant response split into fragments.
+    ///
+    /// Task 4 implements the walkback fix; this test must FAIL until then.
+    #[test]
+    fn append_message_continues_existing_after_tool_call_interleave() {
+        let mut trace = ReactTrace::new();
+        trace.append_message("first chunk. ", "claude", "10:00:01".to_string());
+        // Simulate a tool call landing between chunks (from session/update:
+        // ToolCall or ToolCallUpdate variants). ReactTrace tracks tool calls
+        // as TraceKind::Act.
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "read_file".to_string(),
+                args: String::new(),
+            },
+            text: "read_file(path=...)".to_string(),
+            timestamp: "10:00:02".to_string(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        trace.append_message("second chunk.", "claude", "10:00:03".to_string());
+
+        // Count AgentMessage entries with agent="claude" — must be ONE merged.
+        let entries = trace.entries_for_test();
+        let agent_message_count = entries
+            .iter()
+            .filter(|e| {
+                matches!(&e.kind, TraceKind::AgentMessage { agent } if agent == "claude")
+            })
+            .count();
+        assert_eq!(
+            agent_message_count, 1,
+            "interleaved tool call split AgentMessage — H2 regressed"
+        );
+
+        // The single AgentMessage should contain both chunks. Under the
+        // `markdown` feature the raw text lives inside the stream; fall
+        // back to the stream's `raw_text()` when `entry.text` is empty.
+        let msg_text = entries
+            .iter()
+            .find_map(|e| match &e.kind {
+                TraceKind::AgentMessage { .. } => {
+                    #[cfg(feature = "markdown")]
+                    {
+                        if !e.text.is_empty() {
+                            Some(e.text.clone())
+                        } else {
+                            e.markdown.as_ref().map(|s| s.raw_text().to_string())
+                        }
+                    }
+                    #[cfg(not(feature = "markdown"))]
+                    {
+                        Some(e.text.clone())
+                    }
+                }
+                _ => None,
+            })
+            .expect("expected AgentMessage entry");
+        assert!(
+            msg_text.contains("first chunk"),
+            "missing first chunk in merged message: {msg_text:?}"
+        );
+        assert!(
+            msg_text.contains("second chunk"),
+            "missing second chunk in merged message: {msg_text:?}"
+        );
+    }
+}
