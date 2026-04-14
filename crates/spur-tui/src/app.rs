@@ -59,8 +59,7 @@ pub enum UserInput {
     VendorExec {
         session: SessionId,
         method: String,
-        command: String,
-        args: serde_json::Value,
+        params: serde_json::Value,
     },
 }
 
@@ -691,20 +690,12 @@ impl App {
                 self.dirty = true;
             }
 
-            Action::VendorExec { session, method, command, args } => {
-                if let Some(ref mut detail) = self.session_detail {
-                    let handle = detail.agent_handle_for_commands();
-                    detail.push_system_note(format!(
-                        "\u{27e8}{handle}\u{27e9} /{} queued",
-                        command
-                    ));
-                }
-                if let Some(ref tx) = self.user_input_tx {
+            Action::VendorExec { session, method, params } => {
+                if let Some(tx) = self.user_input_tx.as_ref() {
                     let _ = tx.try_send(UserInput::VendorExec {
                         session,
                         method,
-                        command,
-                        args,
+                        params,
                     });
                 }
             }

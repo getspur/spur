@@ -194,7 +194,7 @@ fn kiro_execute_response_renders_as_system_note() {
             args_template: spur_acp::ArgsTemplateKind::RawRest,
             ingest: vec![],
             response: vec![spur_acp::ResponseBinding {
-                method: spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE.to_string(),
+                method: "_kiro.dev/commands/execute/response".to_string(),
                 render: spur_acp::ResponseRenderKind::SystemNote,
             }],
             static_commands: vec![],
@@ -215,7 +215,7 @@ fn kiro_execute_response_renders_as_system_note() {
 
     let ev = SpurEvent::now(SpurEventBody::AgentExtNotification {
         session: sid,
-        method: spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE.to_string(),
+        method: "_kiro.dev/commands/execute/response".to_string(),
         params: serde_json::json!({"stdout": "ok"}),
     });
     view.handle_spur_event(&ev);

@@ -682,12 +682,11 @@ impl SessionDetailView {
                             })
                         }
                         SubmitDecision::Local { action } => Some(action),
-                        SubmitDecision::VendorExec { method, command, args } => {
+                        SubmitDecision::VendorExec { method, params } => {
                             Some(Action::VendorExec {
                                 session: self.session_id.clone(),
                                 method,
-                                command,
-                                args,
+                                params,
                             })
                         }
                     };

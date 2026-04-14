@@ -77,14 +77,14 @@ pub enum InteractiveInput {
     /// there is no active brain session.
     SetSessionMode { mode_id: String },
     /// Invoke an agent vendor-extension RPC on the active brain session.
-    /// No-op if there is no active brain session. The method name and args
+    /// No-op if there is no active brain session. The method name and params
     /// are chosen by the TUI's config-driven dispatch path — the
-    /// orchestrator is agnostic to specific extensions.
+    /// orchestrator is agnostic to specific extensions. `sessionId` is
+    /// injected into `params` here (the TUI doesn't know ACP session IDs).
     VendorExec {
         session: SessionId,
         method: String,
-        command: String,
-        args: serde_json::Value,
+        params: serde_json::Value,
     },
     /// Submit a human review decision. Routed to the ReviewSink by the
     /// dispatcher task, not handled inline in `run_interactive`.
@@ -523,19 +523,21 @@ impl Orchestrator {
                 }
 
                 // ── VendorExec ───────────────────────────────────────────
-                InteractiveInput::VendorExec { session, method, command, args } => {
+                InteractiveInput::VendorExec { session, method, mut params } => {
                     if let Some(b) = brain.as_mut() {
-                        let params = serde_json::json!({
-                            "sessionId": b.acp_session_id,
-                            "command": command,
-                            "args": args,
-                        });
+                        // Inject ACP session ID — TUI doesn't know it.
+                        if let Some(obj) = params.as_object_mut() {
+                            obj.insert(
+                                "sessionId".into(),
+                                serde_json::json!(b.acp_session_id),
+                            );
+                        }
                         match b.connection.call_ext(&method, params).await {
                             Ok(resp) => {
                                 self.emit(SpurEvent::now(
                                     SpurEventBody::AgentExtNotification {
                                         session: session.clone(),
-                                        method: spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE.into(),
+                                        method: format!("{}/response", method),
                                         params: resp,
                                     },
                                 ));
@@ -544,19 +546,19 @@ impl Orchestrator {
                                 warn!(
                                     brain = %b.brain_name,
                                     method = %method,
-                                    command = %command,
                                     error = %e,
                                     "vendor exec call failed"
                                 );
                                 self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                     session,
-                                    message: format!("vendor exec failed: {}", e),
+                                    message: format!(
+                                        "vendor exec `{}` failed: {}", method, e
+                                    ),
                                 }));
                             }
                         }
                     } else {
-                        warn!(method = %method, command = %command,
-                            "VendorExec received but no active brain session");
+                        warn!(method = %method, "VendorExec received but no active brain session");
                     }
                 }
 

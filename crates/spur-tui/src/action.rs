@@ -57,8 +57,7 @@ pub enum Action {
         session: SessionId,
         /// Full wire method (e.g. `"_kiro.dev/commands/execute"`).
         method: String,
-        command: String,
-        args: serde_json::Value,
+        params: serde_json::Value,
     },
     /// Move tree selection down one row.
     SelectNext,
