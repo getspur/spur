@@ -172,7 +172,7 @@ async fn load_session_skips_set_session_mode_when_flag_off() {
     let mut conn = MockConn::default();
     let calls = conn.calls.clone();
     let cfg = cfg(false, Some("bypassPermissions"));
-    load_session_with_bypass(
+    let _stream = load_session_with_bypass(
         &mut conn,
         &cfg,
         "acp-sess-1".to_string(),
@@ -194,7 +194,7 @@ async fn load_session_skips_set_session_mode_when_mode_absent() {
     let mut conn = MockConn::default();
     let calls = conn.calls.clone();
     let cfg = cfg(true, None);
-    load_session_with_bypass(
+    let _stream = load_session_with_bypass(
         &mut conn,
         &cfg,
         "acp-sess-3".to_string(),
@@ -216,7 +216,7 @@ async fn load_session_calls_set_session_mode_when_bypass_and_mode_present() {
     let mut conn = MockConn::default();
     let calls = conn.calls.clone();
     let cfg = cfg(true, Some("bypassPermissions"));
-    load_session_with_bypass(
+    let _stream = load_session_with_bypass(
         &mut conn,
         &cfg,
         "acp-sess-2".to_string(),
