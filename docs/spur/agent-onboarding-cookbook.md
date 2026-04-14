@@ -133,8 +133,9 @@ description = "Print agent help"
 Once your config works, contribute it back so other spur users get it via `spur init`:
 
 1. Add an `[[agents.entries]]` block to `crates/spur-acp/src/seed_agents.toml`.
-2. Run `cargo test -p spur-acp config::tests::seed_template` to confirm the compile-time parse + validator checks still pass.
-3. Open a PR. No Rust changes are required.
+2. Add an entry to `INSTALL_HINTS` in `crates/spur-cli/src/main.rs` — a terse one-liner telling new users how to install your agent. Example: `("my-agent", "brew install my-agent")`. A contract test in `crates/spur-cli/tests/init_ux.rs` enforces parity between the seed template and `INSTALL_HINTS`.
+3. Run `cargo test -p spur-acp config::tests::seed_template` and `cargo test -p spur-cli --test init_ux` to confirm parse + contract checks still pass.
+4. Open a PR. No other Rust changes are required.
 
 ## Troubleshooting
 
