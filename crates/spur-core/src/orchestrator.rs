@@ -1130,6 +1130,14 @@ impl Orchestrator {
                 brain_name
             ))?;
 
+        // Pre-subscribe BEFORE new_session so notifications the agent emits
+        // during session setup (e.g. claude-code-acp's initial
+        // `available_commands_update`) land on a live receiver. Broadcast
+        // `send()` returns `Err(SendError)` only when every receiver has
+        // been dropped; holding `presub_notif_rx` here keeps sends
+        // succeeding until we hand the receiver to the pump below.
+        let presub_notif_rx = connection.subscribe_session_notifications();
+
         let session_response = crate::skip_perm::new_session_with_bypass(
             &mut *connection,
             &brain_cfg,
@@ -1169,14 +1177,15 @@ impl Orchestrator {
 
         // Fan out session notifications from the connection's broadcast
         // into the SpurEvent bus — see notification_pump::spawn_session_notification_pump.
-        let notification_pump_handle =
-            connection.subscribe_session_notifications().map(|notif_rx| {
-                crate::notification_pump::spawn_session_notification_pump(
-                    notif_rx,
-                    session_id.clone(),
-                    self.funnel.clone(),
-                )
-            });
+        // `presub_notif_rx` was subscribed before new_session so we don't
+        // miss notifications emitted during session setup.
+        let notification_pump_handle = presub_notif_rx.map(|notif_rx| {
+            crate::notification_pump::spawn_session_notification_pump(
+                notif_rx,
+                session_id.clone(),
+                self.funnel.clone(),
+            )
+        });
 
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
             session: session_id.clone(),
@@ -1266,6 +1275,13 @@ impl Orchestrator {
                 brain_name
             ))?;
 
+        // Pre-subscribe BEFORE load_session so the entire history replay
+        // (published via the broadcast during load_session for native
+        // transports) lands on a live receiver. Holding `presub_notif_rx`
+        // here keeps broadcast sends succeeding until we hand the receiver
+        // to the pump below.
+        let presub_notif_rx = connection.subscribe_session_notifications();
+
         // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
         // fall back to new_session so we have a working session for subsequent prompts.
         // The historical conversation is displayed from the disk fallback in either case.
@@ -1324,14 +1340,15 @@ impl Orchestrator {
 
         // Fan out session notifications from the connection's broadcast
         // into the SpurEvent bus — see notification_pump::spawn_session_notification_pump.
-        let notification_pump_handle =
-            connection.subscribe_session_notifications().map(|notif_rx| {
-                crate::notification_pump::spawn_session_notification_pump(
-                    notif_rx,
-                    session_id.clone(),
-                    self.funnel.clone(),
-                )
-            });
+        // `presub_notif_rx` was subscribed before load_session so history
+        // replay items aren't missed.
+        let notification_pump_handle = presub_notif_rx.map(|notif_rx| {
+            crate::notification_pump::spawn_session_notification_pump(
+                notif_rx,
+                session_id.clone(),
+                self.funnel.clone(),
+            )
+        });
 
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
             session: session_id.clone(),
