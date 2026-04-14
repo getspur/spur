@@ -34,6 +34,35 @@ pub struct AgentConfig {
     /// Human-review policy for delegations to this agent.
     #[serde(default)]
     pub review: AgentReviewPolicy,
+
+    /// When true, SPUR runs this agent in bypass mode. Activates (up to)
+    /// three lanes, each conditional on this flag and its corresponding
+    /// declared value:
+    ///   - L1a: `skip_permissions_args` are appended to `args` at spawn.
+    ///   - L1b: `skip_permissions_session_mode` is applied via
+    ///          `set_session_mode` immediately after `new_session`.
+    ///   - L2:  spur-acp passes `permission_tx = None` into the transport,
+    ///          which auto-approves every ACP `request_permission` call.
+    /// Default: false.
+    #[serde(default)]
+    pub skip_permissions: bool,
+
+    /// Spawn-time CLI args appended to `args` when `skip_permissions = true`.
+    /// Use for agents whose bypass is a command-line flag
+    /// (e.g. `["--trust-all-tools"]` for kiro-cli,
+    /// `["--dangerously-skip-permissions"]` for claude direct).
+    /// Default: empty.
+    #[serde(default)]
+    pub skip_permissions_args: Vec<String>,
+
+    /// ACP session mode to set via `set_session_mode` right after
+    /// `new_session`, when `skip_permissions = true`. Use for agents that
+    /// expose bypass as an ACP session mode (claude-code-acp →
+    /// `"bypassPermissions"`). Non-fatal if the agent rejects the mode:
+    /// L2 auto-approve still catches any permission calls.
+    /// Default: None.
+    #[serde(default)]
+    pub skip_permissions_session_mode: Option<String>,
 }
 
 fn default_role() -> AgentRole {
