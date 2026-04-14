@@ -1419,14 +1419,37 @@ fn content_chunk_text_len(chunk: &agent_client_protocol::ContentChunk) -> usize 
 fn auto_approve(
     args: &RequestPermissionRequest,
 ) -> agent_client_protocol::Result<RequestPermissionResponse> {
+    // Prefer an explicitly allow-class option. Falls back to the first
+    // option (historical behavior) if no allow-class is present, and to
+    // a hardcoded "allow" id if the options list is empty.
+    //
+    // `PermissionOptionKind` is `#[non_exhaustive]`, so the match below
+    // uses a `_` arm to stay forward-compatible with future variants.
     let option_id = args
         .options
-        .first()
+        .iter()
+        .find(|o| matches!(
+            o.kind,
+            agent_client_protocol::PermissionOptionKind::AllowAlways
+                | agent_client_protocol::PermissionOptionKind::AllowOnce
+        ))
         .map(|o| o.option_id.clone())
+        .or_else(|| args.options.first().map(|o| o.option_id.clone()))
         .unwrap_or_else(|| agent_client_protocol::PermissionOptionId::new("allow"));
     Ok(RequestPermissionResponse::new(
         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
     ))
+}
+
+/// Test-only re-export of the private `auto_approve` helper so
+/// integration tests under `tests/` can exercise its selection logic
+/// without spawning an agent. Hidden from rustdoc; not a stability
+/// surface.
+#[doc(hidden)]
+pub fn __test_auto_approve(
+    args: &RequestPermissionRequest,
+) -> agent_client_protocol::Result<RequestPermissionResponse> {
+    auto_approve(args)
 }
 
 fn auto_deny(
