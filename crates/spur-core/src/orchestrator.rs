@@ -1676,6 +1676,11 @@ impl Orchestrator {
         };
 
         let mut current_task = original_task.clone();
+        // Retry-history accumulator. Each retry attempt pushes its
+        // prior attempt's (summary, diff_summary, reviewer feedback)
+        // so the NEXT attempt's prompt can reference what was tried.
+        // 2 KB bloat cap drops oldest entries first.
+        let mut retry_history: Vec<RetryAttempt> = Vec::new();
         let mut attempt_n: u32 = 1;
         // Stable across retries; captured from the first worker session.
         let mut executor_id: Option<ExecutorId> = None;
@@ -2027,12 +2032,24 @@ impl Orchestrator {
                         new_session_id: retry_session.clone(),
                     }));
 
-                    // Append constraints to the ORIGINAL task (not
-                    // the accumulated one — prevents compounding
-                    // constraint text across N retries).
-                    current_task = format!(
-                        "{}\n\n## Additional constraints\n{}",
-                        original_task, new_constraints
+                    // Record this attempt in the retry history before re-prompting.
+                    // See docs/superpowers/specs/2026-04-14-brain-worker-refinement-design.md
+                    // for the rationale — inverts the original
+                    // "prevent compounding" choice in favor of the
+                    // Reflexion pattern, with a 2KB bloat cap as the
+                    // mitigation.
+                    retry_history.push(RetryAttempt {
+                        attempt_n,
+                        summary: outcome.summary.clone().unwrap_or_default(),
+                        diff_summary: outcome.diff_summary.clone(),
+                        feedback: new_constraints.clone(),
+                    });
+                    apply_bloat_cap(&mut retry_history, 2048);
+
+                    current_task = render_retry_context(
+                        &retry_history,
+                        &original_task,
+                        &new_constraints,
                     );
                     attempt_n += 1;
                     next_worker_session = retry_session;
@@ -2680,7 +2697,6 @@ async fn build_diff_summary(
 /// One retry attempt's surviving state, kept in memory across the
 /// retry loop so later attempts can see the history. Module-local;
 /// does not leak into public API.
-#[allow(dead_code)] // TODO(Task 8): remove once wired in execute_delegation retry loop
 #[derive(Debug, Clone)]
 struct RetryAttempt {
     attempt_n: u32,
@@ -2710,7 +2726,6 @@ struct RetryAttempt {
 ///
 ///   Most recent feedback:
 ///   {current_feedback}
-#[allow(dead_code)] // TODO(Task 8): remove once wired in execute_delegation retry loop
 fn render_retry_context(
     history: &[RetryAttempt],
     original_task: &str,
@@ -2748,7 +2763,6 @@ fn render_retry_context(
 /// Drop oldest attempts until the total in-memory summary+feedback
 /// footprint fits under `max_bytes`. Preserves the most recent
 /// attempts (those are most relevant to the current feedback).
-#[allow(dead_code)] // TODO(Task 8): remove once wired in execute_delegation retry loop
 fn apply_bloat_cap(history: &mut Vec<RetryAttempt>, max_bytes: usize) {
     fn size(a: &RetryAttempt) -> usize {
         a.summary.len() + a.feedback.len()
@@ -2770,6 +2784,36 @@ fn shellexpand_tilde(path: &str) -> String {
 
 fn dirs_home() -> Option<String> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_string_lossy().to_string())
+}
+
+#[doc(hidden)]
+pub mod test_support {
+    //! Public shims for integration tests. Not part of the stable API.
+    use spur_acp::DiffSummary;
+
+    pub struct RetryAttemptPublic {
+        pub attempt_n: u32,
+        pub summary: String,
+        pub diff_summary: Option<DiffSummary>,
+        pub feedback: String,
+    }
+
+    pub fn render_retry_context_public(
+        history: &[RetryAttemptPublic],
+        original_task: &str,
+        current_feedback: &str,
+    ) -> String {
+        let internal: Vec<super::RetryAttempt> = history
+            .iter()
+            .map(|a| super::RetryAttempt {
+                attempt_n: a.attempt_n,
+                summary: a.summary.clone(),
+                diff_summary: a.diff_summary.clone(),
+                feedback: a.feedback.clone(),
+            })
+            .collect();
+        super::render_retry_context(&internal, original_task, current_feedback)
+    }
 }
 
 /// Strip a leading `!` from the first text block in `blocks`, if any.
