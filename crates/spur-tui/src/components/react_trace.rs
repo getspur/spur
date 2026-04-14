@@ -1380,6 +1380,13 @@ impl ReactTrace {
         &self.entries
     }
 
+    /// Return the text of the most recent entry, or `None` if the trace is
+    /// empty. Used in tests to assert on system-note content.
+    #[cfg(test)]
+    pub fn last_text(&self) -> Option<String> {
+        self.entries.last().map(|e| e.text.clone())
+    }
+
     /// Locate the most recent `Delegate` entry whose `request_id` matches
     /// the given UUID and attach the `executor_id`. No-op if not found
     /// (event arrived for an entry not in this trace, or out of order).
