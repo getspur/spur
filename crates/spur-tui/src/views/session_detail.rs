@@ -23,6 +23,9 @@ pub struct SessionDetailView {
     session_id: SessionId,
     agent_name: String,
     role: String,
+    /// The AgentConfig backing this session. Owns the CommandsConfig used
+    /// by the ingest/response loops, and the effective permissions.
+    agent_cfg: std::sync::Arc<spur_acp::AgentConfig>,
     react_trace: ReactTrace,
     input_bar: InputBar,
     cost: f64,
@@ -85,11 +88,13 @@ impl SessionDetailView {
         agent_name: String,
         role: String,
         cwd: std::path::PathBuf,
+        agent_cfg: std::sync::Arc<spur_acp::AgentConfig>,
     ) -> Self {
         Self {
             session_id,
             agent_name,
             role,
+            agent_cfg,
             react_trace: ReactTrace::new(),
             input_bar: InputBar::new(),
             cost: 0.0,
@@ -246,6 +251,30 @@ impl SessionDetailView {
     /// registry (e.g. `"claude"`, `"kiro"`).
     pub(crate) fn agent_handle_for_commands(&self) -> String {
         self.agent_name.to_lowercase()
+    }
+
+    /// Handle an ACP `SessionUpdate::AvailableCommandsUpdate`. Builds
+    /// `CommandEntry` values using the session's `agent_cfg.commands` and
+    /// stores them in the registry.
+    pub fn apply_available_commands(&mut self, commands: &[spur_acp::AvailableCommand]) {
+        let handle = self.agent_handle_for_commands();
+        let entries: Vec<_> = commands
+            .iter()
+            .map(|c| crate::agents::build_entry(&handle, &self.agent_cfg.commands, c))
+            .collect();
+        self.command_registry.set_agent_commands(&handle, entries);
+    }
+
+    /// Test-only accessor: flattened trace text for each entry,
+    /// oldest→newest. Used by integration tests in
+    /// `tests/session_update_handling.rs`.
+    #[doc(hidden)]
+    pub fn trace_snapshot_for_test(&self) -> Vec<String> {
+        self.react_trace
+            .entries_for_test()
+            .iter()
+            .map(|e| e.text.clone())
+            .collect()
     }
 
     /// Current local time formatted as HH:MM:SS.
@@ -977,35 +1006,36 @@ impl View for SessionDetailView {
                 if session.0 != self.session_id.0 {
                     return;
                 }
-                if method == spur_acp::ext::KIRO_COMMANDS_AVAILABLE {
-                    if let Some(arr) = params.get("availableCommands").cloned() {
-                        if let Ok(parsed) =
-                            serde_json::from_value::<Vec<spur_acp::AvailableCommand>>(arr)
-                        {
-                            // Transitional: build entries through the new pure
-                            // helper using a synthetic kiro CommandsConfig. Task 5
-                            // replaces this block entirely with a config-driven loop.
-                            let kiro_cfg = spur_acp::CommandsConfig {
-                                dispatch: spur_acp::DispatchKind::VendorExec,
-                                exec_method: Some(
-                                    spur_acp::ext::KIRO_COMMANDS_EXECUTE.to_string(),
-                                ),
-                                args_template: spur_acp::ArgsTemplateKind::RawRest,
-                                ingest: vec![],
-                                response: vec![],
-                            };
-                            let entries: Vec<_> = parsed
-                                .iter()
-                                .map(|c| crate::agents::build_entry("kiro", &kiro_cfg, c))
-                                .collect();
-                            self.command_registry.set_agent_commands("kiro", entries);
+                let handle = self.agent_handle_for_commands();
+                let cfg = self.agent_cfg.clone();
+
+                // Ingest bindings: decode params → CommandEntry list → registry.
+                for binding in &cfg.commands.ingest {
+                    if &binding.method != method {
+                        continue;
+                    }
+                    if let Some(parsed) = crate::agents::run_ingest_hook(binding, params) {
+                        let entries: Vec<_> = parsed
+                            .iter()
+                            .map(|c| crate::agents::build_entry(&handle, &cfg.commands, c))
+                            .collect();
+                        self.command_registry.set_agent_commands(&handle, entries);
+                    }
+                }
+
+                // Response bindings: render the payload according to `render` kind.
+                for binding in &cfg.commands.response {
+                    if &binding.method != method {
+                        continue;
+                    }
+                    match binding.render {
+                        spur_acp::ResponseRenderKind::SystemNote => {
+                            self.push_system_note(format!(
+                                "\u{27e8}{handle}\u{27e9} response: {}",
+                                params
+                            ));
                         }
                     }
-                } else if method == spur_acp::ext::SPUR_KIRO_EXECUTE_RESPONSE {
-                    self.push_system_note(format!(
-                        "\u{27e8}kiro\u{27e9} response: {}",
-                        params
-                    ));
                 }
             }
 
@@ -1313,6 +1343,23 @@ mod invalidate_protocols_tests {
             "claude".to_string(),
             "brain".to_string(),
             std::path::PathBuf::from("/tmp"),
+            std::sync::Arc::new(spur_acp::AgentConfig {
+                name: "claude".into(),
+                command: String::new(),
+                args: vec![],
+                transport: spur_acp::types::TransportKind::Acp,
+                role: spur_acp::types::AgentRole::Both,
+                capabilities: vec![],
+                cost_tier: spur_acp::types::CostTier::Medium,
+                rate_limit_window: None,
+                review: Default::default(),
+                display: Default::default(),
+                commands: Default::default(),
+                permissions: Default::default(),
+                skip_permissions: false,
+                skip_permissions_args: vec![],
+                skip_permissions_session_mode: None,
+            }),
         )
     }
 

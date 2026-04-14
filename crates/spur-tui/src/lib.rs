@@ -19,6 +19,29 @@ pub mod test_support {
     use crate::views::session_detail::SessionDetailView;
     use spur_acp::{SessionId, SessionNotification, SpurEvent};
 
+    /// Build a minimal `Arc<AgentConfig>` with all-default nested blocks,
+    /// suitable for constructing `SessionDetailView` in integration tests
+    /// that don't exercise any ingest/response bindings.
+    pub fn default_agent_config(name: &str) -> std::sync::Arc<spur_acp::AgentConfig> {
+        std::sync::Arc::new(spur_acp::AgentConfig {
+            name: name.to_string(),
+            command: String::new(),
+            args: vec![],
+            transport: spur_acp::types::TransportKind::Acp,
+            role: spur_acp::types::AgentRole::Both,
+            capabilities: vec![],
+            cost_tier: spur_acp::types::CostTier::Medium,
+            rate_limit_window: None,
+            review: Default::default(),
+            display: Default::default(),
+            commands: Default::default(),
+            permissions: Default::default(),
+            skip_permissions: false,
+            skip_permissions_args: vec![],
+            skip_permissions_session_mode: None,
+        })
+    }
+
     /// Build a fresh `SessionDetailView` with placeholder identity fields so
     /// tests can apply session updates to it.
     pub fn new_session_state() -> SessionDetailView {
@@ -27,6 +50,23 @@ pub mod test_support {
             "test-agent".to_string(),
             "brain".to_string(),
             std::path::PathBuf::from("."),
+            std::sync::Arc::new(spur_acp::AgentConfig {
+                name: "test-agent".into(),
+                command: String::new(),
+                args: vec![],
+                transport: spur_acp::types::TransportKind::Acp,
+                role: spur_acp::types::AgentRole::Both,
+                capabilities: vec![],
+                cost_tier: spur_acp::types::CostTier::Medium,
+                rate_limit_window: None,
+                review: Default::default(),
+                display: Default::default(),
+                commands: Default::default(),
+                permissions: Default::default(),
+                skip_permissions: false,
+                skip_permissions_args: vec![],
+                skip_permissions_session_mode: None,
+            }),
         )
     }
 

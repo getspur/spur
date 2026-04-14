@@ -7,6 +7,7 @@ fn banner_visible_immediately_after_show() {
         "agent".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("agent"),
     );
     assert!(!view.banner_is_visible());
     view.show_resume_banner("my title".into(), "2m ago".into());
@@ -23,6 +24,7 @@ fn banner_dismisses_on_any_key_without_consuming() {
         "agent".into(),
         "brain".into(),
         std::path::PathBuf::from("."),
+        spur_tui::test_support::default_agent_config("agent"),
     );
     view.show_resume_banner("t".into(), "1m".into());
     assert!(view.banner_is_visible());

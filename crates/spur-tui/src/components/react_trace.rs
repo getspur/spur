@@ -1373,6 +1373,13 @@ impl ReactTrace {
         &self.entries
     }
 
+    /// Test-only accessor (available in normal builds so integration tests
+    /// can reach it transitively via `SessionDetailView::trace_snapshot_for_test`).
+    #[doc(hidden)]
+    pub(crate) fn entries_for_test(&self) -> &[TraceEntry] {
+        &self.entries
+    }
+
     /// Locate the most recent `Delegate` entry whose `request_id` matches
     /// the given UUID and attach the `executor_id`. No-op if not found
     /// (event arrived for an entry not in this trace, or out of order).
