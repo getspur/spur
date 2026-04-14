@@ -1,44 +1,23 @@
-# .spur/config.toml.example — ships with claude + kiro worked examples.
-# Copy to .spur/config.toml and edit as needed.
+# .spur/config.toml — per-repo spur configuration.
+#
+# IMPORTANT: `spur init` OVERWRITES this file with the seed template
+# populated from agents found on $PATH. If you've hand-customized this
+# config, edit it directly rather than re-running init.
+#
+# Reference: docs/spur/agent-config.md (schema)
+# Cookbook: docs/spur/agent-onboarding-cookbook.md (how to add an agent)
 
-[brain]
-default = "claude-code-acp"
-fallback = ["kiro"]
-
-# ─── Claude (prompt-text dispatch, bypass via ACP session mode) ───────
-[[agents.entries]]
-name = "claude-code-acp"
-command = "npx"
-args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
-transport = "acp"
-role = "both"
-capabilities = ["general", "code", "reasoning"]
-cost_tier = "medium"
-
-[agents.entries.display]
-handle = "claude"
-display_name = "Claude"
-
-[agents.entries.commands]
-dispatch = "prompt_text"
-
-[agents.entries.permissions]
-skip = true
-session_mode = "bypassPermissions"
-
-# ─── Kiro (vendor-exec dispatch, bypass via spawn args) ───────────────
+# ── kiro ──────────────────────────────────────────────────────────
 [[agents.entries]]
 name = "kiro"
 command = "kiro-cli"
 args = ["acp"]
 transport = "acp"
 role = "both"
-capabilities = ["kiro-native", "specs"]
 cost_tier = "medium"
 
 [agents.entries.display]
 handle = "kiro"
-display_name = "Kiro"
 
 [agents.entries.commands]
 dispatch = "vendor_exec"
@@ -51,37 +30,82 @@ parser = "json_path_list"
 path = "availableCommands"
 item_schema = "acp_available_command"
 
-[[agents.entries.commands.static]]
-name = "help"
-description = "Show kiro help"
-
 [[agents.entries.commands.response]]
 method = "_kiro.dev/commands/execute/response"
 render = "system_note"
 
 [agents.entries.permissions]
-skip = true
 args = ["--trust-all-tools"]
+# skip = true                # uncomment to enable bypass
 
-# # Codex — zero-Rust onboarding example. Uncomment to enable.
-# [[agents.entries]]
-# name = "codex"
-# command = "codex"
-# args = ["--full-auto"]
-# transport = "stream_json"
-# role = "worker"
-#
-# [agents.entries.display]
-# handle = "codex"
-#
-# [agents.entries.commands]
-# dispatch = "prompt_text"
-#
-# [[agents.entries.commands.static]]
-# name = "compact"
-# description = "Compact conversation history"
-#
-# [[agents.entries.commands.static]]
-# name = "model"
-# description = "Switch model"
-# hint = "[model-name]"
+# ── claude-code (stream-json fallback) ────────────────────────────
+[[agents.entries]]
+name = "claude-code"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"]
+transport = "stream-json"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "claude-sj"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[agents.entries.permissions]
+args = ["--dangerously-skip-permissions"]
+# skip = true                # uncomment to enable bypass
+
+# ── claude-code-acp ───────────────────────────────────────────────
+[[agents.entries]]
+name = "claude-code-acp"
+command = "npx"
+args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
+transport = "acp"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "claude"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[agents.entries.permissions]
+session_mode = "bypassPermissions"
+# skip = true                # uncomment to enable bypass
+
+# ── codex ─────────────────────────────────────────────────────────
+[[agents.entries]]
+name = "codex"
+command = "codex"
+args = ["--acp"]
+transport = "acp"
+role = "both"
+cost_tier = "low"
+
+[agents.entries.display]
+handle = "codex"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[[agents.entries.commands.static]]
+name = "compact"
+description = "Compact conversation history"
+
+# ── gemini ────────────────────────────────────────────────────────
+[[agents.entries]]
+name = "gemini"
+command = "gemini"
+args = []
+transport = "cli-wrap"
+role = "worker"
+cost_tier = "low"
+
+[agents.entries.display]
+handle = "gemini"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
