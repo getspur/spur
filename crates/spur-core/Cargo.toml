@@ -27,3 +27,4 @@ directories = { workspace = true }
 # `start_paused = true` on `#[tokio::test]` + `tokio::time::advance` require
 # the `test-util` feature.
 tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
