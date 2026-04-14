@@ -125,6 +125,7 @@ fn replay_produces_identical_timestamps() {
     let events: Vec<SpurEvent> = vec![
         SpurEvent {
             occurred_at: t0,
+            seq: 0,
             body: SpurEventBody::ExecutorSpawned {
                 id: "w".into(),
                 parent_id: None,
@@ -136,6 +137,7 @@ fn replay_produces_identical_timestamps() {
         },
         SpurEvent {
             occurred_at: t0 + Duration::from_secs(10),
+            seq: 0,
             body: SpurEventBody::ExecutorPhaseChanged {
                 id: "w".into(),
                 phase: LifecycleState::Succeeded,
@@ -169,6 +171,7 @@ fn replay_produces_byte_identical_state() {
     let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mk = |offset_secs: u64, body: SpurEventBody| SpurEvent {
         occurred_at: t0 + Duration::from_secs(offset_secs),
+        seq: 0,
         body,
     };
 
@@ -242,6 +245,7 @@ fn applying_same_event_twice_is_idempotent_except_cost() {
     let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let spawn = SpurEvent {
         occurred_at: t0,
+        seq: 0,
         body: SpurEventBody::ExecutorSpawned {
             id: "w".into(), parent_id: None,
             session_id: SessionId("s".into()),
@@ -250,6 +254,7 @@ fn applying_same_event_twice_is_idempotent_except_cost() {
     };
     let phase = SpurEvent {
         occurred_at: t0 + Duration::from_secs(1),
+        seq: 0,
         body: SpurEventBody::ExecutorPhaseChanged {
             id: "w".into(), phase: LifecycleState::Running,
         },
