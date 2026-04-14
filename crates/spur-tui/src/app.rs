@@ -1311,11 +1311,20 @@ pub async fn run_tui_with_config(
             }
         }
 
-        // Phase 3: Drain all remaining spur events (non-blocking).
-        loop {
+        // Phase 3: Drain remaining spur events (non-blocking), capped per frame.
+        //
+        // S1.c (H1') — cap at DRAIN_CAP_PER_FRAME so bursts of streaming chunks
+        // don't collapse into a single paint. Leftover events drain on the next
+        // iteration; no event is lost, just deferred by one frame. `Lagged`
+        // counts toward the cap so a subscriber that's badly behind still makes
+        // progress instead of spinning on drop notifications.
+        const DRAIN_CAP_PER_FRAME: u32 = 8;
+        let mut drained_this_phase: u32 = 0;
+        while drained_this_phase < DRAIN_CAP_PER_FRAME {
             match event_rx.try_recv() {
                 Ok(spur_event) => {
                     spur_drained += 1;
+                    drained_this_phase += 1;
                     app.handle_spur_event(spur_event);
                 }
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
@@ -1323,11 +1332,14 @@ pub async fn run_tui_with_config(
                         streaming_probe = true,
                         site = "E_broadcast_lag",
                         lagged_n = n,
+                        source = file!(),
+                        line = line!(),
                         "TUI broadcast receiver lagged (drain phase) — events dropped"
                     );
-                    continue;
+                    drained_this_phase += 1;
                 }
-                Err(_) => break,
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Closed) => break,
             }
         }
 
