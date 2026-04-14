@@ -1,6 +1,15 @@
 //! Fan-out pump: drains a connection-scoped broadcast of SessionNotifications
 //! and emits SpurEventBody::AgentNotification onto the SpurEvent bus via the
 //! funnel, tagged with the caller-supplied spur_session_id.
+//!
+//! **Coupled invariant with `AgentConnection::prompt()`:** to avoid double-
+//! emitting `AgentNotification` on the event bus, any transport whose
+//! `subscribe_session_notifications()` returns `Some(...)` (i.e. participates
+//! in this pump) MUST also return an empty `Stream` from `prompt()` and
+//! `load_session()`. Transports that stream notifications synchronously
+//! (stdio, cli_wrap, stream_json) return `None` from subscribe and let the
+//! brain's inline stream drain at `orchestrator.rs` handle emission. Only
+//! `NativeAcpConnection` currently participates.
 
 use tokio::sync::broadcast::{Receiver, error::RecvError};
 use tokio::task::JoinHandle;

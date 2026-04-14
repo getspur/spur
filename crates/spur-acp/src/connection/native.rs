@@ -1130,10 +1130,13 @@ impl Client for SpurAcpClientDynamic {
         };
         let session = args.session_id.to_string();
         // `broadcast::Sender::send` returns `Err(SendError)` only when every
-        // receiver has been dropped. In our topology the orchestrator's
-        // pump task subscribes at connection setup and stays alive for the
-        // connection's lifetime — so `Err` here indicates the connection
-        // is tearing down and we can safely ignore it.
+        // receiver has been dropped. The orchestrator pre-subscribes before
+        // calling `new_session` / `load_session` (see `create_brain_session`
+        // and `load_brain_session` in `spur-core/src/orchestrator.rs`) and
+        // holds the receiver for the lifetime of the BrainSession — so
+        // `Err` here indicates the connection is tearing down and we can
+        // safely ignore it. If this starts producing `err` in logs under
+        // normal operation, the pre-subscribe ordering has regressed.
         let send_result = self.session_notif_tx.send(args);
         let send_result_str = if send_result.is_ok() { "ok" } else { "err" };
         tracing::debug!(
