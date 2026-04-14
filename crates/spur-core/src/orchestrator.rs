@@ -2516,20 +2516,32 @@ async fn run_one_worker_attempt(
     let duration = start.elapsed();
     let cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
 
-    let summary = if output_text.len() > 500 {
-        Some(format!("{}...", &output_text[..500]))
-    } else if output_text.is_empty() {
+    let summary = if output_text.is_empty() {
         None
     } else {
-        Some(output_text)
+        Some(truncate_summary_env_default(&output_text))
     };
 
     let candidate_status = if worker_success {
         DelegationStatus::Success
     } else {
-        DelegationStatus::Failed {
-            error: "Worker reported errors".into(),
-        }
+        // Capture the last ~500 chars of the already-truncated summary
+        // as the error message. For LLM/tool workers this is almost
+        // always the actual failure (compiler error, test assertion,
+        // panic). Char-boundary-safe via ceil_char_boundary (stable
+        // since 1.80). `summary` holds the widened + UTF-8-safe text
+        // from the previous step — reusing it avoids re-running the
+        // truncation logic.
+        let error = summary
+            .as_deref()
+            .map(|s| {
+                let tail_len = 500usize.min(s.len());
+                let start = s.ceil_char_boundary(s.len().saturating_sub(tail_len));
+                s[start..].to_string()
+            })
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Worker reported errors (no output captured)".into());
+        DelegationStatus::Failed { error }
     };
 
     Ok(WorkerAttemptOutcome {
@@ -2553,7 +2565,6 @@ async fn run_one_worker_attempt(
 /// Returns `text` unchanged if `text.len() <= cap`. Otherwise keeps
 /// `cap/4` head bytes and `cap - cap/4` tail bytes (both aligned to
 /// char boundaries), joined by an omission marker.
-#[allow(dead_code)] // TODO(Task 6): remove once wired at run_one_worker_attempt
 fn truncate_summary(text: &str, cap: usize) -> String {
     if text.len() <= cap {
         return text.to_string();
@@ -2579,7 +2590,6 @@ fn truncate_summary(text: &str, cap: usize) -> String {
 }
 
 /// Reads `SPUR_SUMMARY_MAX_BYTES` (default 4000) and applies `truncate_summary`.
-#[allow(dead_code)] // TODO(Task 6): remove once wired at run_one_worker_attempt
 fn truncate_summary_env_default(text: &str) -> String {
     let cap: usize = std::env::var("SPUR_SUMMARY_MAX_BYTES")
         .ok()
