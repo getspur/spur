@@ -1,0 +1,62 @@
+//! `spur config check` — validates `.spur/config.toml` without starting
+//! any agents. Exit 0 if all entries pass; exit 1 if any entry produces
+//! a fatal ConfigError. Warnings are reported to stderr but do not flip
+//! the exit code.
+//!
+//! The validation logic itself is in `spur_acp::validate_agent_config`;
+//! this module only loads the config, iterates, and formats output.
+
+use std::path::Path;
+
+use spur_acp::{validate_agent_config, SpurConfig};
+
+/// Returns the exit code: 0 on success, 1 on any fatal error.
+pub fn run(repo_root: &Path) -> anyhow::Result<i32> {
+    let cfg = load_spur_config(repo_root)?;
+
+    if cfg.agents.entries.is_empty() {
+        eprintln!("no agents configured in .spur/config.toml");
+        return Ok(0);
+    }
+
+    let mut fatal_count = 0_usize;
+    let mut warn_count = 0_usize;
+
+    for entry in &cfg.agents.entries {
+        match validate_agent_config(entry) {
+            Ok(()) => {
+                println!("\u{2713} {}", entry.name);
+            }
+            Err(errors) => {
+                for e in errors {
+                    if e.is_fatal() {
+                        eprintln!("\u{2717} {}", e);
+                        fatal_count += 1;
+                    } else {
+                        eprintln!("\u{26a0} {}", e);
+                        warn_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if fatal_count > 0 {
+        eprintln!("\nconfig check FAILED: {fatal_count} fatal, {warn_count} warning(s)");
+        Ok(1)
+    } else {
+        if warn_count > 0 {
+            eprintln!("\nconfig check OK with {warn_count} warning(s)");
+        }
+        Ok(0)
+    }
+}
+
+fn load_spur_config(repo_root: &Path) -> anyhow::Result<SpurConfig> {
+    let path = repo_root.join(".spur").join("config.toml");
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+    let cfg: SpurConfig = toml::from_str(&contents)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
+    Ok(cfg)
+}
