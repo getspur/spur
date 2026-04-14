@@ -4,6 +4,7 @@ pub mod lineage;
 pub mod orchestrator;
 mod review_sink;
 pub mod skip_perm;
+pub mod spur_ext_interp;
 
 pub use spur_acp::{Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role};
 pub use lineage::{
