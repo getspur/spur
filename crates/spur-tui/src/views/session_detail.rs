@@ -710,7 +710,10 @@ impl SessionDetailView {
                     self.completion_popup.borrow_mut().set_rows(Vec::new());
                     return None;
                 }
-                KeyCode::Enter | KeyCode::Tab => {
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    return self.accept_completion();
+                }
+                KeyCode::Tab => {
                     return self.accept_completion();
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1220,7 +1223,7 @@ impl SessionDetailView {
             frame.render_widget(banner, banner_area);
         }
 
-        let input_height = self.input_bar.required_height();
+        let input_height = self.input_bar.required_height(content_area.width);
         let chunks = Layout::vertical([
             Constraint::Length(1),            // header
             Constraint::Min(4),              // react trace (fills)

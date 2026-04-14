@@ -1,9 +1,9 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -51,6 +51,18 @@ impl InputBar {
     /// Returns `None` for all other keys.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<(String, bool)> {
         match key.code {
+            // Ctrl+J inserts a newline (multiline input).
+            // Only fires when the Kitty keyboard protocol is enabled.
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(idx) = self.range_at(self.cursor) {
+                    self.delete_range(idx);
+                }
+                let at = self.cursor;
+                self.text.insert(at, '\n');
+                self.shift_ranges(at, 1);
+                self.cursor = at + 1;
+                None
+            }
             KeyCode::Char(c) => {
                 if let Some(idx) = self.range_at(self.cursor) {
                     self.delete_range(idx);
@@ -136,6 +148,17 @@ impl InputBar {
             }
             KeyCode::End => {
                 self.cursor = self.text.len();
+                None
+            }
+            // Alt+Enter inserts a newline (works in all terminals).
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                if let Some(idx) = self.range_at(self.cursor) {
+                    self.delete_range(idx);
+                }
+                let at = self.cursor;
+                self.text.insert(at, '\n');
+                self.shift_ranges(at, 1);
+                self.cursor = at + 1;
                 None
             }
             KeyCode::Enter => {
@@ -240,37 +263,46 @@ impl InputBar {
         self.status.is_some()
     }
 
-    /// Required render height based on text length.
+    /// Required render height given the available `width`.
     ///
-    /// The returned value includes the border lines (top + bottom), so the
-    /// widget should be given exactly this many rows.
-    ///
-    /// | text bytes | inner content rows | total height |
-    /// |---|---|---|
-    /// | 0 – 70     | 1                  | 3            |
-    /// | 71 – 140   | 2                  | 4            |
-    /// | 141+       | 3                  | 5            |
-    ///
-    /// We follow the task spec which says 1/2/3, interpreted as inner rows;
-    /// adding 2 for the Block border makes the widget self-contained.
-    pub fn required_height(&self) -> u16 {
-        let len = self.text.len();
-        let inner = if len <= 70 {
-            1_u16
-        } else if len <= 140 {
-            2
-        } else {
-            3
-        };
-        // +2 for top and bottom border lines.
-        inner + 2
+    /// Accounts for explicit newlines and soft-wrapping. The returned value
+    /// includes the border lines (top + bottom). Inner rows are capped at 5
+    /// to keep the input bar from dominating the screen.
+    pub fn required_height(&self, width: u16) -> u16 {
+        // Inner width after borders (1 each side).
+        let inner_w = (width.saturating_sub(2)) as usize;
+        if inner_w == 0 {
+            return 3; // minimum: 1 content row + 2 borders
+        }
+
+        // Prefix length on the first line: status + "> "
+        let prefix_len = self
+            .status
+            .as_ref()
+            .map(|s| s.len() + 1)
+            .unwrap_or(0)
+            + 2; // "> "
+
+        let mut rows: usize = 0;
+        for (i, line) in self.text.split('\n').enumerate() {
+            let line_len = if i == 0 {
+                line.len() + prefix_len + 1 // +1 for cursor glyph
+            } else {
+                line.len() + 1
+            };
+            rows += 1.max((line_len + inner_w - 1) / inner_w);
+        }
+
+        let inner = (rows as u16).clamp(1, 5);
+        inner + 2 // +2 for top and bottom border
     }
 
     /// Render the input bar into `area`.
     ///
     /// Displays a green-bordered box with a `> ` prompt and a block cursor
     /// (`█`) at the current cursor position. Protected ranges (atoms) are
-    /// styled cyan + underlined.
+    /// styled cyan + underlined. Supports multiline text (via Ctrl+J) and
+    /// long-line wrapping.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -286,24 +318,17 @@ impl InputBar {
         let plain_style = Style::default();
         let cursor_style = Style::default().fg(Color::Green);
 
-        let mut spans = Vec::new();
-
-        // Status label (if set)
-        if let Some(ref status) = self.status {
-            spans.push(Span::styled(
-                format!("{} ", status),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-
-        // Prompt
-        spans.push(Span::raw("> "));
-
-        // Build split points: 0, len, cursor, and each range boundary.
+        // Build split points: 0, len, cursor, newlines, and each range boundary.
         let mut splits: Vec<usize> = Vec::with_capacity(4 + self.protected_ranges.len() * 2);
         splits.push(0);
         splits.push(self.text.len());
         splits.push(self.cursor);
+        for (i, ch) in self.text.char_indices() {
+            if ch == '\n' {
+                splits.push(i);
+                splits.push(i + 1);
+            }
+        }
         for r in &self.protected_ranges {
             splits.push(r.start);
             splits.push(r.end);
@@ -317,26 +342,45 @@ impl InputBar {
                 .any(|r| byte >= r.start && byte < r.end)
         };
 
+        // Build spans, splitting into lines at '\n' boundaries.
+        let mut lines: Vec<Line> = Vec::new();
+        let mut cur_spans: Vec<Span> = Vec::new();
+
+        // Status label + prompt on the first line.
+        if let Some(ref status) = self.status {
+            cur_spans.push(Span::styled(
+                format!("{} ", status),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        cur_spans.push(Span::raw("> "));
+
         for window in splits.windows(2) {
             let (a, b) = (window[0], window[1]);
-            // Insert cursor glyph at the left boundary of this slice if it
-            // falls there and there is text following (otherwise handled below).
             if self.cursor == a && self.cursor < self.text.len() {
-                spans.push(Span::styled("\u{2588}", cursor_style));
+                cur_spans.push(Span::styled("\u{2588}", cursor_style));
             }
             if a == b {
                 continue;
             }
+            let slice = &self.text[a..b];
+            if slice == "\n" {
+                lines.push(Line::from(std::mem::take(&mut cur_spans)));
+                continue;
+            }
             let style = if in_range(a) { atom_style } else { plain_style };
-            spans.push(Span::styled(self.text[a..b].to_string(), style));
+            cur_spans.push(Span::styled(slice.to_string(), style));
         }
 
         // Cursor at end of text (including empty text).
         if self.cursor == self.text.len() {
-            spans.push(Span::styled("\u{2588}", cursor_style));
+            cur_spans.push(Span::styled("\u{2588}", cursor_style));
         }
+        lines.push(Line::from(cur_spans));
 
-        let paragraph = Paragraph::new(Line::from(spans)).block(block);
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
 
