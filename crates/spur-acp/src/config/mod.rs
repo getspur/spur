@@ -89,14 +89,38 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    /// Args to pass when spawning this agent. Concatenates `args` with
-    /// `skip_permissions_args` iff `skip_permissions` is true. This is the
-    /// single source of truth used by `spur_core`'s spawn paths — do not
-    /// read `self.args` directly when spawning.
+    /// The effective permissions for this agent, merging the legacy flat
+    /// `skip_permissions*` fields with the newer `[permissions]` nested
+    /// block. Precedence: if the nested block has ANY non-default value
+    /// (`skip`, `args`, or `session_mode`), it wins entirely. Otherwise the
+    /// flat fields are promoted into a `PermissionsConfig`.
+    ///
+    /// The flat fields are retained for one release cycle for back-compat.
+    /// New configs should write the nested form.
+    pub fn effective_permissions(&self) -> PermissionsConfig {
+        let nested_is_default = !self.permissions.skip
+            && self.permissions.args.is_empty()
+            && self.permissions.session_mode.is_none();
+        if nested_is_default {
+            PermissionsConfig {
+                skip: self.skip_permissions,
+                args: self.skip_permissions_args.clone(),
+                session_mode: self.skip_permissions_session_mode.clone(),
+            }
+        } else {
+            self.permissions.clone()
+        }
+    }
+
+    /// Args to pass when spawning this agent. Concatenates `args` with the
+    /// effective `permissions.args` iff `permissions.skip` is true. Single
+    /// source of truth for `spur-core`'s spawn paths — do not read
+    /// `self.args` directly when spawning.
     pub fn effective_args(&self) -> Vec<String> {
         let mut out = self.args.clone();
-        if self.skip_permissions {
-            out.extend(self.skip_permissions_args.iter().cloned());
+        let perms = self.effective_permissions();
+        if perms.skip {
+            out.extend(perms.args.iter().cloned());
         }
         out
     }

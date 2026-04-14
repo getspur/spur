@@ -142,3 +142,60 @@ fn effective_args_returns_plain_args_when_enabled_but_no_skip_args() {
         ]
     );
 }
+
+#[test]
+fn flat_and_nested_permissions_yield_equivalent_effective() {
+    let flat_toml = r#"
+name = "kiro"
+command = "kiro-cli"
+args = ["acp"]
+transport = "acp"
+skip_permissions = true
+skip_permissions_args = ["--trust-all-tools"]
+skip_permissions_session_mode = "bypassPermissions"
+"#;
+    let nested_toml = r#"
+name = "kiro"
+command = "kiro-cli"
+args = ["acp"]
+transport = "acp"
+
+[permissions]
+skip = true
+args = ["--trust-all-tools"]
+session_mode = "bypassPermissions"
+"#;
+    let flat: AgentConfig = toml::from_str(flat_toml).expect("flat");
+    let nested: AgentConfig = toml::from_str(nested_toml).expect("nested");
+
+    let flat_eff = flat.effective_permissions();
+    let nested_eff = nested.effective_permissions();
+
+    assert_eq!(flat_eff.skip, nested_eff.skip);
+    assert_eq!(flat_eff.args, nested_eff.args);
+    assert_eq!(flat_eff.session_mode, nested_eff.session_mode);
+
+    // effective_args must behave the same too.
+    assert_eq!(flat.effective_args(), nested.effective_args());
+}
+
+#[test]
+fn nested_permissions_wins_when_both_present() {
+    // Top-level flat fields are legacy; if a user has written a nested
+    // [permissions] block, that is the source of truth.
+    let toml_src = r#"
+name = "mixed"
+command = "x"
+transport = "acp"
+skip_permissions = false
+skip_permissions_args = ["--ignored-flat"]
+
+[permissions]
+skip = true
+args = ["--wins"]
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_src).expect("parse");
+    let eff = cfg.effective_permissions();
+    assert!(eff.skip);
+    assert_eq!(eff.args, vec!["--wins".to_string()]);
+}

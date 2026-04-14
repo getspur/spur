@@ -970,6 +970,9 @@ impl Orchestrator {
                         cost_tier: CostTier::Medium,
                         rate_limit_window: None,
                         review: Default::default(),
+                        display: Default::default(),
+                        commands: Default::default(),
+                        permissions: Default::default(),
                         skip_permissions: false,
                         skip_permissions_args: seed
                             .skip_permissions_args
@@ -1505,7 +1508,7 @@ impl Orchestrator {
         // passing None, which activates spur-acp's auto_approve fast-path.
         // Only meaningful for transports that surface ACP permission
         // callbacks (ACP native); other transports ignore the value.
-        let perm_tx = if config.skip_permissions { None } else { permission_tx };
+        let perm_tx = if config.effective_permissions().skip { None } else { permission_tx };
 
         build_connection_from_transport(config, args, perm_tx)
     }
