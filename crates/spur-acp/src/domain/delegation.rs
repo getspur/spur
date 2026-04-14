@@ -1,3 +1,4 @@
+use crate::DiffSummary;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -54,6 +55,12 @@ pub enum TimeoutFallback {
 pub struct DelegationResult {
     pub status: DelegationStatus,
     pub diff: Option<String>,
+    /// Structured diff stats (files changed, lines added/removed, file list).
+    /// Populated from `git diff --numstat` at result-construction time.
+    /// `None` when the worker produced no diff (setup failure, empty diff,
+    /// or the diff call failed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_summary: Option<DiffSummary>,
     pub summary: Option<String>,
     pub estimated_cost_usd: f64,
 }
@@ -71,5 +78,42 @@ mod duration_serde {
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         u64::deserialize(d).map(Duration::from_secs)
+    }
+}
+
+#[cfg(test)]
+mod delegation_result_tests {
+    use super::*;
+    use crate::DiffSummary;
+    use std::path::PathBuf;
+
+    #[test]
+    fn result_with_diff_summary_round_trips_json() {
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: Some("--- a/x\n+++ b/x\n".into()),
+            diff_summary: Some(DiffSummary {
+                files_changed: 1,
+                insertions: 3,
+                deletions: 1,
+                files: vec![PathBuf::from("x")],
+            }),
+            summary: Some("did the thing".into()),
+            estimated_cost_usd: 0.42,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: DelegationResult = serde_json::from_str(&json).unwrap();
+        let ds = back.diff_summary.expect("diff_summary should round-trip");
+        assert_eq!(ds.files_changed, 1);
+        assert_eq!(ds.insertions, 3);
+        assert_eq!(ds.files, vec![PathBuf::from("x")]);
+    }
+
+    #[test]
+    fn result_without_diff_summary_deserializes_old_payloads() {
+        // Older payloads omit the field entirely. serde must accept.
+        let json = r#"{"status":"Success","diff":null,"summary":null,"estimated_cost_usd":0.0}"#;
+        let back: DelegationResult = serde_json::from_str(json).unwrap();
+        assert!(back.diff_summary.is_none());
     }
 }
