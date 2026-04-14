@@ -35,15 +35,12 @@ pub struct AgentConfig {
     #[serde(default)]
     pub review: AgentReviewPolicy,
 
-    /// When true, SPUR runs this agent in bypass mode. Activates (up to)
-    /// three lanes, each conditional on this flag and its corresponding
-    /// declared value:
-    ///   - L1a: `skip_permissions_args` are appended to `args` at spawn.
-    ///   - L1b: `skip_permissions_session_mode` is applied via
-    ///          `set_session_mode` immediately after `new_session`.
-    ///   - L2:  spur-acp passes `permission_tx = None` into the transport,
-    ///          which auto-approves every ACP `request_permission` call.
-    /// Default: false.
+    /// Enables bypass mode for this agent. When true, `skip_permissions_args`
+    /// (if any) are appended at spawn, `skip_permissions_session_mode` (if
+    /// set) is applied after session creation, and any ACP permission
+    /// requests are auto-approved. See
+    /// `docs/superpowers/specs/2026-04-14-spur-acp-skip-permissions-design.md`
+    /// for the full mechanism. Default: false.
     #[serde(default)]
     pub skip_permissions: bool,
 
