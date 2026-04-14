@@ -31,15 +31,14 @@ async fn apply_bypass_session_mode(
     session_id: SessionId,
     phase: &'static str,
 ) {
-    if !cfg.skip_permissions {
+    let perms = cfg.effective_permissions();
+    if !perms.skip {
         return;
     }
-    let Some(mode) = cfg.skip_permissions_session_mode.as_deref() else {
+    let Some(mode) = perms.session_mode.as_deref() else {
         return;
     };
 
-    // SessionModeId's From<&str> requires 'static; convert via String so
-    // a runtime-provided mode name compiles.
     let sid_for_log = session_id.0.to_string();
     let req = SetSessionModeRequest::new(session_id, mode.to_string());
 
