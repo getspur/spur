@@ -15,6 +15,19 @@
 
 ## Revision log
 
+**2026-04-14 rev 3 — apply arch doc §5.0 adjustments (post-Phase-1 code reality):**
+
+After Phase 1 landed (commits `85415c3..edd94f3`) and `docs/spur/brain-worker-architecture.md` §5.0 published three adjustments the stream spec must respect, revise:
+
+1. **Task 10 — keep `Orchestrator::emit(event: SpurEvent)` signature unchanged.** The ~22 method-scope `self.emit(SpurEvent::now(body))` sites stay as-is. `emit` internally delegates to the funnel by destructuring the event's body and discarding the caller's occurred_at (funnel restamps). No caller churn; seq still monotonically stamped at the funnel.
+2. **Task 11 — migrate ONLY the ~13 free-function `event_tx.send(SpurEvent::now(body))` sites** (lines 1113, 1258, 1821, 1832, 1852, 1884, 1913, 1942, 2028, 2084, 2133, 2242, 2409, 2444, 2451 in current code). These are in free helper functions (`handle_delegations`, `execute_delegation`, `run_one_worker_attempt`, `finalize`, review-gate helpers) that receive `event_tx` as a parameter. Change their parameter to `funnel: FunnelHandle` and emit via `funnel.emit(body)`. This is where the funnel's value actually lands — the method-scope sites gain nothing from churn.
+3. **Task 14 — add `brain_session_id: SessionId` to `WorkerHeartbeat` / `WorkerProgress` / `WorkerFileTouched` variants.** Phase 1 threads brain_session_id through `run_one_worker_attempt(brain_session_id: &SessionId, ..)` (confirmed at `orchestrator.rs:2392-2394`), so it's in scope anywhere these new variants are emitted. Including it in the event makes external stream queries filter-not-join (subscribers don't need to maintain an executor_id → brain_session_id lookup table).
+4. **Task 15 — `interpret` function signature gains `brain_session_id: SessionId` parameter** alongside `executor_id`.
+5. **Task 16 — per-worker consumer task must capture `brain_session_id`** from the `run_one_worker_attempt` scope and pass to `interpret`.
+6. **Task 17 — file_touched synthesizer must include brain_session_id** in the emitted `WorkerFileTouched` variant.
+
+Total changes: ~5 LoC added to variants; ~13 function signatures change to `FunnelHandle`; interpreter signature gains one parameter. No other structural change to the plan.
+
 **2026-04-14 rev 2 — MCTS cross-check against `docs/spur/brain-worker-architecture.md`:**
 
 1. **Removed Task 17** (extend `report_progress` MCP tool). The arch doc §1.1 lists MCP tools on Channel A as **brain-facing only** — workers do not connect to the MCP callback server. `report_progress` is called by the brain, not by workers; it cannot emit `WorkerProgress { executor_id, .. }` because the brain isn't an executor. **Worker-progress-via-MCP requires first adding a worker-side MCP path**, which is a Phase 2 capability not in scope. `_spur/*` vocabulary remains defined in Task 14 as a wire format for future SPUR-aware agents; only `_spur/file_touched` is exercised in v1 via the server-side ToolCall synthesis path (Task 17 — renumbered from 18).
@@ -995,7 +1008,9 @@ Ok(Self {
 })
 ```
 
-- [ ] **Step 10.3: Refactor `Orchestrator::emit` (line ~1510)**
+- [ ] **Step 10.3: Refactor `Orchestrator::emit` (line ~1510) — preserve signature (rev 3)**
+
+Per arch doc §5.0 adjustment (b), keep the `fn emit(&self, event: SpurEvent)` signature so the ~22 existing `self.emit(SpurEvent::now(body))` call sites compile unchanged. Route internally through the funnel by destructuring the event.
 
 Replace:
 
@@ -1008,56 +1023,39 @@ fn emit(&self, event: SpurEvent) {
 with:
 
 ```rust
-/// Emit an event through the S2 funnel. Stamps seq + timestamp.
-/// Replaces direct `event_tx.send` calls.
-fn emit(&self, body: SpurEventBody) {
-    self.funnel.emit(body);
+/// Emit an event through the S2 funnel. The funnel stamps seq + timestamp,
+/// so the caller's `event.occurred_at` is discarded — funnel's is more
+/// accurate (it's the wall-clock at send-to-broadcast moment).
+fn emit(&self, event: SpurEvent) {
+    self.funnel.emit(event.body);
 }
 ```
 
-- [ ] **Step 10.4: Run compiler to surface all broken call sites**
+- [ ] **Step 10.4: Verify method-scope call sites compile unchanged**
 
 Run: `cargo build -p spur-core 2>&1 | grep -E 'error|warning' | head -40`
+Expected: success (no changes to `self.emit(SpurEvent::now(body))` callers — they still pass `SpurEvent`).
 
-Every `self.emit(SpurEvent::now(body))` call now has a type mismatch (expecting `SpurEventBody`, getting `SpurEvent`). Continue to the next task to fix them.
+The free-function `event_tx.send(SpurEvent::now(body))` sites are NOT touched by this task; they're migrated in Task 11.
 
-### Task 11: Convert all `self.emit(SpurEvent::now(body))` sites
+### Task 11: Migrate free-function `event_tx.send(SpurEvent::now(body))` sites (rev 3 — scope narrowed)
 
 **Files:**
-- Modify: `crates/spur-core/src/orchestrator.rs` (15+ call sites per earlier grep)
+- Modify: `crates/spur-core/src/orchestrator.rs` (~13 free-function call sites)
+
+Per arch doc §5.0 adjustment (b): **do NOT** churn the ~22 method-scope `self.emit(SpurEvent::now(body))` sites. They already route through `Orchestrator::emit`, which (after Task 10) funnels internally. Only the free-function sites — which receive `event_tx: broadcast::Sender<SpurEvent>` as a parameter — need the refactor.
 
 **Arch doc invariants preserved (§1.4 and §6.1):**
 - **Channel D ordering** — `register_gate()` MUST be called BEFORE emitting `ExecutorReviewRequested`. Orchestrator code already does this synchronously at the call site. The funnel's mpsc→singleton-task→broadcast path adds only latency; it cannot reorder. By the time `funnel.emit(ExecutorReviewRequested)` is called, `register_gate()` has already executed.
 - **"Exactly one DelegationCompleted" per delegation** — `finalize()` remains a single call site per terminal arm. The funnel changes HOW emit happens, not how many times.
 - **Broadcast send order preserved for lineage** — the singleton emitter task reads mpsc FIFO and calls `broadcast.send` serially. Events reach subscribers in emitter-task order.
+- **brain_session_id threading preserved** — Phase 1 added `brain_session_id: &SessionId` to `run_one_worker_attempt` (`orchestrator.rs:2392-2394`). The refactor changes `event_tx → funnel` alongside this parameter; do not remove or reorder brain_session_id.
 
-- [ ] **Step 11.1: Find all sites**
-
-Run: `grep -n 'self\.emit(SpurEvent::now' crates/spur-core/src/orchestrator.rs`
-
-- [ ] **Step 11.2: Convert each site to pass the body directly**
-
-For each hit, transform:
-
-```rust
-self.emit(SpurEvent::now(SpurEventBody::BrainSpawned { ... }));
-```
-
-to:
-
-```rust
-self.emit(SpurEventBody::BrainSpawned { ... });
-```
-
-There are ~20 such sites per the earlier grep at lines 199, 208, 337, 358, 418, 443, 450, 478, 500, 512, 520, 524, 552, 567, 641, 646, 669, 674, 725, 777, 1030, 1124, 1156, 1269. Do them all. `sed` is tempting but do them one by one with Edit to verify each compiles after a batch.
-
-- [ ] **Step 11.3: Fix free-function emit sites (no `self`)**
+- [ ] **Step 11.1: Find the free-function sites**
 
 Run: `grep -n 'event_tx\.send(SpurEvent::now' crates/spur-core/src/orchestrator.rs`
 
-Expected: ~15 hits (at 1113, 1258, 1511 is now gone, 1821, 1832, 1852, 1884, 1913, 1942, 2028, 2084, 2133, 2242, 2409, 2444, 2451).
-
-These free functions (e.g., `execute_delegation`, `run_one_worker_attempt`, `finalize`) receive `event_tx: broadcast::Sender<SpurEvent>` as a parameter. Change the parameter to `funnel: crate::event_funnel::FunnelHandle`, and convert each call site to `funnel.emit(body)`.
+Expected: ~13 hits (at lines 1113, 1258, 1821, 1832, 1852, 1884, 1913, 1942, 2028, 2084, 2133, 2242, 2409, 2444, 2451 — minus any that have moved since the plan was written).
 
 Example function signature change (at `handle_delegations`, line ~1519 onward — inspect the actual signature):
 
@@ -1111,29 +1109,32 @@ Expected: success.
 Run: `cargo test --workspace --lib 2>&1 | tail -20`
 Expected: all pre-existing tests pass. The funnel is a transparent refactor — subscribers still receive identical SpurEvent values (now with seq > 0 for events emitted through the orchestrator).
 
-- [ ] **Step 11.6: Verify the funnel is the SOLE emit path**
+- [ ] **Step 11.6: Verify free-function sites are fully migrated**
 
-Run: `grep -n 'event_tx\.send\|\.event_tx\.send' crates/spur-core/src/orchestrator.rs`
-Expected: zero hits (or only the broadcast::Sender being passed to the funnel itself).
+Run: `grep -n 'event_tx\.send(SpurEvent::now' crates/spur-core/src/orchestrator.rs`
+Expected: zero hits.
 
-Run: `grep -n 'SpurEvent::now' crates/spur-core/src/orchestrator.rs`
-Expected: zero hits inside orchestrator (but may exist in tests; that's fine).
+Run: `grep -n 'self\.emit(SpurEvent::now' crates/spur-core/src/orchestrator.rs`
+Expected: ~22 hits — these are the method-scope sites we INTENTIONALLY preserve per rev 3 adjustment (b). Task 10's internal delegation funnels them transparently.
 
 - [ ] **Step 11.7: Commit**
 
 ```bash
 git add crates/spur-core/src/orchestrator.rs
 git commit -m "$(cat <<'EOF'
-refactor(spur-core): S2 route all emits through event funnel
+refactor(spur-core): S2 route free-function emits through funnel
 
-Every direct `event_tx.send(SpurEvent::now(body))` call site in
-orchestrator.rs now goes through `funnel.emit(body)`, which stamps
-monotonic seq + timestamp via the singleton emitter task. Function
-signatures that previously took `event_tx: broadcast::Sender<...>`
-now take `funnel: FunnelHandle`.
+All ~13 free-function `event_tx.send(SpurEvent::now(body))` call
+sites (handle_delegations, execute_delegation, run_one_worker_attempt,
+finalize, review-gate helpers) now take `funnel: FunnelHandle` and
+emit via `funnel.emit(body)`. Per arch doc §5.0 adjustment (b), the
+~22 method-scope `self.emit(SpurEvent::now(body))` sites are
+preserved; Task 10's internal `Orchestrator::emit` delegation funnels
+them transparently.
 
-No behavior change for existing subscribers — events have identical
-content with a new seq field > 0 (was always 0 before).
+Phase 1's `brain_session_id: &SessionId` parameter on
+`run_one_worker_attempt` preserved. No behavior change for existing
+subscribers — events carry new seq > 0 (was always 0 before).
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 EOF
@@ -1481,12 +1482,13 @@ Opens at `crates/spur-acp/src/domain/events.rs:96`. Existing variants are BrainS
 
 - [ ] **Step 14.2: Add three new variants**
 
-Add at the end of the enum body (before the closing brace):
+Add at the end of the enum body (before the closing brace). Per arch doc §5.0 adjustment (c), each variant carries `brain_session_id` so subscribers can filter by session without joining against `DelegationRequested`:
 
 ```rust
 /// Worker emitted `_spur/heartbeat` — periodic alive signal.
 /// The TUI uses this to detect stalled workers.
 WorkerHeartbeat {
+    brain_session_id: SessionId,
     executor_id: String,
     /// Wall-clock at the worker; informational only.
     worker_ts: Option<String>,
@@ -1495,6 +1497,7 @@ WorkerHeartbeat {
 /// Worker emitted `_spur/progress_milestone` — named checkpoint.
 /// The TUI shows this in the executor card.
 WorkerProgress {
+    brain_session_id: SessionId,
     executor_id: String,
     name: String,
     /// Optional 0..=100 percentage.
@@ -1506,6 +1509,7 @@ WorkerProgress {
 /// orchestrator from observed ToolCall events with a 200ms
 /// de-duplication window.
 WorkerFileTouched {
+    brain_session_id: SessionId,
     executor_id: String,
     path: std::path::PathBuf,
     kind: FileTouchKind,
@@ -1571,11 +1575,12 @@ use crate::event_funnel::FunnelHandle;
 /// Consume an ExtNotificationPayload and, if it's a known `_spur/*`
 /// method, synthesize + emit the matching SpurEventBody.
 ///
-/// `resolve_executor_id` maps an ACP session id to the worker's
-/// ExecutorId. Orchestrator supplies this closure from its existing
-/// session-id → executor-id bookkeeping.
+/// Caller supplies `brain_session_id` and `executor_id` from the worker's
+/// delegation context — both are in-scope inside `run_one_worker_attempt`
+/// where the per-worker consumer task is spawned.
 pub fn interpret(
     payload: ExtNotificationPayload,
+    brain_session_id: spur_acp::types::SessionId,
     executor_id: String,
     funnel: &FunnelHandle,
 ) {
@@ -1587,6 +1592,7 @@ pub fn interpret(
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             funnel.emit(SpurEventBody::WorkerHeartbeat {
+                brain_session_id,
                 executor_id,
                 worker_ts,
             });
@@ -1611,6 +1617,7 @@ pub fn interpret(
                 .and_then(|v| v.as_u64())
                 .and_then(|u| u8::try_from(u).ok());
             funnel.emit(SpurEventBody::WorkerProgress {
+                brain_session_id,
                 executor_id,
                 name,
                 pct,
@@ -1634,6 +1641,7 @@ pub fn interpret(
                 }
             };
             funnel.emit(SpurEventBody::WorkerFileTouched {
+                brain_session_id,
                 executor_id,
                 path,
                 kind,
@@ -1660,6 +1668,10 @@ mod tests {
         (h, rx)
     }
 
+    fn test_brain() -> spur_acp::types::SessionId {
+        spur_acp::types::SessionId::from("brain-1")
+    }
+
     #[tokio::test]
     async fn progress_milestone_synthesizes_event() {
         let (h, mut rx) = harness();
@@ -1668,12 +1680,14 @@ mod tests {
                 method: "_spur/progress_milestone".into(),
                 params: json!({"name": "tests_starting", "pct": 60}),
             },
+            test_brain(),
             "exec-1".into(),
             &h,
         );
         let event = rx.recv().await.unwrap();
         match event.body {
-            SpurEventBody::WorkerProgress { executor_id, name, pct } => {
+            SpurEventBody::WorkerProgress { brain_session_id, executor_id, name, pct } => {
+                assert_eq!(brain_session_id, test_brain());
                 assert_eq!(executor_id, "exec-1");
                 assert_eq!(name, "tests_starting");
                 assert_eq!(pct, Some(60));
@@ -1690,12 +1704,14 @@ mod tests {
                 method: "_spur/file_touched".into(),
                 params: json!({"path": "src/foo.rs", "kind": "write"}),
             },
+            test_brain(),
             "exec-1".into(),
             &h,
         );
         let event = rx.recv().await.unwrap();
         match event.body {
-            SpurEventBody::WorkerFileTouched { executor_id, path, kind } => {
+            SpurEventBody::WorkerFileTouched { brain_session_id, executor_id, path, kind } => {
+                assert_eq!(brain_session_id, test_brain());
                 assert_eq!(executor_id, "exec-1");
                 assert_eq!(path, std::path::PathBuf::from("src/foo.rs"));
                 assert_eq!(kind, FileTouchKind::Write);
@@ -1712,6 +1728,7 @@ mod tests {
                 method: "_spur/no-such-thing".into(),
                 params: json!({}),
             },
+            test_brain(),
             "exec-1".into(),
             &h,
         );
@@ -1771,13 +1788,16 @@ Inside `run_one_worker_attempt` (spec says this function builds the worker conne
 ```rust
 // S5 — consume _spur/* ExtNotifications from this worker and
 // translate into SpurEvent variants via the funnel.
+// brain_session_id is in scope in run_one_worker_attempt per Phase 1.
 if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
     let funnel_for_ext = funnel.clone();
     let executor_id_for_ext = executor_id.clone();
+    let brain_session_for_ext = brain_session_id.clone();
     tokio::spawn(async move {
         while let Some(payload) = ext_rx.recv().await {
             crate::spur_ext_interp::interpret(
                 payload,
+                brain_session_for_ext.clone(),
                 executor_id_for_ext.clone(),
                 &funnel_for_ext,
             );
@@ -1786,7 +1806,9 @@ if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
 }
 ```
 
-Exact placement depends on the current code shape. The key constraint: it must happen AFTER connection construction and BEFORE the connection is moved into subsequent code (otherwise `take_ext_notification_rx` — which takes `&mut self` — can't be called).
+Exact placement depends on the current code shape. Key constraints:
+1. must happen AFTER connection construction and BEFORE the connection is moved into subsequent code (otherwise `take_ext_notification_rx` — which takes `&mut self` — can't be called).
+2. `brain_session_id` parameter of `run_one_worker_attempt` (Phase 1, `orchestrator.rs:2392-2394`) is a `&SessionId`; clone before moving into the spawned task.
 
 - [ ] **Step 16.3: Build**
 
@@ -1899,8 +1921,11 @@ Add a helper:
 ```rust
 /// If `notification` is a ToolCall matching a known file-op tool name,
 /// synthesize a WorkerFileTouched event (subject to dedup).
+/// `brain_session_id` comes from the per-worker scope via the same
+/// bookkeeping that feeds the S5 interpreter (Task 16).
 fn maybe_synthesize_file_touch(
     notification: &agent_client_protocol::SessionNotification,
+    brain_session_id: &spur_acp::types::SessionId,
     executor_id: &str,
     dedup: &FileTouchDedup,
     funnel: &crate::event_funnel::FunnelHandle,
@@ -1933,6 +1958,7 @@ fn maybe_synthesize_file_touch(
     };
     if dedup.should_emit(&key) {
         funnel.emit(spur_acp::domain::events::SpurEventBody::WorkerFileTouched {
+            brain_session_id: brain_session_id.clone(),
             executor_id: executor_id.to_string(),
             path,
             kind,
@@ -1945,16 +1971,24 @@ The exact SessionUpdate field names (`name`, `input`, `path`, `file_path`) must 
 
 - [ ] **Step 17.3: Call the synthesizer at every AgentNotification emit site**
 
-Before each `funnel.emit(SpurEventBody::AgentNotification { session, notification })`, insert:
+Before each `funnel.emit(SpurEventBody::AgentNotification { session, notification })`, insert (at sites inside `run_one_worker_attempt` where `brain_session_id` is in scope):
 
 ```rust
 if let Some(executor_id) = self.session_to_executor(&session) {
-    maybe_synthesize_file_touch(&notification, &executor_id, &self.file_touch_dedup, &self.funnel);
+    maybe_synthesize_file_touch(
+        &notification,
+        brain_session_id,
+        &executor_id,
+        &self.file_touch_dedup,
+        &self.funnel,
+    );
 }
 funnel.emit(SpurEventBody::AgentNotification { session, notification });
 ```
 
 `session_to_executor` is a placeholder: the orchestrator must already have a lookup from session id to executor id (used for correlation elsewhere). Find and reuse it; if no equivalent exists, skip synthesis for the brain's own session (only worker sessions map to executor ids).
+
+For sites OUTSIDE `run_one_worker_attempt` (e.g., the two brain-session AgentNotification emits at orchestrator.rs:337 and :500), skip file-touch synthesis — the brain isn't a worker and has no executor_id. Only the worker-session site at :725 needs the synthesizer hook.
 
 - [ ] **Step 17.4: Build + test**
 
