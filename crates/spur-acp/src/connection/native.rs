@@ -175,7 +175,11 @@ impl NativeAcpConnection {
         permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ) -> Self {
         let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtNotificationPayload>();
-        let (session_notif_tx, _) = tokio::sync::broadcast::channel(1024);
+        // Capacity 4096 per the broadcast-sizing invariant (anchor 3ff4e86):
+        // bursty history replay from `load_session` can produce O(hundreds)
+        // of notifications in rapid succession, and the floor was established
+        // empirically under 20 workers × 80 evt/s load.
+        let (session_notif_tx, _) = tokio::sync::broadcast::channel(4096);
         Self {
             agent_name: agent_name.into(),
             command: command.into(),
