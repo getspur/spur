@@ -14,5 +14,5 @@
 pub mod entry_builder;
 pub mod ingest;
 
-pub use entry_builder::build_entry;
+pub use entry_builder::{build_entry, build_static_entry};
 pub use ingest::run_ingest_hook;
