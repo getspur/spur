@@ -23,6 +23,7 @@ dispatch = "prompt_text"
 "#;
     let cfg: AgentConfig = toml::from_str(toml_src).expect("parse");
     assert_eq!(cfg.display.handle.as_deref(), Some("claude"));
+    assert_eq!(cfg.display.display_name.as_deref(), Some("Claude"));
     assert_eq!(cfg.commands.dispatch, DispatchKind::PromptText);
     assert!(cfg.commands.exec_method.is_none());
     assert!(cfg.commands.ingest.is_empty());
@@ -100,4 +101,26 @@ args = ["--trust-all-tools"]
     assert!(cfg.permissions.skip);
     assert_eq!(cfg.permissions.args, vec!["--trust-all-tools".to_string()]);
     assert!(cfg.permissions.session_mode.is_none());
+}
+
+#[test]
+fn flat_and_nested_permissions_coexist_in_same_config() {
+    // Users may have both the legacy flat fields AND the new nested
+    // [permissions] block during migration. Both must parse cleanly;
+    // precedence is handled by AgentConfig::effective_permissions (Task 2).
+    let toml_src = r#"
+name = "kiro"
+command = "kiro-cli"
+args = ["acp"]
+transport = "acp"
+skip_permissions = true
+skip_permissions_args = ["--trust-all-tools"]
+
+[permissions]
+skip = true
+args = ["--trust-all-tools"]
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_src).expect("both flat and nested should parse");
+    assert!(cfg.skip_permissions);
+    assert!(cfg.permissions.skip);
 }
