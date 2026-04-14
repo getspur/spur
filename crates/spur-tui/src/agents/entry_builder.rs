@@ -18,9 +18,13 @@ pub fn build_entry(
         _ => None,
     };
 
+    // Some agents (kiro-cli) advertise names with a leading slash ("/agent").
+    // Strip it for display/resolve; preserve the original for VendorExec wire calls.
+    let display_name = cmd.name.strip_prefix('/').unwrap_or(&cmd.name).to_string();
+
     let dispatch = match cfg.dispatch {
         DispatchKind::PromptText => Dispatch::PromptText {
-            normalized: format!("/{}", cmd.name),
+            normalized: format!("/{}", display_name),
         },
         DispatchKind::VendorExec => {
             // Validator guarantees exec_method is present for vendor_exec
@@ -39,7 +43,7 @@ pub fn build_entry(
     };
 
     CommandEntry {
-        name: cmd.name.clone(),
+        name: display_name,
         description: cmd.description.clone(),
         hint,
         source: CommandSource::Agent {

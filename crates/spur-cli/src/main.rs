@@ -41,7 +41,8 @@ const INSTALL_HINTS: &[(&str, &str)] = &[
     ("claude-code",     "npm install -g @anthropic-ai/claude-code"),
     ("kiro",            "brew install kiro-cli"),
     ("claude-code-acp", "npm install -g npx   # then re-run `spur init`"),
-    ("codex",           "https://docs.openai.com/codex/install"),
+    ("codex",           "https://github.com/zed-industries/codex-acp/releases"),
+    ("codex-acp",       "npx @zed-industries/codex-acp"),
     ("gemini",          "npm install -g @google/gemini-cli"),
 ];
 

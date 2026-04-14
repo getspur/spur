@@ -48,7 +48,7 @@ args_template = "raw_rest"
 [[agents.entries.commands.ingest]]
 method = "_kiro.dev/commands/available"
 parser = "json_path_list"
-path = "availableCommands"
+path = "commands"
 item_schema = "acp_available_command"
 
 [[agents.entries.commands.response]]
@@ -76,14 +76,14 @@ dispatch = "prompt_text"
 [agents.entries.permissions]
 session_mode = "bypassPermissions"
 
-# ── codex ─────────────────────────────────────────────────────────
-# NOTE: `args = ["--acp"]` reflects the current assumption. Validate
-# against your installed codex binary — flag may differ across versions.
-# If codex needs a different ACP mode, edit this entry.
+# ── codex (via zed-industries/codex-acp, direct binary) ───────────
+# Rust binary that bridges OpenAI Codex runtime with ACP over stdio.
+# Install: https://github.com/zed-industries/codex-acp/releases
+# Or: npx @zed-industries/codex-acp (see codex-acp entry below).
 [[agents.entries]]
 name = "codex"
-command = "codex"
-args = ["--acp"]
+command = "codex-acp"
+args = []
 transport = "acp"
 role = "both"
 cost_tier = "low"
@@ -95,8 +95,59 @@ handle = "codex"
 dispatch = "prompt_text"
 
 [[agents.entries.commands.static]]
+name = "review"
+description = "Review current changes and find issues"
+hint = "[optional instructions]"
+
+[[agents.entries.commands.static]]
+name = "review-branch"
+description = "Review code changes against a specific branch"
+hint = "[branch name]"
+
+[[agents.entries.commands.static]]
+name = "review-commit"
+description = "Review code changes introduced by a commit"
+hint = "[commit sha]"
+
+[[agents.entries.commands.static]]
+name = "init"
+description = "Create an AGENTS.md with repository guidance"
+
+[[agents.entries.commands.static]]
 name = "compact"
-description = "Compact conversation history"
+description = "Summarize conversation to prevent hitting context limit"
+
+[[agents.entries.commands.static]]
+name = "undo"
+description = "Undo Codex's most recent turn"
+
+[[agents.entries.commands.static]]
+name = "logout"
+description = "Logout of Codex"
+
+[agents.entries.permissions]
+session_mode = "full-auto"
+
+# ── codex-acp (npx wrapper, version-pinned) ──────────────────────
+# Same agent as above but via npx — no pre-installed binary needed.
+# Pinned version is critical: @latest would silently pull breaking
+# changes mid-session. Bump deliberately and retest after each bump.
+[[agents.entries]]
+name = "codex-acp"
+command = "npx"
+args = ["--yes", "@zed-industries/codex-acp@0.11.1"]
+transport = "acp"
+role = "both"
+cost_tier = "low"
+
+[agents.entries.display]
+handle = "codex"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[agents.entries.permissions]
+session_mode = "full-auto"
 
 # ── gemini ────────────────────────────────────────────────────────
 [[agents.entries]]

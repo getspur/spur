@@ -20,6 +20,7 @@ fn install_hints_cover_all_seed_agents() {
         "kiro",
         "claude-code-acp",
         "codex",
+        "codex-acp",
         "gemini",
     ];
     let seeds = spur_acp::config::load_seed_template();
