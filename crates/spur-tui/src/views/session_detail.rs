@@ -313,6 +313,13 @@ impl SessionDetailView {
 
     /// Update the brain status label shown in the InputBar.
     pub fn set_brain_status(&mut self, status: &str) {
+        if self.cancelling_in_flight {
+            self.input_bar.set_status(Some(format!(
+                "[{}: cancelling\u{2026}]",
+                self.agent_name
+            )));
+            return;
+        }
         let label = match status {
             "idle" => None,
             "thinking" => Some(format!("[{} \u{00b7}\u{00b7}\u{00b7}]", self.agent_name)),
@@ -369,6 +376,26 @@ impl SessionDetailView {
         self.react_trace.push(TraceEntry {
             kind: TraceKind::Think,
             text: msg,
+            timestamp: Self::now_stamp(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+    }
+
+    /// Push a system note reflecting the active `cancel_mode`. Called when
+    /// the user presses `Esc` to cancel an in-flight stream.
+    fn push_cancel_note(&mut self) {
+        let text = match self.cancel_mode {
+            Some(spur_acp::CancelMode::AcpSoft) =>
+                "\u{23f9} Cancellation requested \u{2014} waiting for agent\u{2026}",
+            Some(spur_acp::CancelMode::ProcessKill) =>
+                "\u{23f9} Stopping agent (process will restart on next message)",
+            None =>
+                "\u{23f9} Cancellation requested",
+        };
+        self.react_trace.push(TraceEntry {
+            kind: TraceKind::Think,
+            text: text.to_string(),
             timestamp: Self::now_stamp(),
             #[cfg(feature = "markdown")]
             markdown: None,
@@ -607,6 +634,24 @@ impl SessionDetailView {
         // dispatched regardless.
         if self.auth_error.is_some() {
             self.auth_error = None;
+        }
+
+        // Priority 0: Esc-to-cancel takes precedence when a stream is in flight
+        // and we're not already cancelling. Second Esc falls through to the
+        // existing Esc handlers (popup dismiss / NavigateBack).
+        if matches!(key.code, KeyCode::Esc)
+            && self.stream_in_flight
+            && !self.cancelling_in_flight
+        {
+            self.cancelling_in_flight = true;
+            self.push_cancel_note();
+            self.input_bar.set_status(Some(format!(
+                "[{}: cancelling\u{2026}]",
+                self.agent_name
+            )));
+            return Some(Action::CancelStream {
+                session: self.session_id.clone(),
+            });
         }
 
         // Alt-m → cycle session mode between "default" and "plan".
@@ -1571,5 +1616,74 @@ mod cancel_state_tests {
         let other = spur_acp::SessionId("other".to_string());
         v.handle_spur_event(&agent_msg_chunk_event(&other));
         assert!(!v.stream_in_flight);
+    }
+
+    use crate::action::Action;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn press(key: KeyCode) -> KeyEvent {
+        KeyEvent::new(key, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn esc_with_stream_in_flight_emits_cancel_stream() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
+        let action = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        assert!(matches!(action, Some(Action::CancelStream { .. })));
+        assert!(v.cancelling_in_flight);
+    }
+
+    #[test]
+    fn esc_when_already_cancelling_falls_through_to_navigate_back() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancelling_in_flight = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        assert!(matches!(action, Some(Action::NavigateBack)));
+    }
+
+    #[test]
+    fn esc_without_stream_preserves_navigate_back() {
+        let mut v = make_view();
+        let action = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        assert!(matches!(action, Some(Action::NavigateBack)));
+    }
+
+    #[test]
+    fn cancel_note_uses_acp_soft_text_when_mode_is_acp_soft() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
+        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let trace = v.react_trace();
+        let last_text = trace.last_text().unwrap_or_default();
+        assert!(last_text.contains("Cancellation requested"),
+                "expected AcpSoft message; got {last_text:?}");
+    }
+
+    #[test]
+    fn cancel_note_uses_process_kill_text_when_mode_is_process_kill() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_mode = Some(spur_acp::CancelMode::ProcessKill);
+        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let trace = v.react_trace();
+        let last_text = trace.last_text().unwrap_or_default();
+        assert!(last_text.contains("Stopping agent"),
+                "expected ProcessKill message; got {last_text:?}");
+    }
+
+    #[test]
+    fn cancel_note_generic_when_cancel_mode_unknown() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_mode = None;
+        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let trace = v.react_trace();
+        let last_text = trace.last_text().unwrap_or_default();
+        assert!(last_text.contains("Cancellation requested"),
+                "expected generic fallback; got {last_text:?}");
     }
 }
