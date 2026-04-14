@@ -9,7 +9,7 @@ pub mod types;
 pub use config::{
     AgentConfig, AgentReviewPolicy, AgentsConfig, ArgsTemplateKind, CommandsConfig, ConfigError,
     DispatchKind, DisplayConfig, IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig,
-    ResponseBinding, ResponseRenderKind, SpurConfig, validate_agent_config,
+    ResponseBinding, ResponseRenderKind, SpurConfig, StaticCommandDecl, validate_agent_config,
 };
 pub use connection::{AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 pub use registry::AgentRegistry;
