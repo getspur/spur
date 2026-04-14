@@ -834,6 +834,7 @@ impl View for SessionDetailView {
                 crate::app::apply_session_update(self, &notification.update);
                 match &notification.update {
                     spur_acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                        self.stream_in_flight = true;
                         if let Some(text) = extract_text(chunk) {
                             if !text.is_empty() {
                                 self.react_trace.append_think(text, Self::now_stamp());
@@ -841,6 +842,7 @@ impl View for SessionDetailView {
                         }
                     }
                     spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                        self.stream_in_flight = true;
                         if let Some(text) = extract_text(chunk) {
                             if !text.is_empty() {
                                 let prev_kind = self
@@ -990,6 +992,8 @@ impl View for SessionDetailView {
 
             SpurEventBody::TurnComplete { session } => {
                 if session.0 == self.session_id.0 {
+                    self.stream_in_flight = false;
+                    self.cancelling_in_flight = false;
                     #[cfg(feature = "markdown")]
                     {
                         use crate::components::markdown_stream::StateLookup;
@@ -1061,11 +1065,13 @@ impl View for SessionDetailView {
             SpurEventBody::AgentSessionReady {
                 session,
                 resumed,
+                cancel_mode,
                 ..
             } => {
                 if session.0 != self.session_id.0 {
                     return;
                 }
+                self.cancel_mode = Some(*cancel_mode);
                 if *resumed {
                     self.push_system_note("Resumed from prior conversation".to_string());
                 }
@@ -1496,11 +1502,74 @@ mod cancel_state_tests {
         )
     }
 
+    fn agent_msg_chunk_event(session: &spur_acp::SessionId) -> SpurEvent {
+        let update = spur_acp::SessionUpdate::AgentMessageChunk(
+            spur_acp::ContentChunk::new(spur_acp::ContentBlock::from("hi".to_string())),
+        );
+        let notification = spur_acp::SessionNotification::new(
+            session.0.clone(),
+            update,
+        );
+        SpurEvent::now(SpurEventBody::AgentNotification {
+            session: session.clone(),
+            notification: Box::new(notification),
+        })
+    }
+
+    fn turn_complete_event(session: &spur_acp::SessionId) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::TurnComplete { session: session.clone() })
+    }
+
+    fn agent_session_ready_event(session: &spur_acp::SessionId, mode: spur_acp::CancelMode) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::AgentSessionReady {
+            session: session.clone(),
+            acp_session_id: "acp-1".into(),
+            brain: "claude".into(),
+            resumed: false,
+            cancel_mode: mode,
+        })
+    }
+
     #[test]
     fn new_view_has_no_stream_in_flight() {
         let v = make_view();
         assert!(!v.stream_in_flight);
         assert!(!v.cancelling_in_flight);
         assert!(v.cancel_mode.is_none());
+    }
+
+    #[test]
+    fn chunk_sets_stream_in_flight() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.handle_spur_event(&agent_msg_chunk_event(&sid));
+        assert!(v.stream_in_flight);
+    }
+
+    #[test]
+    fn turn_complete_clears_both_flags() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.stream_in_flight = true;
+        v.cancelling_in_flight = true;
+        v.handle_spur_event(&turn_complete_event(&sid));
+        assert!(!v.stream_in_flight);
+        assert!(!v.cancelling_in_flight);
+    }
+
+    #[test]
+    fn agent_session_ready_populates_cancel_mode() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.handle_spur_event(&agent_session_ready_event(&sid, spur_acp::CancelMode::AcpSoft));
+        assert_eq!(v.cancel_mode, Some(spur_acp::CancelMode::AcpSoft));
+    }
+
+    #[test]
+    fn event_for_different_session_is_ignored() {
+        let mut v = make_view();
+        let other = spur_acp::SessionId("other".to_string());
+        v.handle_spur_event(&agent_msg_chunk_event(&other));
+        assert!(!v.stream_in_flight);
     }
 }
