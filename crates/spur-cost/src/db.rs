@@ -183,7 +183,7 @@ pub fn query_recent_sessions(conn: &Connection, limit: usize) -> Result<Vec<Sess
          LIMIT ?1",
     )?;
 
-    let rows = stmt.query_map(params![limit as i64], |row| session_from_row(row))?;
+    let rows = stmt.query_map(params![limit as i64], session_from_row)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 

@@ -119,7 +119,7 @@ fn retry_preserves_previous_attempts() {
 
 #[test]
 fn replay_produces_identical_timestamps() {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, UNIX_EPOCH};
 
     let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let events: Vec<SpurEvent> = vec![
@@ -223,6 +223,7 @@ fn replay_produces_byte_identical_state() {
     let mut b = ExecutorLineage::new();
     for e in &events { b.apply(e); }
 
+    #[allow(clippy::type_complexity)]
     let collect = |l: &ExecutorLineage| -> Vec<(ExecutorId, LifecycleState, Vec<(std::time::SystemTime, Option<std::time::SystemTime>)>)> {
         let mut out: Vec<_> = l.nodes().map(|n| {
             let attempts: Vec<_> = n.attempts.iter().map(|a| (a.started_at, a.ended_at)).collect();

@@ -24,9 +24,11 @@ use crate::ExecutorId;
 ///
 /// `ReviewSink` is a newtype over `Arc<Mutex<_>>`; `Clone` is cheap
 /// and yields another handle to the same sink.
+type SinkMap = HashMap<ExecutorId, (u32, oneshot::Sender<ReviewDecision>)>;
+
 #[derive(Clone)]
 pub struct ReviewSink {
-    inner: Arc<Mutex<HashMap<ExecutorId, (u32, oneshot::Sender<ReviewDecision>)>>>,
+    inner: Arc<Mutex<SinkMap>>,
 }
 
 impl ReviewSink {

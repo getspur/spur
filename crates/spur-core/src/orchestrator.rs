@@ -326,7 +326,7 @@ impl Orchestrator {
 
             self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
                 session: session_id.clone(),
-                notification,
+                notification: Box::new(notification),
             }));
         }
 
@@ -489,7 +489,7 @@ impl Orchestrator {
                                 history_count += 1;
                                 self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
                                     session: spur_id.clone(),
-                                    notification,
+                                    notification: Box::new(notification),
                                 }));
                             }
 
@@ -698,7 +698,7 @@ impl Orchestrator {
                                         );
                                         self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
                                             session: b.spur_session_id.clone(),
-                                            notification,
+                                            notification: Box::new(notification),
                                         }));
                                     }
                                     None => break, // Turn complete
@@ -1701,6 +1701,8 @@ impl Orchestrator {
     /// `executor_id` is stable across attempts (captured from the first
     /// worker session) so the lineage projection's attempt history
     /// accumulates on a single node.
+    // TODO: consolidate args into an ExecuteDelegationParams struct to reduce arity.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_delegation(
         agent: String,
         original_task: String,
@@ -2246,17 +2248,15 @@ async fn apply_worktree_cleanup(
     agent: &str,
     worktree_path: &std::path::Path,
 ) {
-    if should_commit_worker_diff(final_status) {
-        if diff.is_some() {
-            if let Err(e) = worktrees
-                .commit_worker_changes(
-                    worker_session,
-                    &format!("spur: worker {} output", agent),
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to commit worker diff");
-            }
+    if should_commit_worker_diff(final_status) && diff.is_some() {
+        if let Err(e) = worktrees
+            .commit_worker_changes(
+                worker_session,
+                &format!("spur: worker {} output", agent),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "failed to commit worker diff");
         }
     }
 
@@ -2300,6 +2300,10 @@ fn finalize(
 /// `WorkerAttemptOutcome`). Setup errors short-circuit the entire
 /// delegation without retry — retrying a worktree-creation failure is
 /// not a spec'd behavior.
+// All variants share the `Failed` suffix intentionally — they describe distinct
+// failure phases (snapshot, worktree, init, session) and the suffix aids
+// readability at match sites. Suppressing the lint is cleaner than renaming.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 enum AttemptSetupError {
     SnapshotFailed(String),
@@ -2563,11 +2567,9 @@ fn dirs_home() -> Option<String> {
 /// leading bang. We strip it once here before forwarding to the agent so
 /// the agent sees clean prompt text.
 fn strip_bang_prefix(mut blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
-    if let Some(first) = blocks.first_mut() {
-        if let ContentBlock::Text(tc) = first {
-            if tc.text.starts_with('!') {
-                tc.text = tc.text.strip_prefix('!').unwrap_or(&tc.text).to_string();
-            }
+    if let Some(ContentBlock::Text(tc)) = blocks.first_mut() {
+        if tc.text.starts_with('!') {
+            tc.text = tc.text.strip_prefix('!').unwrap_or(&tc.text).to_string();
         }
     }
     blocks
