@@ -735,10 +735,7 @@ impl Orchestrator {
                                     InteractiveInput::Message { blocks: msg_blocks, interrupt: msg_interrupt } => {
                                         if msg_interrupt {
                                             let _ = b.connection.cancel(&b.acp_session_id).await;
-                                            cancel_deadline = Some(
-                                                tokio::time::Instant::now()
-                                                    + std::time::Duration::from_secs(5),
-                                            );
+                                            arm_cancel_deadline(&mut cancel_deadline);
                                         }
                                         let queued_blocks = if msg_interrupt {
                                             strip_bang_prefix(msg_blocks)
@@ -749,6 +746,14 @@ impl Orchestrator {
                                             blocks: queued_blocks,
                                             interrupt: false,
                                         });
+                                    }
+                                    InteractiveInput::CancelStream { session } => {
+                                        // Pure halt: cancel the stream without queuing any follow-on.
+                                        // The `session` field is informational — the streaming loop
+                                        // runs per-brain-session, so there is exactly one active stream.
+                                        let _ = session;
+                                        let _ = b.connection.cancel(&b.acp_session_id).await;
+                                        arm_cancel_deadline(&mut cancel_deadline);
                                     }
                                     other => {
                                         // Queue non-message inputs for after streaming completes.
@@ -2363,6 +2368,18 @@ pub(crate) fn cancel_mode_for(transport: spur_acp::types::TransportKind) -> spur
     }
 }
 
+/// Arm the 5-second force-end deadline used by the streaming `select!`.
+/// Factored out so both the `Message { interrupt: true }` arm and the
+/// new `CancelStream` arm set the deadline identically and so it is
+/// directly unit-testable without a full mock orchestrator.
+pub(crate) fn arm_cancel_deadline(
+    deadline: &mut Option<tokio::time::Instant>,
+) {
+    *deadline = Some(
+        tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+    );
+}
+
 /// Build a boxed `AgentConnection` from the transport declared in `config`.
 ///
 /// Single source of truth for the `match transport { Acp/Stdio/CliWrap/StreamJson }`
@@ -2875,5 +2892,32 @@ mod cancel_stream_variant_tests {
         let _ = InteractiveInput::CancelStream {
             session: SessionId("s".to_string()),
         };
+    }
+}
+
+#[cfg(test)]
+mod cancel_deadline_arm_tests {
+    use super::arm_cancel_deadline;
+
+    #[tokio::test]
+    async fn arm_cancel_deadline_sets_5s_from_now() {
+        let mut deadline = None;
+        let before = tokio::time::Instant::now();
+        arm_cancel_deadline(&mut deadline);
+        let set = deadline.expect("arm_cancel_deadline must populate Some(deadline)");
+        let delta = set.saturating_duration_since(before);
+        assert!(
+            delta >= std::time::Duration::from_millis(4_900)
+                && delta <= std::time::Duration::from_millis(5_100),
+            "expected ~5s deadline, got {delta:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn arm_cancel_deadline_overwrites_existing() {
+        let old = tokio::time::Instant::now() - std::time::Duration::from_secs(60);
+        let mut deadline = Some(old);
+        arm_cancel_deadline(&mut deadline);
+        assert!(deadline.unwrap() > old + std::time::Duration::from_secs(1));
     }
 }
