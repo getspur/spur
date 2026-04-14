@@ -7,8 +7,8 @@ pub mod registry;
 pub mod types;
 
 pub use config::{
-    AgentConfig, AgentReviewPolicy, AgentsConfig, ArgsTemplateKind, CommandsConfig, DisplayConfig,
-    DispatchKind, IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig,
+    AgentConfig, AgentReviewPolicy, AgentsConfig, ArgsTemplateKind, CommandsConfig, DispatchKind,
+    DisplayConfig, IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig,
     ResponseBinding, ResponseRenderKind, SpurConfig,
 };
 pub use connection::{AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
