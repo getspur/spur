@@ -2559,6 +2559,62 @@ fn truncate_summary_env_default(text: &str) -> String {
     truncate_summary(text, cap)
 }
 
+/// Compute a `DiffSummary` for a worktree via `git diff --numstat`.
+///
+/// Preferred over regex-parsing the unified diff text because numstat
+/// emits tab-separated stats directly and handles binary files (`-\t-\tpath`),
+/// renames, and mode-only changes without ambiguity.
+///
+/// Cost: ~10-100ms. Same budget as `collect_diff`.
+#[allow(dead_code)] // TODO(Task 5): remove once wired at run_one_worker_attempt
+async fn build_diff_summary(
+    worktree_path: &std::path::Path,
+) -> anyhow::Result<spur_acp::DiffSummary> {
+    use tokio::process::Command;
+
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--numstat")
+        .current_dir(worktree_path)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff --numstat failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut files_changed = 0usize;
+    let mut insertions = 0usize;
+    let mut deletions = 0usize;
+    let mut files = Vec::new();
+
+    for line in stdout.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let ins = parts.next().unwrap_or("");
+        let del = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("");
+        if path.is_empty() {
+            continue;
+        }
+        files_changed += 1;
+        // numstat emits "-" for binary files. Non-"-" values parse as usize.
+        insertions += ins.parse::<usize>().unwrap_or(0);
+        deletions += del.parse::<usize>().unwrap_or(0);
+        files.push(std::path::PathBuf::from(path));
+    }
+
+    Ok(spur_acp::DiffSummary {
+        files_changed,
+        insertions,
+        deletions,
+        files,
+    })
+}
+
 /// Expand ~ to home directory.
 fn shellexpand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -2935,5 +2991,62 @@ mod truncate_summary_tests {
             Some(v) => unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", v) },
             None => unsafe { std::env::remove_var("SPUR_SUMMARY_MAX_BYTES") },
         }
+    }
+}
+
+#[cfg(test)]
+mod build_diff_summary_tests {
+    use super::build_diff_summary;
+    use spur_acp::DiffSummary;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    fn init_repo() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        Command::new("git").arg("init").current_dir(path).output().unwrap();
+        Command::new("git").args(["config", "user.email", "t@t"]).current_dir(path).output().unwrap();
+        Command::new("git").args(["config", "user.name", "t"]).current_dir(path).output().unwrap();
+        std::fs::write(path.join("a.txt"), "hello\nworld\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(path).output().unwrap();
+        Command::new("git").args(["commit", "-m", "init"]).current_dir(path).output().unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn clean_worktree_returns_zero_summary() {
+        let dir = init_repo();
+        let summary: DiffSummary = build_diff_summary(dir.path()).await.unwrap();
+        assert_eq!(summary.files_changed, 0);
+        assert_eq!(summary.insertions, 0);
+        assert_eq!(summary.deletions, 0);
+        assert!(summary.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn modified_file_produces_expected_stats() {
+        let dir = init_repo();
+        std::fs::write(dir.path().join("a.txt"), "hello\nworld\nnew line\n").unwrap();
+        let summary = build_diff_summary(dir.path()).await.unwrap();
+        assert_eq!(summary.files_changed, 1);
+        assert_eq!(summary.insertions, 1);
+        assert_eq!(summary.deletions, 0);
+        assert_eq!(summary.files, vec![PathBuf::from("a.txt")]);
+    }
+
+    #[tokio::test]
+    async fn binary_file_is_counted_but_numbers_stay_zero() {
+        let dir = init_repo();
+        // numstat emits "-\t-\tpath" for binary files.
+        std::fs::write(dir.path().join("b.bin"), [0u8, 1, 2, 3, 0xFF]).unwrap();
+        Command::new("git").args(["add", "b.bin"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git").args(["commit", "-m", "bin"]).current_dir(dir.path()).output().unwrap();
+        std::fs::write(dir.path().join("b.bin"), [9u8, 8, 7]).unwrap();
+        let summary = build_diff_summary(dir.path()).await.unwrap();
+        assert_eq!(summary.files_changed, 1);
+        assert_eq!(summary.insertions, 0, "binary diff reports '-' for line counts");
+        assert_eq!(summary.deletions, 0);
+        assert_eq!(summary.files, vec![PathBuf::from("b.bin")]);
     }
 }
