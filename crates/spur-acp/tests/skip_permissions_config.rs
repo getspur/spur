@@ -199,3 +199,38 @@ args = ["--wins"]
     assert!(eff.skip);
     assert_eq!(eff.args, vec!["--wins".to_string()]);
 }
+
+#[test]
+fn flat_only_config_without_nested_block_promotes_correctly() {
+    // The legacy user path: existing .spur/config.toml with flat
+    // skip_permissions_* fields, no [permissions] block. Must promote
+    // to nested via effective_permissions without requiring a config
+    // rewrite.
+    let toml_src = r#"
+name = "kiro-legacy"
+command = "kiro-cli"
+args = ["acp"]
+transport = "acp"
+skip_permissions = true
+skip_permissions_args = ["--trust-all-tools"]
+skip_permissions_session_mode = "bypassPermissions"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_src).expect("parse");
+
+    // Nested block is at its default (absent in TOML).
+    assert!(!cfg.permissions.skip);
+    assert!(cfg.permissions.args.is_empty());
+    assert!(cfg.permissions.session_mode.is_none());
+
+    // But effective_permissions promotes the flat fields.
+    let eff = cfg.effective_permissions();
+    assert!(eff.skip);
+    assert_eq!(eff.args, vec!["--trust-all-tools".to_string()]);
+    assert_eq!(eff.session_mode.as_deref(), Some("bypassPermissions"));
+
+    // effective_args appends the bypass args.
+    assert_eq!(
+        cfg.effective_args(),
+        vec!["acp".to_string(), "--trust-all-tools".to_string()]
+    );
+}

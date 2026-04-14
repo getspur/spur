@@ -18,8 +18,9 @@ use futures::Stream;
 use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
 
-/// Apply `set_session_mode` on `session_id` when `cfg.skip_permissions`
-/// is true and a mode is configured. Non-fatal: errors are logged at
+/// Apply `set_session_mode` on `session_id` when the agent's effective
+/// permissions request bypass (`cfg.effective_permissions().skip == true`)
+/// and a mode is configured. Non-fatal: errors are logged at
 /// `warn!` and swallowed — L2 auto-approve is the fallback, so a
 /// non-honoring agent still bypasses permissions.
 ///

@@ -1504,11 +1504,12 @@ impl Orchestrator {
         // L1a: effective_args folds skip_permissions_args into the spawn
         // args when bypass is on.
         let args = config.effective_args();
+        let perms = config.effective_permissions();
         // L2: when bypass is on, short-circuit permission requests by
         // passing None, which activates spur-acp's auto_approve fast-path.
         // Only meaningful for transports that surface ACP permission
         // callbacks (ACP native); other transports ignore the value.
-        let perm_tx = if config.effective_permissions().skip { None } else { permission_tx };
+        let perm_tx = if perms.skip { None } else { permission_tx };
 
         build_connection_from_transport(config, args, perm_tx)
     }
