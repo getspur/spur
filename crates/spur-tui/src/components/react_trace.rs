@@ -300,14 +300,36 @@ impl ReactTrace {
         });
     }
 
-    /// Append text to the most recent AgentMessage entry, or create a new one.
-    /// Same accumulation pattern as append_think but for agent responses.
+    /// Append text to the most recent AgentMessage entry for the same agent,
+    /// or create a new one. Walks backwards up to a small bounded window
+    /// skipping non-message entries (tool calls, observations, etc.) so that
+    /// interleaved tool calls don't split one logical agent message into
+    /// multiple fragments (S1.b fix for H2).
     pub fn append_message(&mut self, text: &str, agent: &str, timestamp: String) {
+        // Walk backwards up to a small bounded window looking for the most
+        // recent AgentMessage for THIS agent, skipping non-message entries
+        // (tool calls, observations, etc.). Stop at a user turn or a
+        // different agent's message — don't merge across those boundaries.
+        const WALKBACK_LIMIT: usize = 10;
+        let mut target_idx: Option<usize> = None;
+        for (offset, entry) in self.entries.iter().rev().take(WALKBACK_LIMIT).enumerate() {
+            match &entry.kind {
+                TraceKind::AgentMessage { agent: entry_agent } if entry_agent == agent => {
+                    target_idx = Some(self.entries.len() - 1 - offset);
+                    break;
+                }
+                // Don't walk past user turns or other agents' messages.
+                TraceKind::UserMessage => break,
+                TraceKind::AgentMessage { .. } => break, // different agent
+                _ => continue,                            // tool call / think / etc.
+            }
+        }
+
         #[cfg(feature = "markdown")]
         {
-            if let Some(last) = self.entries.last_mut() {
-                if let TraceKind::AgentMessage { .. } = last.kind {
-                    if let Some(stream) = last.markdown.as_mut() {
+            if let Some(idx) = target_idx {
+                if let Some(entry) = self.entries.get_mut(idx) {
+                    if let Some(stream) = entry.markdown.as_mut() {
                         stream.append(text);
                     }
                     if self.is_following {
@@ -329,9 +351,9 @@ impl ReactTrace {
         }
         #[cfg(not(feature = "markdown"))]
         {
-            if let Some(last) = self.entries.last_mut() {
-                if matches!(last.kind, TraceKind::AgentMessage { .. }) {
-                    last.text.push_str(text);
+            if let Some(idx) = target_idx {
+                if let Some(entry) = self.entries.get_mut(idx) {
+                    entry.text.push_str(text);
                     if self.is_following {
                         self.scroll_to_bottom();
                     }
