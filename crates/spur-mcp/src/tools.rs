@@ -18,6 +18,11 @@ pub struct DelegationRequest {
     pub context_files: Vec<String>,
     /// Oneshot channel for the orchestrator to send the result back.
     pub respond_to: oneshot::Sender<DelegationResult>,
+    /// Brain session that originated this request. Threaded through so
+    /// `DelegationRequested.from` / `DelegationDispatched.from` can
+    /// correctly identify the brain in lineage. Stamped at every
+    /// construction site in the MCP server.
+    pub brain_session_id: spur_acp::SessionId,
 }
 
 /// Channel the orchestrator holds to receive requests from the MCP server.
