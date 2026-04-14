@@ -2384,6 +2384,114 @@ fn build_connection_from_transport(
     }
 }
 
+// ─── WorkerFileTouched synthesis (S5 / Task 17) ──────────────────────
+//
+// Workers using general-purpose agents (kiro, claude-code, codex) do
+// NOT emit `_spur/file_touched` ExtNotifications. Instead, the
+// orchestrator synthesizes `WorkerFileTouched` events by observing
+// the worker's ToolCall stream for known file-op tool names and
+// extracting the `path`/`file_path` input field. A 200ms de-dup
+// window prevents double-counting if a SPUR-aware worker ever emits
+// both an explicit `_spur/file_touched` and a matching ToolCall.
+
+/// De-dup key for the 200ms file-touch window.
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct FileTouchKey {
+    executor_id: String,
+    path: std::path::PathBuf,
+    kind: spur_acp::domain::events::FileTouchKind,
+}
+
+/// Single-worker-or-multi-worker de-dup for WorkerFileTouched synthesis.
+/// Prevents emitting two WorkerFileTouched events when a worker both
+/// emits _spur/file_touched AND issues a matching ToolCall within 200ms.
+struct FileTouchDedup {
+    last_seen: std::sync::Mutex<std::collections::HashMap<FileTouchKey, std::time::Instant>>,
+    ttl: std::time::Duration,
+}
+
+impl FileTouchDedup {
+    fn new() -> Self {
+        Self {
+            last_seen: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ttl: std::time::Duration::from_millis(200),
+        }
+    }
+
+    /// Returns true if this (executor, path, kind) is fresh and should
+    /// be emitted. Updates the last-seen map.
+    fn should_emit(&self, key: &FileTouchKey) -> bool {
+        let now = std::time::Instant::now();
+        let mut map = self.last_seen.lock().unwrap();
+        // Garbage collect stale entries opportunistically.
+        map.retain(|_, t| now.duration_since(*t) < self.ttl * 5);
+        match map.get(key) {
+            Some(last) if now.duration_since(*last) < self.ttl => false,
+            _ => {
+                map.insert(key.clone(), now);
+                true
+            }
+        }
+    }
+}
+
+/// If `notification` is a ToolCall matching a known file-op tool name,
+/// synthesize a WorkerFileTouched event (subject to dedup).
+///
+/// The `title` field of the ACP `ToolCall` struct carries the tool name
+/// as populated by adapters (e.g. claude_events maps Anthropic's
+/// `tool_use.name` into `title`). Path extraction tries `raw_input`'s
+/// `path` / `file_path` fields first, then falls back to the first
+/// entry in `locations` if raw_input is missing the key.
+fn maybe_synthesize_file_touch(
+    notification: &agent_client_protocol::SessionNotification,
+    brain_session_id: &spur_acp::types::SessionId,
+    executor_id: &str,
+    dedup: &FileTouchDedup,
+    funnel: &crate::event_funnel::FunnelHandle,
+) {
+    let tc = match &notification.update {
+        SessionUpdate::ToolCall(tc) => tc,
+        _ => return,
+    };
+    let kind = match tc.title.as_str() {
+        "read_file" | "Read" => spur_acp::domain::events::FileTouchKind::Read,
+        "write_file" | "Write" | "edit_file" | "Edit" => {
+            spur_acp::domain::events::FileTouchKind::Write
+        }
+        _ => return,
+    };
+    // Prefer explicit raw_input path; fall back to first location entry.
+    let path = tc
+        .raw_input
+        .as_ref()
+        .and_then(|v| {
+            v.get("path")
+                .and_then(|p| p.as_str())
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    v.get("file_path")
+                        .and_then(|p| p.as_str())
+                        .map(std::path::PathBuf::from)
+                })
+        })
+        .or_else(|| tc.locations.first().map(|loc| loc.path.clone()));
+    let Some(path) = path else { return };
+    let key = FileTouchKey {
+        executor_id: executor_id.to_string(),
+        path: path.clone(),
+        kind,
+    };
+    if dedup.should_emit(&key) {
+        funnel.emit(SpurEventBody::WorkerFileTouched {
+            brain_session_id: brain_session_id.clone(),
+            executor_id: executor_id.to_string(),
+            path,
+            kind,
+        });
+    }
+}
+
 /// Run a single worker attempt: snapshot brain state, create worktree,
 /// spawn agent, prompt, collect diff.
 ///
@@ -2528,9 +2636,26 @@ async fn run_one_worker_attempt(
     let mut output_text = String::new();
     let mut worker_success = true;
 
+    // S5 — Per-worker-attempt file-touch dedup. Scope is local because
+    // the dedup key `(executor_id, path, kind)` is already
+    // executor-unique; a cross-worker shared Arc would not collide.
+    // Keeping the instance here avoids threading a new parameter
+    // through `execute_delegation` → `run_one_worker_attempt`.
+    let file_touch_dedup = std::sync::Arc::new(FileTouchDedup::new());
+    let executor_id_for_synth = worker_session.0.clone();
+
     match connection.prompt(prompt_request).await {
         Ok(mut stream) => {
             while let Some(notification) = stream.next().await {
+                // S5 — synthesize WorkerFileTouched from file-op ToolCalls
+                // before any other notification handling.
+                maybe_synthesize_file_touch(
+                    &notification,
+                    brain_session_id,
+                    &executor_id_for_synth,
+                    &file_touch_dedup,
+                    funnel,
+                );
                 match &notification.update {
                     SessionUpdate::AgentThoughtChunk(chunk)
                     | SessionUpdate::AgentMessageChunk(chunk) => {
