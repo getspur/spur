@@ -1168,40 +1168,14 @@ impl Orchestrator {
         }
 
         // Fan out session notifications from the connection's broadcast
-        // into the SpurEvent bus, tagged by the brain's spur_session_id.
-        // Transports that do not publish via broadcast (stdio / cli_wrap /
-        // stream_json) return None here; the per-call Stream drain loops
-        // below continue to handle their notifications. The JoinHandle is
-        // stored on the BrainSession so `retire_active_brain` can abort it
-        // — otherwise a pump subscribed against the reused connection keeps
-        // emitting events tagged with the now-stale spur_session_id (and
-        // a new pump on the next session doubles every notification).
+        // into the SpurEvent bus — see notification_pump::spawn_session_notification_pump.
         let notification_pump_handle =
-            connection.subscribe_session_notifications().map(|mut notif_rx| {
-                let funnel_for_notif = self.funnel.clone();
-                let spur_id_for_notif = session_id.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match notif_rx.recv().await {
-                            Ok(notif) => {
-                                funnel_for_notif.emit(SpurEventBody::AgentNotification {
-                                    session: spur_id_for_notif.clone(),
-                                    notification: Box::new(notif),
-                                });
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(
-                                    skipped = n,
-                                    session = %spur_id_for_notif,
-                                    "session notification pump lagged"
-                                );
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                break;
-                            }
-                        }
-                    }
-                })
+            connection.subscribe_session_notifications().map(|notif_rx| {
+                crate::notification_pump::spawn_session_notification_pump(
+                    notif_rx,
+                    session_id.clone(),
+                    self.funnel.clone(),
+                )
             });
 
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
@@ -1349,40 +1323,14 @@ impl Orchestrator {
         }
 
         // Fan out session notifications from the connection's broadcast
-        // into the SpurEvent bus, tagged by the brain's spur_session_id.
-        // Transports that do not publish via broadcast (stdio / cli_wrap /
-        // stream_json) return None here; the per-call Stream drain loops
-        // below continue to handle their notifications. The JoinHandle is
-        // stored on the BrainSession so `retire_active_brain` can abort it
-        // — otherwise a pump subscribed against the reused connection keeps
-        // emitting events tagged with the now-stale spur_session_id (and
-        // a new pump on the next session doubles every notification).
+        // into the SpurEvent bus — see notification_pump::spawn_session_notification_pump.
         let notification_pump_handle =
-            connection.subscribe_session_notifications().map(|mut notif_rx| {
-                let funnel_for_notif = self.funnel.clone();
-                let spur_id_for_notif = session_id.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match notif_rx.recv().await {
-                            Ok(notif) => {
-                                funnel_for_notif.emit(SpurEventBody::AgentNotification {
-                                    session: spur_id_for_notif.clone(),
-                                    notification: Box::new(notif),
-                                });
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(
-                                    skipped = n,
-                                    session = %spur_id_for_notif,
-                                    "session notification pump lagged"
-                                );
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                break;
-                            }
-                        }
-                    }
-                })
+            connection.subscribe_session_notifications().map(|notif_rx| {
+                crate::notification_pump::spawn_session_notification_pump(
+                    notif_rx,
+                    session_id.clone(),
+                    self.funnel.clone(),
+                )
             });
 
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
