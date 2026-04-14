@@ -1290,6 +1290,7 @@ impl SessionDetailView {
                 current_mode: self.current_mode.as_deref(),
                 context_used: self.context_used,
                 context_size: self.context_size,
+                stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
             },
         );
 

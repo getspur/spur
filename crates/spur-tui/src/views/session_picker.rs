@@ -380,6 +380,7 @@ impl SessionPickerView {
                 current_mode: None,
                 context_used: None,
                 context_size: None,
+                stream_in_flight: false,
             },
         );
         render_footer_hint(frame, chunks[2]);
@@ -684,6 +685,7 @@ impl SessionPickerView {
                     current_mode: None,
                     context_used: None,
                     context_size: None,
+                    stream_in_flight: false,
                 },
             );
         }
@@ -732,6 +734,7 @@ impl SessionPickerView {
                 current_mode: None,
                 context_used: None,
                 context_size: None,
+                stream_in_flight: false,
             },
         );
         render_footer_hint(frame, chunks[2]);
