@@ -879,12 +879,33 @@ impl Orchestrator {
 
     /// Initialize: scan $PATH for known agents, populate registry.
     pub async fn init_agents(&mut self) -> Result<Vec<String>> {
+        struct SeedAgent {
+            name: &'static str,
+            command: &'static str,
+            args: Vec<&'static str>,
+            transport: TransportKind,
+            /// L1a mechanism: CLI args appended when skip_permissions is on.
+            /// Empty means this agent's bypass is not a CLI flag.
+            skip_permissions_args: Vec<&'static str>,
+            /// L1b mechanism: ACP session mode set after new_session when
+            /// skip_permissions is on. None means this agent's bypass is
+            /// not an ACP session mode.
+            skip_permissions_session_mode: Option<&'static str>,
+        }
+
         let known_agents = [
-            ("kiro", "kiro-cli", vec!["acp"], TransportKind::Acp),
-            (
-                "claude-code",
-                "claude",
-                vec![
+            SeedAgent {
+                name: "kiro",
+                command: "kiro-cli",
+                args: vec!["acp"],
+                transport: TransportKind::Acp,
+                skip_permissions_args: vec!["--trust-all-tools"],
+                skip_permissions_session_mode: None,
+            },
+            SeedAgent {
+                name: "claude-code",
+                command: "claude",
+                args: vec![
                     "-p",
                     "--output-format",
                     "stream-json",
@@ -893,39 +914,75 @@ impl Orchestrator {
                     "--permission-mode",
                     "acceptEdits",
                 ],
-                TransportKind::StreamJson,
-            ),
-            ("codex", "codex", vec!["--acp"], TransportKind::Acp),
-            ("gemini", "gemini", vec![], TransportKind::CliWrap),
+                transport: TransportKind::StreamJson,
+                skip_permissions_args: vec!["--dangerously-skip-permissions"],
+                skip_permissions_session_mode: None,
+            },
+            SeedAgent {
+                name: "claude-code-acp",
+                command: "npx",
+                args: vec!["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"],
+                transport: TransportKind::Acp,
+                // The npx wrapper takes no CLI flags — bypass is via
+                // ACP session mode (verified in acp-agent.js source
+                // and probed live, see design doc).
+                skip_permissions_args: vec![],
+                skip_permissions_session_mode: Some("bypassPermissions"),
+            },
+            SeedAgent {
+                name: "codex",
+                command: "codex",
+                args: vec!["--acp"],
+                transport: TransportKind::Acp,
+                // Unknown bypass mechanism; operator can set
+                // skip_permissions=true and get L2-only (every ACP
+                // permission request silently auto-approved).
+                skip_permissions_args: vec![],
+                skip_permissions_session_mode: None,
+            },
+            SeedAgent {
+                name: "gemini",
+                command: "gemini",
+                args: vec![],
+                transport: TransportKind::CliWrap,
+                skip_permissions_args: vec![],
+                skip_permissions_session_mode: None,
+            },
         ];
 
         let mut found = Vec::new();
 
-        for (name, command, args, transport) in &known_agents {
+        for seed in &known_agents {
             let which = tokio::process::Command::new("which")
-                .arg(command)
+                .arg(seed.command)
                 .output()
                 .await;
 
             if let Ok(output) = which {
                 if output.status.success() {
                     let config = spur_acp::config::AgentConfig {
-                        name: name.to_string(),
-                        command: command.to_string(),
-                        args: args.iter().map(|s| s.to_string()).collect(),
-                        transport: *transport,
+                        name: seed.name.to_string(),
+                        command: seed.command.to_string(),
+                        args: seed.args.iter().map(|s| s.to_string()).collect(),
+                        transport: seed.transport,
                         role: AgentRole::Both,
                         capabilities: vec![],
                         cost_tier: CostTier::Medium,
                         rate_limit_window: None,
                         review: Default::default(),
                         skip_permissions: false,
-                        skip_permissions_args: vec![],
-                        skip_permissions_session_mode: None,
+                        skip_permissions_args: seed
+                            .skip_permissions_args
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect(),
+                        skip_permissions_session_mode: seed
+                            .skip_permissions_session_mode
+                            .map(String::from),
                     };
                     self.registry.register(config);
-                    found.push(name.to_string());
-                    info!(agent = %name, command = %command, "Found agent");
+                    found.push(seed.name.to_string());
+                    info!(agent = %seed.name, command = %seed.command, "Found agent");
                 }
             }
         }
