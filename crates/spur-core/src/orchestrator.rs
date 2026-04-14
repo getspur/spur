@@ -911,6 +911,9 @@ impl Orchestrator {
                         cost_tier: CostTier::Medium,
                         rate_limit_window: None,
                         review: Default::default(),
+                        skip_permissions: false,
+                        skip_permissions_args: vec![],
+                        skip_permissions_session_mode: None,
                     };
                     self.registry.register(config);
                     found.push(name.to_string());
@@ -1402,27 +1405,36 @@ impl Orchestrator {
         config: &spur_acp::config::AgentConfig,
         permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
     ) -> Box<dyn AgentConnection> {
+        // L1a: effective_args folds skip_permissions_args into the spawn
+        // args when bypass is on.
+        let args = config.effective_args();
+        // L2: when bypass is on, short-circuit permission requests by
+        // passing None, which activates spur-acp's auto_approve fast-path.
+        // Only meaningful for transports that surface ACP permission
+        // callbacks (ACP native); other transports ignore the value.
+        let perm_tx = if config.skip_permissions { None } else { permission_tx };
+
         match config.transport {
             TransportKind::Acp => Box::new(NativeAcpConnection::new(
                 config.name.clone(),
                 config.command.clone(),
-                config.args.clone(),
-                permission_tx,
+                args.clone(),
+                perm_tx,
             )),
             TransportKind::Stdio => Box::new(StdioAdapter::new(
                 config.name.clone(),
                 config.command.clone(),
-                config.args.clone(),
+                args.clone(),
             )),
             TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
                 config.name.clone(),
                 config.command.clone(),
-                config.args.clone(),
+                args.clone(),
             )),
             TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
                 config.name.clone(),
                 config.command.clone(),
-                config.args.clone(),
+                args,
             )),
         }
     }
@@ -2296,27 +2308,31 @@ async fn run_one_worker_attempt(
         .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
 
     // 2. Spawn worker agent in worktree via AgentConnection.
+    // Workers never receive a permission_tx, so L2 auto-approve is
+    // implicitly always on for them. skip_permissions still has effect
+    // via L1a (spawn args).
+    let spawn_args = agent_config.effective_args();
     let mut connection: Box<dyn AgentConnection> = match agent_config.transport {
         TransportKind::Acp => Box::new(NativeAcpConnection::new(
             agent_config.name.clone(),
             agent_config.command.clone(),
-            agent_config.args.clone(),
+            spawn_args.clone(),
             None,
         )),
         TransportKind::Stdio => Box::new(StdioAdapter::new(
             agent_config.name.clone(),
             agent_config.command.clone(),
-            agent_config.args.clone(),
+            spawn_args.clone(),
         )),
         TransportKind::CliWrap => Box::new(CliWrapAdapter::new(
             agent_config.name.clone(),
             agent_config.command.clone(),
-            agent_config.args.clone(),
+            spawn_args.clone(),
         )),
         TransportKind::StreamJson => Box::new(StreamJsonAdapter::new(
             agent_config.name.clone(),
             agent_config.command.clone(),
-            agent_config.args.clone(),
+            spawn_args,
         )),
     };
 
