@@ -119,6 +119,27 @@ pub enum TransportKind {
     StreamJson,
 }
 
+// ─── Cancel Mode ───────────────────────────────────────────────────────
+
+/// How `AgentConnection::cancel` behaves for a given transport.
+///
+/// `AcpSoft` is a true ACP `session/cancel` notification — the agent
+/// continues to exist and the session remains addressable.
+///
+/// `ProcessKill` tears down the underlying subprocess (SIGTERM for
+/// `Stdio`, SIGKILL for `CliWrap`/`StreamJson`). The next interaction
+/// with that agent requires respawning.
+///
+/// Used by the TUI to show transport-aware cancel feedback. See
+/// `docs/superpowers/specs/2026-04-14-session-detail-esc-cancel-design.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelMode {
+    /// ACP `session/cancel` notification; process stays alive.
+    AcpSoft,
+    /// Transport kills the subprocess on cancel.
+    ProcessKill,
+}
+
 // ─── Permission Flow ──────────────────────────────────────────────────
 
 /// A permission request sent from the ACP thread to the TUI.
@@ -131,5 +152,18 @@ pub struct PermissionRequest {
 #[derive(Debug, Clone)]
 pub struct PermissionResponse {
     pub option_id: String,
+}
+
+#[cfg(test)]
+mod cancel_mode_tests {
+    use super::CancelMode;
+
+    #[test]
+    fn cancel_mode_is_copy_and_equatable() {
+        let a = CancelMode::AcpSoft;
+        let b = a; // Copy
+        assert_eq!(a, b);
+        assert_ne!(CancelMode::AcpSoft, CancelMode::ProcessKill);
+    }
 }
 
