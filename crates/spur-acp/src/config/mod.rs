@@ -1,3 +1,13 @@
+pub mod entries;
+pub mod hooks;
+
+pub use entries::{
+    CommandsConfig, DisplayConfig, IngestBinding, PermissionsConfig, ResponseBinding,
+};
+pub use hooks::{
+    ArgsTemplateKind, DispatchKind, IngestParserKind, ItemSchemaKind, ResponseRenderKind,
+};
+
 use crate::domain::delegation::TimeoutFallback;
 use crate::types::{AgentRole, CostTier, TransportKind};
 use serde::{Deserialize, Serialize};
@@ -34,6 +44,22 @@ pub struct AgentConfig {
     /// Human-review policy for delegations to this agent.
     #[serde(default)]
     pub review: AgentReviewPolicy,
+
+    /// Per-agent display metadata (short handle, display name). Optional;
+    /// defaults applied by `effective_handle`.
+    #[serde(default)]
+    pub display: DisplayConfig,
+
+    /// Command dispatch / vendor-ext wiring. Optional; defaults to
+    /// `prompt_text` dispatch with no vendor-ext ingest or response.
+    #[serde(default)]
+    pub commands: CommandsConfig,
+
+    /// Permission-bypass levers. Replaces the three flat `skip_permissions*`
+    /// fields; those remain for backward compatibility and are consulted by
+    /// `effective_permissions` when this block is left at default.
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
 
     /// Enables bypass mode for this agent. When true, `skip_permissions_args`
     /// (if any) are appended at spawn, `skip_permissions_session_mode` (if

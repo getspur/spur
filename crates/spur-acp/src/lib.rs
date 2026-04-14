@@ -6,7 +6,11 @@ pub mod protocol;
 pub mod registry;
 pub mod types;
 
-pub use config::{AgentConfig, AgentReviewPolicy};
+pub use config::{
+    AgentConfig, AgentReviewPolicy, AgentsConfig, ArgsTemplateKind, CommandsConfig, DisplayConfig,
+    DispatchKind, IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig,
+    ResponseBinding, ResponseRenderKind, SpurConfig,
+};
 pub use connection::{AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
 pub use registry::AgentRegistry;
 
