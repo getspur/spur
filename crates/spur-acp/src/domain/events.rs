@@ -128,10 +128,9 @@ pub enum SpurEventBody {
         params: serde_json::Value,
     },
     DelegationRequested {
-        /// **Currently populated with the worker session**, not the brain session —
-        /// pre-existing limitation: the brain session id is not threaded into
-        /// the orchestrator. To be corrected alongside `DelegationDispatched.from`
-        /// in the follow-up task that wires the brain session through.
+        /// Brain session that issued the delegation. Stamped by the MCP
+        /// server onto every `DelegationRequest` and threaded through the
+        /// orchestrator to this emission site.
         from: SessionId,
         to_agent: String,
         task: String,
@@ -145,11 +144,9 @@ pub enum SpurEventBody {
     /// view correlate its `DelegationRequested` trace entry with the
     /// new executor node so an inline executor card can render.
     DelegationDispatched {
-        /// **Currently populated with the worker session**, not the brain session —
-        /// the brain session is not yet threaded into the orchestrator's delegation
-        /// path. Will become the brain session once the brain-side session id is
-        /// plumbed through `DelegationRequest` (follow-up task; see Task 4+ of the
-        /// close-feedback-loop plan).
+        /// Brain session that issued the delegation. Stamped by the MCP
+        /// server onto every `DelegationRequest` and threaded through the
+        /// orchestrator to this emission site.
         from: SessionId,
         /// Matches the `request_id` on `DelegationRequested` /
         /// `DelegationRequest.id` (UUID).
