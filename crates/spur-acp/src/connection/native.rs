@@ -133,6 +133,14 @@ pub struct NativeAcpConnection {
     ext_notification_rx: Option<mpsc::UnboundedReceiver<ExtNotificationPayload>>,
     /// Paired sender for `ext_notification_rx`, cloned into the ACP thread.
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    /// Connection-scoped broadcast of session notifications. Cloned into
+    /// `SpurAcpClientDynamic` (via `acp_thread_main`); subscribers obtained
+    /// via `subscribe_session_notifications` live for the connection's
+    /// whole lifetime — no per-turn channel swap, no grace window, no
+    /// dead_tx. Capacity 1024 absorbs bursty history replay from
+    /// `load_session`. Task 4 rewires `session_notification` onto this;
+    /// today it's only plumbed.
+    session_notif_tx: tokio::sync::broadcast::Sender<agent_client_protocol::SessionNotification>,
     /// Process-group id of the spawned child (equal to its pid because we spawn
     /// with `process_group(0)`). Populated by the ACP thread after spawn, read
     /// by the graceful shutdown path and the `Drop` safety net to kill the
@@ -167,6 +175,7 @@ impl NativeAcpConnection {
         permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ) -> Self {
         let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtNotificationPayload>();
+        let (session_notif_tx, _) = tokio::sync::broadcast::channel(1024);
         Self {
             agent_name: agent_name.into(),
             command: command.into(),
@@ -177,6 +186,7 @@ impl NativeAcpConnection {
             permission_tx,
             ext_notification_rx: Some(ext_rx),
             ext_notification_tx: ext_tx,
+            session_notif_tx,
             child_pgid: Arc::new(Mutex::new(None)),
         }
     }
@@ -245,6 +255,7 @@ impl AgentConnection for NativeAcpConnection {
         let thread_agent_name = agent_name.clone();
         let permission_tx = self.permission_tx.clone();
         let ext_tx = self.ext_notification_tx.clone();
+        let session_notif_tx_for_thread = self.session_notif_tx.clone();
         let child_pgid = self.child_pgid.clone();
         let handle = std::thread::Builder::new()
             .name(format!("acp-{}", agent_name))
@@ -256,6 +267,7 @@ impl AgentConnection for NativeAcpConnection {
                     cmd_rx,
                     permission_tx,
                     ext_tx,
+                    session_notif_tx_for_thread,
                     child_pgid,
                 );
             })
@@ -655,6 +667,7 @@ fn acp_thread_main(
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    _session_notif_tx: tokio::sync::broadcast::Sender<agent_client_protocol::SessionNotification>,
     child_pgid: Arc<Mutex<Option<i32>>>,
 ) {
     // Build a single-threaded runtime for this thread.
