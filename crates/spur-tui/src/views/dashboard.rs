@@ -217,7 +217,7 @@ impl DashboardView {
             let paragraph = Paragraph::new(lines)
                 .alignment(ratatui::layout::Alignment::Center);
 
-            let input_height = self.input_bar.required_height();
+            let input_height = self.input_bar.required_height(area.width);
             let chunks = Layout::vertical([
                 Constraint::Min(4),
                 Constraint::Length(input_height),
@@ -258,7 +258,7 @@ impl DashboardView {
             .clamp(4, area.height * 40 / 100)
             .min(12);
 
-        let input_height = self.input_bar.required_height();
+        let input_height = self.input_bar.required_height(area.width);
 
         let chunks = Layout::vertical([
             Constraint::Length(agents_height),   // lineage tree
