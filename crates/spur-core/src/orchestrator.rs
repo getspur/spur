@@ -93,6 +93,13 @@ pub enum InteractiveInput {
         attempt_n: u32,
         decision: spur_acp::ReviewDecision,
     },
+    /// Halt the currently streaming prompt (if any) via `AgentConnection::cancel`.
+    /// When received inside the streaming `select!`, calls `cancel()` and arms
+    /// the 5s force-timeout. When received outside the streaming loop (no
+    /// active turn), dropped with a debug log (the view guards against emitting
+    /// this unless a stream is in-flight, but a TurnComplete-vs-Esc race can
+    /// still produce a stray one).
+    CancelStream { session: SessionId },
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -591,6 +598,14 @@ impl Orchestrator {
                     } else {
                         warn!(mode_id = %mode_id, "SetSessionMode received but no active brain session");
                     }
+                }
+
+                // ── CancelStream (outside active turn) ───────────────────
+                InteractiveInput::CancelStream { session } => {
+                    tracing::debug!(
+                        session = %session,
+                        "CancelStream received outside active turn; dropping (no stream to cancel)"
+                    );
                 }
 
                 // ── Message ─────────────────────────────────────────────
@@ -2847,5 +2862,18 @@ mod cancel_mode_helper_tests {
         assert_eq!(cancel_mode_for(TransportKind::Stdio), CancelMode::ProcessKill);
         assert_eq!(cancel_mode_for(TransportKind::CliWrap), CancelMode::ProcessKill);
         assert_eq!(cancel_mode_for(TransportKind::StreamJson), CancelMode::ProcessKill);
+    }
+}
+
+#[cfg(test)]
+mod cancel_stream_variant_tests {
+    use super::InteractiveInput;
+    use spur_acp::SessionId;
+
+    #[test]
+    fn cancel_stream_variant_constructs() {
+        let _ = InteractiveInput::CancelStream {
+            session: SessionId("s".to_string()),
+        };
     }
 }
