@@ -126,9 +126,11 @@ pub enum TransportKind {
 /// `AcpSoft` is a true ACP `session/cancel` notification — the agent
 /// continues to exist and the session remains addressable.
 ///
-/// `ProcessKill` tears down the underlying subprocess (SIGTERM for
-/// `Stdio`, SIGKILL for `CliWrap`/`StreamJson`). The next interaction
-/// with that agent requires respawning.
+/// `ProcessKill` signals the subprocess on cancel (SIGTERM for `Stdio`;
+/// SIGKILL via `child.kill()` for `CliWrap`/`StreamJson`). The session
+/// cannot be resumed without respawning — even if the `Stdio` agent
+/// declines to exit on SIGTERM, the transport no longer treats the
+/// session as usable.
 ///
 /// Used by the TUI to show transport-aware cancel feedback. See
 /// `docs/superpowers/specs/2026-04-14-session-detail-esc-cancel-design.md`.
@@ -136,7 +138,7 @@ pub enum TransportKind {
 pub enum CancelMode {
     /// ACP `session/cancel` notification; process stays alive.
     AcpSoft,
-    /// Transport kills the subprocess on cancel.
+    /// Transport signals the subprocess on cancel; the session is dropped.
     ProcessKill,
 }
 
