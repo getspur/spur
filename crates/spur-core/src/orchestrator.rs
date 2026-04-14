@@ -2575,6 +2575,7 @@ async fn build_diff_summary(
     let output = Command::new("git")
         .arg("diff")
         .arg("--numstat")
+        .arg("HEAD")
         .current_dir(worktree_path)
         .output()
         .await?;
@@ -2600,11 +2601,34 @@ async fn build_diff_summary(
         if path.is_empty() {
             continue;
         }
+        // Rename notation: "old => new" (top-level) or "dir/{old => new}" (nested).
+        // Extract destination path so downstream consumers see a real filename.
+        let path = if let Some(arrow_pos) = path.find(" => ") {
+            let after_arrow = &path[arrow_pos + 4..];
+            // Nested form: "dir/{old => new}/tail" — strip the trailing '}' and
+            // reconstruct as "dir/" + destination + "/tail". For the simple
+            // top-level form "old => new" there are no braces and this just
+            // returns `new`.
+            if let Some(brace_pos) = path[..arrow_pos].rfind('{') {
+                let prefix = &path[..brace_pos];
+                let dest = after_arrow.trim_end_matches('}');
+                // Handle "dir/{old => new}/tail" — find where the '}' lived.
+                let (dest_clean, tail) = match dest.find('}') {
+                    Some(i) => (&dest[..i], &dest[i + 1..]),
+                    None => (dest, ""),
+                };
+                format!("{}{}{}", prefix, dest_clean, tail)
+            } else {
+                after_arrow.to_string()
+            }
+        } else {
+            path.to_string()
+        };
         files_changed += 1;
         // numstat emits "-" for binary files. Non-"-" values parse as usize.
         insertions += ins.parse::<usize>().unwrap_or(0);
         deletions += del.parse::<usize>().unwrap_or(0);
-        files.push(std::path::PathBuf::from(path));
+        files.push(std::path::PathBuf::from(&path));
     }
 
     Ok(spur_acp::DiffSummary {
@@ -3003,14 +3027,23 @@ mod build_diff_summary_tests {
     use tempfile::tempdir;
 
     fn init_repo() -> tempfile::TempDir {
+        fn git(path: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git").args(args).current_dir(path).output().unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
         let dir = tempdir().unwrap();
         let path = dir.path();
-        Command::new("git").arg("init").current_dir(path).output().unwrap();
-        Command::new("git").args(["config", "user.email", "t@t"]).current_dir(path).output().unwrap();
-        Command::new("git").args(["config", "user.name", "t"]).current_dir(path).output().unwrap();
+        git(path, &["init"]);
+        git(path, &["config", "user.email", "t@t"]);
+        git(path, &["config", "user.name", "t"]);
         std::fs::write(path.join("a.txt"), "hello\nworld\n").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(path).output().unwrap();
-        Command::new("git").args(["commit", "-m", "init"]).current_dir(path).output().unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", "init"]);
         dir
     }
 
@@ -3048,5 +3081,35 @@ mod build_diff_summary_tests {
         assert_eq!(summary.insertions, 0, "binary diff reports '-' for line counts");
         assert_eq!(summary.deletions, 0);
         assert_eq!(summary.files, vec![PathBuf::from("b.bin")]);
+    }
+
+    #[tokio::test]
+    async fn renamed_file_reports_destination_path() {
+        let dir = init_repo();
+        let path = dir.path();
+        // Create a second file to make git rename-detection engage reliably.
+        std::fs::write(path.join("a.txt"), "hello\nworld\nextra\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(path).output().unwrap();
+        Command::new("git").args(["commit", "-m", "grow"]).current_dir(path).output().unwrap();
+        // Rename a.txt -> b.txt with a small tweak so line counts are non-zero.
+        std::fs::rename(path.join("a.txt"), path.join("b.txt")).unwrap();
+        std::fs::write(path.join("b.txt"), "hello\nworld\nextra\nrenamed\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(path).output().unwrap();
+
+        let summary = build_diff_summary(path).await.unwrap();
+        // Either git reports a rename (1 entry, path=b.txt) OR a delete+add pair
+        // (2 entries, both a.txt and b.txt). Both are acceptable — the key
+        // invariant is: no path contains " => " after our rename-stripping.
+        assert!(
+            summary.files.iter().all(|p| !p.to_string_lossy().contains(" => ")),
+            "rename notation leaked into path: {:?}",
+            summary.files
+        );
+        // b.txt must appear in the file list under either shape.
+        assert!(
+            summary.files.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("b.txt")),
+            "b.txt not in file list: {:?}",
+            summary.files
+        );
     }
 }
