@@ -16,6 +16,14 @@ pub enum ReviewKind {
     Checkpoint,
 }
 
+/// Whether a file was read or written.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum FileTouchKind {
+    Read,
+    Write,
+}
+
 /// Payload carried with a review request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewPayload {
@@ -232,6 +240,37 @@ pub enum SpurEventBody {
     SessionsListError { message: String },
     /// Replayed conversation history from disk (when agent doesn't support load_session).
     SessionHistory { session: SessionId, entries: Vec<HistoryEntry> },
+
+    // ── Worker _spur/* ExtNotification vocabulary (S5) ─────────────
+    /// Worker emitted `_spur/heartbeat` — periodic alive signal.
+    /// The TUI uses this to detect stalled workers.
+    WorkerHeartbeat {
+        brain_session_id: SessionId,
+        executor_id: String,
+        /// Wall-clock at the worker; informational only.
+        worker_ts: Option<String>,
+    },
+
+    /// Worker emitted `_spur/progress_milestone` — named checkpoint.
+    /// The TUI shows this in the executor card.
+    WorkerProgress {
+        brain_session_id: SessionId,
+        executor_id: String,
+        name: String,
+        /// Optional 0..=100 percentage.
+        pct: Option<u8>,
+    },
+
+    /// Worker read or wrote a file. Either emitted explicitly by the
+    /// worker via `_spur/file_touched`, or synthesized by the
+    /// orchestrator from observed ToolCall events with a 200ms
+    /// de-duplication window.
+    WorkerFileTouched {
+        brain_session_id: SessionId,
+        executor_id: String,
+        path: std::path::PathBuf,
+        kind: FileTouchKind,
+    },
 }
 
 /// A single entry in a replayed conversation history.
