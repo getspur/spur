@@ -1,0 +1,114 @@
+# Seed agents for `spur init`. Same schema as .spur/config.toml.
+#
+# `spur init` parses this, scans $PATH for each `command`, and registers
+# matching entries into the in-memory AgentRegistry. The CLI then writes
+# that registry to .spur/config.toml as the user's starting config.
+#
+# IMPORTANT: `spur init` OVERWRITES .spur/config.toml. If you've
+# customized your config, edit it by hand rather than re-running init.
+#
+# To add a new seed agent: append an [[agents.entries]] block below. No
+# Rust changes are required. See docs/spur/agent-onboarding-cookbook.md.
+
+# ── kiro ──────────────────────────────────────────────────────────
+[[agents.entries]]
+name = "kiro"
+command = "kiro-cli"
+args = ["acp"]
+transport = "acp"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "kiro"
+
+[agents.entries.commands]
+dispatch = "vendor_exec"
+exec_method = "_kiro.dev/commands/execute"
+args_template = "raw_rest"
+
+[[agents.entries.commands.ingest]]
+method = "_kiro.dev/commands/available"
+parser = "json_path_list"
+path = "availableCommands"
+item_schema = "acp_available_command"
+
+[[agents.entries.commands.response]]
+method = "_kiro.dev/commands/execute/response"
+render = "system_note"
+
+[agents.entries.permissions]
+args = ["--trust-all-tools"]
+
+# ── claude-code (stream-json fallback) ────────────────────────────
+[[agents.entries]]
+name = "claude-code"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"]
+transport = "stream-json"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "claude-sj"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[agents.entries.permissions]
+args = ["--dangerously-skip-permissions"]
+
+# ── claude-code-acp ───────────────────────────────────────────────
+[[agents.entries]]
+name = "claude-code-acp"
+command = "npx"
+args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
+transport = "acp"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "claude"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[agents.entries.permissions]
+session_mode = "bypassPermissions"
+
+# ── codex ─────────────────────────────────────────────────────────
+# NOTE: `args = ["--acp"]` reflects the current assumption. Validate
+# against your installed codex binary — flag may differ across versions.
+# If codex needs a different ACP mode, edit this entry.
+[[agents.entries]]
+name = "codex"
+command = "codex"
+args = ["--acp"]
+transport = "acp"
+role = "both"
+cost_tier = "low"
+
+[agents.entries.display]
+handle = "codex"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[[agents.entries.commands.static]]
+name = "compact"
+description = "Compact conversation history"
+
+# ── gemini ────────────────────────────────────────────────────────
+[[agents.entries]]
+name = "gemini"
+command = "gemini"
+args = []
+transport = "cli-wrap"
+role = "worker"
+cost_tier = "low"
+
+[agents.entries.display]
+handle = "gemini"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
