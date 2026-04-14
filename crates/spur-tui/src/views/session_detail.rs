@@ -250,7 +250,7 @@ impl SessionDetailView {
     /// Lowercase agent identifier used for namespacing commands in the
     /// registry (e.g. `"claude"`, `"kiro"`).
     pub(crate) fn agent_handle_for_commands(&self) -> String {
-        self.agent_name.to_lowercase()
+        self.agent_cfg.effective_handle()
     }
 
     /// Handle an ACP `SessionUpdate::AvailableCommandsUpdate`. Builds

@@ -4,6 +4,7 @@ pub mod validator;
 
 pub use entries::{
     CommandsConfig, DisplayConfig, IngestBinding, PermissionsConfig, ResponseBinding,
+    StaticCommandDecl,
 };
 pub use hooks::{
     ArgsTemplateKind, DispatchKind, IngestParserKind, ItemSchemaKind, ResponseRenderKind,
@@ -136,6 +137,17 @@ impl AgentConfig {
         } else {
             self.permissions.clone()
         }
+    }
+
+    /// The short handle used as `/handle:cmd` on collision and as the
+    /// key under which an agent's commands register. Prefers
+    /// `display.handle` when set, otherwise falls back to
+    /// `name.to_lowercase()`.
+    pub fn effective_handle(&self) -> String {
+        self.display
+            .handle
+            .clone()
+            .unwrap_or_else(|| self.name.to_lowercase())
     }
 
     /// Args to pass when spawning this agent. Concatenates `args` with the
@@ -419,5 +431,23 @@ mod optional_duration_serde {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_handle_prefers_display_handle() {
+        let mut cfg = AgentConfig::with_defaults("ClaudeCode");
+        cfg.display.handle = Some("cc".into());
+        assert_eq!(cfg.effective_handle(), "cc");
+    }
+
+    #[test]
+    fn effective_handle_falls_back_to_lowercased_name() {
+        let cfg = AgentConfig::with_defaults("ClaudeCode");
+        assert_eq!(cfg.effective_handle(), "claudecode");
     }
 }
