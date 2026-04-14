@@ -24,7 +24,7 @@
 //! Each run prints one summary line:
 //!   agent=<…> mode=<…> permission_calls=<N> notifs=<N> took=<…>ms outcome=<ok|err>
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -156,7 +156,7 @@ struct ProbeReport {
     notifs: u32,
 }
 
-async fn run_probe(spec: &AgentSpec, mode: Mode, cwd: &PathBuf) -> anyhow::Result<ProbeReport> {
+async fn run_probe(spec: &AgentSpec, mode: Mode, cwd: &Path) -> anyhow::Result<ProbeReport> {
     // Assemble spawn args.
     let mut spawn_args = spec.base_args.clone();
     if mode.wants_args() {
@@ -210,7 +210,7 @@ async fn run_probe(spec: &AgentSpec, mode: Mode, cwd: &PathBuf) -> anyhow::Resul
     conn.initialize(InitializeRequest::new(ProtocolVersion::LATEST))
         .await?;
 
-    let session = conn.new_session(cwd.clone(), vec![]).await?;
+    let session = conn.new_session(cwd.to_path_buf(), vec![]).await?;
     let session_id = session.session_id.clone();
     eprintln!("[probe] new_session: {}", session_id);
 

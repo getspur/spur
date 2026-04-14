@@ -114,7 +114,7 @@ pub enum SpurEventBody {
     },
     WorkerSpawned { agent: String, session: SessionId, worktree: PathBuf },
     SessionCompleted { session: SessionId, success: bool },
-    AgentNotification { session: SessionId, notification: SessionNotification },
+    AgentNotification { session: SessionId, notification: Box<SessionNotification> },
     /// Vendor-extension notification received from the agent side.
     /// Routing by `method` name is the receiver's responsibility.
     /// `method` is the wire form (e.g. `"_kiro.dev/commands/available"`),

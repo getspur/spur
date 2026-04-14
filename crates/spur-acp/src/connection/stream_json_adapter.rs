@@ -252,17 +252,11 @@ impl AgentConnection for StreamJsonAdapter {
         let agent_name_clone = self.agent_name.clone();
 
         // Wrap the notification stream: yield events from rx, then update session ID.
+        // Stream ended (None) → process exited. The background reader has finished by then.
         let stream = unfold(
             (rx, Some(holder), Some(agent_name_clone)),
             |(mut rx, holder, name)| async move {
-                match rx.recv().await {
-                    Some(notif) => Some((notif, (rx, holder, name))),
-                    None => {
-                        // Stream ended — process exited. Extract Claude session ID if captured.
-                        // This runs after the background reader has finished.
-                        None
-                    }
-                }
+                rx.recv().await.map(|notif| (notif, (rx, holder, name)))
             },
         );
 
