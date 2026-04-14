@@ -79,6 +79,10 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpurEvent {
     pub occurred_at: SystemTime,
+    /// Monotonic sequence number assigned by the orchestrator's emit
+    /// funnel (S2). Direct constructors set this to 0; the funnel
+    /// overwrites. Subscribers can detect gaps and order chronologically.
+    pub seq: u64,
     pub body: SpurEventBody,
 }
 
@@ -86,8 +90,11 @@ impl SpurEvent {
     /// Convenience constructor. Use at emission sites. Do NOT call inside
     /// `apply` / projection code — timestamps there must come from the
     /// arriving event.
+    ///
+    /// Note: `seq` defaults to 0; the orchestrator's emit funnel (S2)
+    /// overwrites with a real monotonic value before broadcast.
     pub fn now(body: SpurEventBody) -> Self {
-        Self { occurred_at: SystemTime::now(), body }
+        Self { occurred_at: SystemTime::now(), seq: 0, body }
     }
 }
 
