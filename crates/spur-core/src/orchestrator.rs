@@ -111,6 +111,16 @@ pub struct Orchestrator {
     pub worktrees: WorktreeManager,
     pub cost_tracker: Option<CostTracker>,
     pub event_tx: broadcast::Sender<SpurEvent>,
+    /// Monotonic sequence counter for the S2 funnel. The funnel task
+    /// owns the write end via `fetch_add`; retained on the struct so
+    /// tests/diagnostics can inspect the current count if needed.
+    #[allow(dead_code)]
+    event_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// S2 funnel handle — every orchestrator emit flows through this.
+    /// Internally writes `SpurEventBody` into an mpsc that the funnel
+    /// task drains onto `event_tx`, stamping monotonic `seq` +
+    /// `occurred_at` in strict enqueue order (Pitfall P1).
+    funnel: crate::event_funnel::FunnelHandle,
     pub review_sink: ReviewSink,  // Clone type, shares inner Arc<Mutex>
     repo_root: PathBuf,
 }
@@ -140,6 +150,11 @@ impl Orchestrator {
         // (20 workers × 80 evt/s). Subscribers that still lag get
         // RecvError::Lagged (logged at WARN; see S1.d Lagged audit).
         let (event_tx, _) = broadcast::channel(4096);
+        // S2 — spawn the singleton funnel. Every orchestrator emit
+        // flows through `funnel.emit(body)`; the funnel task stamps
+        // monotonic seq + wall-clock time and forwards on `event_tx`.
+        let event_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let funnel = crate::event_funnel::spawn_funnel(event_tx.clone(), event_seq.clone());
         let review_sink = ReviewSink::new();
 
         Ok(Self {
@@ -148,6 +163,8 @@ impl Orchestrator {
             worktrees,
             cost_tracker,
             event_tx,
+            event_seq,
+            funnel,
             review_sink,
             repo_root,
         })
@@ -318,7 +335,7 @@ impl Orchestrator {
             self.repo_root.clone(),
             self.config.agents.entries.clone(),
             max_concurrent,
-            self.event_tx.clone(),
+            self.funnel.clone(),
             self.review_sink.clone(),
         ));
 
@@ -1101,7 +1118,7 @@ impl Orchestrator {
             self.repo_root.clone(),
             self.config.agents.entries.clone(),
             max_concurrent,
-            self.event_tx.clone(),
+            self.funnel.clone(),
             self.review_sink.clone(),
         ));
 
@@ -1109,17 +1126,15 @@ impl Orchestrator {
         // supports it). Each payload becomes a `SpurEventBody::AgentExtNotification`
         // scoped to this brain session.
         if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
-            let event_tx = self.event_tx.clone();
+            let funnel = self.funnel.clone();
             let spur_session_id = session_id.clone();
             tokio::spawn(async move {
                 while let Some(payload) = ext_rx.recv().await {
-                    let _ = event_tx.send(SpurEvent::now(
-                        SpurEventBody::AgentExtNotification {
-                            session: spur_session_id.clone(),
-                            method: payload.method,
-                            params: payload.params,
-                        },
-                    ));
+                    funnel.emit(SpurEventBody::AgentExtNotification {
+                        session: spur_session_id.clone(),
+                        method: payload.method,
+                        params: payload.params,
+                    });
                 }
             });
         }
@@ -1248,23 +1263,21 @@ impl Orchestrator {
             self.repo_root.clone(),
             self.config.agents.entries.clone(),
             max_concurrent,
-            self.event_tx.clone(),
+            self.funnel.clone(),
             self.review_sink.clone(),
         ));
 
         // Pump vendor-extension notifications onto the event stream.
         if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
-            let event_tx = self.event_tx.clone();
+            let funnel = self.funnel.clone();
             let spur_session_id = session_id.clone();
             tokio::spawn(async move {
                 while let Some(payload) = ext_rx.recv().await {
-                    let _ = event_tx.send(SpurEvent::now(
-                        SpurEventBody::AgentExtNotification {
-                            session: spur_session_id.clone(),
-                            method: payload.method,
-                            params: payload.params,
-                        },
-                    ));
+                    funnel.emit(SpurEventBody::AgentExtNotification {
+                        session: spur_session_id.clone(),
+                        method: payload.method,
+                        params: payload.params,
+                    });
                 }
             });
         }
@@ -1510,8 +1523,13 @@ impl Orchestrator {
         ))
     }
 
+    /// Emit an event through the S2 funnel. The funnel stamps `seq` +
+    /// `occurred_at`, so the caller's `event.occurred_at` is discarded —
+    /// the funnel's value is more accurate (wall-clock at send-to-broadcast
+    /// moment). Signature unchanged so the ~22 method-scope
+    /// `self.emit(SpurEvent::now(body))` callers compile transparently.
     fn emit(&self, event: SpurEvent) {
-        let _ = self.event_tx.send(event);
+        self.funnel.emit(event.body);
     }
 
     /// Handle delegation requests from the MCP callback server.
@@ -1524,7 +1542,7 @@ impl Orchestrator {
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         max_concurrent: usize,
-        event_tx: broadcast::Sender<SpurEvent>,
+        funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
@@ -1549,7 +1567,7 @@ impl Orchestrator {
             let repo_root = repo_root.clone();
             let agent_configs = agent_configs.clone();
             let semaphore = Arc::clone(&semaphore);
-            let event_tx = event_tx.clone();
+            let funnel = funnel.clone();
             let review_sink = review_sink.clone();
 
             tokio::spawn(async move {
@@ -1583,7 +1601,7 @@ impl Orchestrator {
                     brain_session_id,
                     repo_root,
                     agent_configs,
-                    event_tx.clone(),
+                    funnel.clone(),
                     review_sink.clone(),
                 )
                 .await;
@@ -1599,7 +1617,7 @@ impl Orchestrator {
                         cleanup_cancelled_review(
                             eid,
                             "brain call cancelled",
-                            &event_tx,
+                            &funnel,
                             &review_sink,
                         )
                         .await;
@@ -1639,7 +1657,7 @@ impl Orchestrator {
         brain_session_id: SessionId,
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
-        event_tx: broadcast::Sender<SpurEvent>,
+        funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
     ) -> (DelegationResult, Option<ExecutorId>) {
         // Special agent names for PM operations (from MCP server).
@@ -1713,7 +1731,7 @@ impl Orchestrator {
                 &request_id,
                 &agent_config,
                 &mut worktrees,
-                &event_tx,
+                &funnel,
             )
             .await
             {
@@ -1728,7 +1746,7 @@ impl Orchestrator {
                     // ran).
                     return (
                         finalize(
-                            &event_tx,
+                            &funnel,
                             next_worker_session,
                             DelegationStatus::Failed {
                                 error: setup_err.to_string(),
@@ -1764,7 +1782,7 @@ impl Orchestrator {
                 .await;
                 return (
                     finalize(
-                        &event_tx,
+                        &funnel,
                         outcome.worker_session,
                         outcome.candidate_status,
                         outcome.diff,
@@ -1808,7 +1826,7 @@ impl Orchestrator {
                     .await;
                     return (
                         finalize(
-                            &event_tx,
+                            &funnel,
                             outcome.worker_session,
                             failed_status,
                             outcome.diff,
@@ -1821,10 +1839,10 @@ impl Orchestrator {
                 }
             };
 
-            let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
+            funnel.emit(SpurEventBody::ExecutorPhaseChanged {
                 id: eid.0.clone(),
                 phase: LifecycleState::AwaitingReview,
-            }));
+            });
 
             let review_payload = ReviewPayload {
                 summary: outcome.summary.clone().unwrap_or_default(),
@@ -1832,12 +1850,12 @@ impl Orchestrator {
                 pr_url: None,
                 error: None,
             };
-            let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+            funnel.emit(SpurEventBody::ExecutorReviewRequested {
                 id: eid.0.clone(),
                 attempt_n,
                 kind: ReviewKind::Completion,
                 payload: review_payload,
-            }));
+            });
 
             // Inline decision-loop (so we can intercept Retry before
             // apply_decision_to_candidate maps it to Failed).
@@ -1852,10 +1870,10 @@ impl Orchestrator {
                     };
                     // Emit cancellation so the lineage projection clears
                     // pending_review (DelegationCompleted alone does not).
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+                    funnel.emit(SpurEventBody::ExecutorReviewCancelled {
                         id: eid.0.clone(),
                         reason: "review timeout".to_string(),
-                    }));
+                    });
                     // TimedOut → preserve worktree (no commit).
                     apply_worktree_cleanup(
                         &mut worktrees,
@@ -1868,7 +1886,7 @@ impl Orchestrator {
                     .await;
                     return (
                         finalize(
-                            &event_tx,
+                            &funnel,
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -1884,10 +1902,10 @@ impl Orchestrator {
             match decision_result {
                 Some(ReviewDecision::Approve) => {
                     let final_status = outcome.candidate_status.clone();
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
+                    funnel.emit(SpurEventBody::ExecutorReviewResolved {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Approve,
-                    }));
+                    });
                     // Approve → commit + remove.
                     apply_worktree_cleanup(
                         &mut worktrees,
@@ -1900,7 +1918,7 @@ impl Orchestrator {
                     .await;
                     return (
                         finalize(
-                            &event_tx,
+                            &funnel,
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -1913,10 +1931,10 @@ impl Orchestrator {
                 }
                 Some(ReviewDecision::Reject { reason }) => {
                     let final_status = DelegationStatus::Rejected { reason: reason.clone() };
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
+                    funnel.emit(SpurEventBody::ExecutorReviewResolved {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Reject { reason },
-                    }));
+                    });
                     // Rejected → no commit, preserve worktree.
                     apply_worktree_cleanup(
                         &mut worktrees,
@@ -1929,7 +1947,7 @@ impl Orchestrator {
                     .await;
                     return (
                         finalize(
-                            &event_tx,
+                            &funnel,
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -1942,10 +1960,10 @@ impl Orchestrator {
                 }
                 Some(ReviewDecision::Modify { note }) => {
                     let final_status = DelegationStatus::Modified { reviewer_note: note.clone() };
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
+                    funnel.emit(SpurEventBody::ExecutorReviewResolved {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Modify { note },
-                    }));
+                    });
                     // Modified → commit + remove (approved with reviewer note).
                     apply_worktree_cleanup(
                         &mut worktrees,
@@ -1958,7 +1976,7 @@ impl Orchestrator {
                     .await;
                     return (
                         finalize(
-                            &event_tx,
+                            &funnel,
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -2007,7 +2025,7 @@ impl Orchestrator {
                         .await;
                         return (
                             finalize(
-                                &event_tx,
+                                &funnel,
                                 outcome.worker_session,
                                 final_status,
                                 outcome.diff,
@@ -2028,12 +2046,12 @@ impl Orchestrator {
                     // the next attempt; emitting a fresh-but-unused
                     // id here would silently dangle.
                     let retry_session = SessionId::new();
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorRetryStarted {
+                    funnel.emit(SpurEventBody::ExecutorRetryStarted {
                         id: eid.0.clone(),
                         attempt_n: attempt_n + 1,
                         reason: new_constraints.clone(),
                         new_session_id: retry_session.clone(),
-                    }));
+                    });
 
                     // Record this attempt in the retry history before re-prompting.
                     // See docs/superpowers/specs/2026-04-14-brain-worker-refinement-design.md
@@ -2084,10 +2102,10 @@ impl Orchestrator {
                     };
                     // Emit cancellation so the lineage projection clears
                     // pending_review (DelegationCompleted alone does not).
-                    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+                    funnel.emit(SpurEventBody::ExecutorReviewCancelled {
                         id: eid.0.clone(),
                         reason: "review sender dropped".to_string(),
-                    }));
+                    });
                     // Sender-drop TimedOut → preserve worktree (no commit).
                     apply_worktree_cleanup(
                         &mut worktrees,
@@ -2100,7 +2118,7 @@ impl Orchestrator {
                     .await;
                     return (
                         finalize(
-                            &event_tx,
+                            &funnel,
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -2130,13 +2148,13 @@ impl Orchestrator {
 pub async fn cleanup_cancelled_review(
     executor_id: &ExecutorId,
     reason: &str,
-    event_tx: &broadcast::Sender<SpurEvent>,
+    funnel: &crate::event_funnel::FunnelHandle,
     review_sink: &ReviewSink,
 ) {
-    let _ = event_tx.send(SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
+    funnel.emit(SpurEventBody::ExecutorReviewCancelled {
         id: executor_id.0.clone(),
         reason: reason.to_string(),
-    }));
+    });
     review_sink.remove(executor_id).await;
 }
 
@@ -2234,7 +2252,7 @@ async fn apply_worktree_cleanup(
 /// "every terminal emits DelegationCompleted" invariant locally
 /// verifiable (one call site per terminal arm in `execute_delegation`).
 fn finalize(
-    event_tx: &broadcast::Sender<SpurEvent>,
+    funnel: &crate::event_funnel::FunnelHandle,
     worker_session: SessionId,
     final_status: DelegationStatus,
     diff: Option<String>,
@@ -2242,10 +2260,10 @@ fn finalize(
     summary: Option<String>,
     total_cost: f64,
 ) -> DelegationResult {
-    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationCompleted {
+    funnel.emit(SpurEventBody::DelegationCompleted {
         worker_session,
         status: final_status.clone(),
-    }));
+    });
     DelegationResult {
         status: final_status,
         diff,
@@ -2400,7 +2418,7 @@ async fn run_one_worker_attempt(
     request_id: &str,
     agent_config: &spur_acp::config::AgentConfig,
     worktrees: &mut WorktreeManager,
-    event_tx: &broadcast::Sender<SpurEvent>,
+    funnel: &crate::event_funnel::FunnelHandle,
 ) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
     // NOTE: DelegationRequested is emitted per-attempt here. The legacy
     // lineage adapter (lineage/adapter.rs) keys task_spec population to
@@ -2409,12 +2427,12 @@ async fn run_one_worker_attempt(
     // This is part of the broader "adapter keys off worker_session, not
     // stable executor_id" limitation documented for follow-up work.
     // The projection path (apply_inner) sees each event correctly.
-    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationRequested {
+    funnel.emit(SpurEventBody::DelegationRequested {
         from: brain_session_id.clone(),
         to_agent: agent.to_string(),
         task: task.to_string(),
         request_id: request_id.to_string(),
-    }));
+    });
 
     let start = Instant::now();
 
@@ -2444,18 +2462,18 @@ async fn run_one_worker_attempt(
     }
 
     // Emit WorkerSpawned event.
-    let _ = event_tx.send(SpurEvent::now(SpurEventBody::WorkerSpawned {
+    funnel.emit(SpurEventBody::WorkerSpawned {
         agent: agent.to_string(),
         session: worker_session.clone(),
         worktree: worktree_info.path.clone(),
-    }));
+    });
     // Correlate this executor with the brain's delegate_to_worker call
     // so the brain-side session_detail view can render an inline card.
-    let _ = event_tx.send(SpurEvent::now(SpurEventBody::DelegationDispatched {
+    funnel.emit(SpurEventBody::DelegationDispatched {
         from: brain_session_id.clone(),
         request_id: request_id.to_string(),
         executor_id: worker_session.0.clone(),
-    }));
+    });
 
     // Workers get no MCP servers (per spec).
     let session_response = match crate::skip_perm::new_session_with_bypass(

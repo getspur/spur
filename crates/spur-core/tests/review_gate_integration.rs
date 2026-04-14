@@ -554,7 +554,10 @@ fn review_cancelled_with_sender_dropped_reason_clears_pending_review() {
 #[tokio::test(start_paused = true)]
 async fn brain_cancellation_during_review_emits_review_cancelled() {
     use spur_acp::{SpurEvent, SpurEventBody};
+    use spur_core::event_funnel::spawn_funnel;
     use spur_core::orchestrator::cleanup_cancelled_review;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
     use tokio::sync::broadcast;
 
     let sink = ReviewSink::new();
@@ -562,11 +565,14 @@ async fn brain_cancellation_during_review_emits_review_cancelled() {
     let _rx = sink.register(ExecutorId::new("e1"), 1).await.unwrap();
 
     let (tx, mut event_rx) = broadcast::channel::<SpurEvent>(8);
+    // Build a funnel pointing at `tx` so the test can observe the
+    // stamped event on `event_rx`.
+    let funnel = spawn_funnel(tx.clone(), Arc::new(AtomicU64::new(0)));
 
     cleanup_cancelled_review(
         &ExecutorId::new("e1"),
         "brain call cancelled",
-        &tx,
+        &funnel,
         &sink,
     )
     .await;
