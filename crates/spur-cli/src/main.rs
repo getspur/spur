@@ -450,6 +450,9 @@ async fn main() -> Result<()> {
                                 params,
                             }
                         }
+                        spur_tui::UserInput::CancelStream { session } => {
+                            spur_core::InteractiveInput::CancelStream { session }
+                        }
                     };
 
                     // SubmitReview → dispatch_tx; everything else → user_tx.

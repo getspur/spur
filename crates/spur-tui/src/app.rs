@@ -61,6 +61,9 @@ pub enum UserInput {
         method: String,
         params: serde_json::Value,
     },
+    /// Halt the in-flight agent stream on the given session. Maps 1:1 to
+    /// `spur_core::InteractiveInput::CancelStream` via `spur-cli`.
+    CancelStream { session: SessionId },
 }
 
 /// Tracks the brain agent's current state for status indicators.
@@ -487,6 +490,7 @@ impl App {
                 acp_session_id,
                 brain,
                 resumed: _,
+                cancel_mode: _,
             } => {
                 self.metadata_store
                     .set_acp_mapping(&session.0, acp_session_id, brain);
@@ -697,6 +701,13 @@ impl App {
                         method,
                         params,
                     });
+                }
+            }
+
+            Action::CancelStream { session } => {
+                tracing::debug!(session = %session.0, "dispatching CancelStream to orchestrator");
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::CancelStream { session });
                 }
             }
 
