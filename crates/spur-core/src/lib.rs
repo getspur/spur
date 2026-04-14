@@ -1,3 +1,4 @@
+pub mod event_funnel;
 pub mod lineage;
 pub mod orchestrator;
 mod review_sink;
