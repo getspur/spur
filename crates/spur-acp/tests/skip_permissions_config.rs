@@ -12,7 +12,7 @@ command = "kiro-cli"
 transport = "acp"
 "#;
     let cfg: AgentConfig = toml::from_str(toml_src).expect("parse");
-    assert_eq!(cfg.skip_permissions, false);
+    assert!(!cfg.skip_permissions);
     assert!(cfg.skip_permissions_args.is_empty());
     assert!(cfg.skip_permissions_session_mode.is_none());
 }
@@ -51,11 +51,14 @@ fn skip_permissions_round_trips_through_toml() {
         review: Default::default(),
         skip_permissions: true,
         skip_permissions_args: vec!["--trust-all-tools".into()],
-        skip_permissions_session_mode: None,
+        skip_permissions_session_mode: Some("bypassPermissions".into()),
     };
     let encoded = toml::to_string(&original).expect("serialize");
     let decoded: AgentConfig = toml::from_str(&encoded).expect("deserialize");
-    assert_eq!(decoded.skip_permissions, true);
+    assert!(decoded.skip_permissions);
     assert_eq!(decoded.skip_permissions_args, vec!["--trust-all-tools".to_string()]);
-    assert!(decoded.skip_permissions_session_mode.is_none());
+    assert_eq!(
+        decoded.skip_permissions_session_mode.as_deref(),
+        Some("bypassPermissions")
+    );
 }
