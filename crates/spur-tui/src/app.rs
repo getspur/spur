@@ -191,7 +191,14 @@ impl App {
             .find(|e| e.name == name)
             .cloned()
             .map(std::sync::Arc::new)
-            .unwrap_or_else(|| std::sync::Arc::new(Self::fallback_agent_config(name)))
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    agent = %name,
+                    "agent not found in config.toml — using PromptText fallback; \
+                     vendor-ext commands will not be registered"
+                );
+                std::sync::Arc::new(Self::fallback_agent_config(name))
+            })
     }
 
     fn fallback_agent_config(name: &str) -> spur_acp::AgentConfig {

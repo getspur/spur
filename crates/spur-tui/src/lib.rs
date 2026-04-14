@@ -50,23 +50,7 @@ pub mod test_support {
             "test-agent".to_string(),
             "brain".to_string(),
             std::path::PathBuf::from("."),
-            std::sync::Arc::new(spur_acp::AgentConfig {
-                name: "test-agent".into(),
-                command: String::new(),
-                args: vec![],
-                transport: spur_acp::types::TransportKind::Acp,
-                role: spur_acp::types::AgentRole::Both,
-                capabilities: vec![],
-                cost_tier: spur_acp::types::CostTier::Medium,
-                rate_limit_window: None,
-                review: Default::default(),
-                display: Default::default(),
-                commands: Default::default(),
-                permissions: Default::default(),
-                skip_permissions: false,
-                skip_permissions_args: vec![],
-                skip_permissions_session_mode: None,
-            }),
+            default_agent_config("test-agent"),
         )
     }
 
