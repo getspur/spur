@@ -100,6 +100,10 @@ pub struct McpCallbackServer {
     delegation_tx: mpsc::Sender<DelegationRequest>,
     /// Available worker agents (set once at creation).
     workers: Vec<WorkerInfo>,
+    /// Brain session this server belongs to. Stamped onto every
+    /// `DelegationRequest` so downstream events can attribute the
+    /// request to the originating brain (not the worker session).
+    brain_session_id: SessionId,
 }
 
 impl McpCallbackServer {
@@ -118,6 +122,7 @@ impl McpCallbackServer {
             socket_path,
             delegation_tx: req_tx,
             workers: Vec::new(),
+            brain_session_id: session_id.clone(),
         };
 
         let channel = DelegationChannel {
@@ -329,6 +334,7 @@ impl McpCallbackServer {
             task: task.clone(),
             context_files,
             respond_to: tx,
+            brain_session_id: self.brain_session_id.clone(),
         };
 
         info!(agent = %agent, request_id = %request_id, "Sending delegation request");
@@ -410,6 +416,7 @@ impl McpCallbackServer {
                 task,
                 context_files: Vec::new(),
                 respond_to: tx,
+                brain_session_id: self.brain_session_id.clone(),
             };
 
             info!(agent = %agent, request_id = %request_id, "Sending parallel delegation request");
@@ -486,6 +493,7 @@ impl McpCallbackServer {
             task: json!({ "source": source, "id": issue_id }).to_string(),
             context_files: Vec::new(),
             respond_to: tx,
+            brain_session_id: self.brain_session_id.clone(),
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -540,6 +548,7 @@ impl McpCallbackServer {
             .to_string(),
             context_files: Vec::new(),
             respond_to: tx,
+            brain_session_id: self.brain_session_id.clone(),
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -592,6 +601,7 @@ impl McpCallbackServer {
             .to_string(),
             context_files: Vec::new(),
             respond_to: tx,
+            brain_session_id: self.brain_session_id.clone(),
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -634,6 +644,7 @@ impl McpCallbackServer {
             task: message.clone(),
             context_files: Vec::new(),
             respond_to: tx,
+            brain_session_id: self.brain_session_id.clone(),
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -659,6 +670,7 @@ impl McpCallbackServer {
             task: String::new(),
             context_files: Vec::new(),
             respond_to: tx,
+            brain_session_id: self.brain_session_id.clone(),
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
