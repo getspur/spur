@@ -1,17 +1,24 @@
-//! Skip-permissions empirical probe.
+//! Skip-permissions diagnostic probe.
 //!
-//! Validates two design claims for per-agent `skip_permissions` before we
-//! commit to a config schema in production:
+//! A permanent diagnostic that exercises the per-agent `skip_permissions`
+//! levers against a live agent and reports how many ACP `request_permission`
+//! calls round-tripped. Used to:
 //!
-//!   C1 (kiro-cli) — does `kiro-cli acp --trust-all-tools` suppress
-//!       ACP `request_permission` calls, or does kiro still round-trip?
-//!   C2 (claude-code-acp) — does ACP `set_session_mode("bypassPermissions")`
-//!       post-`new_session` actually suppress `request_permission` calls in
-//!       practice (already looks correct in the wrapper's source, but we want
-//!       a live check).
+//!   - Verify a new agent's bypass claims before adding it to the
+//!     supported matrix (do `--trust-all-tools` / `bypassPermissions`
+//!     actually suppress permission calls?).
+//!   - Catch regressions when upgrading a pinned agent version.
 //!
-//! Not a production artifact — delete after the design doc captures the
-//! observed matrix.
+//! Covers two known-good agents today:
+//!
+//!   C1 (kiro-cli) — `kiro-cli acp --trust-all-tools` should suppress
+//!       all ACP `request_permission` calls.
+//!   C2 (claude-code-acp) — ACP `set_session_mode("bypassPermissions")`
+//!       post-`new_session` should suppress all `request_permission`
+//!       calls in practice.
+//!
+//! Design reference:
+//!   docs/superpowers/specs/2026-04-14-spur-acp-skip-permissions-design.md
 //!
 //! Run:
 //!   cargo run -p spur-acp --example skip_perm_spike -- <agent> <mode> [cwd]
