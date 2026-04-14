@@ -1,4 +1,5 @@
 /target
 .spur/worktrees/
+.worktrees/
 *.db
 .idea/
