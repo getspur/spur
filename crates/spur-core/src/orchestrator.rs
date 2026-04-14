@@ -2677,6 +2677,87 @@ async fn build_diff_summary(
     })
 }
 
+/// One retry attempt's surviving state, kept in memory across the
+/// retry loop so later attempts can see the history. Module-local;
+/// does not leak into public API.
+#[allow(dead_code)] // TODO(Task 8): remove once wired in execute_delegation retry loop
+#[derive(Debug, Clone)]
+struct RetryAttempt {
+    attempt_n: u32,
+    summary: String,
+    diff_summary: Option<spur_acp::DiffSummary>,
+    /// Reviewer's `new_constraints` verbatim, the feedback that
+    /// triggered this retry decision.
+    feedback: String,
+}
+
+/// Render the augmented task prompt fed to the NEXT retry attempt.
+///
+/// Layout:
+///   {original_task}
+///
+///   --- Previous attempts ---
+///   Attempt N:
+///     What was tried: {summary}
+///     Files touched: {files_changed} changed, +{ins}/-{del}
+///     Reviewer feedback: {feedback}
+///   ...
+///
+///   --- Your task ---
+///   Address the reviewer's most recent feedback above. Do NOT repeat
+///   approaches that were rejected earlier — the reviewer sees the
+///   same history and will reject a repeat.
+///
+///   Most recent feedback:
+///   {current_feedback}
+#[allow(dead_code)] // TODO(Task 8): remove once wired in execute_delegation retry loop
+fn render_retry_context(
+    history: &[RetryAttempt],
+    original_task: &str,
+    current_feedback: &str,
+) -> String {
+    let mut out = String::with_capacity(original_task.len() + current_feedback.len() + 512);
+    out.push_str(original_task);
+
+    if !history.is_empty() {
+        out.push_str("\n\n--- Previous attempts ---\n");
+        for a in history {
+            out.push_str(&format!("\nAttempt {}:\n", a.attempt_n));
+            out.push_str(&format!("  What was tried: {}\n", a.summary));
+            if let Some(ds) = &a.diff_summary {
+                out.push_str(&format!(
+                    "  Files touched: {} changed, +{}/-{}\n",
+                    ds.files_changed, ds.insertions, ds.deletions
+                ));
+            }
+            out.push_str(&format!("  Reviewer feedback: {}\n", a.feedback));
+        }
+    }
+
+    out.push_str(
+        "\n--- Your task ---\n\
+         Address the reviewer's most recent feedback above. Do NOT repeat \
+         approaches that were rejected earlier — the reviewer sees the \
+         same history and will reject a repeat.\n\n\
+         Most recent feedback:\n",
+    );
+    out.push_str(current_feedback);
+    out
+}
+
+/// Drop oldest attempts until the total in-memory summary+feedback
+/// footprint fits under `max_bytes`. Preserves the most recent
+/// attempts (those are most relevant to the current feedback).
+#[allow(dead_code)] // TODO(Task 8): remove once wired in execute_delegation retry loop
+fn apply_bloat_cap(history: &mut Vec<RetryAttempt>, max_bytes: usize) {
+    fn size(a: &RetryAttempt) -> usize {
+        a.summary.len() + a.feedback.len()
+    }
+    while history.iter().map(size).sum::<usize>() > max_bytes && !history.is_empty() {
+        history.remove(0);
+    }
+}
+
 /// Expand ~ to home directory.
 fn shellexpand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -3149,5 +3230,74 @@ mod build_diff_summary_tests {
             "b.txt not in file list: {:?}",
             summary.files
         );
+    }
+}
+
+#[cfg(test)]
+mod retry_context_tests {
+    use super::{apply_bloat_cap, render_retry_context, RetryAttempt};
+    use spur_acp::DiffSummary;
+    use std::path::PathBuf;
+
+    fn att(n: u32, summary: &str, feedback: &str) -> RetryAttempt {
+        RetryAttempt {
+            attempt_n: n,
+            summary: summary.into(),
+            diff_summary: Some(DiffSummary {
+                files_changed: 1,
+                insertions: 10,
+                deletions: 2,
+                files: vec![PathBuf::from("f.rs")],
+            }),
+            feedback: feedback.into(),
+        }
+    }
+
+    #[test]
+    fn render_includes_original_task_and_all_attempts_and_current_feedback() {
+        let history = vec![
+            att(1, "tried approach A", "needs tests"),
+            att(2, "tried approach B", "still too slow"),
+        ];
+        let out = render_retry_context(&history, "make foo fast", "use async");
+        assert!(out.contains("make foo fast"));
+        assert!(out.contains("Attempt 1"));
+        assert!(out.contains("tried approach A"));
+        assert!(out.contains("needs tests"));
+        assert!(out.contains("Attempt 2"));
+        assert!(out.contains("tried approach B"));
+        assert!(out.contains("still too slow"));
+        assert!(out.contains("use async"));
+        assert!(out.contains("1 changed"));
+        assert!(out.contains("+10"));
+        assert!(out.contains("-2"));
+    }
+
+    #[test]
+    fn render_handles_empty_history() {
+        let out = render_retry_context(&[], "task", "feedback");
+        assert!(out.contains("task"));
+        assert!(out.contains("feedback"));
+        assert!(!out.contains("Attempt 1"));
+    }
+
+    #[test]
+    fn apply_bloat_cap_drops_oldest_first() {
+        let big = "x".repeat(1000);
+        let mut history = vec![
+            att(1, &big, "fb1"),
+            att(2, &big, "fb2"),
+            att(3, &big, "fb3"),
+        ];
+        apply_bloat_cap(&mut history, 2000);
+        assert!(history.iter().all(|a| a.attempt_n != 1));
+        assert!(history.iter().any(|a| a.attempt_n == 3));
+    }
+
+    #[test]
+    fn apply_bloat_cap_is_noop_when_under_cap() {
+        let mut history = vec![att(1, "s", "f")];
+        apply_bloat_cap(&mut history, 10_000);
+        assert_eq!(history.len(), 1);
     }
 }
