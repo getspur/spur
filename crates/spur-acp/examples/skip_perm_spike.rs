@@ -40,7 +40,6 @@ use agent_client_protocol::{
     ContentBlock, InitializeRequest, PermissionOptionId, PromptRequest, ProtocolVersion,
     SetSessionModeRequest, TextContent,
 };
-use futures::StreamExt;
 use spur_acp::connection::{AgentConnection, NativeAcpConnection};
 use spur_acp::types::{PermissionRequest, PermissionResponse};
 use tokio::sync::mpsc;
@@ -255,22 +254,46 @@ async fn run_probe(spec: &AgentSpec, mode: Mode, cwd: &Path) -> anyhow::Result<P
         session_id.clone(),
         vec![ContentBlock::Text(TextContent::new(prompt_text))],
     );
-    let mut stream = conn.prompt(prompt_req).await?;
 
-    // Drain notifications until the stream closes naturally or we hit the
-    // safety timeout.
+    // Subscribe BEFORE the prompt so we don't miss early notifications.
+    // For transports that publish via the broadcast (NativeAcpConnection)
+    // the returned stream is empty — the real notification path is the
+    // subscriber. For other transports (stdio/cli_wrap/stream_json) the
+    // subscriber is None and notifications flow through the stream.
+    let notif_rx = conn.subscribe_session_notifications();
+    let _stream = conn.prompt(prompt_req).await?;
+
+    // After prompt returns, drain buffered broadcast items until idle or
+    // the 90s safety cap.
     let mut notifs: u32 = 0;
-    let drain = async {
-        while let Some(_notif) = stream.next().await {
-            notifs += 1;
-            if notifs > 5000 {
+    if let Some(mut rx) = notif_rx {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                eprintln!("[probe] broadcast drain TIMED OUT after 90s ({notifs} notifs)");
                 break;
             }
+            // Use a short per-recv timeout so we exit soon after the agent
+            // goes quiet instead of waiting the full 90s.
+            let idle_cap = std::cmp::min(remaining, Duration::from_millis(500));
+            match tokio::time::timeout(idle_cap, rx.recv()).await {
+                Ok(Ok(_notif)) => {
+                    notifs += 1;
+                    if notifs > 5000 {
+                        break;
+                    }
+                }
+                Ok(Err(_)) => break,       // broadcast closed
+                Err(_) => {
+                    // idle for 500ms — treat as done.
+                    eprintln!("[probe] broadcast drained ({notifs} notifs)");
+                    break;
+                }
+            }
         }
-    };
-    match tokio::time::timeout(Duration::from_secs(90), drain).await {
-        Ok(()) => eprintln!("[probe] stream drained ({notifs} notifs)"),
-        Err(_) => eprintln!("[probe] stream drain TIMED OUT after 90s ({notifs} notifs)"),
+    } else {
+        eprintln!("[probe] transport does not expose a broadcast subscriber; notifs=0");
     }
 
     // Sanity: did the file get written? Report but don't fail on it — we

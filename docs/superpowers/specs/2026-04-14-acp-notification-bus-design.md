@@ -94,3 +94,15 @@ Replace per-turn mpsc channels + grace window + `dead_tx` swap with a single con
 3. `cargo test -p spur-acp -p spur-core -p spur-tui` — all green.
 4. Live run: `spur run` with `claude-code-acp`, open `/` popup, confirm all advertised commands appear.
 5. Grep a fresh `.spur/logs/spur.log.*` for `send_result="err"` — expect zero occurrences.
+
+## Future refactor — unify the notification delivery API
+
+Post-migration, `AgentConnection::prompt` / `load_session` have hybrid semantics: for `NativeAcpConnection` they return an empty stream and deliver notifications via the broadcast; for `StdioAdapter` / `CliWrapAdapter` / `StreamJsonAdapter` they still stream notifications synchronously. The trait docs describe this, but it remains a latent foot-gun.
+
+When appetite exists for a cross-cutting change, unify on a single API:
+
+- Change the signatures to `prompt(req) -> Result<()>` and `load_session(req) -> Result<()>`.
+- Require every transport to expose `subscribe_session_notifications() -> broadcast::Receiver<SessionNotification>` (no `Option`). Adapters that currently stream synchronously wrap their internal mpsc with a broadcast bridge.
+- Remove `drive_prompt_notifications` (`crates/spur-core/src/notification_drain.rs`) — all callers just subscribe and drain.
+
+Benefit: single honest API, no stream/broadcast split, no race-prone compat layer. Cost: touches all four adapters plus every caller. Defer until another change in this area naturally pulls it in.

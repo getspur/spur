@@ -62,13 +62,33 @@ async fn main() -> anyhow::Result<()> {
             "Say only the word OK and nothing else.".to_string(),
         ))],
     );
-    let mut stream = conn.prompt(prompt_req).await?;
-    use futures::StreamExt;
+
+    // Subscribe BEFORE issuing the prompt so we don't miss early
+    // notifications. The returned stream is empty for transports that
+    // publish via the broadcast (NativeAcpConnection); those transports
+    // deliver notifications through `subscribe_session_notifications`.
+    let notif_rx = conn.subscribe_session_notifications();
+    let _stream = conn.prompt(prompt_req).await?;
+
     let mut chunks = 0usize;
-    while let Some(_notif) = stream.next().await {
-        chunks += 1;
-        if chunks > 200 {
-            break;
+    if let Some(mut rx) = notif_rx {
+        // Prompt has returned; drain buffered broadcast items with a
+        // 500ms cap for any LocalSet-scheduled stragglers.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(_notif)) => {
+                    chunks += 1;
+                    if chunks > 200 {
+                        break;
+                    }
+                }
+                Ok(Err(_)) | Err(_) => break,
+            }
         }
     }
     println!("[ok] prompt streamed {chunks} notifications");
@@ -131,39 +151,59 @@ async fn main() -> anyhow::Result<()> {
 
         let t_load = Instant::now();
         let load_req = LoadSessionRequest::new(first.session_id.clone(), first.cwd.clone());
+        // Fresh subscriber for the load-history replay. Subscribe BEFORE
+        // the load call so early replay items aren't missed.
+        let load_notif_rx = conn.subscribe_session_notifications();
         match conn.load_session(load_req).await {
-            Ok(mut load_stream) => {
+            Ok(_load_stream) => {
                 let mut replayed = 0usize;
                 let mut variant_counts: std::collections::HashMap<&'static str, usize> =
                     std::collections::HashMap::new();
-                while let Some(notif) = load_stream.next().await {
-                    replayed += 1;
-                    let name = match &notif.update {
-                        agent_client_protocol::SessionUpdate::UserMessageChunk(_) => {
-                            "user_message_chunk"
+                if let Some(mut rx) = load_notif_rx {
+                    // After load_session returns, drain buffered replay items
+                    // with a 1s cap. Transports without a broadcast (stdio
+                    // etc.) use the returned stream instead; this path is
+                    // the native/broadcast code path.
+                    let deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+                    loop {
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        if remaining.is_zero() {
+                            break;
                         }
-                        agent_client_protocol::SessionUpdate::AgentMessageChunk(_) => {
-                            "agent_message_chunk"
+                        let notif = match tokio::time::timeout(remaining, rx.recv()).await {
+                            Ok(Ok(n)) => n,
+                            Ok(Err(_)) | Err(_) => break,
+                        };
+                        replayed += 1;
+                        let name = match &notif.update {
+                            agent_client_protocol::SessionUpdate::UserMessageChunk(_) => {
+                                "user_message_chunk"
+                            }
+                            agent_client_protocol::SessionUpdate::AgentMessageChunk(_) => {
+                                "agent_message_chunk"
+                            }
+                            agent_client_protocol::SessionUpdate::AgentThoughtChunk(_) => {
+                                "agent_thought_chunk"
+                            }
+                            agent_client_protocol::SessionUpdate::ToolCall(_) => "tool_call",
+                            agent_client_protocol::SessionUpdate::ToolCallUpdate(_) => {
+                                "tool_call_update"
+                            }
+                            agent_client_protocol::SessionUpdate::Plan(_) => "plan",
+                            agent_client_protocol::SessionUpdate::AvailableCommandsUpdate(_) => {
+                                "available_commands_update"
+                            }
+                            agent_client_protocol::SessionUpdate::CurrentModeUpdate(_) => {
+                                "current_mode_update"
+                            }
+                            _ => "other",
+                        };
+                        *variant_counts.entry(name).or_insert(0) += 1;
+                        if replayed >= 5000 {
+                            break;
                         }
-                        agent_client_protocol::SessionUpdate::AgentThoughtChunk(_) => {
-                            "agent_thought_chunk"
-                        }
-                        agent_client_protocol::SessionUpdate::ToolCall(_) => "tool_call",
-                        agent_client_protocol::SessionUpdate::ToolCallUpdate(_) => {
-                            "tool_call_update"
-                        }
-                        agent_client_protocol::SessionUpdate::Plan(_) => "plan",
-                        agent_client_protocol::SessionUpdate::AvailableCommandsUpdate(_) => {
-                            "available_commands_update"
-                        }
-                        agent_client_protocol::SessionUpdate::CurrentModeUpdate(_) => {
-                            "current_mode_update"
-                        }
-                        _ => "other",
-                    };
-                    *variant_counts.entry(name).or_insert(0) += 1;
-                    if replayed >= 5000 {
-                        break;
                     }
                 }
                 println!(
