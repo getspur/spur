@@ -91,6 +91,30 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
+    /// Construct an AgentConfig with all-default sub-tables and empty
+    /// command/args, identified by `name`. Used by the TUI's fallback
+    /// path (agent referenced but not listed in `.spur/config.toml`)
+    /// and by test fixtures that need a minimal config stub.
+    pub fn with_defaults(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            command: String::new(),
+            args: Vec::new(),
+            transport: crate::types::TransportKind::Acp,
+            role: crate::types::AgentRole::Both,
+            capabilities: Vec::new(),
+            cost_tier: crate::types::CostTier::Medium,
+            rate_limit_window: None,
+            review: AgentReviewPolicy::default(),
+            display: DisplayConfig::default(),
+            commands: CommandsConfig::default(),
+            permissions: PermissionsConfig::default(),
+            skip_permissions: false,
+            skip_permissions_args: Vec::new(),
+            skip_permissions_session_mode: None,
+        }
+    }
+
     /// The effective permissions for this agent, merging the legacy flat
     /// `skip_permissions*` fields with the newer `[permissions]` nested
     /// block. Precedence: if the nested block has ANY non-default value

@@ -222,23 +222,7 @@ impl App {
     }
 
     fn fallback_agent_config(name: &str) -> spur_acp::AgentConfig {
-        spur_acp::AgentConfig {
-            name: name.to_string(),
-            command: String::new(),
-            args: vec![],
-            transport: spur_acp::types::TransportKind::Acp,
-            role: spur_acp::types::AgentRole::Both,
-            capabilities: vec![],
-            cost_tier: spur_acp::types::CostTier::Medium,
-            rate_limit_window: None,
-            review: Default::default(),
-            display: Default::default(),
-            commands: Default::default(),
-            permissions: Default::default(),
-            skip_permissions: false,
-            skip_permissions_args: vec![],
-            skip_permissions_session_mode: None,
-        }
+        spur_acp::AgentConfig::with_defaults(name)
     }
 
     /// Dispatch a crossterm event (keyboard, resize, mouse, etc.) to the active view.
