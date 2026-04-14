@@ -1200,6 +1200,7 @@ impl Orchestrator {
             acp_session_id: session_response.session_id.to_string(),
             brain: brain_name.clone(),
             resumed: false,
+            cancel_mode: cancel_mode_for(brain_cfg.transport),
         }));
 
         Ok(BrainSession {
@@ -1344,6 +1345,7 @@ impl Orchestrator {
             acp_session_id: final_acp_session_id.clone(),
             brain: brain_name.clone(),
             resumed,
+            cancel_mode: cancel_mode_for(brain_cfg.transport),
         }));
 
         let brain_session = BrainSession {
@@ -2361,6 +2363,20 @@ struct WorkerAttemptOutcome {
 /// caller short-circuits the delegation without retry — consistent
 /// with pre-T10 behavior. Per-attempt error shape is decoupled from
 /// the public `DelegationResult` type.
+
+/// Map a transport kind to its `CancelMode`. Single source of truth used
+/// by `AgentSessionReady` emitters so the TUI can render transport-aware
+/// cancel feedback without re-inspecting `AgentConfig`.
+pub(crate) fn cancel_mode_for(transport: spur_acp::types::TransportKind) -> spur_acp::CancelMode {
+    use spur_acp::types::TransportKind;
+    match transport {
+        TransportKind::Acp => spur_acp::CancelMode::AcpSoft,
+        TransportKind::Stdio
+        | TransportKind::CliWrap
+        | TransportKind::StreamJson => spur_acp::CancelMode::ProcessKill,
+    }
+}
+
 /// Build a boxed `AgentConnection` from the transport declared in `config`.
 ///
 /// Single source of truth for the `match transport { Acp/Stdio/CliWrap/StreamJson }`
@@ -2814,5 +2830,23 @@ fn apply_decision_to_candidate(
                     (caller must wrap with retry loop)"
                 .into(),
         },
+    }
+}
+
+#[cfg(test)]
+mod cancel_mode_helper_tests {
+    use super::cancel_mode_for;
+    use spur_acp::{CancelMode, types::TransportKind};
+
+    #[test]
+    fn acp_transport_is_acp_soft() {
+        assert_eq!(cancel_mode_for(TransportKind::Acp), CancelMode::AcpSoft);
+    }
+
+    #[test]
+    fn subprocess_transports_are_process_kill() {
+        assert_eq!(cancel_mode_for(TransportKind::Stdio), CancelMode::ProcessKill);
+        assert_eq!(cancel_mode_for(TransportKind::CliWrap), CancelMode::ProcessKill);
+        assert_eq!(cancel_mode_for(TransportKind::StreamJson), CancelMode::ProcessKill);
     }
 }
