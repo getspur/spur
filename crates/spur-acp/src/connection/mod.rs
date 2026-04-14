@@ -86,9 +86,22 @@ pub trait AgentConnection: Send + Sync {
 
     /// Send a prompt to the agent and receive a stream of session notifications.
     ///
-    /// The returned stream yields `SessionNotification` items as the agent
-    /// processes the prompt. Implementations must bridge from their underlying
-    /// update mechanism (ACP callbacks, raw I/O, etc.) into this stream.
+    /// The returned stream carries `SessionNotification` items as the agent
+    /// processes the prompt. Implementations that route notifications through
+    /// their underlying update mechanism (raw I/O, line-based protocols)
+    /// deliver them here.
+    ///
+    /// **Hybrid delivery model:** implementations that also override
+    /// [`AgentConnection::subscribe_session_notifications`] (currently
+    /// `NativeAcpConnection`) publish notifications through a
+    /// connection-scoped `broadcast` channel instead and return an **empty**
+    /// stream here. The stream still closes when the prompt turn completes,
+    /// so it remains useful as a turn-completion signal, but it carries no
+    /// notification payload. New callers SHOULD prefer the subscriber:
+    /// subscribe *before* issuing the prompt to avoid missing early
+    /// notifications. Existing stream-based callers keep working for
+    /// transports that do not publish via broadcast (stdio, cli_wrap,
+    /// stream_json). See `docs/superpowers/specs/2026-04-14-acp-notification-bus-design.md`.
     async fn prompt(
         &mut self,
         request: PromptRequest,
@@ -110,7 +123,12 @@ pub trait AgentConnection: Send + Sync {
 
     /// Load an existing session by ID, returning a stream of historical notifications.
     ///
-    /// Not all transports support this; the default implementation returns an error.
+    /// Not all transports support this; the default implementation returns
+    /// an error. Like [`prompt`](Self::prompt), implementations that also
+    /// override [`subscribe_session_notifications`](Self::subscribe_session_notifications)
+    /// publish replayed history through the broadcast and return an empty
+    /// stream here — subscribe *before* calling `load_session` to capture
+    /// replay items.
     async fn load_session(
         &mut self,
         request: LoadSessionRequest,
