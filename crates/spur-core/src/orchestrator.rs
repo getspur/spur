@@ -2524,6 +2524,7 @@ async fn run_one_worker_attempt(
 /// Returns `text` unchanged if `text.len() <= cap`. Otherwise keeps
 /// `cap/4` head bytes and `cap - cap/4` tail bytes (both aligned to
 /// char boundaries), joined by an omission marker.
+#[allow(dead_code)] // TODO(Task 6): remove once wired at run_one_worker_attempt
 fn truncate_summary(text: &str, cap: usize) -> String {
     if text.len() <= cap {
         return text.to_string();
@@ -2537,7 +2538,9 @@ fn truncate_summary(text: &str, cap: usize) -> String {
     // Clamp degenerate case where head and tail would overlap.
     let tail_start = tail_start.max(head_end);
 
-    let omitted = tail_start - head_end;
+    // Use char count (not byte diff) so the marker is meaningful for
+    // multi-byte input — the very case this helper is designed to handle.
+    let omitted = text[head_end..tail_start].chars().count();
     format!(
         "{}\n\n[... {} chars omitted ...]\n\n{}",
         &text[..head_end],
@@ -2547,6 +2550,7 @@ fn truncate_summary(text: &str, cap: usize) -> String {
 }
 
 /// Reads `SPUR_SUMMARY_MAX_BYTES` (default 4000) and applies `truncate_summary`.
+#[allow(dead_code)] // TODO(Task 6): remove once wired at run_one_worker_attempt
 fn truncate_summary_env_default(text: &str) -> String {
     let cap: usize = std::env::var("SPUR_SUMMARY_MAX_BYTES")
         .ok()
@@ -2917,6 +2921,10 @@ mod truncate_summary_tests {
 
     #[test]
     fn env_var_overrides_default_cap() {
+        // This test mutates process-global env state. It is safe only
+        // because no other test in this binary reads SPUR_SUMMARY_MAX_BYTES
+        // concurrently. If that changes (future Task 6 integration test,
+        // etc.), gate with #[serial] from the serial_test crate.
         let prev = std::env::var("SPUR_SUMMARY_MAX_BYTES").ok();
         unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", "50") };
         let input = "x".repeat(200);
