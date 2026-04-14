@@ -21,6 +21,8 @@ pub use stdio_adapter::StdioAdapter;
 pub mod stream_json_adapter;
 pub use stream_json_adapter::StreamJsonAdapter;
 
+pub use tokio::sync::broadcast;
+
 use std::path::PathBuf;
 use std::pin::Pin;
 
@@ -178,6 +180,24 @@ pub trait AgentConnection: Send + Sync {
     fn take_ext_notification_rx(
         &mut self,
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<ExtNotificationPayload>> {
+        None
+    }
+
+    /// Subscribe to the connection-scoped broadcast of `SessionNotification`s.
+    ///
+    /// Implementations that publish notifications through a long-lived
+    /// broadcast channel (only `NativeAcpConnection` at time of writing)
+    /// return `Some(receiver)` here. The orchestrator spawns a pump task
+    /// that converts every published notification into a
+    /// `SpurEventBody::AgentNotification` tagged with the brain/worker's
+    /// `spur_session_id`.
+    ///
+    /// Transports that stay on the per-call `Stream` API return `None`
+    /// (default) — the orchestrator falls back to draining the stream
+    /// handed back by `prompt()` / `load_session()`.
+    fn subscribe_session_notifications(
+        &self,
+    ) -> Option<broadcast::Receiver<SessionNotification>> {
         None
     }
 }
