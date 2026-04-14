@@ -216,6 +216,12 @@ async fn run_probe(spec: &AgentSpec, mode: Mode, cwd: &Path) -> anyhow::Result<P
     conn.initialize(InitializeRequest::new(ProtocolVersion::LATEST))
         .await?;
 
+    // Subscribe BEFORE new_session so any notifications the agent emits
+    // during session setup (available_commands_update etc.) land on a
+    // live receiver. broadcast::send drops items when there are no
+    // receivers, so late subscribers miss early notifications.
+    let notif_rx = conn.subscribe_session_notifications();
+
     let session = conn.new_session(cwd.to_path_buf(), vec![]).await?;
     let session_id = session.session_id.clone();
     eprintln!("[probe] new_session: {}", session_id);
@@ -255,12 +261,8 @@ async fn run_probe(spec: &AgentSpec, mode: Mode, cwd: &Path) -> anyhow::Result<P
         vec![ContentBlock::Text(TextContent::new(prompt_text))],
     );
 
-    // Subscribe BEFORE the prompt so we don't miss early notifications.
-    // For transports that publish via the broadcast (NativeAcpConnection)
-    // the returned stream is empty — the real notification path is the
-    // subscriber. For other transports (stdio/cli_wrap/stream_json) the
-    // subscriber is None and notifications flow through the stream.
-    let notif_rx = conn.subscribe_session_notifications();
+    // notif_rx was subscribed before new_session so we already hold a
+    // receiver that captured any pre-prompt notifications.
     let _stream = conn.prompt(prompt_req).await?;
 
     // After prompt returns, drain buffered broadcast items until idle or

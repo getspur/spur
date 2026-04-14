@@ -48,6 +48,13 @@ async fn main() -> anyhow::Result<()> {
         init.agent_capabilities
     );
 
+    // Subscribe BEFORE new_session so notifications emitted during session
+    // setup (e.g. claude-code-acp's initial `available_commands_update`)
+    // land on a live receiver. tokio::sync::broadcast::send returns Err
+    // if there are zero current receivers — no retention for late
+    // subscribers — so ordering matters.
+    let notif_rx = conn.subscribe_session_notifications();
+
     let t1 = Instant::now();
     let session = conn.new_session(cwd.clone(), vec![]).await?;
     println!(
@@ -63,11 +70,6 @@ async fn main() -> anyhow::Result<()> {
         ))],
     );
 
-    // Subscribe BEFORE issuing the prompt so we don't miss early
-    // notifications. The returned stream is empty for transports that
-    // publish via the broadcast (NativeAcpConnection); those transports
-    // deliver notifications through `subscribe_session_notifications`.
-    let notif_rx = conn.subscribe_session_notifications();
     let _stream = conn.prompt(prompt_req).await?;
 
     let mut chunks = 0usize;
