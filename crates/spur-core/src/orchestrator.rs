@@ -274,10 +274,14 @@ impl Orchestrator {
                 .args(Vec::new()),
         )];
 
-        let session_response = connection
-            .new_session(self.repo_root.clone(), mcp_servers)
-            .await
-            .context("Failed to create brain session")?;
+        let session_response = crate::skip_perm::new_session_with_bypass(
+            &mut *connection,
+            &brain_config,
+            self.repo_root.clone(),
+            mcp_servers,
+        )
+        .await
+        .context("Failed to create brain session")?;
 
         // 7. Send prompt and stream events.
         let prompt_request = PromptRequest::new(
@@ -825,10 +829,14 @@ impl Orchestrator {
             .await
             .context("Failed to initialize agent")?;
 
-        let session_response = connection
-            .new_session(self.repo_root.clone(), vec![])
-            .await
-            .context("Failed to create agent session")?;
+        let session_response = crate::skip_perm::new_session_with_bypass(
+            &mut *connection,
+            &agent_config,
+            self.repo_root.clone(),
+            vec![],
+        )
+        .await
+        .context("Failed to create agent session")?;
 
         let prompt_request = PromptRequest::new(
             session_response.session_id.clone(),
@@ -1068,10 +1076,23 @@ impl Orchestrator {
                 .args(Vec::new()),
         )];
 
-        let session_response = connection
-            .new_session(self.repo_root.clone(), mcp_servers)
-            .await
-            .context("Failed to create brain session")?;
+        let brain_cfg = self
+            .registry
+            .get(&brain_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(
+                "brain agent '{}' not in registry during create_brain_session",
+                brain_name
+            ))?;
+
+        let session_response = crate::skip_perm::new_session_with_bypass(
+            &mut *connection,
+            &brain_cfg,
+            self.repo_root.clone(),
+            mcp_servers,
+        )
+        .await
+        .context("Failed to create brain session")?;
 
         // Spawn delegation handler.
         let max_concurrent = self.config.worktree.max_concurrent;
@@ -1180,6 +1201,15 @@ impl Orchestrator {
                 .args(Vec::new()),
         )];
 
+        let brain_cfg = self
+            .registry
+            .get(&brain_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(
+                "brain agent '{}' not in registry during load_brain_session",
+                brain_name
+            ))?;
+
         // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
         // fall back to new_session so we have a working session for subsequent prompts.
         // The historical conversation is displayed from the disk fallback in either case.
@@ -1196,10 +1226,14 @@ impl Orchestrator {
             }
             Err(e) => {
                 warn!(brain = %brain_name, error = %e, "load_session failed, falling back to new_session");
-                let session_response = connection
-                    .new_session(self.repo_root.clone(), mcp_servers)
-                    .await
-                    .context("Failed to create fallback session after load_session failure")?;
+                let session_response = crate::skip_perm::new_session_with_bypass(
+                    &mut *connection,
+                    &brain_cfg,
+                    self.repo_root.clone(),
+                    mcp_servers,
+                )
+                .await
+                .context("Failed to create fallback session after load_session failure")?;
                 (session_response.session_id.to_string(), None, false)
             }
         };
@@ -2357,9 +2391,13 @@ async fn run_one_worker_attempt(
     }));
 
     // Workers get no MCP servers (per spec).
-    let session_response = match connection
-        .new_session(worktree_info.path.clone(), vec![])
-        .await
+    let session_response = match crate::skip_perm::new_session_with_bypass(
+        &mut *connection,
+        agent_config,
+        worktree_info.path.clone(),
+        vec![],
+    )
+    .await
     {
         Ok(s) => s,
         Err(e) => {
