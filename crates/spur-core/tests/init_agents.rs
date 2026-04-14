@@ -2,7 +2,7 @@
 //!
 //! Uses a temp directory as an isolated $PATH so these tests don't
 //! depend on what's installed on the developer's machine. These tests
-//! pin the Spec 3 refactor (hand-rolled SeedAgent struct → embedded
+//! pin the Spec 3 refactor (hand-rolled per-agent struct → embedded
 //! seed_agents.toml).
 
 #![cfg(unix)]  // stub_binary uses Unix permissions. Windows not supported.
@@ -72,8 +72,9 @@ async fn init_agents_with_empty_path_returns_empty() {
 #[tokio::test]
 async fn init_agents_registers_full_spec12_config() {
     // Proves seed agents carry commands/permissions/display blocks,
-    // not just the 6 fields the old SeedAgent struct had. This is the
-    // key Spec 3 win — spur init now produces config-complete entries.
+    // not just a handful of fields like the pre-Spec-3 hardcoded table.
+    // This is the key Spec 3 win — spur init now produces
+    // config-complete entries.
     let tmp = TempDir::new().unwrap();
     stub_binary(tmp.path(), "kiro-cli");
 
