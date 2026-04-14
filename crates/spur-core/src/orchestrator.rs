@@ -76,10 +76,13 @@ pub enum InteractiveInput {
     /// Request `set_session_mode` on the active brain session. No-op if
     /// there is no active brain session.
     SetSessionMode { mode_id: String },
-    /// Invoke the kiro vendor extension `_kiro.dev/commands/execute` on the
-    /// active brain session. No-op if there is no active brain session.
-    KiroExecute {
+    /// Invoke an agent vendor-extension RPC on the active brain session.
+    /// No-op if there is no active brain session. The method name and args
+    /// are chosen by the TUI's config-driven dispatch path — the
+    /// orchestrator is agnostic to specific extensions.
+    VendorExec {
         session: SessionId,
+        method: String,
         command: String,
         args: serde_json::Value,
     },
@@ -519,19 +522,15 @@ impl Orchestrator {
                     }
                 }
 
-                // ── KiroExecute ──────────────────────────────────────────
-                InteractiveInput::KiroExecute { session, command, args } => {
+                // ── VendorExec ───────────────────────────────────────────
+                InteractiveInput::VendorExec { session, method, command, args } => {
                     if let Some(b) = brain.as_mut() {
                         let params = serde_json::json!({
                             "sessionId": b.acp_session_id,
                             "command": command,
                             "args": args,
                         });
-                        match b
-                            .connection
-                            .call_ext(spur_acp::ext::KIRO_COMMANDS_EXECUTE, params)
-                            .await
-                        {
+                        match b.connection.call_ext(&method, params).await {
                             Ok(resp) => {
                                 self.emit(SpurEvent::now(
                                     SpurEventBody::AgentExtNotification {
@@ -544,18 +543,20 @@ impl Orchestrator {
                             Err(e) => {
                                 warn!(
                                     brain = %b.brain_name,
+                                    method = %method,
                                     command = %command,
                                     error = %e,
-                                    "kiro ext execute failed"
+                                    "vendor exec call failed"
                                 );
                                 self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                     session,
-                                    message: format!("\u{27e8}kiro\u{27e9} execute failed: {}", e),
+                                    message: format!("vendor exec failed: {}", e),
                                 }));
                             }
                         }
                     } else {
-                        warn!(command = %command, "KiroExecute received but no active brain session");
+                        warn!(method = %method, command = %command,
+                            "VendorExec received but no active brain session");
                     }
                 }
 

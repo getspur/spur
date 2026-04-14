@@ -1,4 +1,5 @@
 pub mod action;
+pub mod agents;
 pub mod app;
 pub mod commands;
 pub mod components;

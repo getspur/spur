@@ -52,10 +52,21 @@ fn acp_cmd(name: &str, desc: &str, hint: Option<&str>) -> AvailableCommand {
     c
 }
 
+/// Helper: build a `CommandEntry` for an agent-advertised command using the
+/// default prompt_text dispatch. Mirrors what `apply_session_update` does
+/// for AvailableCommandsUpdate in production.
+fn agent_entry(handle: &str, cmd: &AvailableCommand) -> CommandEntry {
+    let cfg = spur_acp::CommandsConfig {
+        dispatch: spur_acp::DispatchKind::PromptText,
+        ..Default::default()
+    };
+    spur_tui::agents::build_entry(handle, &cfg, cmd)
+}
+
 #[test]
 fn registry_merges_spur_local_and_agent() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![acp_cmd("compact", "compact", None)]);
+    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("compact", "compact", None))]);
     let entries = reg.list();
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -70,7 +81,7 @@ fn registry_merges_spur_local_and_agent() {
 #[test]
 fn registry_marks_collisions_with_source_prefix() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![acp_cmd("help", "claude help", None)]);
+    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("help", "claude help", None))]);
 
     let entries = reg.list();
     let helps: Vec<_> = entries.iter().filter(|e| e.name == "help").collect();
@@ -91,7 +102,7 @@ fn registry_marks_collisions_with_source_prefix() {
 #[test]
 fn registry_unique_names_use_bare_form() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![acp_cmd("compact", "", None)]);
+    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("compact", "", None))]);
     let entries = reg.list();
     let compact = entries.iter().find(|e| e.name == "compact").unwrap();
     assert_eq!(reg.canonical_typed_form(compact), "/compact");
@@ -100,7 +111,7 @@ fn registry_unique_names_use_bare_form() {
 #[test]
 fn registry_resolve_prefers_explicit_prefix() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![acp_cmd("help", "", None)]);
+    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("help", "", None))]);
     let entry = reg.resolve("/claude:help").expect("match");
     assert!(matches!(&entry.source, CommandSource::Agent { handle } if handle == "claude"));
 }
@@ -108,7 +119,7 @@ fn registry_resolve_prefers_explicit_prefix() {
 #[test]
 fn registry_resolve_bare_ambiguous_prefers_spur() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![acp_cmd("help", "", None)]);
+    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("help", "", None))]);
     let entry = reg.resolve("/help").expect("match");
     assert_eq!(entry.source, CommandSource::Spur);
 }
@@ -128,9 +139,9 @@ fn fuzzy_rank_commands_prefers_prefix_matches() {
     reg.set_agent_commands(
         "claude",
         vec![
-            acp_cmd("compact", "", None),
-            acp_cmd("config", "", None),
-            acp_cmd("doctor", "", None),
+            agent_entry("claude", &acp_cmd("compact", "", None)),
+            agent_entry("claude", &acp_cmd("config", "", None)),
+            agent_entry("claude", &acp_cmd("doctor", "", None)),
         ],
     );
     let entries: Vec<_> = reg
