@@ -37,7 +37,6 @@ fn init_tracing(
 ///
 /// Contract: every agent in `spur_acp::config::load_seed_template()`
 /// must have an entry here. Enforced by `tests/init_ux.rs`.
-#[allow(dead_code)]
 const INSTALL_HINTS: &[(&str, &str)] = &[
     ("claude-code",     "npm install -g @anthropic-ai/claude-code"),
     ("kiro",            "brew install kiro-cli"),
@@ -46,7 +45,6 @@ const INSTALL_HINTS: &[(&str, &str)] = &[
     ("gemini",          "npm install -g @google/gemini-cli"),
 ];
 
-#[allow(dead_code)]
 fn install_hint(name: &str) -> &'static str {
     INSTALL_HINTS
         .iter()
@@ -66,7 +64,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize SPUR: detect agents, create config
-    Init,
+    Init {
+        /// Overwrite existing .spur/config.toml.
+        #[arg(long)]
+        force: bool,
+    },
     /// List and manage registered agents
     Agents {
         #[command(subcommand)]
@@ -185,7 +187,7 @@ async fn main() -> Result<()> {
     let _tracing_guard = init_tracing(tui_mode, &repo_root)?;
 
     match cli.command {
-        Commands::Init => cmd_init(repo_root).await,
+        Commands::Init { force } => cmd_init(repo_root, force).await,
         Commands::Agents { command } => cmd_agents(repo_root, command).await,
         Commands::Run {
             task,
@@ -575,40 +577,126 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn cmd_init(repo_root: PathBuf) -> Result<()> {
-    println!("[spur] Scanning for agents...");
-    let config = SpurConfig::default();
-    let mut orch = Orchestrator::new(repo_root.clone(), config)?;
-    let found = orch.init_agents().await?;
+async fn cmd_init(repo_root: PathBuf, force: bool) -> Result<()> {
+    use spur_acp::types::AgentRole;
 
-    if found.is_empty() {
-        println!("[spur] No agents found on $PATH.");
-        println!("[spur] Install one of: kiro-cli, claude, codex, gemini");
-    } else {
-        println!("[spur] Found {} agents:", found.len());
-        for name in &found {
-            println!("  - {name}");
+    let config_path = repo_root.join(".spur").join("config.toml");
+
+    // ── Path C: existing config + no --force → refuse and guide. ──
+    if config_path.exists() && !force {
+        println!("[spur] .spur/config.toml already exists.");
+        println!("[spur] Run `spur init --force` to overwrite.");
+        return Ok(());
+    }
+
+    // ── Scan PATH. ──
+    println!("[spur] Scanning agents on $PATH...");
+    let mut orch = Orchestrator::new(repo_root.clone(), SpurConfig::default())?;
+    let found_names = orch.init_agents().await?;
+    let seed = spur_acp::config::load_seed_template();
+    // Sort registered agents by seed order so brain selection is deterministic
+    // (seed order after Task 1: claude-code, kiro, claude-code-acp, codex, gemini).
+    let seed_order: Vec<&str> = seed.entries.iter().map(|e| e.name.as_str()).collect();
+    let mut registered: Vec<spur_acp::config::AgentConfig> =
+        orch.registry.list().into_iter().cloned().collect();
+    registered.sort_by_key(|a| {
+        seed_order
+            .iter()
+            .position(|&s| s == a.name.as_str())
+            .unwrap_or(usize::MAX)
+    });
+    let registered_names: std::collections::HashSet<_> =
+        found_names.iter().cloned().collect();
+
+    // ── Agent list: ✓ for registered, ✗ with install hint otherwise. ──
+    println!();
+    for agent in &seed.entries {
+        if registered_names.contains(&agent.name) {
+            println!("  ✓ {}", agent.name);
+        } else {
+            println!("  ✗ {:<18}install: {}", agent.name, install_hint(&agent.name));
         }
     }
 
-    // Build config from discovered agents and write to .spur/config.toml
-    let agents_entries: Vec<spur_acp::config::AgentConfig> = orch
-        .registry
-        .list()
-        .into_iter()
-        .cloned()
+    // ── Path B: zero agents → no write. ──
+    if registered.is_empty() {
+        println!();
+        println!("No agents found. Install one of the above and re-run `spur init`.");
+        return Ok(());
+    }
+
+    // ── Adaptive brain selection. ──
+    // Prefer first registered brain-capable agent (seed order after
+    // Task 1's reorder = claude-code, kiro, claude-code-acp, codex, gemini).
+    // If nothing is brain-capable, fall back to registered[0] with a note.
+    let brain_name = registered
+        .iter()
+        .find(|a| matches!(a.role, AgentRole::Brain | AgentRole::Both))
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| {
+            println!();
+            println!(
+                "  (note: no brain-capable agents registered; using {} as brain)",
+                registered[0].name
+            );
+            registered[0].name.clone()
+        });
+
+    // ── Adaptive fallback: other brain-capable agents in seed order. ──
+    let fallbacks: Vec<String> = registered
+        .iter()
+        .filter(|a| a.name != brain_name
+            && matches!(a.role, AgentRole::Brain | AgentRole::Both))
+        .map(|a| a.name.clone())
         .collect();
-    let mut persist_config = SpurConfig::default();
-    persist_config.agents.entries = agents_entries;
 
-    let config_dir = repo_root.join(".spur");
-    std::fs::create_dir_all(&config_dir)?;
-    let config_path = config_dir.join("config.toml");
-    let toml_str = toml::to_string_pretty(&persist_config)?;
-    std::fs::write(&config_path, toml_str)?;
-    println!("[spur] Config written to {}", config_path.display());
+    // ── Persist config with derived brain/fallback. ──
+    let mut persist = SpurConfig::default();
+    persist.brain.default = brain_name.clone();
+    persist.brain.fallback = fallbacks.clone();
+    persist.agents.entries = registered.clone();
 
-    println!("[spur] Initialized.");
+    std::fs::create_dir_all(config_path.parent().unwrap())?;
+    std::fs::write(&config_path, toml::to_string_pretty(&persist)?)?;
+
+    // ── Summary line. ──
+    let any_bypass = persist
+        .agents
+        .entries
+        .iter()
+        .any(|a| a.effective_permissions().skip);
+    let bypass_str = if any_bypass {
+        "enabled for some agents — review .spur/config.toml"
+    } else {
+        "disabled (safety-default)"
+    };
+    let fallback_str = if fallbacks.is_empty() {
+        "none".to_string()
+    } else {
+        fallbacks.join(", ")
+    };
+
+    println!();
+    println!("Config written to {}.", config_path.display());
+    println!(
+        "Brain: {} (fallback: {}). Bypass: {}.",
+        brain_name, fallback_str, bypass_str
+    );
+
+    // ── Capability nudge when ≥2 agents. ──
+    if registered.len() >= 2 {
+        println!();
+        println!("Tip: set `capabilities = [\"security\", ...]` on each agent");
+        println!("to enable capability-based delegation from the brain.");
+    }
+
+    // ── Next-step block. ──
+    println!();
+    println!("Next step:");
+    println!("  spur run \"describe the repo in 3 bullets\"    # one-shot");
+    println!("  spur watch                                   # interactive TUI");
+    println!("  spur config check                            # validate your setup");
+
     Ok(())
 }
 
