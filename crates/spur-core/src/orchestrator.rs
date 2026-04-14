@@ -2525,18 +2525,18 @@ async fn run_one_worker_attempt(
     let candidate_status = if worker_success {
         DelegationStatus::Success
     } else {
-        // Capture the last ~500 chars of the already-truncated summary
-        // as the error message. For LLM/tool workers this is almost
-        // always the actual failure (compiler error, test assertion,
-        // panic). Char-boundary-safe via ceil_char_boundary (stable
-        // since 1.80). `summary` holds the widened + UTF-8-safe text
-        // from the previous step — reusing it avoids re-running the
-        // truncation logic.
+        // Capture the last ~500 bytes of the already-truncated summary
+        // as the error message (last 500 bytes of the UTF-8-safe text
+        // the previous step produced, aligned to a char boundary). For
+        // LLM/tool workers this is almost always the actual failure
+        // (compiler error, test assertion, panic). `summary` already
+        // ran through truncate_summary_env_default, so reusing its
+        // tail avoids re-running the full truncation logic.
         let error = summary
             .as_deref()
             .map(|s| {
-                let tail_len = 500usize.min(s.len());
-                let start = s.ceil_char_boundary(s.len().saturating_sub(tail_len));
+                let tail_bytes = 500usize.min(s.len());
+                let start = s.ceil_char_boundary(s.len().saturating_sub(tail_bytes));
                 s[start..].to_string()
             })
             .filter(|t| !t.is_empty())
