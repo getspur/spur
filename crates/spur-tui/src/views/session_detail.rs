@@ -80,6 +80,24 @@ pub struct SessionDetailView {
     /// Informational banner shown when the session was auto-resumed on
     /// startup. Auto-fades after 3s or on first keystroke.
     resume_banner: Option<crate::components::resume_banner::ResumeBanner>,
+    /// True from the first `AgentMessageChunk`/`AgentThoughtChunk` of a turn
+    /// until the matching `TurnComplete`. Used to gate `Esc`-to-cancel on
+    /// whether a stream is actually in flight, and to render the "Esc to
+    /// stop" status-bar hint.
+    pub(crate) stream_in_flight: bool,
+
+    /// True from the moment we dispatch `Action::CancelStream` until
+    /// `TurnComplete`. Overrides the streaming label with `cancelling…` and
+    /// prevents re-entrant cancel dispatches (the next `Esc` falls through
+    /// to existing handlers, e.g. NavigateBack).
+    pub(crate) cancelling_in_flight: bool,
+
+    /// How `AgentConnection::cancel` behaves for this session's transport.
+    /// Populated from `SpurEventBody::AgentSessionReady`. Used to select
+    /// transport-aware text for the cancel system note. `None` until
+    /// `AgentSessionReady` arrives; in that window, a generic fallback is
+    /// rendered.
+    pub(crate) cancel_mode: Option<spur_acp::CancelMode>,
 }
 
 impl SessionDetailView {
@@ -123,6 +141,9 @@ impl SessionDetailView {
             last_draft_change_at: None,
             last_persisted_draft: String::new(),
             resume_banner: None,
+            stream_in_flight: false,
+            cancelling_in_flight: false,
+            cancel_mode: None,
         }
     }
 
@@ -1456,5 +1477,30 @@ mod static_command_seeding_tests {
             .map(|e| e.name.clone())
             .collect();
         assert!(names.contains(&"compact".to_string()), "static /compact should be visible at startup, got {names:?}");
+    }
+}
+
+#[cfg(test)]
+mod cancel_state_tests {
+    use super::*;
+
+    fn make_view() -> SessionDetailView {
+        use spur_acp::AgentConfig;
+        use std::sync::Arc;
+        SessionDetailView::new(
+            spur_acp::SessionId("s".to_string()),
+            "claude".to_string(),
+            "brain".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(AgentConfig::with_defaults("claude")),
+        )
+    }
+
+    #[test]
+    fn new_view_has_no_stream_in_flight() {
+        let v = make_view();
+        assert!(!v.stream_in_flight);
+        assert!(!v.cancelling_in_flight);
+        assert!(v.cancel_mode.is_none());
     }
 }
