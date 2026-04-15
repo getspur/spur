@@ -1426,6 +1426,63 @@ impl Orchestrator {
         Ok((brain_session, stream, load_outcome))
     }
 
+    /// Attempt to reconnect after a brain subprocess death. Drops the
+    /// dead `BrainSession` (closing its stdio and aborting its helper
+    /// tasks), spawns a fresh connection via `connect_brain`, then
+    /// reattaches via `load_brain_session` using the old
+    /// `acp_session_id`.
+    ///
+    /// On success returns the new `BrainSession` and the `LoadOutcome`
+    /// distinguishing "session/load restored state" from "we fell back
+    /// to a new session". On failure the caller must surface
+    /// `BrainReconnectFailed` and leave `brain = None`.
+    ///
+    /// The caller (not this helper) is responsible for emitting
+    /// `BrainReconnecting` BEFORE invoking this, and
+    /// `BrainReconnected` / `BrainReconnectFailed` after.
+    async fn try_reconnect_brain(
+        &mut self,
+        dead_brain: BrainSession,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
+        brain_override: Option<&str>,
+    ) -> Result<(BrainSession, spur_acp::LoadOutcome)> {
+        let acp_session_id = dead_brain.acp_session_id.clone();
+        let brain_name_hint = dead_brain.brain_name.clone();
+
+        // Drop the dead session: abort helper tasks, close stdio.
+        dead_brain.delegation_handle.abort();
+        if let Some(h) = dead_brain.notification_pump_handle {
+            h.abort();
+        }
+        dead_brain.mcp_handle.abort();
+        drop(dead_brain.connection);
+
+        // Fresh connection + reattach.
+        let (connection, brain_name) = self
+            .connect_brain(brain_override, permission_tx.clone())
+            .await
+            .with_context(|| {
+                format!("reconnect: connect_brain failed for '{brain_name_hint}'")
+            })?;
+
+        let (new_session, mut history_stream, outcome) = self
+            .load_brain_session(connection, brain_name, permission_tx, acp_session_id)
+            .await
+            .with_context(|| {
+                format!("reconnect: load_brain_session failed for '{brain_name_hint}'")
+            })?;
+
+        // Drain the history stream to keep the pump contract (same
+        // pattern as the ResumeSession arm). We do NOT re-emit
+        // AgentNotification events here — the TUI already rendered the
+        // pre-death transcript.
+        while let Some(_notification) = history_stream.next().await {}
+
+        Ok((new_session, outcome))
+    }
+
     /// Spawn a brain agent session with MCP callback server and delegation handler.
     pub async fn spawn_brain_session(
         &mut self,
