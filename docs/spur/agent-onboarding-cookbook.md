@@ -49,7 +49,7 @@ kind = "claude-code-acp"   # or one of the values below
 | Accepts `/slash` commands as ordinary prompt text | `dispatch = "prompt_text"` |
 | Has a vendor-ext RPC that receives structured commands | `dispatch = "vendor_exec"` + `exec_method = "…"` |
 
-Most agents use `prompt_text`. Use `vendor_exec` only if your agent exposes a custom JSON-RPC method for commands (kiro is the canonical example).
+Most agents use `prompt_text`. Use `vendor_exec` only if your agent exposes a custom JSON-RPC method for commands and you've verified it works in your agent's current release.
 
 ### Step 3 — Add static commands (optional)
 

@@ -60,7 +60,7 @@ item_schema = "acp_available_command"
 
 ```toml
 [[agents.entries.commands.response]]
-method = "_kiro.dev/commands/execute/response"
+method = "_myagent.dev/commands/execute/response"
 render = "system_note"
 ```
 
@@ -86,8 +86,8 @@ the dynamic entry overrides the static one on `(handle, name)` match.
 #### Response-method convention
 
 For `dispatch = "vendor_exec"`, `[[commands.response]]` methods follow
-`{exec_method}/response` — e.g. exec `_kiro.dev/commands/execute`
-produces responses at `_kiro.dev/commands/execute/response`. The
+`{exec_method}/response` — e.g. exec `_myagent.dev/commands/execute`
+produces responses at `_myagent.dev/commands/execute/response`. The
 orchestrator appends `/response` to the method string when re-emitting
 the call result as an `AgentExtNotification`.
 
