@@ -27,7 +27,7 @@ use agent_client_protocol::{
 };
 
 use spur_cost::CostTracker;
-use spur_mcp::{DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo};
+use spur_mcp::{build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo};
 use spur_pm::adapter::PmAdapter;
 use spur_pm::GitHubAdapter;
 use spur_worktree::WorktreeManager;
@@ -292,11 +292,8 @@ impl Orchestrator {
         let workers: Vec<WorkerInfo> = self
             .registry
             .worker_capable()
-            .iter()
-            .map(|c| WorkerInfo {
-                name: c.name.clone(),
-                ..WorkerInfo::default()
-            })
+            .into_iter()
+            .map(|c| build_worker_info(c))
             .collect();
         mcp_server.set_workers(workers);
 
@@ -1182,11 +1179,8 @@ impl Orchestrator {
         let workers: Vec<WorkerInfo> = self
             .registry
             .worker_capable()
-            .iter()
-            .map(|c| WorkerInfo {
-                name: c.name.clone(),
-                ..WorkerInfo::default()
-            })
+            .into_iter()
+            .map(|c| build_worker_info(c))
             .collect();
         mcp_server.set_workers(workers);
 
@@ -1334,11 +1328,8 @@ impl Orchestrator {
         let workers: Vec<WorkerInfo> = self
             .registry
             .worker_capable()
-            .iter()
-            .map(|c| WorkerInfo {
-                name: c.name.clone(),
-                ..WorkerInfo::default()
-            })
+            .into_iter()
+            .map(|c| build_worker_info(c))
             .collect();
         mcp_server.set_workers(workers);
 
