@@ -18,6 +18,8 @@ pub struct ProtectedRange {
     pub name: String,
 }
 
+const HISTORY_CAP: usize = 100;
+
 /// A text input widget for chatting with the brain agent.
 pub struct InputBar {
     /// Current input text.
@@ -31,6 +33,12 @@ pub struct InputBar {
     /// Capture of the most recent Enter-submit: `(text, ranges, interrupt)`.
     /// Populated on Enter, consumed via `take_submit_capture()`.
     submit_capture: Option<(String, Vec<ProtectedRange>, bool)>,
+    /// Submitted input history, oldest first. Capped at [`HISTORY_CAP`].
+    history: Vec<String>,
+    /// `None` = editing live draft; `Some(i)` = browsing `history[i]`.
+    history_cursor: Option<usize>,
+    /// Stashed live input when the user enters history-browsing mode.
+    draft: String,
 }
 
 impl InputBar {
@@ -41,6 +49,9 @@ impl InputBar {
             status: None,
             protected_ranges: Vec::new(),
             submit_capture: None,
+            history: Vec::new(),
+            history_cursor: None,
+            draft: String::new(),
         }
     }
 
@@ -61,6 +72,39 @@ impl InputBar {
                 self.text.insert(at, '\n');
                 self.shift_ranges(at, 1);
                 self.cursor = at + 1;
+                None
+            }
+            // Ctrl+U: delete from cursor to start of line.
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.cursor > 0 {
+                    let removed = self.cursor as isize;
+                    self.protected_ranges.retain(|r| r.start >= self.cursor);
+                    self.text.drain(..self.cursor);
+                    self.shift_ranges(0, -removed);
+                    self.cursor = 0;
+                    self.history_cursor = None;
+                }
+                None
+            }
+            // Ctrl+K: delete from cursor to end of line.
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.cursor < self.text.len() {
+                    self.protected_ranges.retain(|r| r.end <= self.cursor);
+                    self.text.truncate(self.cursor);
+                    self.history_cursor = None;
+                }
+                None
+            }
+            // Ctrl+W: delete previous word.
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.cursor > 0 {
+                    let dest = self.prev_word_boundary();
+                    let delta = -((self.cursor - dest) as isize);
+                    self.text.drain(dest..self.cursor);
+                    self.shift_ranges(dest, delta);
+                    self.cursor = dest;
+                    self.history_cursor = None;
+                }
                 None
             }
             KeyCode::Char(c) => {
@@ -169,6 +213,13 @@ impl InputBar {
                 let interrupt = submitted.starts_with('!');
                 let ranges = self.protected_ranges.clone();
                 self.submit_capture = Some((submitted.clone(), ranges, interrupt));
+                // Push to history.
+                self.history.push(submitted.clone());
+                if self.history.len() > HISTORY_CAP {
+                    self.history.remove(0);
+                }
+                self.history_cursor = None;
+                self.draft.clear();
                 self.clear();
                 Some((submitted, interrupt))
             }
@@ -372,6 +423,65 @@ impl InputBar {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /// Byte offset of the start of the previous word (whitespace-delimited).
+    fn prev_word_boundary(&self) -> usize {
+        let bytes = self.text.as_bytes();
+        let mut i = self.cursor;
+        // Skip trailing whitespace.
+        while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        // Skip word chars.
+        while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        i
+    }
+
+    /// Navigate to the previous history entry. Called by the view on Ctrl+P.
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        match self.history_cursor {
+            None => {
+                self.draft = self.text.clone();
+                let idx = self.history.len() - 1;
+                self.history_cursor = Some(idx);
+                self.load_history_entry(idx);
+            }
+            Some(i) if i > 0 => {
+                self.history_cursor = Some(i - 1);
+                self.load_history_entry(i - 1);
+            }
+            _ => {}
+        }
+    }
+
+    /// Navigate to the next history entry. Called by the view on Ctrl+N.
+    pub fn history_next(&mut self) {
+        match self.history_cursor {
+            Some(i) if i < self.history.len() - 1 => {
+                self.history_cursor = Some(i + 1);
+                self.load_history_entry(i + 1);
+            }
+            Some(_) => {
+                self.history_cursor = None;
+                let draft = std::mem::take(&mut self.draft);
+                let len = draft.len();
+                self.set_text(draft, len);
+            }
+            None => {}
+        }
+    }
+
+    fn load_history_entry(&mut self, idx: usize) {
+        let entry = self.history[idx].clone();
+        let len = entry.len();
+        self.protected_ranges.clear();
+        self.set_text(entry, len);
+    }
 
     /// Return the byte index of the start of the character that ends at `pos`.
     fn prev_char_boundary(&self, pos: usize) -> usize {
