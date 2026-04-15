@@ -46,7 +46,9 @@ pub struct DelegationDescriptor {
     pub output_shape:       Option<String>,
     /// Default true. When false, user fields are used verbatim
     /// (including empty vecs — no built-in merge).
-    #[serde(default = "default_inherit_defaults")]
+    // Field-level default needed even with struct-level `#[serde(default)]`:
+    // the struct-level default only fires when the whole block is absent.
+    #[serde(default = "default_true")]
     pub inherit_defaults:   bool,
 }
 
@@ -61,8 +63,6 @@ impl Default for DelegationDescriptor {
         }
     }
 }
-
-fn default_inherit_defaults() -> bool { true }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
