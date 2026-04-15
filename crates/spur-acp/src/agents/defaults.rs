@@ -83,6 +83,110 @@ pub fn apply_builtin_defaults(cfg: &mut AgentConfig) {
     }
 }
 
+/// Keyword table for lint #4 (capability/descriptor cross-check).
+///
+/// MAINTENANCE NOTE: when a new token is added to `AgentConfig::capabilities`,
+/// add the corresponding trigger keywords here so the lint flags
+/// good_for entries that reference the capability without declaring it.
+const CAPABILITY_KEYWORDS: &[(&str, &[&str])] = &[
+    ("plan_mode",      &["plan mode", "plan-mode", "planning"]),
+    ("usage",          &["usage tracking", "token counting"]),
+    ("load_session",   &["session resume", "load_session"]),
+    ("list_sessions",  &["list_sessions"]),
+    ("session_resume", &["session_resume"]),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LintLevel { Warn, Error }
+
+#[derive(Debug, Clone)]
+pub struct LintMessage {
+    pub level:   LintLevel,
+    pub agent:   String,
+    pub message: String,
+}
+
+/// Run all delegation-config lints over the given AgentConfigs.
+/// Call AFTER `apply_builtin_defaults` so inherited values are visible.
+/// All v1 lints emit `Warn` level; user sees them but startup continues.
+pub fn validate_delegation_config(cfgs: &[AgentConfig]) -> Vec<LintMessage> {
+    let mut msgs = Vec::new();
+    for cfg in cfgs {
+        lint_length(cfg, &mut msgs);
+        lint_worker_without_description(cfg, &mut msgs);
+        lint_worker_without_good_for(cfg, &mut msgs);
+        lint_capability_mismatch(cfg, &mut msgs);
+    }
+    msgs
+}
+
+fn lint_length(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
+    for (i, entry) in cfg.delegation.good_for.iter().enumerate() {
+        if entry.chars().count() > 80 {
+            out.push(LintMessage {
+                level:   LintLevel::Warn,
+                agent:   cfg.name.clone(),
+                message: format!(
+                    "good_for[{}] exceeds 80 chars; use a short task pattern, not a sentence",
+                    i
+                ),
+            });
+        }
+    }
+    for (i, entry) in cfg.delegation.avoid_for.iter().enumerate() {
+        if entry.chars().count() > 80 {
+            out.push(LintMessage {
+                level:   LintLevel::Warn,
+                agent:   cfg.name.clone(),
+                message: format!(
+                    "avoid_for[{}] exceeds 80 chars; use a short task pattern, not a sentence",
+                    i
+                ),
+            });
+        }
+    }
+}
+
+fn lint_worker_without_description(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
+    if cfg.role.is_worker_capable() && cfg.delegation.description.is_none() {
+        out.push(LintMessage {
+            level:   LintLevel::Warn,
+            agent:   cfg.name.clone(),
+            message: "worker-capable but has no delegation.description — routing will be weak".into(),
+        });
+    }
+}
+
+fn lint_worker_without_good_for(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
+    if cfg.role.is_worker_capable() && cfg.delegation.good_for.is_empty() {
+        out.push(LintMessage {
+            level:   LintLevel::Warn,
+            agent:   cfg.name.clone(),
+            message: "worker-capable but no delegation.good_for entries — brain has no positive routing signal".into(),
+        });
+    }
+}
+
+fn lint_capability_mismatch(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
+    let joined = cfg.delegation.good_for.join(" ").to_lowercase();
+    for (token, keywords) in CAPABILITY_KEYWORDS {
+        for kw in keywords.iter() {
+            if joined.contains(&kw.to_lowercase())
+                && !cfg.capabilities.iter().any(|c| c == token) {
+                out.push(LintMessage {
+                    level:   LintLevel::Warn,
+                    agent:   cfg.name.clone(),
+                    message: format!(
+                        "delegation.good_for references {} but capabilities does not declare {}",
+                        kw, token
+                    ),
+                });
+                break; // one message per token
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +286,76 @@ transport = "acp""#, name);
         let a = builtin_descriptor("claude-code").unwrap();
         let b = builtin_descriptor("claude-code-acp").unwrap();
         assert_eq!(a.description, b.description);
+    }
+
+    #[test]
+    fn lint_flags_oversized_good_for_entry() {
+        let mut cfg = minimal_agent("my-agent");
+        cfg.delegation.good_for = vec![
+            "a".repeat(90),  // over 80 chars
+            "ok short entry".into(),
+        ];
+        let msgs = validate_delegation_config(&[cfg]);
+        assert!(msgs.iter().any(|m| m.message.contains("exceeds 80")));
+    }
+
+    #[test]
+    fn lint_flags_oversized_avoid_for_entry() {
+        let mut cfg = minimal_agent("my-agent");
+        cfg.delegation.avoid_for = vec!["a".repeat(81)];
+        let msgs = validate_delegation_config(&[cfg]);
+        assert!(msgs.iter().any(|m| m.message.contains("avoid_for")));
+    }
+
+    #[test]
+    fn lint_flags_worker_without_description() {
+        // my-agent has no built-in default; no user description; worker role
+        let mut cfg = minimal_agent("my-agent");
+        // Note: default role is `Both` which is worker-capable
+        cfg.delegation.description = None;
+        let msgs = validate_delegation_config(&[cfg]);
+        assert!(msgs.iter().any(|m| m.message.contains("description")));
+    }
+
+    #[test]
+    fn lint_flags_worker_without_good_for() {
+        let mut cfg = minimal_agent("my-agent");
+        cfg.delegation.description = Some("something".into());
+        cfg.delegation.good_for = vec![];
+        let msgs = validate_delegation_config(&[cfg]);
+        assert!(msgs.iter().any(|m| m.message.contains("good_for")));
+    }
+
+    #[test]
+    fn lint_flags_capability_mismatch() {
+        let mut cfg = minimal_agent("my-agent");
+        cfg.delegation.good_for = vec!["plan mode refactors".into()];
+        // capabilities stays empty by default
+        let msgs = validate_delegation_config(&[cfg]);
+        assert!(
+            msgs.iter().any(|m| m.message.contains("plan_mode")),
+            "expected plan_mode mismatch warning, got: {:?}",
+            msgs.iter().map(|m| &m.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn lint_clean_config_produces_no_warnings() {
+        let mut cfg = minimal_agent("claude-code-acp");
+        apply_builtin_defaults(&mut cfg);
+        let msgs = validate_delegation_config(&[cfg]);
+        assert!(msgs.is_empty(), "expected no warnings, got: {:?}",
+                msgs.iter().map(|m| &m.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn lint_counts_chars_not_bytes() {
+        // Non-ASCII: each char is multi-byte but counts as 1 char.
+        let mut cfg = minimal_agent("my-agent");
+        cfg.delegation.good_for = vec!["日".repeat(50)];  // 50 chars, 150 bytes
+        let msgs = validate_delegation_config(&[cfg]);
+        // Should NOT flag — 50 chars is under 80.
+        assert!(!msgs.iter().any(|m| m.message.contains("exceeds 80")),
+                "should not flag 50-char entry even though it's 150 bytes");
     }
 }

@@ -95,6 +95,13 @@ pub enum AgentRole {
     Both,
 }
 
+impl AgentRole {
+    /// True if this role can receive delegation tasks.
+    pub fn is_worker_capable(&self) -> bool {
+        matches!(self, AgentRole::Worker | AgentRole::Both)
+    }
+}
+
 // ─── Transport Kind ────────────────────────────────────────────────────
 
 /// Which transport implementation to use for an agent.
