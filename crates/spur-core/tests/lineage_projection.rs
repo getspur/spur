@@ -12,7 +12,11 @@ fn spawn(id: &str, parent: Option<&str>) -> SpurEvent {
         parent_id: parent.map(|s| s.into()),
         session_id: SessionId(format!("sess-{}", id)),
         agent: "kiro".into(),
-        role: if parent.is_none() { Role::Brain } else { Role::Executor },
+        role: if parent.is_none() {
+            Role::Brain
+        } else {
+            Role::Executor
+        },
         task_spec: format!("task for {}", id),
     })
 }
@@ -68,7 +72,10 @@ fn phase_change_terminal_sets_attempt_ended() {
 
     let n = l.node(&ExecutorId::new("w")).unwrap();
     let a = n.current_attempt().unwrap();
-    assert!(a.ended_at.is_some(), "terminal phase must close the attempt");
+    assert!(
+        a.ended_at.is_some(),
+        "terminal phase must close the attempt"
+    );
 }
 
 #[test]
@@ -106,7 +113,10 @@ fn review_requested_populates_pending_review_and_phase() {
     assert!(n.pending_review.is_some());
     assert_eq!(n.phase, LifecycleState::AwaitingReview);
     let r = n.pending_review.as_ref().unwrap();
-    assert_eq!(r.attempt_n, 1, "attempt_n must be carried into ReviewRequest");
+    assert_eq!(
+        r.attempt_n, 1,
+        "attempt_n must be carried into ReviewRequest"
+    );
 }
 
 #[test]
@@ -277,13 +287,23 @@ fn replay_equals_live() {
     ];
 
     let mut live = ExecutorLineage::new();
-    for e in &events { live.apply(e); }
+    for e in &events {
+        live.apply(e);
+    }
 
     let mut replayed = ExecutorLineage::new();
-    for e in &events { replayed.apply(e); }
+    for e in &events {
+        replayed.apply(e);
+    }
 
-    let a: Vec<_> = live.nodes().map(|n| (n.id.clone(), n.phase, n.task_spec.clone())).collect();
-    let b: Vec<_> = replayed.nodes().map(|n| (n.id.clone(), n.phase, n.task_spec.clone())).collect();
+    let a: Vec<_> = live
+        .nodes()
+        .map(|n| (n.id.clone(), n.phase, n.task_spec.clone()))
+        .collect();
+    let b: Vec<_> = replayed
+        .nodes()
+        .map(|n| (n.id.clone(), n.phase, n.task_spec.clone()))
+        .collect();
     assert_eq!(a.len(), b.len());
     for x in &a {
         assert!(b.contains(x), "replayed state missing {:?}", x);
@@ -305,8 +325,10 @@ fn child_spawn_before_parent_spawn_attaches_on_parent_arrival() {
     }));
 
     // Before parent exists, child must NOT be a root.
-    assert!(l.node(&ExecutorId::new("child")).is_none(),
-            "child should be buffered, not attached as root");
+    assert!(
+        l.node(&ExecutorId::new("child")).is_none(),
+        "child should be buffered, not attached as root"
+    );
     assert_eq!(l.root_ids().len(), 0);
 
     // Parent arrives.

@@ -80,7 +80,11 @@ mod tests {
             let ev = bcast_rx.recv().await.expect("recv");
             seen.push(ev.seq);
         }
-        assert_eq!(seen, vec![0, 1, 2, 3, 4], "seq must be monotonic and start at 0");
+        assert_eq!(
+            seen,
+            vec![0, 1, 2, 3, 4],
+            "seq must be monotonic and start at 0"
+        );
     }
 
     #[tokio::test]
@@ -102,7 +106,9 @@ mod tests {
                 }
             }));
         }
-        for j in joins { j.await.unwrap(); }
+        for j in joins {
+            j.await.unwrap();
+        }
 
         let mut seen = Vec::new();
         for _ in 0..800 {

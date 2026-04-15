@@ -47,7 +47,9 @@ impl SessionPreview {
                 .collect()
         };
 
-        let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        let p = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(p, area);
     }
 }

@@ -178,12 +178,7 @@ impl InputBar {
 
     /// Insert a protected atom at the cursor. If the cursor is inside an
     /// existing range, that range is deleted first.
-    pub fn insert_atom(
-        &mut self,
-        text: impl AsRef<str>,
-        uri: String,
-        name: String,
-    ) {
+    pub fn insert_atom(&mut self, text: impl AsRef<str>, uri: String, name: String) {
         if let Some(idx) = self.range_at(self.cursor) {
             self.delete_range(idx);
         }
@@ -276,12 +271,7 @@ impl InputBar {
         }
 
         // Prefix length on the first line: status + "> "
-        let prefix_len = self
-            .status
-            .as_ref()
-            .map(|s| s.len() + 1)
-            .unwrap_or(0)
-            + 2; // "> "
+        let prefix_len = self.status.as_ref().map(|s| s.len() + 1).unwrap_or(0) + 2; // "> "
 
         let mut rows: usize = 0;
         for (i, line) in self.text.split('\n').enumerate() {
@@ -307,10 +297,7 @@ impl InputBar {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green))
-            .title(Span::styled(
-                " INSERT ",
-                Style::default().fg(Color::Green),
-            ));
+            .title(Span::styled(" INSERT ", Style::default().fg(Color::Green)));
 
         let atom_style = Style::default()
             .fg(Color::Cyan)

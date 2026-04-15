@@ -1,7 +1,7 @@
 use crate::adapter::PmAdapter;
+use crate::types::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use crate::types::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams};
 use std::sync::Mutex;
 use tokio::process::Command;
 
@@ -10,6 +10,7 @@ pub struct GitHubAdapter {
     pub repo: Option<String>,
     pub auto_label: String,
     last_poll: Mutex<Option<DateTime<Utc>>>,
+    cwd: Option<std::path::PathBuf>,
 }
 
 impl GitHubAdapter {
@@ -18,7 +19,14 @@ impl GitHubAdapter {
             repo,
             auto_label: String::from("spur-managed"),
             last_poll: Mutex::new(None),
+            cwd: None,
         }
+    }
+
+    /// Set the working directory for `gh` CLI commands.
+    pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
     }
 
     /// Run the `gh` CLI with the given arguments. Returns stdout on success,
@@ -26,20 +34,21 @@ impl GitHubAdapter {
     async fn run_gh(&self, args: &[&str]) -> anyhow::Result<String> {
         tracing::debug!(args = ?args, "running gh CLI");
 
-        let output = Command::new("gh")
-            .args(args)
-            .output()
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    anyhow::anyhow!(
-                        "GitHub CLI (`gh`) not found. Install it from https://cli.github.com/ \
+        let mut cmd = Command::new("gh");
+        cmd.args(args);
+        if let Some(ref cwd) = self.cwd {
+            cmd.current_dir(cwd);
+        }
+        let output = cmd.output().await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "GitHub CLI (`gh`) not found. Install it from https://cli.github.com/ \
                          and run `gh auth login` to authenticate."
-                    )
-                } else {
-                    anyhow::anyhow!("Failed to execute `gh`: {e}")
-                }
-            })?;
+                )
+            } else {
+                anyhow::anyhow!("Failed to execute `gh`: {e}")
+            }
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -284,16 +293,8 @@ impl PmAdapter for GitHubAdapter {
 
         // Status change via label (GitHub doesn't have native status — uses labels)
         if let Some(ref status) = update.status {
-            self.run_gh(&[
-                "issue",
-                "edit",
-                id,
-                "--repo",
-                repo,
-                "--add-label",
-                status,
-            ])
-            .await?;
+            self.run_gh(&["issue", "edit", id, "--repo", repo, "--add-label", status])
+                .await?;
         }
 
         Ok(())

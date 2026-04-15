@@ -4,9 +4,7 @@
 //! - JumpToReview must set detail tab to Review.
 //! - pending_reviews must return insertion order.
 
-use spur_acp::{
-    ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
-};
+use spur_acp::{ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody};
 use spur_core::{ExecutorId, ExecutorLineage};
 
 fn spawn(id: &str) -> SpurEvent {

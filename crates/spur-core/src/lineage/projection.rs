@@ -26,9 +26,7 @@ use spur_acp::{SpurEvent, SpurEventBody};
 
 use spur_acp::LifecycleState;
 
-use super::types::{
-    Attempt, AttemptStatus, ExecutorId, ExecutorNode, ReviewRequest,
-};
+use super::types::{Attempt, AttemptStatus, ExecutorId, ExecutorNode, ReviewRequest};
 
 const MAX_ORPHAN_BUFFER_PER_EXEC: usize = 128;
 
@@ -255,6 +253,38 @@ impl ExecutorLineage {
                     node.last_event_at = Some(event.occurred_at);
                 } else {
                     self.buffer_orphan(eid, event.clone());
+                }
+            }
+
+            SpurEventBody::WorkerProgress {
+                executor_id,
+                name,
+                pct,
+                ..
+            } => {
+                let eid = ExecutorId::new(executor_id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    node.latest_tool_call = Some(match pct {
+                        Some(p) => format!("{} ({}%)", name, p),
+                        None => name.clone(),
+                    });
+                    node.last_event_at = Some(event.occurred_at);
+                }
+            }
+
+            SpurEventBody::WorkerFileTouched {
+                executor_id,
+                path,
+                kind,
+                ..
+            } => {
+                let eid = ExecutorId::new(executor_id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    if *kind == spur_acp::FileTouchKind::Write {
+                        node.files_touched_count += 1;
+                    }
+                    node.latest_tool_call = Some(format!("{}", path.display()));
+                    node.last_event_at = Some(event.occurred_at);
                 }
             }
 

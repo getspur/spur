@@ -20,7 +20,8 @@ fn write_config(contents: &str) -> tempfile::TempDir {
 
 #[test]
 fn config_check_passes_on_valid_config() {
-    let dir = write_config(r#"
+    let dir = write_config(
+        r#"
 [[agents.entries]]
 name = "claude-code-acp"
 command = "npx"
@@ -29,7 +30,8 @@ transport = "acp"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
-"#);
+"#,
+    );
     let out = Command::new(spur_binary())
         .current_dir(dir.path())
         .args(["config", "check"])
@@ -44,7 +46,8 @@ dispatch = "prompt_text"
 
 #[test]
 fn config_check_fails_on_vendor_exec_without_method() {
-    let dir = write_config(r#"
+    let dir = write_config(
+        r#"
 [[agents.entries]]
 name = "broken-kiro"
 command = "x"
@@ -52,7 +55,8 @@ transport = "acp"
 
 [agents.entries.commands]
 dispatch = "vendor_exec"
-"#);
+"#,
+    );
     let out = Command::new(spur_binary())
         .current_dir(dir.path())
         .args(["config", "check"])

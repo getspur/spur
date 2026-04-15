@@ -165,21 +165,18 @@ impl DashboardView {
 
     /// Render the dashboard with access to the current lineage projection.
     /// This is the canonical render path; called directly from `App::render`.
-    pub fn render_with_lineage(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        lineage: &ExecutorLineage,
-    ) {
+    pub fn render_with_lineage(&self, frame: &mut Frame, area: Rect, lineage: &ExecutorLineage) {
         let node_count = lineage.nodes().count();
 
         // Compute aggregates once for both empty and non-empty paths.
         let running = lineage
             .nodes()
-            .filter(|n| matches!(
-                n.phase,
-                spur_core::LifecycleState::Running | spur_core::LifecycleState::Spawning,
-            ))
+            .filter(|n| {
+                matches!(
+                    n.phase,
+                    spur_core::LifecycleState::Running | spur_core::LifecycleState::Spawning,
+                )
+            })
             .count();
         let pending_review = lineage.pending_reviews().len();
         let total_cost: f64 = lineage
@@ -214,8 +211,7 @@ impl DashboardView {
                     Style::default().fg(Color::DarkGray),
                 )),
             ];
-            let paragraph = Paragraph::new(lines)
-                .alignment(ratatui::layout::Alignment::Center);
+            let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
 
             let input_height = self.input_bar.required_height(area.width);
             let chunks = Layout::vertical([
@@ -261,10 +257,10 @@ impl DashboardView {
         let input_height = self.input_bar.required_height(area.width);
 
         let chunks = Layout::vertical([
-            Constraint::Length(agents_height),   // lineage tree
-            Constraint::Min(4),                  // activity log (fills)
-            Constraint::Length(input_height),    // input bar
-            Constraint::Length(1),               // status bar
+            Constraint::Length(agents_height), // lineage tree
+            Constraint::Min(4),                // activity log (fills)
+            Constraint::Length(input_height),  // input bar
+            Constraint::Length(1),             // status bar
         ])
         .split(area);
 
@@ -352,9 +348,9 @@ impl DashboardView {
         if is_editing_key {
             // Check if InputBar handles it (Enter on non-empty submits)
             if let Some((text, interrupt)) = self.input_bar.handle_key(key) {
-                let blocks = vec![spur_acp::ContentBlock::Text(
-                    spur_acp::TextContent::new(text),
-                )];
+                let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
+                    text,
+                ))];
                 // Routing: if brain is attached (status is set), this is a
                 // routed message to the active session — App substitutes the
                 // correct SessionId. Otherwise it's an explicit new-session
@@ -545,7 +541,10 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEventBody::AgentNotification { session, notification } => {
+            SpurEventBody::AgentNotification {
+                session,
+                notification,
+            } => {
                 let prefix = Self::prefix_for_session(&session.0);
                 match &notification.update {
                     spur_acp::SessionUpdate::AgentThoughtChunk(chunk)
@@ -553,7 +552,8 @@ impl View for DashboardView {
                         if let spur_acp::ContentBlock::Text(tc) = &chunk.content {
                             let trimmed = tc.text.trim();
                             if !trimmed.is_empty() {
-                                let entry = self.text_batch
+                                let entry = self
+                                    .text_batch
                                     .entry(session.0.clone())
                                     .or_insert_with(|| (String::new(), Instant::now()));
                                 entry.0.push_str(trimmed);
@@ -609,18 +609,16 @@ impl View for DashboardView {
                         "Delegation completed successfully".to_string(),
                         LogEntryKind::Complete,
                     ),
-                    DelegationStatus::Failed { error } => (
-                        format!("Delegation failed: {}", error),
-                        LogEntryKind::Error,
-                    ),
+                    DelegationStatus::Failed { error } => {
+                        (format!("Delegation failed: {}", error), LogEntryKind::Error)
+                    }
                     DelegationStatus::Conflict { files } => (
                         format!("Delegation conflict in {} files", files.len()),
                         LogEntryKind::Error,
                     ),
-                    DelegationStatus::Timeout => (
-                        "Delegation timed out".to_string(),
-                        LogEntryKind::Error,
-                    ),
+                    DelegationStatus::Timeout => {
+                        ("Delegation timed out".to_string(), LogEntryKind::Error)
+                    }
                     DelegationStatus::Rejected { reason } => (
                         format!("Delegation rejected: {}", reason),
                         LogEntryKind::Error,
@@ -629,7 +627,10 @@ impl View for DashboardView {
                         format!("Delegation modified: {}", reviewer_note),
                         LogEntryKind::Complete,
                     ),
-                    DelegationStatus::TimedOut { waited_for, fallback } => (
+                    DelegationStatus::TimedOut {
+                        waited_for,
+                        fallback,
+                    } => (
                         format!(
                             "Delegation review timed out after {}s (fallback: {:?})",
                             waited_for.as_secs(),
@@ -670,10 +671,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEventBody::RateLimitDetected {
-                agent,
-                retry_after,
-            } => {
+            SpurEventBody::RateLimitDetected { agent, retry_after } => {
                 let msg = match retry_after {
                     Some(d) => format!("Rate limited (retry after {}s)", d.as_secs()),
                     None => "Rate limited".to_string(),
@@ -762,6 +760,43 @@ impl View for DashboardView {
                     kind: LogEntryKind::Error,
                 });
             }
+
+            SpurEventBody::WorkerProgress {
+                executor_id,
+                name,
+                pct,
+                ..
+            } => {
+                let msg = match pct {
+                    Some(p) => format!("{} ({}%)", name, p),
+                    None => name.clone(),
+                };
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: Self::prefix_for_session(executor_id),
+                    message: msg,
+                    kind: LogEntryKind::Info,
+                });
+            }
+
+            SpurEventBody::WorkerFileTouched {
+                executor_id,
+                path,
+                kind,
+                ..
+            } => {
+                let verb = match kind {
+                    spur_acp::FileTouchKind::Read => "read",
+                    spur_acp::FileTouchKind::Write => "wrote",
+                };
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: Self::prefix_for_session(executor_id),
+                    message: format!("{} {}", verb, path.display()),
+                    kind: LogEntryKind::Act,
+                });
+            }
+
             _ => {}
         }
     }
@@ -773,7 +808,10 @@ impl View for DashboardView {
     fn render(&self, _frame: &mut Frame, _area: Rect) {
         // SAFETY: Dashboard always renders via `render_with_lineage`. This
         // trait method is kept to satisfy `View` but should never be called.
-        debug_assert!(false, "DashboardView::render called via trait — use render_with_lineage");
+        debug_assert!(
+            false,
+            "DashboardView::render called via trait — use render_with_lineage"
+        );
     }
 }
 

@@ -29,7 +29,9 @@ pub struct MermaidId(pub u64);
 
 /// State machine for a pending / rendered mermaid diagram.
 pub enum MermaidState {
-    Pending { code: String },
+    Pending {
+        code: String,
+    },
     Rendering,
     Ready {
         /// Reference-counted to avoid deep-copying the pixel buffer on the
@@ -39,7 +41,9 @@ pub enum MermaidState {
         /// invalidated on terminal resize. `RefCell` because render takes `&self`.
         inline_protocol: RefCell<Option<StatefulProtocol>>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 impl std::fmt::Debug for MermaidState {
@@ -78,10 +82,7 @@ pub enum FenceRender {
 /// - `Error`   → `⚠` Yellow+BOLD
 /// - `Ready(_)` → `📊` Magenta+BOLD (the "ready but rendering as placeholder"
 ///   case — height is already encoded for the caller's ImageRow decision)
-pub fn fence_placeholder_line(
-    id: MermaidId,
-    render: FenceRender,
-) -> ratatui::text::Line<'static> {
+pub fn fence_placeholder_line(id: MermaidId, render: FenceRender) -> ratatui::text::Line<'static> {
     use ratatui::{
         style::{Color, Modifier, Style},
         text::{Line, Span},
@@ -89,15 +90,21 @@ pub fn fence_placeholder_line(
     let (text, style) = match render {
         FenceRender::Error => (
             format!("[⚠ mermaid #{} error · Alt-v to view]", id.0),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         FenceRender::Pending => (
             format!("[⏳ mermaid #{} rendering…]", id.0),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
         ),
         FenceRender::Ready(_) => (
             format!("[📊 mermaid #{} · press Alt-v to view]", id.0),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ),
     };
     Line::from(Span::styled(text, style))
@@ -312,18 +319,15 @@ mod tests {
             // ignore the content, we synthesise the SVG stage by calling
             // rasterize_svg inside catch_unwind ourselves.
             let result = std::panic::catch_unwind(|| rasterize_svg(svg, 800));
-            assert!(
-                result.is_ok(),
-                "rasterize_svg panicked on input: {svg:?}"
-            );
+            assert!(result.is_ok(), "rasterize_svg panicked on input: {svg:?}");
             // The inner Result may be Ok or Err — both are fine.
         }
     }
 
     #[test]
     fn ready_state_holds_inline_protocol_slot() {
-        use std::cell::RefCell;
         use image::RgbaImage;
+        use std::cell::RefCell;
 
         let img = std::sync::Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
         let state = MermaidState::Ready {
@@ -331,7 +335,9 @@ mod tests {
             inline_protocol: RefCell::new(None),
         };
         match state {
-            MermaidState::Ready { inline_protocol, .. } => {
+            MermaidState::Ready {
+                inline_protocol, ..
+            } => {
                 assert!(inline_protocol.borrow().is_none());
             }
             _ => panic!("expected Ready"),

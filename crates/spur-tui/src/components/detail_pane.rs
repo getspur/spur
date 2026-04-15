@@ -45,7 +45,9 @@ pub struct DetailPane {
 
 impl DetailPane {
     pub fn new() -> Self {
-        Self { current_tab: DetailTab::Stream }
+        Self {
+            current_tab: DetailTab::Stream,
+        }
     }
 
     pub fn cycle_tab(&mut self, forward: bool) {
@@ -73,7 +75,9 @@ impl DetailPane {
             .iter()
             .map(|t| {
                 let style = if *t == self.current_tab {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
@@ -81,7 +85,12 @@ impl DetailPane {
             })
             .collect();
         let tabs = Tabs::new(titles)
-            .select(DetailTab::all().iter().position(|t| *t == self.current_tab).unwrap_or(0))
+            .select(
+                DetailTab::all()
+                    .iter()
+                    .position(|t| *t == self.current_tab)
+                    .unwrap_or(0),
+            )
             .divider("│");
         frame.render_widget(tabs, chunks[0]);
 
@@ -150,7 +159,10 @@ impl DetailPane {
                 Style::default().fg(Color::DarkGray),
             ))]
         } else {
-            node.task_spec.lines().map(|l| Line::from(l.to_string())).collect()
+            node.task_spec
+                .lines()
+                .map(|l| Line::from(l.to_string()))
+                .collect()
         }
     }
 

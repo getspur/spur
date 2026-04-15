@@ -60,18 +60,13 @@ fn agent_slash_becomes_text_block_stripped_of_prefix() {
 #[test]
 fn explicit_prefix_claude_help_sends_bare_to_claude() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands(
-        "claude",
-        vec![prompt_text_entry("claude", "help", "help")],
-    );
+    reg.set_agent_commands("claude", vec![prompt_text_entry("claude", "help", "help")]);
     let dec = route("/claude:help", &[], &reg, false);
     match dec {
-        SubmitDecision::Send { blocks, .. } => {
-            match &blocks[0] {
-                ContentBlock::Text(t) => assert_eq!(t.text, "/help"),
-                other => panic!("got {:?}", other),
-            }
-        }
+        SubmitDecision::Send { blocks, .. } => match &blocks[0] {
+            ContentBlock::Text(t) => assert_eq!(t.text, "/help"),
+            other => panic!("got {:?}", other),
+        },
         other => panic!("expected Send, got {:?}", other),
     }
 }

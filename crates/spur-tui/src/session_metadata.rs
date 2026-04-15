@@ -119,8 +119,7 @@ impl SessionMetadataStore {
     /// `last_active_session_id` points to a removed entry, clear it too.
     /// Returns the session ids that were removed.
     pub fn gc_orphans(&mut self, live_ids: &[String]) -> Vec<String> {
-        let live: std::collections::HashSet<&str> =
-            live_ids.iter().map(|s| s.as_str()).collect();
+        let live: std::collections::HashSet<&str> = live_ids.iter().map(|s| s.as_str()).collect();
         let to_remove: Vec<String> = self
             .metadata
             .sessions
@@ -180,13 +179,8 @@ impl SessionMetadataStore {
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json)
             .with_context(|| format!("writing tmp metadata file {}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path).with_context(|| {
-            format!(
-                "renaming {} -> {}",
-                tmp.display(),
-                self.path.display()
-            )
-        })?;
+        std::fs::rename(&tmp, &self.path)
+            .with_context(|| format!("renaming {} -> {}", tmp.display(), self.path.display()))?;
         Ok(())
     }
 }
@@ -229,7 +223,9 @@ mod acp_mapping_tests {
         }
         let reloaded = SessionMetadataStore::load(tmp.path());
         assert_eq!(
-            reloaded.entry("spur-1").and_then(|e| e.acp_session_id.clone()),
+            reloaded
+                .entry("spur-1")
+                .and_then(|e| e.acp_session_id.clone()),
             Some("acp-1".into())
         );
         assert_eq!(

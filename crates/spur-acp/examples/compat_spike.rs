@@ -102,7 +102,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match conn
-        .authenticate(AuthenticateRequest::new(AuthMethodId::new("claude-ai-login")))
+        .authenticate(AuthenticateRequest::new(AuthMethodId::new(
+            "claude-ai-login",
+        )))
         .await
     {
         Ok(_) => println!("[ok] authenticate echoed"),
@@ -118,9 +120,7 @@ async fn main() -> anyhow::Result<()> {
     println!("=== Phase 1: list_sessions + load_session ===");
 
     let t_list_none = Instant::now();
-    let list_all = conn
-        .list_sessions(ListSessionsRequest::new())
-        .await?;
+    let list_all = conn.list_sessions(ListSessionsRequest::new()).await?;
     println!(
         "[ok] list_sessions (no cwd) in {:?}: {} sessions",
         t_list_none.elapsed(),
@@ -166,8 +166,7 @@ async fn main() -> anyhow::Result<()> {
                     // with a 1s cap. Transports without a broadcast (stdio
                     // etc.) use the returned stream instead; this path is
                     // the native/broadcast code path.
-                    let deadline =
-                        tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
                     loop {
                         let remaining =
                             deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -212,8 +211,7 @@ async fn main() -> anyhow::Result<()> {
                     "[ok] load_session streamed {replayed} notifications in {:?}",
                     t_load.elapsed()
                 );
-                let mut kinds: Vec<(&str, usize)> =
-                    variant_counts.into_iter().collect();
+                let mut kinds: Vec<(&str, usize)> = variant_counts.into_iter().collect();
                 kinds.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
                 for (k, v) in kinds {
                     println!("     {k}: {v}");
@@ -222,7 +220,10 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => println!("[WARN] load_session failed: {e}"),
         }
     } else {
-        println!("[info] no sessions found for cwd={} — skipping load_session test", cwd.display());
+        println!(
+            "[info] no sessions found for cwd={} — skipping load_session test",
+            cwd.display()
+        );
     }
 
     conn.shutdown().await?;

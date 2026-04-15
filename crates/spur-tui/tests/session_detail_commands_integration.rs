@@ -28,7 +28,9 @@ fn plain_text_submit_produces_text_block() {
     type_str(&mut v, "hello");
     let act = press(&mut v, KeyCode::Enter).expect("action");
     match act {
-        Action::SendMessage { blocks, interrupt, .. } => {
+        Action::SendMessage {
+            blocks, interrupt, ..
+        } => {
             assert!(!interrupt);
             assert_eq!(blocks.len(), 1);
             match &blocks[0] {

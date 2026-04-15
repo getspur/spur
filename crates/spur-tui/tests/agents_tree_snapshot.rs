@@ -51,5 +51,8 @@ fn recursive_tree_renders_depth_two() {
         .find(|l| l.contains("sub"))
         .and_then(|l| Some(l.len() - l.trim_start().len()))
         .unwrap_or(0);
-    assert!(sub_indent > worker_indent, "sub-executor must be indented deeper than worker");
+    assert!(
+        sub_indent > worker_indent,
+        "sub-executor must be indented deeper than worker"
+    );
 }

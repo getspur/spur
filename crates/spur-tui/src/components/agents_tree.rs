@@ -176,10 +176,7 @@ impl AgentsTree {
             })
             .unwrap_or_default();
 
-        let cost = node
-            .current_attempt()
-            .map(|a| a.cost_usd)
-            .unwrap_or(0.0);
+        let cost = node.current_attempt().map(|a| a.cost_usd).unwrap_or(0.0);
         let cost_str = if cost > 0.0 {
             format!("${:.2}", cost)
         } else {
@@ -199,7 +196,11 @@ impl AgentsTree {
         };
 
         let base = Style::default();
-        let row = if selected { base.bg(Color::DarkGray) } else { base };
+        let row = if selected {
+            base.bg(Color::DarkGray)
+        } else {
+            base
+        };
 
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(
@@ -216,9 +217,7 @@ impl AgentsTree {
         ));
         spans.push(Span::styled(
             format!("{:<5} ", role_label),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
         ));
         spans.push(Span::styled(
             format!("{:<14} ", format!("{:?}", node.phase)),
@@ -231,10 +230,7 @@ impl AgentsTree {
             ));
         }
         if !cost_str.is_empty() {
-            spans.push(Span::styled(
-                cost_str,
-                Style::default().fg(Color::Yellow),
-            ));
+            spans.push(Span::styled(cost_str, Style::default().fg(Color::Yellow)));
         }
         if !review_badge.is_empty() {
             spans.push(Span::styled(

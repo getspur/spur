@@ -1,8 +1,8 @@
-use std::time::Duration;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_tui::action::Action;
 use spur_tui::views::session_detail::SessionDetailView;
 use spur_tui::views::View;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::Duration;
 
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)

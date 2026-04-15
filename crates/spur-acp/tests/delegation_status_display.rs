@@ -54,11 +54,17 @@ fn each_review_variant_renders_distinctly() {
     assert!(timeout.contains("\"Timeout\""));
 
     // Mutual distinguishability — brain must be able to tell them apart.
-    let renders = [&success, &rejected, &modified, &timed_out, &failed, &conflict, &timeout];
+    let renders = [
+        &success, &rejected, &modified, &timed_out, &failed, &conflict, &timeout,
+    ];
     for (i, a) in renders.iter().enumerate() {
         for (j, b) in renders.iter().enumerate() {
             if i != j {
-                assert_ne!(a, b, "variants at idx {} and {} must render distinctly", i, j);
+                assert_ne!(
+                    a, b,
+                    "variants at idx {} and {} must render distinctly",
+                    i, j
+                );
             }
         }
     }
@@ -96,7 +102,9 @@ fn human_rejected_distinct_from_timed_out_reject_fallback() {
     }));
     let system = render(&base(DelegationStatus::TimedOut {
         waited_for: Duration::from_secs(1800),
-        fallback: TimeoutFallback::Reject { reason: "review timeout".into() },
+        fallback: TimeoutFallback::Reject {
+            reason: "review timeout".into(),
+        },
     }));
     assert_ne!(human, system);
     // The discriminator strings should be present, not just the reason.

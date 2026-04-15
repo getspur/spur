@@ -54,7 +54,9 @@ where
     let prompt_fut = connection.prompt(prompt_request);
     tokio::pin!(prompt_fut);
 
-    let mut prompt_stream: Option<std::pin::Pin<Box<dyn futures::Stream<Item = SessionNotification> + Send>>> = None;
+    let mut prompt_stream: Option<
+        std::pin::Pin<Box<dyn futures::Stream<Item = SessionNotification> + Send>>,
+    > = None;
     let mut grace_deadline: Option<tokio::time::Instant> = None;
 
     loop {

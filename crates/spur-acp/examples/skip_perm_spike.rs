@@ -32,8 +32,8 @@
 //!   agent=<…> mode=<…> permission_calls=<N> notifs=<N> took=<…>ms outcome=<ok|err>
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::{
@@ -207,11 +207,7 @@ async fn run_probe(spec: &AgentSpec, mode: Mode, cwd: &Path) -> anyhow::Result<P
         Some(perm_tx.clone()),
     );
 
-    eprintln!(
-        "[probe] spawn: {} {:?}",
-        spec.command,
-        spawn_args
-    );
+    eprintln!("[probe] spawn: {} {:?}", spec.command, spawn_args);
 
     conn.initialize(InitializeRequest::new(ProtocolVersion::LATEST))
         .await?;
@@ -286,7 +282,7 @@ async fn run_probe(spec: &AgentSpec, mode: Mode, cwd: &Path) -> anyhow::Result<P
                         break;
                     }
                 }
-                Ok(Err(_)) => break,       // broadcast closed
+                Ok(Err(_)) => break, // broadcast closed
                 Err(_) => {
                     // idle for 500ms — treat as done.
                     eprintln!("[probe] broadcast drained ({notifs} notifs)");

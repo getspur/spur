@@ -99,12 +99,7 @@ impl WorktreeManager {
 
                 // Create a temp worktree on the snapshot branch.
                 self.run_git(
-                    &[
-                        "worktree",
-                        "add",
-                        tmp_dir.to_str().unwrap(),
-                        &branch_name,
-                    ],
+                    &["worktree", "add", tmp_dir.to_str().unwrap(), &branch_name],
                     None,
                 )
                 .await
@@ -118,23 +113,15 @@ impl WorktreeManager {
                 if apply_result.is_ok() {
                     // Stage everything and commit.
                     self.run_git(&["add", "-A"], Some(&tmp_dir)).await?;
-                    self.run_git(
-                        &["commit", "-m", "spur: brain snapshot"],
-                        Some(&tmp_dir),
-                    )
-                    .await
-                    .context("failed to commit snapshot")?;
+                    self.run_git(&["commit", "-m", "spur: brain snapshot"], Some(&tmp_dir))
+                        .await
+                        .context("failed to commit snapshot")?;
                 }
 
                 // Clean up the temp worktree.
                 let _ = self
                     .run_git(
-                        &[
-                            "worktree",
-                            "remove",
-                            tmp_dir.to_str().unwrap(),
-                            "--force",
-                        ],
+                        &["worktree", "remove", tmp_dir.to_str().unwrap(), "--force"],
                         None,
                     )
                     .await;
@@ -152,10 +139,7 @@ impl WorktreeManager {
         base_branch: &str,
     ) -> Result<WorktreeInfo> {
         let session_str = session_id.to_string();
-        let worktree_path = self
-            .repo_root
-            .join(".spur/worktrees")
-            .join(&session_str);
+        let worktree_path = self.repo_root.join(".spur/worktrees").join(&session_str);
         let branch_name = format!("spur/worker-{agent}-{session_str}");
 
         let worktree_path_str = worktree_path
@@ -180,9 +164,7 @@ impl WorktreeManager {
             None,
         )
         .await
-        .with_context(|| {
-            format!("failed to create worktree at {worktree_path_str}")
-        })?;
+        .with_context(|| format!("failed to create worktree at {worktree_path_str}"))?;
 
         let info = WorktreeInfo {
             session_id: session_id.clone(),
@@ -209,10 +191,7 @@ impl WorktreeManager {
 
     /// Collect the diff of uncommitted changes in a worker's worktree.
     /// Returns `None` if there are no changes.
-    pub async fn collect_diff(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<String>> {
+    pub async fn collect_diff(&self, session_id: &SessionId) -> Result<Option<String>> {
         let info = self.lookup(session_id)?;
 
         let diff = self
@@ -229,11 +208,7 @@ impl WorktreeManager {
 
     /// Stage and commit all changes in a worker's worktree.
     /// No-op if there is nothing to commit.
-    pub async fn commit_worker_changes(
-        &self,
-        session_id: &SessionId,
-        message: &str,
-    ) -> Result<()> {
+    pub async fn commit_worker_changes(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let info = self.lookup(session_id)?;
 
         self.run_git(&["add", "-A"], Some(&info.path))
@@ -268,23 +243,16 @@ impl WorktreeManager {
         // Ensure we are on the target branch in the main repo.
         self.run_git(&["checkout", target_branch], None)
             .await
-            .with_context(|| {
-                format!("failed to checkout target branch '{target_branch}'")
-            })?;
+            .with_context(|| format!("failed to checkout target branch '{target_branch}'"))?;
 
-        let result = self
-            .run_git(&["cherry-pick", &info.branch], None)
-            .await;
+        let result = self.run_git(&["cherry-pick", &info.branch], None).await;
 
         match result {
             Ok(_) => Ok(MergeResult::Success),
             Err(_) => {
                 // Determine which files are in conflict.
                 let conflict_output = self
-                    .run_git(
-                        &["diff", "--name-only", "--diff-filter=U"],
-                        None,
-                    )
+                    .run_git(&["diff", "--name-only", "--diff-filter=U"], None)
                     .await
                     .unwrap_or_default();
 
@@ -304,10 +272,7 @@ impl WorktreeManager {
     }
 
     /// Remove a worker's worktree and its branch, cleaning up all resources.
-    pub async fn remove_worktree(
-        &mut self,
-        session_id: &SessionId,
-    ) -> Result<()> {
+    pub async fn remove_worktree(&mut self, session_id: &SessionId) -> Result<()> {
         let session_str = session_id.to_string();
         let info = self
             .active
@@ -326,9 +291,7 @@ impl WorktreeManager {
 
         self.run_git(&["branch", "-D", &info.branch], None)
             .await
-            .with_context(|| {
-                format!("failed to delete branch '{}'", info.branch)
-            })?;
+            .with_context(|| format!("failed to delete branch '{}'", info.branch))?;
 
         Ok(())
     }
@@ -341,9 +304,7 @@ impl WorktreeManager {
         let stale_sessions: Vec<String> = self
             .active
             .iter()
-            .filter(|(_, info)| {
-                now.duration_since(info.created_at) > max_age
-            })
+            .filter(|(_, info)| now.duration_since(info.created_at) > max_age)
             .map(|(key, _)| key.clone())
             .collect();
 

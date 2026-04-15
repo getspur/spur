@@ -14,7 +14,11 @@ fn type_str(bar: &mut InputBar, s: &str) {
 fn insert_atom_creates_range_and_places_cursor_at_end() {
     let mut b = InputBar::new();
     type_str(&mut b, "hi ");
-    b.insert_atom("@src/foo.rs", "file:///abs/src/foo.rs".into(), "src/foo.rs".into());
+    b.insert_atom(
+        "@src/foo.rs",
+        "file:///abs/src/foo.rs".into(),
+        "src/foo.rs".into(),
+    );
     assert_eq!(b.text(), "hi @src/foo.rs");
     assert_eq!(b.cursor(), b.text().len());
     assert_eq!(b.protected_ranges().len(), 1);

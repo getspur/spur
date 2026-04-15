@@ -6,9 +6,7 @@
 //! (kiro-shaped) agents. They do not boot a real orchestrator; the
 //! round-trip to the agent is covered by session_update_handling.rs.
 
-use spur_acp::{
-    AgentConfig, ArgsTemplateKind, CommandsConfig, DispatchKind, StaticCommandDecl,
-};
+use spur_acp::{AgentConfig, ArgsTemplateKind, CommandsConfig, DispatchKind, StaticCommandDecl};
 use spur_tui::commands::submit_router::{blocks_preview, route, SubmitDecision};
 use spur_tui::commands::CommandRegistry;
 

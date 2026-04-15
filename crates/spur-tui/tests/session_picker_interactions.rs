@@ -173,7 +173,10 @@ fn capital_r_enters_rename_mode_and_enter_commits() {
     }
     let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     match action {
-        Some(Action::RenameSession { session_id, new_title }) => {
+        Some(Action::RenameSession {
+            session_id,
+            new_title,
+        }) => {
             assert_eq!(session_id, "a1");
             assert_eq!(new_title, "new name");
         }

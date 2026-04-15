@@ -11,7 +11,7 @@
 //! brain's inline stream drain at `orchestrator.rs` handle emission. Only
 //! `NativeAcpConnection` currently participates.
 
-use tokio::sync::broadcast::{Receiver, error::RecvError};
+use tokio::sync::broadcast::{error::RecvError, Receiver};
 use tokio::task::JoinHandle;
 
 use agent_client_protocol::SessionNotification;

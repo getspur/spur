@@ -35,7 +35,10 @@ fn spur_local_source_exposes_v1_set() {
 
     for e in &entries {
         assert!(matches!(e.source, spur_tui::commands::CommandSource::Spur));
-        assert!(matches!(e.dispatch, spur_tui::commands::Dispatch::SpurLocal(_)));
+        assert!(matches!(
+            e.dispatch,
+            spur_tui::commands::Dispatch::SpurLocal(_)
+        ));
     }
 }
 
@@ -66,7 +69,10 @@ fn agent_entry(handle: &str, cmd: &AvailableCommand) -> CommandEntry {
 #[test]
 fn registry_merges_spur_local_and_agent() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("compact", "compact", None))]);
+    reg.set_agent_commands(
+        "claude",
+        vec![agent_entry("claude", &acp_cmd("compact", "compact", None))],
+    );
     let entries = reg.list();
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -81,7 +87,10 @@ fn registry_merges_spur_local_and_agent() {
 #[test]
 fn registry_marks_collisions_with_source_prefix() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("help", "claude help", None))]);
+    reg.set_agent_commands(
+        "claude",
+        vec![agent_entry("claude", &acp_cmd("help", "claude help", None))],
+    );
 
     let entries = reg.list();
     let helps: Vec<_> = entries.iter().filter(|e| e.name == "help").collect();
@@ -102,7 +111,10 @@ fn registry_marks_collisions_with_source_prefix() {
 #[test]
 fn registry_unique_names_use_bare_form() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("compact", "", None))]);
+    reg.set_agent_commands(
+        "claude",
+        vec![agent_entry("claude", &acp_cmd("compact", "", None))],
+    );
     let entries = reg.list();
     let compact = entries.iter().find(|e| e.name == "compact").unwrap();
     assert_eq!(reg.canonical_typed_form(compact), "/compact");
@@ -111,7 +123,10 @@ fn registry_unique_names_use_bare_form() {
 #[test]
 fn registry_resolve_prefers_explicit_prefix() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("help", "", None))]);
+    reg.set_agent_commands(
+        "claude",
+        vec![agent_entry("claude", &acp_cmd("help", "", None))],
+    );
     let entry = reg.resolve("/claude:help").expect("match");
     assert!(matches!(&entry.source, CommandSource::Agent { handle } if handle == "claude"));
 }
@@ -119,7 +134,10 @@ fn registry_resolve_prefers_explicit_prefix() {
 #[test]
 fn registry_resolve_bare_ambiguous_prefers_spur() {
     let mut reg = CommandRegistry::new();
-    reg.set_agent_commands("claude", vec![agent_entry("claude", &acp_cmd("help", "", None))]);
+    reg.set_agent_commands(
+        "claude",
+        vec![agent_entry("claude", &acp_cmd("help", "", None))],
+    );
     let entry = reg.resolve("/help").expect("match");
     assert_eq!(entry.source, CommandSource::Spur);
 }
@@ -151,7 +169,11 @@ fn fuzzy_rank_commands_prefers_prefix_matches() {
         .collect();
     let ranked = rank(&entries, "co");
     let names: Vec<&str> = ranked.iter().map(|e| e.name.as_str()).collect();
-    assert!(names[0] == "compact" || names[0] == "config", "top: {:?}", names);
+    assert!(
+        names[0] == "compact" || names[0] == "config",
+        "top: {:?}",
+        names
+    );
     assert!(!names.contains(&"doctor") || names.iter().position(|n| *n == "doctor").unwrap() > 1);
 }
 

@@ -134,7 +134,9 @@ pub trait AgentConnection: Send + Sync {
         request: LoadSessionRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
         let _ = request;
-        Err(anyhow::anyhow!("load_session not supported by this transport"))
+        Err(anyhow::anyhow!(
+            "load_session not supported by this transport"
+        ))
     }
 
     /// List all sessions known to the agent.
@@ -145,7 +147,9 @@ pub trait AgentConnection: Send + Sync {
         request: ListSessionsRequest,
     ) -> anyhow::Result<ListSessionsResponse> {
         let _ = request;
-        Err(anyhow::anyhow!("list_sessions not supported by this transport"))
+        Err(anyhow::anyhow!(
+            "list_sessions not supported by this transport"
+        ))
     }
 
     /// Set the current mode of a session (e.g. `"plan"`, `"default"`).
@@ -156,7 +160,9 @@ pub trait AgentConnection: Send + Sync {
         request: SetSessionModeRequest,
     ) -> anyhow::Result<SetSessionModeResponse> {
         let _ = request;
-        Err(anyhow::anyhow!("set_session_mode not supported by this transport"))
+        Err(anyhow::anyhow!(
+            "set_session_mode not supported by this transport"
+        ))
     }
 
     /// Authenticate with the agent using a previously-advertised auth method.
@@ -167,7 +173,9 @@ pub trait AgentConnection: Send + Sync {
         request: AuthenticateRequest,
     ) -> anyhow::Result<AuthenticateResponse> {
         let _ = request;
-        Err(anyhow::anyhow!("authenticate not supported by this transport"))
+        Err(anyhow::anyhow!(
+            "authenticate not supported by this transport"
+        ))
     }
 
     /// Invoke a vendor-extension method (`_foo.dev/bar/baz`) on the agent.
@@ -213,9 +221,7 @@ pub trait AgentConnection: Send + Sync {
     /// Transports that stay on the per-call `Stream` API return `None`
     /// (default) — the orchestrator falls back to draining the stream
     /// handed back by `prompt()` / `load_session()`.
-    fn subscribe_session_notifications(
-        &self,
-    ) -> Option<broadcast::Receiver<SessionNotification>> {
+    fn subscribe_session_notifications(&self) -> Option<broadcast::Receiver<SessionNotification>> {
         None
     }
 }
@@ -233,13 +239,16 @@ pub struct ExtNotificationPayload {
 #[cfg(test)]
 mod agent_connection_defaults {
     use super::*;
-    use agent_client_protocol::{AuthenticateRequest, AuthMethodId, SetSessionModeRequest};
+    use agent_client_protocol::{AuthMethodId, AuthenticateRequest, SetSessionModeRequest};
 
     struct NullConn;
 
     #[async_trait]
     impl AgentConnection for NullConn {
-        async fn initialize(&mut self, _r: InitializeRequest) -> anyhow::Result<InitializeResponse> {
+        async fn initialize(
+            &mut self,
+            _r: InitializeRequest,
+        ) -> anyhow::Result<InitializeResponse> {
             unimplemented!()
         }
         async fn new_session(
@@ -252,12 +261,19 @@ mod agent_connection_defaults {
         async fn prompt(
             &mut self,
             _r: PromptRequest,
-        ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+        ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>>
+        {
             unimplemented!()
         }
-        async fn cancel(&mut self, _s: &str) -> anyhow::Result<()> { unimplemented!() }
-        async fn shutdown(&mut self) -> anyhow::Result<()> { unimplemented!() }
-        fn health(&self) -> crate::types::AgentHealth { unimplemented!() }
+        async fn cancel(&mut self, _s: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn health(&self) -> crate::types::AgentHealth {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]

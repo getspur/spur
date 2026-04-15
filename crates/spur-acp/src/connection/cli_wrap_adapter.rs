@@ -11,11 +11,11 @@
 //! | `shutdown()` | No-op (kill any lingering child for safety) |
 //! | `health()` | Return stored `AgentHealth` |
 
-use std::path::PathBuf;
-use std::pin::Pin;
 use async_trait::async_trait;
 use futures::stream::unfold;
 use futures::Stream;
+use std::path::PathBuf;
+use std::pin::Pin;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use uuid::Uuid;
@@ -173,8 +173,7 @@ impl AgentConnection for CliWrapAdapter {
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| {
-                self.health_status =
-                    AgentHealth::Error(format!("Failed to spawn process: {e}"));
+                self.health_status = AgentHealth::Error(format!("Failed to spawn process: {e}"));
                 anyhow::anyhow!(
                     "CliWrapAdapter '{}': failed to spawn '{}': {e}",
                     self.agent_name,
@@ -182,15 +181,12 @@ impl AgentConnection for CliWrapAdapter {
                 )
             })?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "CliWrapAdapter '{}': failed to capture stdout",
-                    self.agent_name
-                )
-            })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "CliWrapAdapter '{}': failed to capture stdout",
+                self.agent_name
+            )
+        })?;
 
         // Channel to bridge the background reader task into the stream.
         let (tx, rx) = tokio::sync::mpsc::channel::<SessionNotification>(64);

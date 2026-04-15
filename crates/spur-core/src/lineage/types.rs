@@ -3,7 +3,9 @@ use std::time::SystemTime;
 
 use spur_acp::SessionId;
 
-pub use spur_acp::{Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role};
+pub use spur_acp::{
+    Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
+};
 
 /// Stable identifier for a logical executor. Survives retries (retries produce
 /// a new `Attempt` under the same `ExecutorId`).
@@ -26,8 +28,8 @@ pub enum AttemptStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewRequest {
-    pub kind: ReviewKind,        // from spur_acp
-    pub payload: ReviewPayload,  // from spur_acp
+    pub kind: ReviewKind,       // from spur_acp
+    pub payload: ReviewPayload, // from spur_acp
     pub requested_at: SystemTime,
     /// Carried from the event; used by the dispatcher to reject stale
     /// decisions targeting a superseded attempt.
@@ -101,7 +103,8 @@ impl ExecutorNode {
     /// Seconds since this executor was spawned. Derives from the first
     /// attempt's started_at. Safe to call from render (not replay).
     pub fn elapsed_secs(&self) -> u64 {
-        self.attempts.first()
+        self.attempts
+            .first()
             .and_then(|a| a.started_at.elapsed().ok().map(|d| d.as_secs()))
             .unwrap_or(0)
     }

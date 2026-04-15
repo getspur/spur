@@ -31,7 +31,11 @@ pub struct MermaidViewerView {
 
 impl MermaidViewerView {
     pub fn new(session_id: SessionId) -> Self {
-        Self { session_id, focused: None, protocol: None }
+        Self {
+            session_id,
+            focused: None,
+            protocol: None,
+        }
     }
 
     pub fn session_id(&self) -> &SessionId {

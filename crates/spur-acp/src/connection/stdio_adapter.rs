@@ -92,8 +92,7 @@ impl StdioAdapter {
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| {
-                self.health_status =
-                    AgentHealth::Error(format!("Failed to spawn process: {e}"));
+                self.health_status = AgentHealth::Error(format!("Failed to spawn process: {e}"));
                 anyhow::anyhow!(
                     "StdioAdapter '{}': failed to spawn '{}': {e}",
                     self.agent_name,
@@ -244,8 +243,7 @@ impl AgentConnection for StdioAdapter {
                     Ok(Ok(_)) => {
                         // Trim the trailing newline but preserve all other whitespace.
                         let text = line.trim_end_matches('\n').to_string();
-                        let chunk =
-                            ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
                         let notif = SessionNotification::new(
                             session_id.clone(),
                             SessionUpdate::AgentMessageChunk(chunk),

@@ -144,14 +144,17 @@ impl CommandRegistry {
         let cache = self.cache.borrow();
         let entries = &cache.as_ref().unwrap().entries;
         if let Some((source, name)) = first_token.split_once(':') {
-            return entries.iter().find(|e| {
-                e.name == name
-                    && match (&e.source, source) {
-                        (CommandSource::Spur, "spur") => true,
-                        (CommandSource::Agent { handle }, s) => handle == s,
-                        _ => false,
-                    }
-            }).cloned();
+            return entries
+                .iter()
+                .find(|e| {
+                    e.name == name
+                        && match (&e.source, source) {
+                            (CommandSource::Spur, "spur") => true,
+                            (CommandSource::Agent { handle }, s) => handle == s,
+                            _ => false,
+                        }
+                })
+                .cloned();
         }
         let mut candidates: Vec<_> = entries.iter().filter(|e| e.name == first_token).collect();
         if candidates.is_empty() {
@@ -209,7 +212,10 @@ mod tests {
         let cfg = AgentConfig::with_defaults("codex");
         let registry = CommandRegistry::from_configs(&[cfg]);
         // Only spur-local commands present; no agent commands.
-        assert!(registry.list().iter().all(|e| matches!(e.source, CommandSource::Spur)));
+        assert!(registry
+            .list()
+            .iter()
+            .all(|e| matches!(e.source, CommandSource::Spur)));
     }
 
     #[test]
@@ -220,8 +226,12 @@ mod tests {
             name: "compact".into(),
             description: "DYNAMIC DESC".into(),
             hint: None,
-            source: CommandSource::Agent { handle: "codex".into() },
-            dispatch: Dispatch::PromptText { normalized: "/compact".into() },
+            source: CommandSource::Agent {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::PromptText {
+                normalized: "/compact".into(),
+            },
         };
         registry.set_agent_commands("codex", vec![dynamic]);
         let compacts: Vec<_> = registry
@@ -229,7 +239,11 @@ mod tests {
             .into_iter()
             .filter(|e| e.name == "compact")
             .collect();
-        assert_eq!(compacts.len(), 1, "dynamic must replace static, not coexist");
+        assert_eq!(
+            compacts.len(),
+            1,
+            "dynamic must replace static, not coexist"
+        );
         assert_eq!(compacts[0].description, "DYNAMIC DESC");
     }
 
@@ -241,8 +255,12 @@ mod tests {
             name: "compact".into(),
             description: "DYNAMIC".into(),
             hint: None,
-            source: CommandSource::Agent { handle: "codex".into() },
-            dispatch: Dispatch::PromptText { normalized: "/compact".into() },
+            source: CommandSource::Agent {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::PromptText {
+                normalized: "/compact".into(),
+            },
         };
         registry.set_agent_commands("codex", vec![dynamic]);
         registry.set_agent_commands("codex", vec![]);
@@ -252,7 +270,10 @@ mod tests {
             .filter(|e| e.name == "compact")
             .collect();
         assert_eq!(compacts.len(), 1);
-        assert_eq!(compacts[0].description, "compact desc", "static should reappear");
+        assert_eq!(
+            compacts[0].description, "compact desc",
+            "static should reappear"
+        );
     }
 
     #[test]
