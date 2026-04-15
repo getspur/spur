@@ -20,7 +20,7 @@ use spur_acp::{
 use spur_pm::Issue;
 
 use agent_client_protocol::{
-    ContentBlock, InitializeRequest, ListSessionsRequest, McpServer, McpServerStdio,
+    ContentBlock, InitializeRequest, ListSessionsRequest, McpServer, McpServerHttp,
     PromptRequest, ProtocolVersion, SessionInfo, SessionUpdate, SetSessionModeRequest,
     TextContent,
 };
@@ -60,8 +60,12 @@ pub struct BrainSession {
     pub acp_session_id: String,
     pub spur_session_id: SessionId,
     pub brain_name: String,
-    pub mcp_server: Arc<McpCallbackServer>,
     pub delegation_handle: JoinHandle<()>,
+    /// Background task accepting connections on the HTTP MCP callback
+    /// listener. Must be aborted on session retire — otherwise the
+    /// listener keeps its port open and the task + TcpListener are
+    /// leaked for the lifetime of the process.
+    pub mcp_handle: JoinHandle<()>,
     /// Task that drains the connection's session-notification broadcast
     /// and republishes each item onto the `SpurEvent` bus. `None` for
     /// transports that return `None` from `subscribe_session_notifications`
@@ -270,11 +274,11 @@ impl Orchestrator {
             .collect();
         mcp_server.set_workers(workers);
 
-        let mcp_endpoint = mcp_server.endpoint();
         let mcp_server = Arc::new(mcp_server);
-        let _mcp_handle = mcp_server
+        let (mcp_url, mcp_handle) = mcp_server
             .clone()
             .start()
+            .await
             .context("Failed to start MCP callback server")?;
 
         // 5. Log session start.
@@ -304,14 +308,9 @@ impl Orchestrator {
             "Brain agent initialized"
         );
 
-        // Build MCP server config for the SPUR callback server (stdio-based UDS).
-        // The MCP callback server exposes a Unix domain socket; we model it as a
-        // stdio-based MCP server whose command is `socat` connecting to the socket.
-        // However, the cleaner approach per ACP spec is to pass the socket path as
-        // a stdio MCP server that the agent can connect to.
-        let mcp_servers = vec![McpServer::Stdio(
-            McpServerStdio::new("spur-mcp", &mcp_endpoint.socket_path)
-                .args(Vec::new()),
+        // MCP callback server is now HTTP — pass URL directly.
+        let mcp_servers = vec![McpServer::Http(
+            McpServerHttp::new("spur-mcp", &mcp_url),
         )];
 
         let session_response = crate::skip_perm::new_session_with_bypass(
@@ -378,8 +377,8 @@ impl Orchestrator {
 
         // 9. Clean up.
         let _ = connection.shutdown().await;
-        let _ = mcp_server.shutdown();
         delegation_handle.abort();
+        mcp_handle.abort();
 
         let duration = start.elapsed();
 
@@ -716,6 +715,7 @@ impl Orchestrator {
                             if let Some(h) = b.notification_pump_handle.take() {
                                 h.abort();
                             }
+                            b.mcp_handle.abort();
                             let _ = b.connection.shutdown().await;
                             brain = None;
                             continue;
@@ -853,8 +853,8 @@ impl Orchestrator {
             if let Some(h) = b.notification_pump_handle.take() {
                 h.abort();
             }
+            b.mcp_handle.abort();
             let _ = b.connection.shutdown().await;
-            let _ = b.mcp_server.shutdown();
         }
         // Drop any pre-connected but unused connection.
         if let Some((mut conn, _)) = agent_connection.take() {
@@ -1026,7 +1026,7 @@ impl Orchestrator {
             if let Some(h) = b.notification_pump_handle {
                 h.abort();
             }
-            let _ = b.mcp_server.shutdown();
+            b.mcp_handle.abort();
             *agent_connection = Some((b.connection, b.brain_name));
         }
     }
@@ -1096,11 +1096,11 @@ impl Orchestrator {
             .collect();
         mcp_server.set_workers(workers);
 
-        let mcp_endpoint = mcp_server.endpoint();
         let mcp_server = Arc::new(mcp_server);
-        let _mcp_handle = mcp_server
+        let (mcp_url, mcp_handle) = mcp_server
             .clone()
             .start()
+            .await
             .context("Failed to start MCP callback server")?;
 
         // Log session start.
@@ -1116,9 +1116,8 @@ impl Orchestrator {
             );
         }
 
-        let mcp_servers = vec![McpServer::Stdio(
-            McpServerStdio::new("spur-mcp", &mcp_endpoint.socket_path)
-                .args(Vec::new()),
+        let mcp_servers = vec![McpServer::Http(
+            McpServerHttp::new("spur-mcp", &mcp_url),
         )];
 
         let brain_cfg = self
@@ -1200,9 +1199,9 @@ impl Orchestrator {
             acp_session_id: session_response.session_id.to_string(),
             spur_session_id: session_id,
             brain_name,
-            mcp_server,
             delegation_handle,
             notification_pump_handle,
+            mcp_handle,
         })
     }
 
@@ -1241,11 +1240,11 @@ impl Orchestrator {
             .collect();
         mcp_server.set_workers(workers);
 
-        let mcp_endpoint = mcp_server.endpoint();
         let mcp_server = Arc::new(mcp_server);
-        let _mcp_handle = mcp_server
+        let (mcp_url, mcp_handle) = mcp_server
             .clone()
             .start()
+            .await
             .context("Failed to start MCP callback server")?;
 
         // Log session start.
@@ -1261,9 +1260,8 @@ impl Orchestrator {
             );
         }
 
-        let mcp_servers = vec![McpServer::Stdio(
-            McpServerStdio::new("spur-mcp", &mcp_endpoint.socket_path)
-                .args(Vec::new()),
+        let mcp_servers = vec![McpServer::Http(
+            McpServerHttp::new("spur-mcp", &mcp_url),
         )];
 
         let brain_cfg = self
@@ -1363,9 +1361,9 @@ impl Orchestrator {
             acp_session_id: final_acp_session_id,
             spur_session_id: session_id,
             brain_name,
-            mcp_server,
             delegation_handle,
             notification_pump_handle,
+            mcp_handle,
         };
 
         // Return an empty stream if we fell back to new_session.
