@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod agents;
 pub mod config;
 pub mod connection;
 pub mod domain;
