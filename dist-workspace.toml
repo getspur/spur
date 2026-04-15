@@ -24,6 +24,8 @@ installers = ["shell", "powershell", "npm"]
 source-tarball = false
 # A namespace to use when publishing this package to the npm registry
 npm-scope = "@getspur"
+# Host release artifacts on a separate public repo (source stays private)
+github-releases-repo = "getspur/spur-releases"
 # Whether to produce an npm lockfile
 npm-shrinkwrap = true
 # Publish jobs to run in CI
