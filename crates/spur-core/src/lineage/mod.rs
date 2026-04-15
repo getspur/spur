@@ -11,5 +11,5 @@ pub mod types;
 pub use projection::ExecutorLineage;
 pub use types::{
     Artifact, Attempt, AttemptStatus, ExecutorId, ExecutorNode, ReviewDecision, ReviewKind,
-    ReviewPayload, ReviewRequest,
+    ReviewPayload, ReviewRequest, WorkerStreamEntry, WorkerStreamKind,
 };

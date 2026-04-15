@@ -36,6 +36,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 latest_diff_summary: None,
                 latest_diff_text: None,
                 last_error: None,
+                stream_buffer: std::collections::VecDeque::new(),
             });
         }
 
@@ -76,6 +77,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 latest_diff_summary: None,
                 latest_diff_text: None,
                 last_error: None,
+                stream_buffer: std::collections::VecDeque::new(),
             };
             match parent {
                 Some(p) => lineage.attach_child(&p, node),

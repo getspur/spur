@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_core::{Artifact, ExecutorNode};
+use spur_core::{Artifact, ExecutorNode, WorkerStreamKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailTab {
@@ -105,11 +105,27 @@ impl DetailPane {
         frame.render_widget(p, chunks[1]);
     }
 
-    fn render_stream<'a>(&self, _node: &'a ExecutorNode) -> Vec<Line<'a>> {
-        vec![Line::from(Span::styled(
-            "(live stream — rebinding to focused-node view is a follow-up)",
-            Style::default().fg(Color::DarkGray),
-        ))]
+    fn render_stream<'a>(&self, node: &'a ExecutorNode) -> Vec<Line<'a>> {
+        if node.stream_buffer.is_empty() {
+            return vec![Line::from(Span::styled(
+                "(waiting for worker output…)",
+                Style::default().fg(Color::DarkGray),
+            ))];
+        }
+        node.stream_buffer
+            .iter()
+            .map(|entry| {
+                let (prefix, color) = match entry.kind {
+                    WorkerStreamKind::Thought => ("💭 ", Color::DarkGray),
+                    WorkerStreamKind::Message => ("💬 ", Color::White),
+                    WorkerStreamKind::ToolCall => ("🔧 ", Color::Cyan),
+                };
+                Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(color)),
+                    Span::styled(entry.text.clone(), Style::default().fg(color)),
+                ])
+            })
+            .collect()
     }
 
     fn render_artifacts<'a>(&self, node: &'a ExecutorNode) -> Vec<Line<'a>> {
