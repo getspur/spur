@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -62,17 +61,6 @@ pub struct AgentCapabilities {
     pub supports_streaming: bool,
     /// Raw capabilities object from ACP initialize response.
     pub raw: serde_json::Value,
-}
-
-// ─── MCP Endpoint ──────────────────────────────────────────────────────
-
-/// Endpoint info for SPUR's MCP callback server, passed to agents during ACP init.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpEndpoint {
-    /// Path to Unix domain socket.
-    pub socket_path: PathBuf,
-    /// Human-readable server name.
-    pub server_name: String,
 }
 
 // ─── Prompt Blocks ─────────────────────────────────────────────────────
