@@ -16,6 +16,58 @@ use crate::types::{AgentKind, AgentRole, CostTier, TransportKind};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Per-agent task-routing descriptor. Feeds both the brain prompt and
+/// `list_available_workers` tool response. See design spec section A.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DelegationDescriptor {
+    /// One-line human summary. Rendered into the workers-block of the
+    /// brain prompt when non-empty.
+    pub description:        Option<String>,
+    /// Routing preference signal. Specialists are preferred when their
+    /// good_for matches; generalists are fallback.
+    pub tier:               Option<Tier>,
+    /// Positive task patterns. Used by the brain to route.
+    pub good_for:           Vec<String>,
+    /// Negative task patterns. Soft signal; brain MAY override with
+    /// stated rationale when no better agent exists.
+    pub avoid_for:          Vec<String>,
+    /// Held back from workers-block; injected into per-dispatch task
+    /// prompt only.
+    pub strengths:          Vec<String>,
+    /// Held back from workers-block; injected into per-dispatch task
+    /// prompt only.
+    pub limitations:        Vec<String>,
+    /// Held back from routing; shown to brain when dispatching so it
+    /// can shape CONTEXT appropriately.
+    pub input_expectations: Option<String>,
+    /// Routing-relevant via `list_available_workers`. Brain uses for
+    /// EXPECTED_OUTPUT section of dispatched task prompt.
+    pub output_shape:       Option<String>,
+    /// Default true. When false, user fields are used verbatim
+    /// (including empty vecs — no built-in merge).
+    #[serde(default = "default_inherit_defaults")]
+    pub inherit_defaults:   bool,
+}
+
+impl Default for DelegationDescriptor {
+    fn default() -> Self {
+        Self {
+            description: None, tier: None,
+            good_for: Vec::new(), avoid_for: Vec::new(),
+            strengths: Vec::new(), limitations: Vec::new(),
+            input_expectations: None, output_shape: None,
+            inherit_defaults: true,
+        }
+    }
+}
+
+fn default_inherit_defaults() -> bool { true }
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier { Specialist, Generalist }
+
 /// Configuration for a single registered agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -463,6 +515,34 @@ pub fn load_seed_template() -> AgentsConfig {
         )
     });
     parsed.agents
+}
+
+#[cfg(test)]
+mod delegation_descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_deserializes_from_partial_toml() {
+        let toml = r#"
+            description = "test agent"
+            tier = "specialist"
+            good_for = ["a", "b"]
+        "#;
+        let d: DelegationDescriptor = toml::from_str(toml).unwrap();
+        assert_eq!(d.description.as_deref(), Some("test agent"));
+        assert!(matches!(d.tier, Some(Tier::Specialist)));
+        assert_eq!(d.good_for, vec!["a".to_string(), "b".to_string()]);
+        assert!(d.avoid_for.is_empty());
+        assert!(d.inherit_defaults); // default true
+    }
+
+    #[test]
+    fn descriptor_default_is_empty_and_inherits() {
+        let d = DelegationDescriptor::default();
+        assert!(d.description.is_none());
+        assert!(d.good_for.is_empty());
+        assert!(d.inherit_defaults);
+    }
 }
 
 #[cfg(test)]
