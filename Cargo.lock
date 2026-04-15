@@ -2207,6 +2207,7 @@ dependencies = [
  "spur-acp",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "tracing",
  "uuid",
 ]
