@@ -150,6 +150,20 @@ pub struct Orchestrator {
     repo_root: PathBuf,
 }
 
+/// Detect whether an error from an `AgentConnection` RPC indicates the
+/// underlying subprocess has died (pipe closed, ACP thread exited, etc.),
+/// versus a normal request-level error (auth needed, invalid session, etc.).
+///
+/// Pragmatic string-match against the two known "subprocess is gone"
+/// patterns emitted by `NativeAcpConnection` and the ACP SDK. A more
+/// structured signal would require a new trait method on `AgentConnection`;
+/// revisit if the set of transports grows.
+pub(crate) fn is_connection_death(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("ACP thread died")
+        || msg.contains("server shut down unexpectedly")
+}
+
 impl Orchestrator {
     /// Create a new orchestrator for the given repo directory.
     pub fn new(repo_root: PathBuf, config: SpurConfig) -> Result<Self> {
@@ -3800,5 +3814,25 @@ mod retry_context_tests {
         let mut history = vec![att(1, "s", "f")];
         apply_bloat_cap(&mut history, 10_000);
         assert_eq!(history.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod is_connection_death_tests {
+    use super::*;
+
+    #[test]
+    fn is_connection_death_detects_known_patterns() {
+        let e1 = anyhow::anyhow!("NativeAcpConnection 'kiro': ACP thread died during ext_method");
+        assert!(is_connection_death(&e1));
+
+        let e2 = anyhow::anyhow!("NativeAcpConnection 'kiro': ACP thread died");
+        assert!(is_connection_death(&e2));
+
+        let e3 = anyhow::anyhow!("Internal error: \"server shut down unexpectedly\"");
+        assert!(is_connection_death(&e3));
+
+        let e4 = anyhow::anyhow!("prompt rejected: invalid session id");
+        assert!(!is_connection_death(&e4));
     }
 }
