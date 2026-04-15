@@ -2222,13 +2222,27 @@ impl Orchestrator {
                 phase: LifecycleState::AwaitingReview,
             });
 
+            let plan = delegation_plan.as_ref();
+            let chosen_matches_dispatched = plan
+                .and_then(|p| p.chosen.as_ref())
+                .map(|c| normalize_agent_name(c) == normalize_agent_name(&agent));
+
+            if chosen_matches_dispatched == Some(false) {
+                tracing::warn!(
+                    session = %brain_session_id,
+                    chosen = %plan.and_then(|p| p.chosen.as_deref()).unwrap_or(""),
+                    dispatched = %agent,
+                    "delegation_plan.chosen does not match dispatched agent",
+                );
+            }
+
             let review_payload = ReviewPayload {
                 summary: outcome.summary.clone().unwrap_or_default(),
                 diff_summary: outcome.diff_summary.clone(),
                 pr_url: None,
                 error: None,
-                delegation_plan: None,
-                chosen_matches_dispatched: None,
+                delegation_plan: delegation_plan.clone(),
+                chosen_matches_dispatched,
             };
             funnel.emit(SpurEventBody::ExecutorReviewRequested {
                 id: eid.0.clone(),
@@ -4133,5 +4147,24 @@ mod normalize_tests {
             normalize_agent_name("our-claude"),
             normalize_agent_name("claude"),
         );
+    }
+
+    #[test]
+    fn mismatch_detection_chosen_vs_dispatched_strings() {
+        let dispatched = "kiro";
+        let chosen = "claude";
+        let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
+        assert_eq!(matched, false);
+
+        let dispatched = "claude-code-acp";
+        let chosen = "claude";
+        let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
+        // claude-code-acp normalizes to "claude-code", so "claude" != "claude-code"
+        assert_eq!(matched, false);
+
+        let dispatched = "claude-code-acp";
+        let chosen = "claude-code-acp";
+        let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
+        assert_eq!(matched, true);
     }
 }
