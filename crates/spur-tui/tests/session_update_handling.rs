@@ -133,6 +133,7 @@ fn kiro_available_notification_populates_registry() {
         skip_permissions: false,
         skip_permissions_args: vec![],
         skip_permissions_session_mode: None,
+        delegation: Default::default(),
     });
 
     let mut view = spur_tui::views::session_detail::SessionDetailView::new(
@@ -205,6 +206,7 @@ fn kiro_execute_response_renders_as_system_note() {
         skip_permissions: false,
         skip_permissions_args: vec![],
         skip_permissions_session_mode: None,
+        delegation: Default::default(),
     });
 
     let mut view = spur_tui::views::session_detail::SessionDetailView::new(
