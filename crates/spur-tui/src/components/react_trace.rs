@@ -264,6 +264,9 @@ pub struct ReactTrace {
     /// Current session mode, if known (e.g. "plan", "acceptEdits"). Updated
     /// by `set_mode`. Rendered as a badge appended to the pane title.
     current_mode: Option<String>,
+    /// When true (default), Observe entries show a truncated preview.
+    /// Ctrl+O toggles this to false, expanding all tool-result bodies.
+    observe_collapsed: bool,
 }
 
 /// Map `ToolFamily` to a display glyph + color.
@@ -415,7 +418,8 @@ fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>> {
 }
 
 /// Build display lines for an `ObservePayload`.
-fn observe_payload_lines(payload: &ObservePayload) -> Vec<Line<'static>> {
+/// When `collapsed` is true, output is truncated to a short preview.
+fn observe_payload_lines(payload: &ObservePayload, collapsed: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     match payload {
         ObservePayload::CommandOutput {
@@ -431,16 +435,41 @@ fn observe_payload_lines(payload: &ObservePayload) -> Vec<Line<'static>> {
                 Span::raw("   "),
                 Span::styled(exit_str, Style::default().fg(Color::Magenta)),
             ]));
-            for sl in stdout.lines().take(8) {
+            let stdout_limit = if collapsed { 8 } else { usize::MAX };
+            let stderr_limit = if collapsed { 4 } else { usize::MAX };
+            let stdout_total = stdout.lines().count();
+            for sl in stdout.lines().take(stdout_limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(sl.to_string(), Style::default().fg(Color::White)),
                 ]));
             }
-            for el in stderr.lines().take(4) {
+            if collapsed && stdout_total > stdout_limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!(
+                            "[… {} more lines · Ctrl+O expand]",
+                            stdout_total - stdout_limit
+                        ),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+            let stderr_total = stderr.lines().count();
+            for el in stderr.lines().take(stderr_limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(el.to_string(), Style::default().fg(Color::Red)),
+                ]));
+            }
+            if collapsed && stderr_total > stderr_limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more lines]", stderr_total - stderr_limit),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
         }
@@ -461,10 +490,20 @@ fn observe_payload_lines(payload: &ObservePayload) -> Vec<Line<'static>> {
                 Span::raw("   "),
                 Span::styled(header, Style::default().fg(Color::Cyan)),
             ]));
-            for cl in content.lines().take(8) {
+            let limit = if collapsed { 8 } else { usize::MAX };
+            for cl in content.lines().take(limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(cl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+            if collapsed && line_count > limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more lines · Ctrl+O expand]", line_count - limit),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
         }
@@ -480,7 +519,9 @@ fn observe_payload_lines(payload: &ObservePayload) -> Vec<Line<'static>> {
                     Span::styled(msg, Style::default().fg(Color::Yellow)),
                 ]));
             } else if let Some(d) = diff {
-                for dl in d.lines().take(6) {
+                let limit = if collapsed { 6 } else { usize::MAX };
+                let total = d.lines().count();
+                for dl in d.lines().take(limit) {
                     let color = if dl.starts_with('+') {
                         Color::Green
                     } else if dl.starts_with('-') {
@@ -493,6 +534,15 @@ fn observe_payload_lines(payload: &ObservePayload) -> Vec<Line<'static>> {
                         Span::styled(dl.to_string(), Style::default().fg(color)),
                     ]));
                 }
+                if collapsed && total > limit {
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(
+                            format!("[… {} more lines]", total - limit),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                }
             } else if let Some(p) = path {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
@@ -501,28 +551,40 @@ fn observe_payload_lines(payload: &ObservePayload) -> Vec<Line<'static>> {
             }
         }
         ObservePayload::Json { pretty } => {
-            for jl in pretty.lines().take(8) {
+            let limit = if collapsed { 8 } else { usize::MAX };
+            let total = pretty.lines().count();
+            for jl in pretty.lines().take(limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
                 ]));
             }
-            let total = pretty.lines().count();
-            if total > 8 {
+            if collapsed && total > limit {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        "[… expand]".to_string(),
+                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
             }
         }
         ObservePayload::Text { body } => {
-            for tl in body.lines() {
+            let limit = if collapsed { 8 } else { usize::MAX };
+            let total = body.lines().count();
+            for tl in body.lines().take(limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(tl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+            if collapsed && total > limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
         }
@@ -548,6 +610,7 @@ impl ReactTrace {
             mermaid_enabled: true,
             agent_kind: AgentKind::Generic,
             current_mode: None,
+            observe_collapsed: true,
         }
     }
 
@@ -566,6 +629,18 @@ impl ReactTrace {
         self.current_mode = mode;
     }
 
+    /// Toggle the collapsed state for Observe (tool-result) entries.
+    /// Returns the new state (true = collapsed).
+    pub fn toggle_observe_collapsed(&mut self) -> bool {
+        self.observe_collapsed = !self.observe_collapsed;
+        self.observe_collapsed
+    }
+
+    /// Whether observe entries are currently collapsed.
+    pub fn observe_collapsed(&self) -> bool {
+        self.observe_collapsed
+    }
+
     /// Build the styled pane title + accent color from `agent_kind` and
     /// optional mode badge.
     fn pane_title_and_color(&self) -> (String, Color) {
@@ -577,7 +652,7 @@ impl ReactTrace {
             AgentKind::Kiro => (" Session · kiro ", Color::Cyan),
             AgentKind::Generic => (" Session ", Color::DarkGray),
         };
-        let title = if let Some(mode_id) = &self.current_mode {
+        let mut title = if let Some(mode_id) = &self.current_mode {
             if let Some(badge) = mode_badge(mode_id, self.agent_kind) {
                 format!("{}· {} ", base_title, badge.short)
             } else {
@@ -586,6 +661,9 @@ impl ReactTrace {
         } else {
             base_title.to_string()
         };
+        if !self.observe_collapsed {
+            title.push_str("· ⊞ expanded ");
+        }
         (title, accent)
     }
 
@@ -902,6 +980,7 @@ impl ReactTrace {
         spinner_frame: &str,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) -> Vec<Line<'static>> {
+        let collapsed = self.observe_collapsed;
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         for entry in &self.entries {
@@ -1036,7 +1115,7 @@ impl ReactTrace {
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]));
-                        lines.extend(observe_payload_lines(p));
+                        lines.extend(observe_payload_lines(p, collapsed));
                     } else {
                         // Fallback: render as today
                         lines.push(Line::from(vec![
@@ -1204,6 +1283,7 @@ impl ReactTrace {
         use crate::components::markdown_stream::StreamItem;
 
         let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+        let collapsed = self.observe_collapsed;
 
         let mut rows: Vec<VirtualRow> = Vec::new();
 
@@ -1406,7 +1486,7 @@ impl ReactTrace {
                                 ),
                             ]),
                         );
-                        for line in observe_payload_lines(p) {
+                        for line in observe_payload_lines(p, collapsed) {
                             push_wrapped(&mut rows, line);
                         }
                     } else {
@@ -1931,7 +2011,7 @@ impl ReactTrace {
                         let (glyph, _) = outcome_glyph(p);
                         let verb = observe_verb(p);
                         lines.push(format!("{} {} {}", entry.timestamp, glyph, verb));
-                        for l in observe_payload_lines(p) {
+                        for l in observe_payload_lines(p, self.observe_collapsed) {
                             let joined: String =
                                 l.spans.iter().map(|s| s.content.as_ref()).collect();
                             lines.push(joined);

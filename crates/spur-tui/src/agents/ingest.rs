@@ -13,7 +13,9 @@ pub fn run_ingest_hook(binding: &IngestBinding, params: &Value) -> Option<Vec<Av
     match binding.parser {
         IngestParserKind::JsonPathList => {
             let list = lookup_dotted_path(params, &binding.path)?;
-            let Value::Array(items) = list else { return None };
+            let Value::Array(items) = list else {
+                return None;
+            };
             let filtered: Vec<Value> = items
                 .into_iter()
                 .filter(|item| {
@@ -112,6 +114,10 @@ mod tests {
         });
         let out = run_ingest_hook(&binding, &params).expect("decoded");
         let names: Vec<_> = out.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["/agent", "/compact"], "meta.local=true entries must be dropped");
+        assert_eq!(
+            names,
+            vec!["/agent", "/compact"],
+            "meta.local=true entries must be dropped"
+        );
     }
 }
