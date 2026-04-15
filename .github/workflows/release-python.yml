@@ -74,8 +74,10 @@ jobs:
           pip install auditwheel
           for whl in python/dist/*.whl; do
             auditwheel show "$whl" 2>&1 | tee /tmp/aw.txt
-            if grep -q "external shared libraries" /tmp/aw.txt; then
-              echo "::error::Wheel bundles external shared libraries"
+            if grep -q "requires no external shared libraries" /tmp/aw.txt; then
+              echo "✅ Wheel is clean"
+            else
+              echo "::error::Wheel has external shared library dependencies"
               exit 1
             fi
           done
