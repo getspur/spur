@@ -3030,6 +3030,12 @@ async fn run_one_worker_attempt(
                 &file_touch_dedup,
                 funnel,
             );
+            // Phase 1 — stream worker notifications to TUI via event bus.
+            funnel.emit(SpurEventBody::WorkerNotification {
+                brain_session_id: ctx.brain_session_id.clone(),
+                executor_id: worker_session.0.clone(),
+                notification: Box::new(notification.clone()),
+            });
             match &notification.update {
                 SessionUpdate::AgentThoughtChunk(chunk)
                 | SessionUpdate::AgentMessageChunk(chunk) => {

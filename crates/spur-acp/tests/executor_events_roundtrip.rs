@@ -119,3 +119,25 @@ fn executor_review_cancelled_round_trips() {
     assert!(j.contains("ExecutorReviewCancelled"));
     assert!(j.contains("brain call cancelled"));
 }
+
+#[test]
+fn worker_notification_roundtrips() {
+    use agent_client_protocol::{
+        ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
+    };
+    let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new("thinking...")));
+    let notification = SessionNotification::new("acp-sess", SessionUpdate::AgentThoughtChunk(chunk));
+    let ev = SpurEvent::now(SpurEventBody::WorkerNotification {
+        brain_session_id: SessionId("brain-1".into()),
+        executor_id: "exec-1".into(),
+        notification: Box::new(notification),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        round.body,
+        SpurEventBody::WorkerNotification { .. }
+    ));
+    assert!(json.contains("WorkerNotification"));
+    assert!(json.contains("thinking..."));
+}
