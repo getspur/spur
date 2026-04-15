@@ -13,9 +13,19 @@ pub fn run_ingest_hook(binding: &IngestBinding, params: &Value) -> Option<Vec<Av
     match binding.parser {
         IngestParserKind::JsonPathList => {
             let list = lookup_dotted_path(params, &binding.path)?;
+            let Value::Array(items) = list else { return None };
+            let filtered: Vec<Value> = items
+                .into_iter()
+                .filter(|item| {
+                    item.get("meta")
+                        .and_then(|m| m.get("local"))
+                        .and_then(|v| v.as_bool())
+                        != Some(true)
+                })
+                .collect();
             match binding.item_schema {
                 ItemSchemaKind::AcpAvailableCommand => {
-                    serde_json::from_value::<Vec<AvailableCommand>>(list).ok()
+                    serde_json::from_value::<Vec<AvailableCommand>>(Value::Array(filtered)).ok()
                 }
             }
         }
@@ -83,5 +93,25 @@ mod tests {
         });
         let out = run_ingest_hook(&binding, &params).expect("decoded");
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn filters_entries_marked_meta_local_true() {
+        let binding = IngestBinding {
+            method: "_kiro.dev/commands/available".into(),
+            parser: IngestParserKind::JsonPathList,
+            path: "commands".into(),
+            item_schema: ItemSchemaKind::AcpAvailableCommand,
+        };
+        let params = serde_json::json!({
+            "commands": [
+                { "name": "/agent", "description": "switch agent", "meta": { "local": false } },
+                { "name": "/chat",  "description": "save/load",    "meta": { "local": true } },
+                { "name": "/compact", "description": "summarize" }
+            ]
+        });
+        let out = run_ingest_hook(&binding, &params).expect("decoded");
+        let names: Vec<_> = out.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["/agent", "/compact"], "meta.local=true entries must be dropped");
     }
 }
