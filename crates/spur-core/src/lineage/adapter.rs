@@ -90,6 +90,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             to_agent,
             task,
             request_id: _,
+            delegation_plan: _,
         } => {
             // Populate the task_spec of the most recent Executor owned by the
             // worker name, if empty.
