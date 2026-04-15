@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
-use spur_acp::types::{AgentHealth, AgentRole, CostTier, TransportKind};
+use spur_acp::types::{AgentHealth, AgentKind, AgentRole, CostTier, TransportKind};
 use spur_core::skip_perm::{load_session_with_bypass, new_session_with_bypass};
 
 #[derive(Default)]
@@ -27,10 +27,7 @@ struct MockConn {
 
 #[async_trait]
 impl AgentConnection for MockConn {
-    async fn initialize(
-        &mut self,
-        _r: InitializeRequest,
-    ) -> anyhow::Result<InitializeResponse> {
+    async fn initialize(&mut self, _r: InitializeRequest) -> anyhow::Result<InitializeResponse> {
         unimplemented!()
     }
 
@@ -43,22 +40,27 @@ impl AgentConnection for MockConn {
             .lock()
             .unwrap()
             .push(("new_session".into(), cwd.display().to_string()));
-        Ok(NewSessionResponse::new(
-            SessionId::new("mock-session".to_string()),
-        ))
+        Ok(NewSessionResponse::new(SessionId::new(
+            "mock-session".to_string(),
+        )))
     }
 
     async fn prompt(
         &mut self,
         _r: PromptRequest,
-    ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>>
-    {
+    ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
         unimplemented!()
     }
 
-    async fn cancel(&mut self, _s: &str) -> anyhow::Result<()> { unimplemented!() }
-    async fn shutdown(&mut self) -> anyhow::Result<()> { Ok(()) }
-    fn health(&self) -> AgentHealth { AgentHealth::Ready }
+    async fn cancel(&mut self, _s: &str) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn health(&self) -> AgentHealth {
+        AgentHealth::Ready
+    }
 
     async fn set_session_mode(
         &mut self,
@@ -88,15 +90,13 @@ impl AgentConnection for MockConn {
     }
 }
 
-fn cfg(
-    skip: bool,
-    mode: Option<&str>,
-) -> AgentConfig {
+fn cfg(skip: bool, mode: Option<&str>) -> AgentConfig {
     AgentConfig {
         name: "mock".into(),
         command: "mock".into(),
         args: vec![],
         transport: TransportKind::Acp,
+        kind: AgentKind::Generic,
         role: AgentRole::Both,
         capabilities: vec![],
         cost_tier: CostTier::Medium,
@@ -253,5 +253,8 @@ async fn load_session_set_session_mode_error_is_non_fatal() {
         vec![],
     )
     .await;
-    assert!(res.is_ok(), "load_session must succeed even if set_session_mode errors");
+    assert!(
+        res.is_ok(),
+        "load_session must succeed even if set_session_mode errors"
+    );
 }

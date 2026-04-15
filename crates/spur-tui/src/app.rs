@@ -63,7 +63,9 @@ pub enum UserInput {
     },
     /// Halt the in-flight agent stream on the given session. Maps 1:1 to
     /// `spur_core::InteractiveInput::CancelStream` via `spur-cli`.
-    CancelStream { session: SessionId },
+    CancelStream {
+        session: SessionId,
+    },
 }
 
 /// Tracks the brain agent's current state for status indicators.
@@ -197,7 +199,9 @@ impl App {
 
     /// Test-only accessor: borrow the current `SessionDetailView`.
     #[doc(hidden)]
-    pub fn session_detail_for_test(&self) -> Option<&crate::views::session_detail::SessionDetailView> {
+    pub fn session_detail_for_test(
+        &self,
+    ) -> Option<&crate::views::session_detail::SessionDetailView> {
         self.session_detail.as_ref()
     }
 
@@ -379,8 +383,8 @@ impl App {
                     // the event carries a sentinel/empty session id (spawn-side
                     // failures that happen before a session id is allocated).
                     let matches_focused = session.0 == detail.session_id().0;
-                    let is_sentinel = session.0.is_empty()
-                        || session.0 == "00000000-0000-0000-0000-000000000000";
+                    let is_sentinel =
+                        session.0.is_empty() || session.0 == "00000000-0000-0000-0000-000000000000";
                     if matches_focused || is_sentinel {
                         detail.auth_error = Some(message.clone());
                     } else {
@@ -466,10 +470,7 @@ impl App {
                             .and_then(|e| e.title_override.clone())
                             .unwrap_or_else(|| agent.clone());
                         let quit_ago = humanize_since(
-                            self.metadata_store
-                                .metadata()
-                                .last_active_at
-                                .as_deref(),
+                            self.metadata_store.metadata().last_active_at.as_deref(),
                         );
                         view.show_resume_banner(title, quit_ago);
                         self.metadata_store.clear_last_active();
@@ -511,8 +512,7 @@ impl App {
             SpurEventBody::TurnComplete { session } => {
                 self.brain_status = BrainStatus::Ready;
                 let now = chrono::Utc::now().to_rfc3339();
-                self.metadata_store
-                    .set_last_active(session.0.clone(), now);
+                self.metadata_store.set_last_active(session.0.clone(), now);
                 if let Err(e) = self.metadata_store.save() {
                     tracing::warn!(error = %e, "failed to persist last_active on TurnComplete");
                 }
@@ -622,7 +622,10 @@ impl App {
                 }
 
                 // Transition to Thinking when sending a message
-                if matches!(self.brain_status, BrainStatus::Ready | BrainStatus::Idle | BrainStatus::Error(_)) {
+                if matches!(
+                    self.brain_status,
+                    BrainStatus::Ready | BrainStatus::Idle | BrainStatus::Error(_)
+                ) {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
@@ -685,16 +688,17 @@ impl App {
                 // replay into an unrelated session that happens to spawn next).
 
                 if let Some(ref tx) = self.user_input_tx {
-                    let _ = tx.try_send(UserInput::NewSessionWithMessage {
-                        blocks,
-                        interrupt,
-                    });
+                    let _ = tx.try_send(UserInput::NewSessionWithMessage { blocks, interrupt });
                 }
                 self.sync_brain_status();
                 self.dirty = true;
             }
 
-            Action::VendorExec { session, method, params } => {
+            Action::VendorExec {
+                session,
+                method,
+                params,
+            } => {
                 if let Some(tx) = self.user_input_tx.as_ref() {
                     let _ = tx.try_send(UserInput::VendorExec {
                         session,
@@ -825,7 +829,7 @@ impl App {
                 // immediately; orchestrator will emit CurrentModeUpdate to
                 // reconcile if the agent rejects the mode id.
                 if let Some(ref mut detail) = self.session_detail {
-                    detail.current_mode = Some(next.to_string());
+                    detail.set_current_mode(Some(next.to_string()));
                 }
             }
 
@@ -854,22 +858,28 @@ impl App {
                 if let Some((perm, _)) = self.pending_permission.take() {
                     match choice {
                         PermissionChoice::Allow => {
-                            let id = perm.args.options.first()
+                            let id = perm
+                                .args
+                                .options
+                                .first()
                                 .map(|o| o.option_id.to_string())
                                 .unwrap_or_else(|| "allow".to_string());
-                            let _ = perm.reply_tx.send(spur_acp::types::PermissionResponse {
-                                option_id: id,
-                            });
+                            let _ = perm
+                                .reply_tx
+                                .send(spur_acp::types::PermissionResponse { option_id: id });
                         }
                         PermissionChoice::AlwaysAllow => {
-                            let id = perm.args.options.iter()
+                            let id = perm
+                                .args
+                                .options
+                                .iter()
                                 .find(|o| o.name.to_lowercase().contains("always"))
                                 .or(perm.args.options.first())
                                 .map(|o| o.option_id.to_string())
                                 .unwrap_or_else(|| "allow".to_string());
-                            let _ = perm.reply_tx.send(spur_acp::types::PermissionResponse {
-                                option_id: id,
-                            });
+                            let _ = perm
+                                .reply_tx
+                                .send(spur_acp::types::PermissionResponse { option_id: id });
                         }
                         PermissionChoice::Deny => {
                             // Drop reply_tx (signals denial to ACP thread)
@@ -907,7 +917,9 @@ impl App {
                     .and_then(|i| reviews.get(i + 1).cloned())
                     .or_else(|| reviews.into_iter().next());
                 if let Some(id) = next {
-                    self.dashboard.agents_tree_mut().set_selected(Some(id.clone()));
+                    self.dashboard
+                        .agents_tree_mut()
+                        .set_selected(Some(id.clone()));
                     self.dashboard.set_focused_node(Some(id));
                     self.dashboard.detail_pane_mut().current_tab =
                         crate::components::detail_pane::DetailTab::Review;
@@ -919,7 +931,11 @@ impl App {
                     self.dashboard.agents_tree_mut().toggle_collapsed(&id);
                 }
             }
-            Action::SubmitReview { executor_id, attempt_n, decision } => {
+            Action::SubmitReview {
+                executor_id,
+                attempt_n,
+                decision,
+            } => {
                 let has_review = self
                     .lineage
                     .node(&spur_core::ExecutorId(executor_id.clone()))
@@ -939,14 +955,20 @@ impl App {
                 // Optimistically reflect the resolution locally so the UI
                 // updates immediately without waiting for the authoritative
                 // event to round-trip.
-                self.lineage.apply(&spur_acp::SpurEvent::now(spur_acp::SpurEventBody::ExecutorReviewResolved {
-                    id: executor_id,
-                    decision: to_wire_decision(&decision),
-                }));
+                self.lineage.apply(&spur_acp::SpurEvent::now(
+                    spur_acp::SpurEventBody::ExecutorReviewResolved {
+                        id: executor_id,
+                        decision: to_wire_decision(&decision),
+                    },
+                ));
             }
 
             #[cfg(feature = "markdown")]
-            Action::MermaidRenderRequest { session, ref_id, code } => {
+            Action::MermaidRenderRequest {
+                session,
+                ref_id,
+                code,
+            } => {
                 let tx = self.mermaid_tx.clone();
                 let session_cloned = session.clone();
                 tokio::task::spawn_blocking(move || {
@@ -961,7 +983,11 @@ impl App {
                 });
             }
             #[cfg(feature = "markdown")]
-            Action::MermaidRenderCompleted { session, ref_id, result } => {
+            Action::MermaidRenderCompleted {
+                session,
+                ref_id,
+                result,
+            } => {
                 if let Some(ref mut detail) = self.session_detail {
                     if detail.session_id().0 == session.0 {
                         detail.handle_mermaid_completed(ref_id, result);
@@ -985,7 +1011,11 @@ impl App {
         self.pending_permission.take();
 
         // Extract description from SDK args
-        let description = request.args.tool_call.fields.title
+        let description = request
+            .args
+            .tool_call
+            .fields
+            .title
             .clone()
             .unwrap_or_else(|| "Tool call".to_string());
 
@@ -1173,7 +1203,9 @@ impl App {
         let area = frame.area();
 
         match self.current_view.clone() {
-            ViewId::Dashboard => self.dashboard.render_with_lineage(frame, area, &self.lineage),
+            ViewId::Dashboard => self
+                .dashboard
+                .render_with_lineage(frame, area, &self.lineage),
             ViewId::SessionDetail(_) => {
                 if let Some(ref detail) = self.session_detail {
                     detail.render_with_lineage(frame, area, &self.lineage);
@@ -1382,7 +1414,7 @@ pub(crate) fn apply_session_update(
     use spur_acp::SessionUpdate::*;
     match update {
         CurrentModeUpdate(u) => {
-            state.current_mode = Some(u.current_mode_id.to_string());
+            state.set_current_mode(Some(u.current_mode_id.to_string()));
         }
         AvailableCommandsUpdate(u) => {
             state.apply_available_commands(&u.available_commands);
@@ -1425,7 +1457,9 @@ fn render_mermaid_overlay(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             " Mermaid Viewer ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ))),
         chunks[0],
     );

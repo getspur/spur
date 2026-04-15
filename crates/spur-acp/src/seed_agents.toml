@@ -16,6 +16,7 @@ name = "claude-code"
 command = "claude"
 args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"]
 transport = "stream-json"
+kind = "claude-stream-json"
 role = "both"
 cost_tier = "medium"
 
@@ -34,6 +35,7 @@ name = "kiro"
 command = "kiro-cli"
 args = ["acp"]
 transport = "acp"
+kind = "kiro"
 role = "both"
 cost_tier = "medium"
 
@@ -64,6 +66,7 @@ name = "claude-code-acp"
 command = "npx"
 args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
 transport = "acp"
+kind = "claude-code-acp"
 role = "both"
 cost_tier = "medium"
 
@@ -85,6 +88,7 @@ name = "codex"
 command = "codex-acp"
 args = []
 transport = "acp"
+kind = "codex-acp"
 role = "both"
 cost_tier = "low"
 
@@ -137,6 +141,7 @@ name = "codex-acp"
 command = "npx"
 args = ["--yes", "@zed-industries/codex-acp@0.11.1"]
 transport = "acp"
+kind = "codex-acp"
 role = "both"
 cost_tier = "low"
 
@@ -155,6 +160,7 @@ name = "gemini"
 command = "gemini"
 args = []
 transport = "cli-wrap"
+kind = "generic"
 role = "worker"
 cost_tier = "low"
 

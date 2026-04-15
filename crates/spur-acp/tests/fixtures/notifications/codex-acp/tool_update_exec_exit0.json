@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess-cx-001",
+  "update": {
+    "sessionUpdate": "tool_call_update",
+    "toolCallId": "tc-exec-001",
+    "status": "completed",
+    "rawOutput": {
+      "exit_code": 0,
+      "stdout": "done\n",
+      "stderr": ""
+    }
+  }
+}

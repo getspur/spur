@@ -1,0 +1,9 @@
+{
+  "sessionId": "sess-ki-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-generic-001",
+    "title": "custom-thing",
+    "rawInput": {}
+  }
+}

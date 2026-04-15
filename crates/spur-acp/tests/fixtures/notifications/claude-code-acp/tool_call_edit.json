@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess-cc-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-edit-001",
+    "title": "Edit",
+    "kind": "edit",
+    "rawInput": {
+      "file_path": "/tmp/foo.rs",
+      "old_string": "a",
+      "new_string": "b"
+    }
+  }
+}

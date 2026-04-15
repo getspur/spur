@@ -35,7 +35,10 @@ impl std::fmt::Display for ConfigError {
                 "{agent}: dispatch = \"vendor_exec\" requires [agents.entries.commands] exec_method"
             ),
             Self::SkipPermissionsNoExplicitMechanism { agent, note } => {
-                write!(f, "{agent}: permissions.skip = true with no explicit mechanism — {note}")
+                write!(
+                    f,
+                    "{agent}: permissions.skip = true with no explicit mechanism — {note}"
+                )
             }
         }
     }
@@ -86,6 +89,7 @@ mod tests {
             command: "x".into(),
             args: vec![],
             transport: crate::types::TransportKind::Acp,
+            kind: crate::types::AgentKind::Generic,
             role: crate::types::AgentRole::Both,
             capabilities: vec![],
             cost_tier: crate::types::CostTier::Medium,
@@ -108,7 +112,10 @@ mod tests {
         let err = validate_agent_config(&cfg).expect_err("should error");
         assert_eq!(err.len(), 1);
         assert!(err[0].is_fatal());
-        assert!(matches!(err[0], ConfigError::VendorExecMissingMethod { .. }));
+        assert!(matches!(
+            err[0],
+            ConfigError::VendorExecMissingMethod { .. }
+        ));
     }
 
     #[test]
@@ -130,7 +137,10 @@ mod tests {
         let err = validate_agent_config(&cfg).expect_err("should warn");
         assert_eq!(err.len(), 1);
         assert!(!err[0].is_fatal(), "R3 must be warning, not fatal");
-        assert!(matches!(err[0], ConfigError::SkipPermissionsNoExplicitMechanism { .. }));
+        assert!(matches!(
+            err[0],
+            ConfigError::SkipPermissionsNoExplicitMechanism { .. }
+        ));
     }
 
     #[test]

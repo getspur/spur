@@ -107,6 +107,34 @@ pub enum TransportKind {
     StreamJson,
 }
 
+// ─── Agent Kind ────────────────────────────────────────────────────────
+
+/// Identifies the agent's wire-level idiom for the adapter layer.
+///
+/// Orthogonal to `TransportKind`: multiple kinds share the same transport
+/// (e.g. `ClaudeCodeAcp`, `CodexAcp`, and `Kiro` all use `TransportKind::Acp`
+/// via `NativeAcpConnection`). The adapter module reads `AgentKind` to pick
+/// per-agent classifiers, observe-payload extractors, and mode-badge tables.
+///
+/// Unknown agents default to `Generic`, which applies only heuristic
+/// fallbacks. Explicit TOML is preferred over inference — see
+/// `docs/spur/agent-onboarding-cookbook.md` for the mapping table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentKind {
+    /// Claude Code via `claude -p --output-format stream-json`.
+    ClaudeStreamJson,
+    /// Claude Code via `@agentclientprotocol/claude-agent-acp`.
+    ClaudeCodeAcp,
+    /// Codex via `@zed-industries/codex-acp` (npx or native binary).
+    CodexAcp,
+    /// Kiro CLI via `kiro-cli acp`.
+    Kiro,
+    /// Any ACP-speaking agent not otherwise recognized.
+    #[default]
+    Generic,
+}
+
 // ─── Cancel Mode ───────────────────────────────────────────────────────
 
 /// How `AgentConnection::cancel` behaves for a given transport.
@@ -156,4 +184,3 @@ mod cancel_mode_tests {
         assert_ne!(CancelMode::AcpSoft, CancelMode::ProcessKill);
     }
 }
-

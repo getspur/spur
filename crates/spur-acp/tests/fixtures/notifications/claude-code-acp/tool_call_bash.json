@@ -1,0 +1,12 @@
+{
+  "sessionId": "sess-cc-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-bash-001",
+    "title": "Bash",
+    "kind": "execute",
+    "rawInput": {
+      "command": "ls"
+    }
+  }
+}
