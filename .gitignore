@@ -3,3 +3,4 @@
 .worktrees/
 *.db
 .idea/
+python/dist/

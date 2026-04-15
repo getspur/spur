@@ -66,3 +66,8 @@ spur-pm = { path = "crates/spur-pm" }
 spur-worktree = { path = "crates/spur-worktree" }
 spur-cost = { path = "crates/spur-cost" }
 spur-tui = { path = "crates/spur-tui" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

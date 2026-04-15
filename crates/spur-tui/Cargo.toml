@@ -31,7 +31,7 @@ tui-markdown = { version = "0.3", optional = true }
 ratatui-core = { version = "0.1", default-features = false, optional = true }
 mermaid-rs-renderer = { version = "0.2", default-features = false, features = ["png"], optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
-ratatui-image = { version = "9", default-features = false, features = ["tokio", "chafa-dyn"], optional = true }
+ratatui-image = { version = "9", default-features = false, features = ["tokio"], optional = true }
 resvg = { version = "0.46", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 
