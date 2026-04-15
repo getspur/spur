@@ -454,8 +454,8 @@ impl Orchestrator {
 
         let mut reconnect_failures: std::collections::VecDeque<std::time::Instant> =
             std::collections::VecDeque::new();
-        const RECONNECT_CIRCUIT_LIMIT: usize = 2;
-        const RECONNECT_CIRCUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+        const RECONNECT_CIRCUIT_LIMIT: usize = 3;
+        const RECONNECT_CIRCUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
         loop {
             // ── Get next input (from queue or user) ────────────────────
@@ -559,6 +559,8 @@ impl Orchestrator {
                             brain_name,
                             permission_tx.clone(),
                             session_id,
+                            None,   // preserve_spur_session_id: fresh view on ResumeSession
+                            false,  // force_new_session: normal load behavior
                         )
                         .await
                     {
@@ -1307,18 +1309,25 @@ impl Orchestrator {
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
         acp_session_id: String,
+        preserve_spur_session_id: Option<SessionId>,
+        force_new_session: bool,
     ) -> Result<(
         BrainSession,
         std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
         spur_acp::LoadOutcome,
     )> {
-        let session_id = SessionId::new();
+        let (session_id, is_reconnect) = match preserve_spur_session_id {
+            Some(sid) => (sid, true),
+            None => (SessionId::new(), false),
+        };
 
         info!(brain = %brain_name, session = %session_id, acp_session = %acp_session_id, "Loading brain session");
-        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
-            agent: brain_name.clone(),
-            session: session_id.clone(),
-        }));
+        if !is_reconnect {
+            self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
+                agent: brain_name.clone(),
+                session: session_id.clone(),
+            }));
+        }
 
         // Start MCP callback server.
         let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
@@ -1344,16 +1353,18 @@ impl Orchestrator {
             .context("Failed to start MCP callback server")?;
 
         // Log session start.
-        if let Some(ref ct) = self.cost_tracker {
-            let _ = ct.start_session(
-                &session_id,
-                &brain_name,
-                "brain",
-                None,
-                "(resumed)",
-                self.config.project.as_ref().map(|p| p.name.as_str()),
-                None,
-            );
+        if !is_reconnect {
+            if let Some(ref ct) = self.cost_tracker {
+                let _ = ct.start_session(
+                    &session_id,
+                    &brain_name,
+                    "brain",
+                    None,
+                    "(resumed)",
+                    self.config.project.as_ref().map(|p| p.name.as_str()),
+                    None,
+                );
+            }
         }
 
         let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
@@ -1375,7 +1386,25 @@ impl Orchestrator {
         // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
         // fall back to new_session so we have a working session for subsequent prompts.
         // The historical conversation is displayed from the disk fallback in either case.
-        let (final_acp_session_id, history_stream, resumed, load_outcome) =
+        let (final_acp_session_id, history_stream, resumed, load_outcome) = if force_new_session {
+            // Escalated reconnect: don't even try session/load — just spawn fresh.
+            let session_response = crate::skip_perm::new_session_with_bypass(
+                &mut *connection,
+                &brain_cfg,
+                self.repo_root.clone(),
+                mcp_servers.clone(),
+            )
+            .await
+            .context("Failed to create fresh session during escalated reconnect")?;
+            (
+                session_response.session_id.to_string(),
+                None,
+                false,
+                spur_acp::LoadOutcome::FellBackToNew {
+                    reason: "escalated to fresh session after repeated failures".into(),
+                },
+            )
+        } else {
             match crate::skip_perm::load_session_with_bypass(
                 &mut *connection,
                 &brain_cfg,
@@ -1414,7 +1443,8 @@ impl Orchestrator {
                         },
                     )
                 }
-            };
+            }
+        };
 
         // Spawn delegation handler.
         let max_concurrent = self.config.worktree.max_concurrent;
@@ -1504,8 +1534,10 @@ impl Orchestrator {
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
         brain_override: Option<&str>,
+        force_new_session: bool,
     ) -> Result<(BrainSession, spur_acp::LoadOutcome)> {
         let acp_session_id = dead_brain.acp_session_id.clone();
+        let preserve_spur_id = dead_brain.spur_session_id.clone();
         let brain_name_hint = dead_brain.brain_name.clone();
 
         // Drop the dead session: abort helper tasks, close stdio.
@@ -1525,7 +1557,14 @@ impl Orchestrator {
             })?;
 
         let (new_session, mut history_stream, outcome) = self
-            .load_brain_session(connection, brain_name, permission_tx, acp_session_id)
+            .load_brain_session(
+                connection,
+                brain_name,
+                permission_tx,
+                acp_session_id,
+                Some(preserve_spur_id),
+                force_new_session,
+            )
             .await
             .with_context(|| {
                 format!("reconnect: load_brain_session failed for '{brain_name_hint}'")
@@ -1560,7 +1599,7 @@ impl Orchestrator {
         let spur_session_id = dead_brain.spur_session_id.clone();
         let brain_name = dead_brain.brain_name.clone();
 
-        // Trim stale failure timestamps and check the breaker.
+        // Trim stale death timestamps and record this death.
         let now = std::time::Instant::now();
         while let Some(front) = failures.front() {
             if now.duration_since(*front) > window {
@@ -1569,31 +1608,41 @@ impl Orchestrator {
                 break;
             }
         }
-        if failures.len() >= limit {
-            self.emit(SpurEvent::now(SpurEventBody::BrainReconnectFailed {
-                session: spur_session_id,
-                brain_name,
-                reason: format!(
-                    "circuit breaker: {} reconnect failures within {:?}",
+        failures.push_back(now);
+
+        // Decide tier: if we've exceeded the budget of deaths in the window,
+        // escalate to a fresh-session reconnect.
+        let escalate = failures.len() > limit;
+        let (reconnecting_reason, force_new) = if escalate {
+            (
+                format!(
+                    "{} — escalating to fresh session after {} deaths within {:?}",
+                    trigger_reason,
                     failures.len(),
                     window
                 ),
-            }));
-            return None;
-        }
+                true,
+            )
+        } else {
+            (trigger_reason, false)
+        };
 
         self.emit(SpurEvent::now(SpurEventBody::BrainReconnecting {
             session: spur_session_id.clone(),
             brain_name: brain_name.clone(),
-            reason: trigger_reason,
+            reason: reconnecting_reason,
         }));
 
         match self
-            .try_reconnect_brain(dead_brain, permission_tx, brain_override)
+            .try_reconnect_brain(dead_brain, permission_tx, brain_override, force_new)
             .await
         {
             Ok((new_brain, outcome)) => {
-                failures.clear();
+                // Tier 1 success clears the window; Tier 2 success keeps the
+                // record so a quick re-death after escalation still trips.
+                if !escalate {
+                    failures.clear();
+                }
                 self.emit(SpurEvent::now(SpurEventBody::BrainReconnected {
                     session: new_brain.spur_session_id.clone(),
                     brain_name: new_brain.brain_name.clone(),
@@ -1602,7 +1651,6 @@ impl Orchestrator {
                 Some(new_brain)
             }
             Err(e) => {
-                failures.push_back(std::time::Instant::now());
                 self.emit(SpurEvent::now(SpurEventBody::BrainReconnectFailed {
                     session: spur_session_id,
                     brain_name,

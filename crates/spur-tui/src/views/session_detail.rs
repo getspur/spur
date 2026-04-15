@@ -1155,11 +1155,14 @@ impl View for SessionDetailView {
                 if session.0 == self.session_id.0 {
                     let text = match outcome {
                         spur_acp::LoadOutcome::Restored => {
-                            format!("brain '{}' reconnected — state restored", brain_name)
+                            format!(
+                                "brain '{}' reconnected — state restored. Your last prompt/command was dropped; retype to retry.",
+                                brain_name
+                            )
                         }
                         spur_acp::LoadOutcome::FellBackToNew { reason } => {
                             format!(
-                                "brain '{}' reconnected — state LOST, session/load failed ({}); check context",
+                                "brain '{}' reconnected — started FRESH ({}); prior context wiped. Retype to continue.",
                                 brain_name, reason
                             )
                         }
