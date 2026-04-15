@@ -7,6 +7,14 @@
 # Reference: docs/spur/agent-config.md (schema)
 # Cookbook: docs/spur/agent-onboarding-cookbook.md (how to add an agent)
 
+# [brain.delegation]
+# # "v1" enables the rewritten brain prompt (workers block, dispatch
+# # procedure, delegation_plan). "legacy" uses the pre-framework
+# # 5-line prompt. Default is build-aware: dev builds use "v1";
+# # release builds default to "legacy" at v1 ship. See
+# # docs/spur/agent-config.md for the lifecycle.
+# framework = "v1"
+
 # ── kiro ──────────────────────────────────────────────────────────
 [[agents.entries]]
 name = "kiro"
@@ -33,6 +41,14 @@ item_schema = "acp_available_command"
 args = ["--trust-all-tools"]
 # skip = true                # uncomment to enable bypass
 
+# [agents.entries.delegation]
+# # Uncomment to override the built-in descriptor.
+# # Fields omitted here inherit from the built-in default.
+# # description = "..."
+# # good_for = ["..."]
+# # avoid_for = ["..."]
+# # output_shape = "..."
+
 # ── claude-code (stream-json fallback) ────────────────────────────
 [[agents.entries]]
 name = "claude-code"
@@ -51,6 +67,14 @@ dispatch = "prompt_text"
 [agents.entries.permissions]
 args = ["--dangerously-skip-permissions"]
 # skip = true                # uncomment to enable bypass
+
+# [agents.entries.delegation]
+# # Uncomment to override the built-in descriptor.
+# # Fields omitted here inherit from the built-in default.
+# # description = "..."
+# # good_for = ["..."]
+# # avoid_for = ["..."]
+# # output_shape = "..."
 
 # ── claude-code-acp ───────────────────────────────────────────────
 [[agents.entries]]
@@ -71,6 +95,14 @@ dispatch = "prompt_text"
 session_mode = "bypassPermissions"
 # skip = true                # uncomment to enable bypass
 
+# [agents.entries.delegation]
+# # Uncomment to override the built-in descriptor.
+# # Fields omitted here inherit from the built-in default.
+# # description = "..."
+# # good_for = ["..."]
+# # avoid_for = ["..."]
+# # output_shape = "..."
+
 # ── codex ─────────────────────────────────────────────────────────
 [[agents.entries]]
 name = "codex"
@@ -90,6 +122,14 @@ dispatch = "prompt_text"
 name = "compact"
 description = "Compact conversation history"
 
+# [agents.entries.delegation]
+# # Uncomment to override the built-in descriptor.
+# # Fields omitted here inherit from the built-in default.
+# # description = "..."
+# # good_for = ["..."]
+# # avoid_for = ["..."]
+# # output_shape = "..."
+
 # ── gemini ────────────────────────────────────────────────────────
 [[agents.entries]]
 name = "gemini"
@@ -104,3 +144,11 @@ handle = "gemini"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
+
+# [agents.entries.delegation]
+# # Uncomment to override the built-in descriptor.
+# # Fields omitted here inherit from the built-in default.
+# # description = "..."
+# # good_for = ["..."]
+# # avoid_for = ["..."]
+# # output_shape = "..."
