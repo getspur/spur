@@ -155,3 +155,69 @@ new hook enum variant in `crates/spur-acp/src/config/hooks.rs` plus its
 implementation in `crates/spur-tui/src/agents/`, then reference it from
 config. That's out of scope for Spec 1; see the roadmap
 (`docs/superpowers/specs/2026-04-14-agent-onboarding-roadmap.md`).
+
+## Delegation descriptor — `[agents.entries.delegation]`
+
+Each worker-capable agent can declare a delegation descriptor that tells the brain what the agent is good at, when to avoid it, and how to shape task prompts for it. Descriptors feed both the brain's system prompt (as a one-liner per agent) and the `list_available_workers` MCP tool (with the full shape).
+
+All fields are optional. Built-in defaults ship for `claude-code-acp`, `kiro`, `codex`, and `gemini`; user values override per-field.
+
+### Example
+
+    [[agents.entries]]
+    name = "my-claude"
+    command = "claude"
+    transport = "acp"
+
+    [agents.entries.delegation]
+    description = "Custom claude variant for our auth-flow work."
+    tier        = "generalist"             # "specialist" | "generalist"
+    good_for    = [
+      "auth module refactors",
+      "session-state migrations",
+    ]
+    avoid_for   = ["database schema work"]
+    strengths   = ["long-context", "diff-shaped output"]
+    limitations = ["no network"]
+    input_expectations = "Provide session-state migration doc link in CONTEXT."
+    output_shape       = "Unified diff + migration notes."
+    inherit_defaults   = true              # default true; false = use user values verbatim
+
+### Field reference
+
+| Field | Role | Where used |
+|---|---|---|
+| `description` | One-line summary | Workers block in brain prompt, `list_available_workers` |
+| `tier` | Specialist/generalist routing hint | Both |
+| `good_for` | Positive task patterns | `list_available_workers`; brain routes on |
+| `avoid_for` | Soft negative patterns | `list_available_workers`; brain may override with rationale |
+| `strengths` | Free-form descriptors | Per-dispatch task prompt only |
+| `limitations` | Known failure modes | Per-dispatch task prompt only |
+| `input_expectations` | What the brain must supply in CONTEXT | Per-dispatch task prompt only |
+| `output_shape` | Shape the worker produces | Brain's EXPECTED_OUTPUT section + `list_available_workers` |
+| `inherit_defaults` | Merge with built-in default (default true) | Loader |
+
+### Merge semantics
+
+- **Per-field override:** users replace any subset without restating others.
+- **Empty vec inherits (when `inherit_defaults = true`).** Setting `good_for = []` at v1 means "use the built-in default's `good_for`".
+- **`inherit_defaults = false`:** user values are used verbatim, including empty vecs. Use when the built-in is genuinely wrong for your setup.
+
+### Validation
+
+spur warns at startup for:
+- `good_for`/`avoid_for` entries over 80 chars
+- Worker-capable agents with no `description`
+- Worker-capable agents with empty `good_for`
+- `good_for` entries mentioning a capability (e.g., "plan mode") that isn't declared in `[agents.entries.capabilities]`
+
+Warnings don't block startup.
+
+### Feature flag
+
+The brain-delegation framework is gated by:
+
+    [brain.delegation]
+    framework = "v1"    # "v1" | "legacy"
+
+Defaults: `"v1"` in dev builds (debug_assertions=true); `"legacy"` in release builds at v1 ship. Flag will flip to `"v1"` in release builds at v2, and be removed at v3.
