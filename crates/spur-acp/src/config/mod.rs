@@ -673,9 +673,8 @@ mod tests {
     #[test]
     fn brain_delegation_framework_explicit_v1() {
         let toml = r#"
-            [brain]
             default = "claude-code-acp"
-            [brain.delegation]
+            [delegation]
             framework = "v1"
         "#;
         let cfg: BrainConfig = toml::from_str(toml).unwrap();
