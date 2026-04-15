@@ -1,0 +1,64 @@
+# Built-in delegation descriptors. Coarse, imperative, stable.
+# Tune carefully — every bump ships to all users on next release.
+# See docs/spur/contributing-agent-defaults.md for guidelines.
+
+[claude-code-acp]
+description = "Generalist coding agent; strong at greenfield + refactors."
+tier = "generalist"
+good_for = [
+  "multi-file refactors",
+  "writing new modules from spec",
+  "test authoring",
+  "code review with rationale",
+]
+avoid_for = ["kiro vendor-ext command invocation"]
+strengths = ["long-context reasoning", "diff-shaped output"]
+limitations = ["no network access beyond allowlisted tools"]
+input_expectations = "Provide acceptance criteria + file allowlist when scope > 3 files."
+output_shape = "Unified diff + summary paragraph + test plan bullets."
+
+[kiro]
+description = "Specialist agent for Kiro spec-driven workflows and vendor commands."
+tier = "specialist"
+good_for = [
+  "/spec-init, /spec-plan, /spec-execute tasks",
+  "work requiring Kiro's internal spec schema",
+]
+avoid_for = [
+  "tasks outside Kiro's spec/command workflow",
+  "large refactors with no spec artifact",
+]
+strengths = ["structured spec output", "vendor-ext command integration"]
+limitations = []
+input_expectations = ""
+output_shape = "Spec artifact + next-step suggestions."
+
+[codex]
+description = "Low-cost generalist; strong at narrowly-scoped edits."
+tier = "generalist"
+good_for = [
+  "single-file edits",
+  "syntactic refactors",
+  "translating between language idioms",
+]
+avoid_for = [
+  "multi-file coordination",
+  "architectural decisions",
+]
+strengths = ["mechanical precision"]
+limitations = ["limited broad-codebase reasoning"]
+input_expectations = ""
+output_shape = "Unified diff + one-sentence rationale."
+
+[gemini]
+description = "Generalist agent with strong multi-modal support."
+tier = "generalist"
+good_for = [
+  "tasks involving images or diagrams",
+  "exploratory analysis where context is ambiguous",
+]
+avoid_for = []
+strengths = ["multi-modal input handling"]
+limitations = []
+input_expectations = ""
+output_shape = "Narrative analysis + action items."
