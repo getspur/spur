@@ -115,6 +115,7 @@ impl InputBar {
                 self.text.insert(at, c);
                 self.shift_ranges(at, c.len_utf8() as isize);
                 self.cursor = at + c.len_utf8();
+                self.history_cursor = None;
                 None
             }
             KeyCode::Backspace => {
@@ -136,6 +137,7 @@ impl InputBar {
                     self.shift_ranges(prev, delta);
                     self.cursor = prev;
                 }
+                self.history_cursor = None;
                 None
             }
             KeyCode::Delete => {
@@ -149,6 +151,7 @@ impl InputBar {
                     self.text.drain(self.cursor..next);
                     self.shift_ranges(self.cursor, delta);
                 }
+                self.history_cursor = None;
                 None
             }
             KeyCode::Left => {
