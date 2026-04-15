@@ -101,6 +101,7 @@ mod tests {
             skip_permissions: false,
             skip_permissions_args: vec![],
             skip_permissions_session_mode: None,
+            delegation: Default::default(),
         }
     }
 

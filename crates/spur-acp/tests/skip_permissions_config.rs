@@ -59,6 +59,7 @@ fn skip_permissions_round_trips_through_toml() {
         skip_permissions: true,
         skip_permissions_args: vec!["--trust-all-tools".into()],
         skip_permissions_session_mode: Some("bypassPermissions".into()),
+        delegation: Default::default(),
     };
     let encoded = toml::to_string(&original).expect("serialize");
     let decoded: AgentConfig = toml::from_str(&encoded).expect("deserialize");
@@ -92,6 +93,7 @@ fn effective_args_returns_plain_args_when_disabled() {
         skip_permissions: false,
         skip_permissions_args: vec!["--trust-all-tools".into()],
         skip_permissions_session_mode: None,
+        delegation: Default::default(),
     };
     assert_eq!(cfg.effective_args(), vec!["acp".to_string()]);
 }
@@ -115,6 +117,7 @@ fn effective_args_appends_skip_args_when_enabled() {
         skip_permissions: true,
         skip_permissions_args: vec!["--trust-all-tools".into()],
         skip_permissions_session_mode: None,
+        delegation: Default::default(),
     };
     assert_eq!(
         cfg.effective_args(),
@@ -146,6 +149,7 @@ fn effective_args_returns_plain_args_when_enabled_but_no_skip_args() {
         skip_permissions: true,
         skip_permissions_args: vec![],
         skip_permissions_session_mode: Some("bypassPermissions".into()),
+        delegation: Default::default(),
     };
     assert_eq!(
         cfg.effective_args(),
