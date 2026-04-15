@@ -1140,6 +1140,50 @@ impl View for SessionDetailView {
                     });
                 }
             }
+            SpurEventBody::BrainReconnecting { session, brain_name, reason } => {
+                if session.0 == self.session_id.0 {
+                    self.react_trace.push(TraceEntry {
+                        kind: TraceKind::Observe { payload: None },
+                        text: format!("brain '{}' reconnecting… ({})", brain_name, reason),
+                        timestamp: Self::now_stamp(),
+                        #[cfg(feature = "markdown")]
+                        markdown: None,
+                    });
+                }
+            }
+            SpurEventBody::BrainReconnected { session, brain_name, outcome } => {
+                if session.0 == self.session_id.0 {
+                    let text = match outcome {
+                        spur_acp::LoadOutcome::Restored => {
+                            format!("brain '{}' reconnected — state restored", brain_name)
+                        }
+                        spur_acp::LoadOutcome::FellBackToNew { reason } => {
+                            format!(
+                                "brain '{}' reconnected — state LOST, session/load failed ({}); check context",
+                                brain_name, reason
+                            )
+                        }
+                    };
+                    self.react_trace.push(TraceEntry {
+                        kind: TraceKind::Observe { payload: None },
+                        text,
+                        timestamp: Self::now_stamp(),
+                        #[cfg(feature = "markdown")]
+                        markdown: None,
+                    });
+                }
+            }
+            SpurEventBody::BrainReconnectFailed { session, brain_name, reason } => {
+                if session.0 == self.session_id.0 {
+                    self.react_trace.push(TraceEntry {
+                        kind: TraceKind::Observe { payload: None },
+                        text: format!("brain '{}' reconnect FAILED: {}", brain_name, reason),
+                        timestamp: Self::now_stamp(),
+                        #[cfg(feature = "markdown")]
+                        markdown: None,
+                    });
+                }
+            }
 
             SpurEventBody::AgentExtNotification {
                 session,

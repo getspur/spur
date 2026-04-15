@@ -772,6 +772,38 @@ impl View for DashboardView {
                     kind: LogEntryKind::Error,
                 });
             }
+            SpurEventBody::BrainReconnecting { session, brain_name, reason } => {
+                let prefix = Self::prefix_for_session(&session.0);
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix,
+                    message: format!("Brain '{}' reconnecting: {}", brain_name, reason),
+                    kind: LogEntryKind::Info,
+                });
+            }
+            SpurEventBody::BrainReconnected { session, brain_name, outcome } => {
+                let prefix = Self::prefix_for_session(&session.0);
+                let (message, kind) = match outcome {
+                    spur_acp::LoadOutcome::Restored => (
+                        format!("Brain '{}' reconnected (state restored)", brain_name),
+                        LogEntryKind::Info,
+                    ),
+                    spur_acp::LoadOutcome::FellBackToNew { reason } => (
+                        format!("Brain '{}' reconnected — state LOST ({})", brain_name, reason),
+                        LogEntryKind::Error,
+                    ),
+                };
+                self.activity_log.push(LogEntry { timestamp: Self::now_stamp(), prefix, message, kind });
+            }
+            SpurEventBody::BrainReconnectFailed { session, brain_name, reason } => {
+                let prefix = Self::prefix_for_session(&session.0);
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix,
+                    message: format!("Brain '{}' reconnect FAILED: {}", brain_name, reason),
+                    kind: LogEntryKind::Error,
+                });
+            }
 
             SpurEventBody::WorkerProgress {
                 executor_id,
