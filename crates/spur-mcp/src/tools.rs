@@ -217,11 +217,56 @@ fn get_session_cost_def() -> ToolDefinition {
     }
 }
 
+fn delegate_async_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "delegate_async".into(),
+        description: "Delegate a task to a worker agent without blocking. Returns a delegation_id that can be collected later with wait_delegation.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "Name of the worker agent to delegate to"
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Task description for the worker"
+                },
+                "context_files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional list of file paths to provide as context"
+                }
+            },
+            "required": ["agent", "task"]
+        }),
+    }
+}
+
+fn wait_delegation_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "wait_delegation".into(),
+        description: "Block until an async delegation completes and return its result. Use after delegate_async.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "delegation_id": {
+                    "type": "string",
+                    "description": "The delegation_id returned by delegate_async"
+                }
+            },
+            "required": ["delegation_id"]
+        }),
+    }
+}
+
 /// Returns all tool definitions for the MCP `tools/list` response.
 pub fn tools_list() -> Vec<ToolDefinition> {
     vec![
         delegate_to_worker_def(),
         delegate_parallel_def(),
+        delegate_async_def(),
+        wait_delegation_def(),
         list_available_workers_def(),
         get_issue_def(),
         update_issue_def(),
