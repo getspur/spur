@@ -785,11 +785,17 @@ impl View for DashboardView {
                 let prefix = Self::prefix_for_session(&session.0);
                 let (message, kind) = match outcome {
                     spur_acp::LoadOutcome::Restored => (
-                        format!("Brain '{}' reconnected (state restored)", brain_name),
+                        format!(
+                            "Brain '{}' reconnected (state restored; your last prompt was dropped — retype)",
+                            brain_name
+                        ),
                         LogEntryKind::Info,
                     ),
                     spur_acp::LoadOutcome::FellBackToNew { reason } => (
-                        format!("Brain '{}' reconnected — state LOST ({})", brain_name, reason),
+                        format!(
+                            "Brain '{}' reconnected — started FRESH ({}); retype to continue",
+                            brain_name, reason
+                        ),
                         LogEntryKind::Error,
                     ),
                 };
