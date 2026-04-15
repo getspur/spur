@@ -1021,6 +1021,7 @@ impl View for SessionDetailView {
                 to_agent,
                 task,
                 request_id,
+                delegation_plan: _,
             } => {
                 if from.0 != self.session_id.0 {
                     return;

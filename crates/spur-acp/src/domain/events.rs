@@ -196,6 +196,10 @@ pub enum SpurEventBody {
         /// the brain conversation can correlate with the spawned executor
         /// via `DelegationDispatched`.
         request_id: String,
+        /// Optional structured plan the brain passed alongside the
+        /// delegate_* call. See design spec section C.7.
+        #[serde(default)]
+        delegation_plan: Option<crate::domain::DelegationPlan>,
     },
     /// Emitted immediately after the orchestrator spawns an executor
     /// for a brain delegation. Lets the brain-side session_detail
@@ -485,5 +489,48 @@ mod review_payload_tests {
         let back: ReviewPayload = serde_json::from_str(&json).unwrap();
         assert!(back.delegation_plan.is_some());
         assert_eq!(back.chosen_matches_dispatched, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod delegation_requested_tests {
+    use super::*;
+    use crate::domain::DelegationPlan;
+    use crate::SessionId;
+
+    #[test]
+    fn delegation_requested_event_carries_optional_plan() {
+        let plan = DelegationPlan {
+            chosen: Some("claude".into()),
+            ..Default::default()
+        };
+        let body = SpurEventBody::DelegationRequested {
+            from: SessionId::new(),
+            to_agent: "claude".into(),
+            task: "do things".into(),
+            request_id: "req-1".into(),
+            delegation_plan: Some(plan.clone()),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"delegation_plan\""));
+    }
+
+    #[test]
+    fn delegation_requested_event_roundtrips_without_plan() {
+        let body = SpurEventBody::DelegationRequested {
+            from: SessionId::new(),
+            to_agent: "codex".into(),
+            task: "tiny fix".into(),
+            request_id: "req-2".into(),
+            delegation_plan: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        match back {
+            SpurEventBody::DelegationRequested { delegation_plan, .. } => {
+                assert!(delegation_plan.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

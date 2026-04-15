@@ -27,6 +27,7 @@ fn full_flow_brain_to_review_to_resolved() {
         to_agent: "w1".into(),
         task: "close the bug".into(),
         request_id: "req-1".into(),
+        delegation_plan: None,
     }));
     // Executor produces an artifact
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorArtifact {
@@ -213,6 +214,7 @@ fn replay_produces_byte_identical_state() {
                 to_agent: "w".into(),
                 task: "task".into(),
                 request_id: "req-1".into(),
+                delegation_plan: None,
             },
         ),
         mk(

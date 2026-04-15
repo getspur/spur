@@ -602,6 +602,7 @@ impl View for DashboardView {
                 to_agent,
                 task,
                 request_id: _,
+                delegation_plan: _,
             } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),

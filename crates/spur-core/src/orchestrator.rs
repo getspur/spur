@@ -1923,7 +1923,7 @@ impl Orchestrator {
                 context_files,
                 respond_to,
                 brain_session_id,
-                delegation_plan: _,
+                delegation_plan,
             } = request;
 
             debug!(
@@ -1967,6 +1967,7 @@ impl Orchestrator {
                     context_files,
                     request_id,
                     brain_session_id,
+                    delegation_plan,
                     repo_root,
                     agent_configs,
                     funnel.clone(),
@@ -2023,6 +2024,7 @@ impl Orchestrator {
         _context_files: Vec<String>,
         request_id: String,
         brain_session_id: SessionId,
+        delegation_plan: Option<spur_acp::domain::DelegationPlan>,
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         funnel: crate::event_funnel::FunnelHandle,
@@ -2104,6 +2106,7 @@ impl Orchestrator {
                     task: &current_task,
                     request_id: &request_id,
                     agent_config: &agent_config,
+                    delegation_plan: delegation_plan.clone(),
                 },
                 &mut worktrees,
                 &funnel,
@@ -2897,6 +2900,7 @@ struct WorkerAttemptCtx<'a> {
     task: &'a str,
     request_id: &'a str,
     agent_config: &'a spur_acp::config::AgentConfig,
+    delegation_plan: Option<spur_acp::domain::DelegationPlan>,
 }
 
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
@@ -2926,6 +2930,7 @@ async fn run_one_worker_attempt(
         to_agent: ctx.agent.to_string(),
         task: ctx.task.to_string(),
         request_id: ctx.request_id.to_string(),
+        delegation_plan: ctx.delegation_plan.clone(),
     });
 
     let start = Instant::now();
