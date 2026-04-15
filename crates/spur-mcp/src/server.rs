@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -102,6 +103,9 @@ pub struct McpCallbackServer {
     workers: Vec<WorkerInfo>,
     /// Brain session this server belongs to.
     brain_session_id: SessionId,
+    /// Async delegation receivers awaiting collection via `wait_delegation`.
+    pending_delegations:
+        tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Receiver<DelegationResult>>>,
 }
 
 impl McpCallbackServer {
@@ -116,6 +120,7 @@ impl McpCallbackServer {
             delegation_tx: req_tx,
             workers: Vec::new(),
             brain_session_id: session_id.clone(),
+            pending_delegations: tokio::sync::Mutex::new(HashMap::new()),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -290,6 +295,8 @@ impl McpCallbackServer {
         match tool_name.as_str() {
             "delegate_to_worker" => self.handle_delegate_to_worker(id, arguments).await,
             "delegate_parallel" => self.handle_delegate_parallel(id, arguments).await,
+            "delegate_async" => self.handle_delegate_async(id, arguments).await,
+            "wait_delegation" => self.handle_wait_delegation(id, arguments).await,
             "list_available_workers" => self.handle_list_available_workers(id).await,
             "get_issue" => self.handle_get_issue(id, arguments).await,
             "update_issue" => self.handle_update_issue(id, arguments).await,
@@ -649,6 +656,94 @@ impl McpCallbackServer {
             Err(_) => JsonRpcResponse::internal_error(
                 id,
                 "get_session_cost failed: orchestrator disconnected",
+            ),
+        }
+    }
+
+    async fn handle_delegate_async(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let agent = match args.get("agent").and_then(|v| v.as_str()) {
+            Some(a) => a.to_string(),
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'agent'"),
+        };
+        let task = match args.get("task").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'task'"),
+        };
+        let context_files: Vec<String> = args
+            .get("context_files")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let delegation = DelegationRequest {
+            id: request_id.clone(),
+            agent: agent.clone(),
+            task,
+            context_files,
+            respond_to: tx,
+            brain_session_id: self.brain_session_id.clone(),
+        };
+
+        info!(agent = %agent, request_id = %request_id, "Sending async delegation request");
+
+        if let Err(_e) = self.delegation_tx.send(delegation).await {
+            return JsonRpcResponse::internal_error(id, "Failed to send delegation request");
+        }
+
+        self.pending_delegations
+            .lock()
+            .await
+            .insert(request_id.clone(), rx);
+
+        JsonRpcResponse::success(
+            id,
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": json!({"delegation_id": request_id}).to_string()
+                }]
+            }),
+        )
+    }
+
+    async fn handle_wait_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
+            Some(d) => d.to_string(),
+            None => {
+                return JsonRpcResponse::invalid_params(id, "Missing required field 'delegation_id'")
+            }
+        };
+
+        let rx = match self.pending_delegations.lock().await.remove(&delegation_id) {
+            Some(rx) => rx,
+            None => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32602,
+                    format!("Unknown or already-collected delegation: {delegation_id}"),
+                )
+            }
+        };
+
+        match rx.await {
+            Ok(result) => {
+                let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&result_json)
+                                .unwrap_or_else(|_| result_json.to_string())
+                        }]
+                    }),
+                )
+            }
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "Delegation cancelled or orchestrator disconnected",
             ),
         }
     }
