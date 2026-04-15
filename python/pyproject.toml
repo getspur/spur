@@ -52,7 +52,6 @@ strip = true
 
 # Produce platform-tagged wheels compatible with any Python 3.8+.
 # `bin` bindings don't depend on a specific Python ABI, so this is pure metadata.
-python-source = "python"   # unused (no .py files), kept for maturin quirks
 
 # Include the LICENSE file from the repo root in the wheel.
 # Maturin copies files listed here into the wheel's .dist-info/.
