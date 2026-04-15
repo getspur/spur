@@ -79,6 +79,8 @@ fn dashboard_reads_attempt_n_from_lineage_on_submit() {
             diff_summary: None,
             pr_url: None,
             error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
         },
     }));
     assert_eq!(

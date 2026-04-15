@@ -2224,6 +2224,8 @@ impl Orchestrator {
                 diff_summary: outcome.diff_summary.clone(),
                 pr_url: None,
                 error: None,
+                delegation_plan: None,
+                chosen_matches_dispatched: None,
             };
             funnel.emit(SpurEventBody::ExecutorReviewRequested {
                 id: eid.0.clone(),
