@@ -146,6 +146,11 @@ pub struct AgentConfig {
     /// Default: None.
     #[serde(default)]
     pub skip_permissions_session_mode: Option<String>,
+
+    /// Task-routing descriptor for delegation decisions. See
+    /// `docs/spur/agent-config.md` and the delegation-framework spec.
+    #[serde(default)]
+    pub delegation: DelegationDescriptor,
 }
 
 impl AgentConfig {
@@ -171,6 +176,7 @@ impl AgentConfig {
             skip_permissions: false,
             skip_permissions_args: Vec::new(),
             skip_permissions_session_mode: None,
+            delegation: DelegationDescriptor::default(),
         }
     }
 
@@ -542,6 +548,34 @@ mod delegation_descriptor_tests {
         assert!(d.description.is_none());
         assert!(d.good_for.is_empty());
         assert!(d.inherit_defaults);
+    }
+
+    #[test]
+    fn agent_config_parses_delegation_sub_table() {
+        let toml = r#"
+            name = "claude-x"
+            command = "claude"
+            transport = "acp"
+
+            [delegation]
+            description = "custom claude variant"
+            good_for = ["one-offs"]
+        "#;
+        let cfg: AgentConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.delegation.description.as_deref(), Some("custom claude variant"));
+        assert_eq!(cfg.delegation.good_for, vec!["one-offs".to_string()]);
+    }
+
+    #[test]
+    fn agent_config_without_delegation_block_uses_defaults() {
+        let toml = r#"
+            name = "bare"
+            command = "bare"
+            transport = "acp"
+        "#;
+        let cfg: AgentConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.delegation.description.is_none());
+        assert!(cfg.delegation.inherit_defaults);
     }
 }
 
