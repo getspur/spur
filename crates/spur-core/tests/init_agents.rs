@@ -111,18 +111,18 @@ async fn init_agents_registers_full_spec12_config() {
         .iter()
         .find(|a| a.name == "kiro")
         .expect("kiro should be registered");
-    assert_eq!(kiro.commands.dispatch, spur_acp::DispatchKind::VendorExec);
-    assert_eq!(
-        kiro.commands.exec_method.as_deref(),
-        Some("_kiro.dev/commands/execute")
+    assert_eq!(kiro.commands.dispatch, spur_acp::DispatchKind::PromptText);
+    assert!(
+        kiro.commands.exec_method.is_none(),
+        "prompt_text dispatch should not carry an exec_method"
     );
     assert!(
         !kiro.commands.ingest.is_empty(),
-        "kiro should have ingest binding"
+        "kiro should still ingest commands/available notifications"
     );
     assert!(
-        !kiro.commands.response.is_empty(),
-        "kiro should have response binding"
+        kiro.commands.response.is_empty(),
+        "prompt_text dispatch has no vendor-exec response to render"
     );
     // Bypass args declared but skip = false → NOT applied (safety-by-default).
     // effective_permissions() returns the nested block.
