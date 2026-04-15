@@ -1,0 +1,60 @@
+# Maturin config for shipping the spur Rust binary as platform wheels.
+# Docs: https://www.maturin.rs/bindings (see "bin" bindings section)
+#
+# Build locally:
+#   cd python && maturin build --release --manifest-path ../crates/spur-cli/Cargo.toml
+# Build in CI: handled by .github/workflows/release-python.yml
+#
+# End users install via:
+#   uvx spur-cli ...           # ephemeral
+#   uv tool install spur-cli   # persistent on PATH
+#   pipx install spur-cli      # also works
+#   pip install spur-cli       # installs binary as a console_script
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "spur-cli"
+version = "0.1.0"
+description = "Spur — agent orchestration CLI"
+requires-python = ">=3.8"
+license = { text = "Proprietary" }
+# Replace with real contact / URL when public.
+authors = [{ name = "Spur" }]
+classifiers = [
+    "License :: Other/Proprietary License",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Software Development :: Build Tools",
+    "Environment :: Console",
+]
+
+# Optional: PyPI project page links.
+# [project.urls]
+# Homepage = "https://yourdomain.example/spur"
+# Issues   = "https://yourdomain.example/spur/issues"
+
+[tool.maturin]
+# `bin` = package a pure Rust binary (no Python bindings, no pyo3 dependency).
+# The binary defined in crates/spur-cli/Cargo.toml's [[bin]] name = "spur"
+# is placed on PATH on install.
+bindings = "bin"
+
+# Point to the binary crate from this python/ subdirectory.
+manifest-path = "../crates/spur-cli/Cargo.toml"
+
+# Strip debug symbols to shrink wheel size.
+strip = true
+
+# Produce platform-tagged wheels compatible with any Python 3.8+.
+# `bin` bindings don't depend on a specific Python ABI, so this is pure metadata.
+python-source = "python"   # unused (no .py files), kept for maturin quirks
+
+# Include the LICENSE file from the repo root in the wheel.
+# Maturin copies files listed here into the wheel's .dist-info/.
+# Uncomment and add a LICENSE file at repo root:
+# include = [{ path = "../LICENSE", format = "wheel" }]

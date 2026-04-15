@@ -1671,7 +1671,6 @@ dependencies = [
  "base64-simd",
  "icy_sixel",
  "image",
- "pkg-config",
  "rand",
  "ratatui",
  "rustix 0.38.44",

@@ -1,0 +1,49 @@
+# cargo-dist configuration for Spur
+# Docs: https://axodotdev.github.io/cargo-dist/book/reference/config.html
+#
+# This file drives `cargo dist` — it generates:
+#   - .github/workflows/release.yml (cross-compile matrix + artifact upload)
+#   - npm installer package that `npx spur` resolves
+#
+# Run `cargo dist init` after editing to regenerate the GitHub Actions workflow.
+
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "npm"]
+# Generate and dist a source tarball
+source-tarball = false
+# A namespace to use when publishing this package to the npm registry
+npm-scope = "@spur-ai"
+# Whether to produce an npm lockfile
+npm-shrinkwrap = true
+# Publish jobs to run in CI
+publish-jobs = ["npm"]
+# Which actions to run on pull requests
+pr-run-mode = "plan"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
+
+# ---- Per-crate: only spur-cli produces a distributable binary ----
+# cargo-dist auto-detects binary crates, but we set explicit metadata in
+# crates/spur-cli/Cargo.toml to be sure:
+#
+#   [package.metadata.dist]
+#   dist = true
+#
+# And in every library crate (spur-acp, spur-core, spur-mcp, spur-pm,
+# spur-worktree, spur-cost, spur-tui):
+#
+#   [package.metadata.dist]
+#   dist = false
