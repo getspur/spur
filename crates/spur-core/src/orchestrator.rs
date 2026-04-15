@@ -2039,8 +2039,10 @@ impl Orchestrator {
 
     fn render_workers_block(&self) -> String {
         let mut out = String::from("## Available worker agents\n\n");
+        let mut agents: Vec<_> = self.registry.worker_capable().into_iter().collect();
+        agents.sort_by(|a, b| a.name.cmp(&b.name));
         let mut any_listed = false;
-        for agent in self.registry.worker_capable() {
+        for agent in agents {
             if agent.delegation.good_for.is_empty() {
                 continue;
             }
