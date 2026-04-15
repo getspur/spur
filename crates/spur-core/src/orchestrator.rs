@@ -543,7 +543,7 @@ impl Orchestrator {
                         )
                         .await
                     {
-                        Ok((session, mut history_stream)) => {
+                        Ok((session, mut history_stream, _load_outcome)) => {
                             let spur_id = session.spur_session_id.clone();
                             // Drain history stream (populated if load_session worked,
                             // empty if we fell back to new_session).
@@ -1239,6 +1239,7 @@ impl Orchestrator {
     ) -> Result<(
         BrainSession,
         std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
+        spur_acp::LoadOutcome,
     )> {
         let session_id = SessionId::new();
 
@@ -1303,7 +1304,7 @@ impl Orchestrator {
         // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
         // fall back to new_session so we have a working session for subsequent prompts.
         // The historical conversation is displayed from the disk fallback in either case.
-        let (final_acp_session_id, history_stream, resumed) =
+        let (final_acp_session_id, history_stream, resumed, load_outcome) =
             match crate::skip_perm::load_session_with_bypass(
                 &mut *connection,
                 &brain_cfg,
@@ -1315,10 +1316,16 @@ impl Orchestrator {
             {
                 Ok(stream) => {
                     debug!(brain = %brain_name, "load_session succeeded");
-                    (acp_session_id, Some(stream), true)
+                    (
+                        acp_session_id,
+                        Some(stream),
+                        true,
+                        spur_acp::LoadOutcome::Restored,
+                    )
                 }
                 Err(e) => {
                     warn!(brain = %brain_name, error = %e, "load_session failed, falling back to new_session");
+                    let fallback_reason = e.to_string();
                     let session_response = crate::skip_perm::new_session_with_bypass(
                         &mut *connection,
                         &brain_cfg,
@@ -1327,7 +1334,14 @@ impl Orchestrator {
                     )
                     .await
                     .context("Failed to create fallback session after load_session failure")?;
-                    (session_response.session_id.to_string(), None, false)
+                    (
+                        session_response.session_id.to_string(),
+                        None,
+                        false,
+                        spur_acp::LoadOutcome::FellBackToNew {
+                            reason: fallback_reason,
+                        },
+                    )
                 }
             };
 
@@ -1395,7 +1409,7 @@ impl Orchestrator {
             None => Box::pin(futures::stream::empty()),
         };
 
-        Ok((brain_session, stream))
+        Ok((brain_session, stream, load_outcome))
     }
 
     /// Spawn a brain agent session with MCP callback server and delegation handler.
@@ -1826,11 +1840,13 @@ impl Orchestrator {
         loop {
             let outcome = match run_one_worker_attempt(
                 next_worker_session.clone(),
-                &brain_session_id,
-                &agent,
-                &current_task,
-                &request_id,
-                &agent_config,
+                &WorkerAttemptCtx {
+                    brain_session_id: &brain_session_id,
+                    agent: &agent,
+                    task: &current_task,
+                    request_id: &request_id,
+                    agent_config: &agent_config,
+                },
                 &mut worktrees,
                 &funnel,
             )
@@ -2614,6 +2630,15 @@ fn maybe_synthesize_file_touch(
 /// immediately — setup failures short-circuit without retry and the
 /// caller's `finalize` records the error status.
 ///
+/// Read-only context shared across worker attempt retries.
+struct WorkerAttemptCtx<'a> {
+    brain_session_id: &'a SessionId,
+    agent: &'a str,
+    task: &'a str,
+    request_id: &'a str,
+    agent_config: &'a spur_acp::config::AgentConfig,
+}
+
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
 /// worker candidate status — success OR worker-reported errors — both
 /// of which are retry-eligible (the human reviewer decides).
@@ -2625,11 +2650,7 @@ fn maybe_synthesize_file_touch(
 /// the public `DelegationResult` type.
 async fn run_one_worker_attempt(
     worker_session: SessionId,
-    brain_session_id: &SessionId,
-    agent: &str,
-    task: &str,
-    request_id: &str,
-    agent_config: &spur_acp::config::AgentConfig,
+    ctx: &WorkerAttemptCtx<'_>,
     worktrees: &mut WorktreeManager,
     funnel: &crate::event_funnel::FunnelHandle,
 ) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
@@ -2641,10 +2662,10 @@ async fn run_one_worker_attempt(
     // stable executor_id" limitation documented for follow-up work.
     // The projection path (apply_inner) sees each event correctly.
     funnel.emit(SpurEventBody::DelegationRequested {
-        from: brain_session_id.clone(),
-        to_agent: agent.to_string(),
-        task: task.to_string(),
-        request_id: request_id.to_string(),
+        from: ctx.brain_session_id.clone(),
+        to_agent: ctx.agent.to_string(),
+        task: ctx.task.to_string(),
+        request_id: ctx.request_id.to_string(),
     });
 
     let start = Instant::now();
@@ -2656,7 +2677,7 @@ async fn run_one_worker_attempt(
         .map_err(|e| AttemptSetupError::SnapshotFailed(e.to_string()))?;
 
     let worktree_info = worktrees
-        .create_worktree(&worker_session, agent, &snapshot_branch)
+        .create_worktree(&worker_session, ctx.agent, &snapshot_branch)
         .await
         .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
 
@@ -2664,9 +2685,9 @@ async fn run_one_worker_attempt(
     // Workers never receive a permission_tx, so L2 auto-approve is
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
-    let spawn_args = agent_config.effective_args();
+    let spawn_args = ctx.agent_config.effective_args();
     let mut connection: Box<dyn AgentConnection> =
-        build_connection_from_transport(agent_config, spawn_args, None);
+        build_connection_from_transport(ctx.agent_config, spawn_args, None);
 
     // S5 — consume `_spur/*` ExtNotifications from this worker and
     // translate them into SpurEvent variants via the funnel. Must run
@@ -2675,7 +2696,7 @@ async fn run_one_worker_attempt(
     if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
         let funnel_for_ext = funnel.clone();
         let executor_id_for_ext = worker_session.0.clone();
-        let brain_session_for_ext = brain_session_id.clone();
+        let brain_session_for_ext = ctx.brain_session_id.clone();
         tokio::spawn(async move {
             while let Some(payload) = ext_rx.recv().await {
                 crate::spur_ext_interp::interpret(
@@ -2696,22 +2717,22 @@ async fn run_one_worker_attempt(
 
     // Emit WorkerSpawned event.
     funnel.emit(SpurEventBody::WorkerSpawned {
-        agent: agent.to_string(),
+        agent: ctx.agent.to_string(),
         session: worker_session.clone(),
         worktree: worktree_info.path.clone(),
     });
     // Correlate this executor with the brain's delegate_to_worker call
     // so the brain-side session_detail view can render an inline card.
     funnel.emit(SpurEventBody::DelegationDispatched {
-        from: brain_session_id.clone(),
-        request_id: request_id.to_string(),
+        from: ctx.brain_session_id.clone(),
+        request_id: ctx.request_id.to_string(),
         executor_id: worker_session.0.clone(),
     });
 
     // Workers get no MCP servers (per spec).
     let session_response = match crate::skip_perm::new_session_with_bypass(
         &mut *connection,
-        agent_config,
+        ctx.agent_config,
         worktree_info.path.clone(),
         vec![],
     )
@@ -2729,7 +2750,7 @@ async fn run_one_worker_attempt(
     let prompt_text = format!(
         "Working directory: {}\n\nTask: {}",
         worktree_info.path.display(),
-        task
+        ctx.task
     );
     let prompt_request = PromptRequest::new(
         session_response.session_id.clone(),
@@ -2755,7 +2776,7 @@ async fn run_one_worker_attempt(
             // before any other notification handling.
             maybe_synthesize_file_touch(
                 &notification,
-                brain_session_id,
+                ctx.brain_session_id,
                 &worker_session.0,
                 &file_touch_dedup,
                 funnel,
@@ -2806,7 +2827,7 @@ async fn run_one_worker_attempt(
     };
 
     let duration = start.elapsed();
-    let cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
+    let cost = spur_cost::estimator::estimate_cost(ctx.agent_config.cost_tier, duration);
 
     let summary = if output_text.is_empty() {
         None
@@ -2828,7 +2849,13 @@ async fn run_one_worker_attempt(
             .as_deref()
             .map(|s| {
                 let tail_bytes = 500usize.min(s.len());
-                let start = s.ceil_char_boundary(s.len().saturating_sub(tail_bytes));
+                let start = {
+                    let mut i = s.len().saturating_sub(tail_bytes);
+                    while i < s.len() && !s.is_char_boundary(i) {
+                        i += 1;
+                    }
+                    i
+                };
                 s[start..].to_string()
             })
             .filter(|t| !t.is_empty())
@@ -2864,8 +2891,20 @@ fn truncate_summary(text: &str, cap: usize) -> String {
     let head_budget = cap / 4;
     let tail_budget = cap - head_budget;
 
-    let head_end = text.floor_char_boundary(head_budget.min(text.len()));
-    let tail_start = text.ceil_char_boundary(text.len().saturating_sub(tail_budget));
+    let head_end = {
+        let mut i = head_budget.min(text.len());
+        while i > 0 && !text.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let tail_start = {
+        let mut i = text.len().saturating_sub(tail_budget);
+        while i < text.len() && !text.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    };
 
     // Clamp degenerate case where head and tail would overlap.
     let tail_start = tail_start.max(head_end);
@@ -2891,8 +2930,13 @@ async fn handle_pm_operation(
         Ok(v) => v,
         Err(e) => {
             return DelegationResult {
-                status: DelegationStatus::Failed { error: format!("Invalid PM task JSON: {e}") },
-                diff: None, diff_summary: None, summary: None, estimated_cost_usd: 0.0,
+                status: DelegationStatus::Failed {
+                    error: format!("Invalid PM task JSON: {e}"),
+                },
+                diff: None,
+                diff_summary: None,
+                summary: None,
+                estimated_cost_usd: 0.0,
             };
         }
     };
@@ -2900,25 +2944,41 @@ async fn handle_pm_operation(
     let mut adapter = spur_pm::GitHubAdapter::new(None).with_cwd(repo_root);
     if let Err(e) = adapter.connect().await {
         return DelegationResult {
-            status: DelegationStatus::Failed { error: e.to_string() },
-            diff: None, diff_summary: None, summary: None, estimated_cost_usd: 0.0,
+            status: DelegationStatus::Failed {
+                error: e.to_string(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
         };
     }
 
     let result: anyhow::Result<String> = match agent {
         "__pm_get_issue" => {
             let id = args["id"].as_str().unwrap_or("");
-            adapter.get_issue(id).await
+            adapter
+                .get_issue(id)
+                .await
                 .map(|issue| serde_json::to_string_pretty(&issue).unwrap_or_default())
         }
         "__pm_update_issue" => {
             let id = args["id"].as_str().unwrap_or("");
             let update = spur_pm::IssueUpdate {
-                status: args.get("status").and_then(|v| v.as_str()).map(String::from),
-                comment: args.get("comment").and_then(|v| v.as_str()).map(String::from),
+                status: args
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                comment: args
+                    .get("comment")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 ..Default::default()
             };
-            adapter.update_issue(id, update).await.map(|_| "Issue updated".into())
+            adapter
+                .update_issue(id, update)
+                .await
+                .map(|_| "Issue updated".into())
         }
         "__pm_create_pr" => {
             let params = spur_pm::PrParams {
@@ -2936,11 +2996,19 @@ async fn handle_pm_operation(
     match result {
         Ok(summary) => DelegationResult {
             status: DelegationStatus::Success,
-            diff: None, diff_summary: None, summary: Some(summary), estimated_cost_usd: 0.0,
+            diff: None,
+            diff_summary: None,
+            summary: Some(summary),
+            estimated_cost_usd: 0.0,
         },
         Err(e) => DelegationResult {
-            status: DelegationStatus::Failed { error: e.to_string() },
-            diff: None, diff_summary: None, summary: None, estimated_cost_usd: 0.0,
+            status: DelegationStatus::Failed {
+                error: e.to_string(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
         },
     }
 }
