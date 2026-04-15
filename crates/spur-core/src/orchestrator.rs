@@ -184,6 +184,139 @@ pub(crate) fn is_connection_death(err: &anyhow::Error) -> bool {
         || msg.contains("server shut down unexpectedly")
 }
 
+// ─── Brain-prompt static constants (v1 framework) ─────────────────────────────
+
+const DISPATCH_PROCEDURE: &str = "\
+## When to delegate vs. do it yourself
+
+Do it yourself when:
+  - The task is <15min of work.
+  - You need tight iterative control (probe, edit, probe).
+  - The task requires your accumulated session context.
+  - No worker's good_for meaningfully matches.
+
+Delegate when:
+  - Subtasks are independent and parallelizable (use delegate_parallel).
+  - A worker's good_for directly matches the task shape.
+  - Scope (LoC, files, or duration) exceeds what you want to spend your
+    context window on.
+  - You need fresh context isolation.
+
+Routing rule: prefer specialist tier when good_for matches exactly;
+fall back to generalist tier otherwise. avoid_for is a SOFT signal —
+you MAY override it with a stated rationale when no better agent exists.
+Prefer lower-cost_tier agents for mechanical tasks; reserve higher-cost
+agents for tasks requiring integration, judgment, or architectural
+decisions.
+
+Your <delegation_plan> replaces, does not supplement, other planning
+artifacts you would emit FOR DELEGATION DECISIONS. Native planning
+tools (Todo, plan mode, etc.) remain for intra-task work.
+
+";
+
+const PLAN_REQUIREMENT: &str = "\
+## Required: delegation_plan parameter
+
+Every delegate_to_worker and delegate_parallel call should include a
+`delegation_plan` argument. Content scales with complexity:
+
+For >=2 subtasks OR >3 files touched — pass the full shape:
+  {
+    \"candidates\":    [{\"agent\": \"...\", \"rationale\": \"...\"}, ...],
+    \"decomposition\": [{\"subtask\": \"...\", \"parallelizable_with\": [\"...\"]}],
+    \"chosen\":        \"agent-name-or-self-or-parallel\",
+    \"rationale\":     \"Why this choice beats the alternatives. If
+                      violating any agent's avoid_for, state why.\"
+  }
+
+For trivial single-step delegations — minimum shape:
+  { \"chosen\": \"agent-name\", \"rationale\": \"short justification\" }
+
+All fields are advisory; the orchestrator accepts the tool call even
+with minimal or missing content. Your rationale is surfaced to the
+review gate so reviewers can see what you decided and why.
+
+If you have access to a sequential-thinking MCP tool, use it to
+generate the candidates and decomposition before committing to the
+delegate_* call.
+
+";
+
+const TASK_STRUCTURE: &str = "\
+## Task prompt structure (what to send workers)
+
+Structure the `task` field of delegate_to_worker as:
+
+  CONTEXT: {scope, constraints from this session, relevant file paths
+           and short excerpts — prefer inlining over passing paths via
+           context_files so the worker doesn't spend turns re-reading}
+  GOAL:    {one-sentence success criterion}
+  CONSTRAINTS: {what the worker must NOT do}
+  EXPECTED OUTPUT: {populated from the chosen agent's output_shape
+                   when declared}
+
+For agents with declared output_shape, EXPECTED OUTPUT must restate it.
+For agents with declared input_expectations, CONTEXT must satisfy those
+expectations before dispatch.
+
+";
+
+const CANONICAL_EXAMPLE: &str = "\
+## Canonical example
+
+Task: 'Refactor the auth module to use the new SessionId format across
+all callers (4 files).'
+
+Reasoning out loud (brain's narrative text):
+  This is a multi-file refactor matching claude-code-acp's good_for.
+  The changes are coupled (can't parallelize across callers).
+
+delegate_to_worker(
+  agent = \"claude-code-acp\",
+  task = \"CONTEXT: Refactor the auth module. Affected files: src/auth/mod.rs, \
+          src/auth/session.rs, src/api/handlers.rs, src/tests/auth.rs. \
+          The new SessionId format is: [snippet]. \
+          GOAL: All callers use the new format; all tests pass. \
+          CONSTRAINTS: Don't touch src/api/v2/; don't modify the database schema. \
+          EXPECTED OUTPUT: Unified diff + summary paragraph + test plan bullets.\",
+  delegation_plan = {
+    \"candidates\": [
+      {\"agent\": \"claude-code-acp\", \"rationale\": \"multi-file refactor matches good_for\"},
+      {\"agent\": \"codex\", \"rationale\": \"cheaper but avoid_for = multi-file coordination\"}
+    ],
+    \"decomposition\": [
+      {\"subtask\": \"refactor auth + callers\", \"parallelizable_with\": []}
+    ],
+    \"chosen\": \"claude-code-acp\",
+    \"rationale\": \"multi-file refactor + coupled callers; codex's avoid_for excludes it.\"
+  }
+)
+
+";
+
+// ─── Free function: log-cap enforcer ──────────────────────────────────────────
+
+fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime, u64)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((e.path(), m.modified().ok()?, m.len()))
+        })
+        .collect();
+    let total: u64 = files.iter().map(|(_, _, s)| s).sum();
+    if total <= cap { return; }
+    files.sort_by_key(|(_, mtime, _)| *mtime);  // oldest first
+    let mut to_free = total - cap;
+    for (path, _, size) in files {
+        if to_free == 0 { break; }
+        let _ = std::fs::remove_file(&path);
+        to_free = to_free.saturating_sub(size);
+    }
+}
+
 impl Orchestrator {
     /// Create a new orchestrator for the given repo directory.
     pub fn new(repo_root: PathBuf, config: SpurConfig) -> Result<Self> {
@@ -1837,6 +1970,14 @@ impl Orchestrator {
     }
 
     fn build_brain_prompt(&self, task: &str, issue: Option<&Issue>) -> String {
+        if self.config.brain.delegation.framework == "v1" {
+            self.build_brain_prompt_v1(task, issue)
+        } else {
+            self.build_brain_prompt_legacy(task, issue)
+        }
+    }
+
+    fn build_brain_prompt_legacy(&self, task: &str, issue: Option<&Issue>) -> String {
         let mut prompt = String::new();
 
         // System instructions.
@@ -1874,6 +2015,94 @@ impl Orchestrator {
         prompt.push_str(&format!("## Task\n\n{}\n", task));
 
         prompt
+    }
+
+    fn build_brain_prompt_v1(&self, task: &str, issue: Option<&Issue>) -> String {
+        let mut prompt = String::new();
+        prompt.push_str(&self.render_header());
+        prompt.push_str(&self.render_workers_block());
+        prompt.push_str(DISPATCH_PROCEDURE);
+        prompt.push_str(PLAN_REQUIREMENT);
+        prompt.push_str(TASK_STRUCTURE);
+        prompt.push_str(CANONICAL_EXAMPLE);
+        self.append_issue_and_task(&mut prompt, task, issue);
+        self.log_prompt_once(&prompt);
+        prompt
+    }
+
+    fn render_header(&self) -> String {
+        "You are a brain coordinating a coding task. You have two kinds of tools:\n\
+         \n\
+         1. Your own tools (filesystem, bash, git) — for investigation and direct edits.\n\
+         2. SPUR delegation tools (delegate_to_worker, delegate_parallel, list_available_workers) — for handing work to worker agents that run in isolated worktrees.\n\n".into()
+    }
+
+    fn render_workers_block(&self) -> String {
+        let mut out = String::from("## Available worker agents\n\n");
+        let mut any_listed = false;
+        for agent in self.registry.worker_capable() {
+            if agent.delegation.good_for.is_empty() {
+                continue;
+            }
+            any_listed = true;
+            let tier = agent.delegation.tier
+                .map(|t| match t {
+                    spur_acp::config::Tier::Specialist => "specialist",
+                    spur_acp::config::Tier::Generalist => "generalist",
+                })
+                .unwrap_or("generalist");
+            let cost = format!("{:?}", agent.cost_tier).to_lowercase();
+            let desc = agent.delegation.description.as_deref().unwrap_or("(no description)");
+            out.push_str(&format!(
+                "### {}  ({}, cost: {})\n{}\n\n",
+                agent.name, tier, cost, desc,
+            ));
+        }
+        if !any_listed {
+            out.push_str("(no worker-capable agents with descriptors configured)\n\n");
+        }
+        out
+    }
+
+    fn append_issue_and_task(&self, prompt: &mut String, task: &str, issue: Option<&Issue>) {
+        // Issue context.
+        if let Some(issue) = issue {
+            prompt.push_str(&format!(
+                "## Issue #{}: {}\n\n{}\n\nLabels: {}\nStatus: {}\n\n",
+                issue.id,
+                issue.title,
+                issue.body,
+                issue.labels.join(", "),
+                issue.status,
+            ));
+        }
+
+        // Project-specific context.
+        if let Some(ref append) = self.config.brain.prompt.append {
+            prompt.push_str(&format!("## Project Context\n\n{}\n\n", append));
+        }
+
+        // Task.
+        prompt.push_str(&format!("## Task\n\n{}\n", task));
+    }
+
+    fn log_prompt_once(&self, prompt: &str) {
+        let dir = self.repo_root.join(".spur/logs/brain-prompts");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::debug!(error = %e, "could not create brain-prompts log dir");
+            return;
+        }
+        // Use a timestamp-based filename since there is no per-call session id
+        // accessor on Orchestrator; a timestamp is unique enough for logging.
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros())
+            .unwrap_or(0);
+        let path = dir.join(format!("{}.md", ts));
+        if let Err(e) = std::fs::write(&path, prompt) {
+            tracing::debug!(error = %e, path = %path.display(), "could not write prompt log");
+        }
+        enforce_log_cap(&dir, 50 * 1024 * 1024);
     }
 
     async fn fetch_issue_context(&self, issue_ref: &str) -> Result<Issue> {
@@ -4166,5 +4395,118 @@ mod normalize_tests {
         let chosen = "claude-code-acp";
         let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
         assert_eq!(matched, true);
+    }
+}
+
+#[cfg(test)]
+mod prompt_v1_tests {
+    use super::*;
+
+    // --- Static-constant tests: no fixture needed ---
+
+    #[test]
+    fn dispatch_procedure_contains_required_keywords() {
+        assert!(DISPATCH_PROCEDURE.contains("When to delegate vs. do it yourself"));
+        assert!(DISPATCH_PROCEDURE.contains("Do it yourself when:"));
+        assert!(DISPATCH_PROCEDURE.contains("Delegate when:"));
+        assert!(DISPATCH_PROCEDURE.contains("specialist"));
+        assert!(DISPATCH_PROCEDURE.contains("avoid_for is a SOFT signal"));
+    }
+
+    #[test]
+    fn plan_requirement_shows_full_and_minimal_shapes() {
+        assert!(PLAN_REQUIREMENT.contains("delegation_plan"));
+        assert!(PLAN_REQUIREMENT.contains("candidates"));
+        assert!(PLAN_REQUIREMENT.contains("decomposition"));
+        assert!(PLAN_REQUIREMENT.contains("minimum shape"));
+        assert!(PLAN_REQUIREMENT.contains(">=2 subtasks OR >3 files"));
+    }
+
+    #[test]
+    fn task_structure_contains_four_sections() {
+        assert!(TASK_STRUCTURE.contains("CONTEXT:"));
+        assert!(TASK_STRUCTURE.contains("GOAL:"));
+        assert!(TASK_STRUCTURE.contains("CONSTRAINTS:"));
+        assert!(TASK_STRUCTURE.contains("EXPECTED OUTPUT"));
+    }
+
+    #[test]
+    fn canonical_example_is_syntactically_present() {
+        assert!(CANONICAL_EXAMPLE.contains("Canonical example"));
+        assert!(CANONICAL_EXAMPLE.contains("delegate_to_worker"));
+        assert!(CANONICAL_EXAMPLE.contains("delegation_plan"));
+    }
+
+    // --- Workers-block rendering: build minimal fixtures from AgentConfig ---
+
+    use spur_acp::config::{AgentConfig, Tier};
+
+    fn cfg_with_good_for(name: &str, good_for: Vec<String>) -> AgentConfig {
+        let mut cfg = AgentConfig::with_defaults(name);
+        cfg.delegation.good_for = good_for;
+        cfg.delegation.description = Some(format!("{} test descriptor", name));
+        cfg.delegation.tier = Some(Tier::Generalist);
+        cfg
+    }
+
+    /// Render the workers block over an explicit agent slice, bypassing
+    /// orchestrator self. Mirrors the logic of `render_workers_block`.
+    fn render_workers_block_over(agents: &[AgentConfig]) -> String {
+        let mut out = String::from("## Available worker agents\n\n");
+        let mut any = false;
+        for agent in agents {
+            if agent.delegation.good_for.is_empty() { continue; }
+            any = true;
+            let tier = agent.delegation.tier
+                .map(|t| match t {
+                    Tier::Specialist => "specialist",
+                    Tier::Generalist => "generalist",
+                })
+                .unwrap_or("generalist");
+            let desc = agent.delegation.description.as_deref().unwrap_or("(no description)");
+            out.push_str(&format!(
+                "### {}  ({}, cost: medium)\n{}\n\n",
+                agent.name, tier, desc,
+            ));
+        }
+        if !any { out.push_str("(no worker-capable agents with descriptors configured)\n\n"); }
+        out
+    }
+
+    #[test]
+    fn workers_block_lists_agents_with_non_empty_good_for() {
+        let agents = vec![
+            cfg_with_good_for("claude-x", vec!["refactors".into()]),
+            cfg_with_good_for("kiro-x", vec!["specs".into()]),
+        ];
+        let block = render_workers_block_over(&agents);
+        assert!(block.contains("claude-x"));
+        assert!(block.contains("kiro-x"));
+    }
+
+    #[test]
+    fn workers_block_excludes_empty_good_for_agents() {
+        let agents = vec![
+            cfg_with_good_for("has-good-for", vec!["real".into()]),
+            cfg_with_good_for("bare", vec![]),  // will be excluded
+        ];
+        let block = render_workers_block_over(&agents);
+        assert!(block.contains("has-good-for"));
+        assert!(!block.contains("bare"));
+    }
+
+    #[test]
+    fn workers_block_says_none_when_all_excluded() {
+        let agents = vec![cfg_with_good_for("bare", vec![])];
+        let block = render_workers_block_over(&agents);
+        assert!(block.contains("(no worker-capable agents with descriptors configured)"));
+    }
+
+    #[test]
+    fn workers_block_is_deterministic_for_same_input() {
+        let agents = vec![cfg_with_good_for("a", vec!["x".into()])];
+        let a = render_workers_block_over(&agents);
+        let b = render_workers_block_over(&agents);
+        assert_eq!(a, b);
     }
 }
