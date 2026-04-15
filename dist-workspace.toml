@@ -23,7 +23,7 @@ installers = ["shell", "powershell", "npm"]
 # Generate and dist a source tarball
 source-tarball = false
 # A namespace to use when publishing this package to the npm registry
-npm-scope = "@spur-ai"
+npm-scope = "@getspur"
 # Whether to produce an npm lockfile
 npm-shrinkwrap = true
 # Publish jobs to run in CI
