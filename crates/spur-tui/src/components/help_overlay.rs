@@ -11,7 +11,7 @@ pub struct HelpOverlay;
 impl HelpOverlay {
     pub fn render(frame: &mut Frame, area: Rect, mermaid_enabled: bool) {
         let width = 66u16.min(area.width.saturating_sub(4));
-        let height = 42u16.min(area.height.saturating_sub(4));
+        let height = 50u16.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(width)) / 2;
         let y = (area.height.saturating_sub(height)) / 2;
         let popup_area = Rect::new(x, y, width, height);
@@ -91,6 +91,34 @@ impl HelpOverlay {
             out.push(Line::from(""));
         }
 
+        // Mouse capture is enabled so the scroll wheel works, which means
+        // the terminal no longer owns drag events for native text selection.
+        // Every major terminal supports a modifier-drag bypass — hold the
+        // modifier while dragging to hand drag events back to the terminal
+        // so you can select and copy text as usual.
+        out.push(header(" Text Selection (copy/paste)"));
+        out.push(Line::from(
+            "  Option+drag        iTerm2 / WezTerm / Ghostty (macOS)",
+        ));
+        out.push(Line::from(
+            "  Fn+drag            macOS Terminal.app",
+        ));
+        out.push(Line::from(
+            "  Shift+drag         Kitty / Alacritty / GNOME / Konsole",
+        ));
+        out.push(Line::from(
+            "  Alt+drag           Windows Terminal",
+        ));
+        out.push(Line::from(Span::styled(
+            "  (mouse capture intercepts drag so the wheel can scroll;",
+            Style::default().fg(Color::DarkGray),
+        )));
+        out.push(Line::from(Span::styled(
+            "   the modifier tells your terminal to keep the drag locally)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        out.push(Line::from(""));
+
         out.push(Line::from(Span::styled(
             " Press ? or Esc to close",
             Style::default().fg(Color::DarkGray),
@@ -129,5 +157,16 @@ mod tests {
             !joined.contains("Mermaid Viewer"),
             "Mermaid Viewer section must be hidden: {joined}"
         );
+    }
+
+    #[test]
+    fn help_advertises_terminal_modifier_bypass_for_text_selection() {
+        let joined = help_lines(false).join("\n");
+        assert!(
+            joined.contains("Text Selection"),
+            "help must advertise text-selection bypass: {joined}"
+        );
+        assert!(joined.contains("Option+drag"), "must mention Option+drag");
+        assert!(joined.contains("Shift+drag"), "must mention Shift+drag");
     }
 }
