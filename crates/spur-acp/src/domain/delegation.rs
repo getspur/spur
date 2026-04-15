@@ -73,6 +73,36 @@ pub struct DelegationResult {
     pub estimated_cost_usd: f64,
 }
 
+/// Structured reasoning trace the brain passes alongside each
+/// `delegate_to_worker` / `delegate_parallel` call. All fields optional;
+/// permissive schema. See design spec section C.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DelegationPlan {
+    /// Candidate agents the brain considered.
+    #[serde(default)]
+    pub candidates:    Vec<PlanCandidate>,
+    /// Subtask breakdown for multi-task dispatches.
+    #[serde(default)]
+    pub decomposition: Vec<PlanSubtask>,
+    /// The agent the brain committed to (or "self"/"parallel").
+    pub chosen:        Option<String>,
+    /// Short justification surfaced to the review gate.
+    pub rationale:     Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PlanCandidate {
+    pub agent:     Option<String>,
+    pub rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PlanSubtask {
+    pub subtask:             Option<String>,
+    #[serde(default)]
+    pub parallelizable_with: Vec<String>,
+}
+
 /// Serializes `Duration` as whole seconds (`u64`).
 ///
 /// Sub-second precision is intentionally discarded — `waited_for` is
@@ -94,6 +124,43 @@ mod delegation_result_tests {
     use super::*;
     use crate::DiffSummary;
     use std::path::PathBuf;
+
+    #[test]
+    fn delegation_plan_deserializes_from_full_json() {
+        let json = r#"{
+            "candidates": [
+                {"agent": "claude", "rationale": "default fit"},
+                {"agent": "codex", "rationale": "cheaper alternative"}
+            ],
+            "decomposition": [
+                {"subtask": "refactor auth", "parallelizable_with": ["refactor tests"]}
+            ],
+            "chosen": "claude",
+            "rationale": "Scope > 3 files; claude is generalist."
+        }"#;
+        let plan: DelegationPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.chosen.as_deref(), Some("claude"));
+        assert_eq!(plan.candidates.len(), 2);
+        assert_eq!(plan.decomposition.len(), 1);
+        assert!(plan.rationale.is_some());
+    }
+
+    #[test]
+    fn delegation_plan_deserializes_from_minimal_json() {
+        let json = r#"{"chosen": "kiro", "rationale": "spec work"}"#;
+        let plan: DelegationPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.chosen.as_deref(), Some("kiro"));
+        assert!(plan.candidates.is_empty());
+        assert!(plan.decomposition.is_empty());
+    }
+
+    #[test]
+    fn delegation_plan_deserializes_from_empty_json() {
+        let json = r#"{}"#;
+        let plan: DelegationPlan = serde_json::from_str(json).unwrap();
+        assert!(plan.chosen.is_none());
+        assert!(plan.candidates.is_empty());
+    }
 
     #[test]
     fn result_with_diff_summary_round_trips_json() {
