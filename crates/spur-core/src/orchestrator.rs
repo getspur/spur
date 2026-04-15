@@ -1840,13 +1840,11 @@ impl Orchestrator {
         loop {
             let outcome = match run_one_worker_attempt(
                 next_worker_session.clone(),
-                &WorkerAttemptCtx {
-                    brain_session_id: &brain_session_id,
-                    agent: &agent,
-                    task: &current_task,
-                    request_id: &request_id,
-                    agent_config: &agent_config,
-                },
+                &brain_session_id,
+                &agent,
+                &current_task,
+                &request_id,
+                &agent_config,
                 &mut worktrees,
                 &funnel,
             )
@@ -2630,15 +2628,6 @@ fn maybe_synthesize_file_touch(
 /// immediately — setup failures short-circuit without retry and the
 /// caller's `finalize` records the error status.
 ///
-/// Read-only context shared across worker attempt retries.
-struct WorkerAttemptCtx<'a> {
-    brain_session_id: &'a SessionId,
-    agent: &'a str,
-    task: &'a str,
-    request_id: &'a str,
-    agent_config: &'a spur_acp::config::AgentConfig,
-}
-
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
 /// worker candidate status — success OR worker-reported errors — both
 /// of which are retry-eligible (the human reviewer decides).
@@ -2650,7 +2639,11 @@ struct WorkerAttemptCtx<'a> {
 /// the public `DelegationResult` type.
 async fn run_one_worker_attempt(
     worker_session: SessionId,
-    ctx: &WorkerAttemptCtx<'_>,
+    brain_session_id: &SessionId,
+    agent: &str,
+    task: &str,
+    request_id: &str,
+    agent_config: &spur_acp::config::AgentConfig,
     worktrees: &mut WorktreeManager,
     funnel: &crate::event_funnel::FunnelHandle,
 ) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
@@ -2662,10 +2655,10 @@ async fn run_one_worker_attempt(
     // stable executor_id" limitation documented for follow-up work.
     // The projection path (apply_inner) sees each event correctly.
     funnel.emit(SpurEventBody::DelegationRequested {
-        from: ctx.brain_session_id.clone(),
-        to_agent: ctx.agent.to_string(),
-        task: ctx.task.to_string(),
-        request_id: ctx.request_id.to_string(),
+        from: brain_session_id.clone(),
+        to_agent: agent.to_string(),
+        task: task.to_string(),
+        request_id: request_id.to_string(),
     });
 
     let start = Instant::now();
@@ -2677,7 +2670,7 @@ async fn run_one_worker_attempt(
         .map_err(|e| AttemptSetupError::SnapshotFailed(e.to_string()))?;
 
     let worktree_info = worktrees
-        .create_worktree(&worker_session, ctx.agent, &snapshot_branch)
+        .create_worktree(&worker_session, agent, &snapshot_branch)
         .await
         .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
 
@@ -2685,9 +2678,9 @@ async fn run_one_worker_attempt(
     // Workers never receive a permission_tx, so L2 auto-approve is
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
-    let spawn_args = ctx.agent_config.effective_args();
+    let spawn_args = agent_config.effective_args();
     let mut connection: Box<dyn AgentConnection> =
-        build_connection_from_transport(ctx.agent_config, spawn_args, None);
+        build_connection_from_transport(agent_config, spawn_args, None);
 
     // S5 — consume `_spur/*` ExtNotifications from this worker and
     // translate them into SpurEvent variants via the funnel. Must run
@@ -2696,7 +2689,7 @@ async fn run_one_worker_attempt(
     if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
         let funnel_for_ext = funnel.clone();
         let executor_id_for_ext = worker_session.0.clone();
-        let brain_session_for_ext = ctx.brain_session_id.clone();
+        let brain_session_for_ext = brain_session_id.clone();
         tokio::spawn(async move {
             while let Some(payload) = ext_rx.recv().await {
                 crate::spur_ext_interp::interpret(
@@ -2717,22 +2710,22 @@ async fn run_one_worker_attempt(
 
     // Emit WorkerSpawned event.
     funnel.emit(SpurEventBody::WorkerSpawned {
-        agent: ctx.agent.to_string(),
+        agent: agent.to_string(),
         session: worker_session.clone(),
         worktree: worktree_info.path.clone(),
     });
     // Correlate this executor with the brain's delegate_to_worker call
     // so the brain-side session_detail view can render an inline card.
     funnel.emit(SpurEventBody::DelegationDispatched {
-        from: ctx.brain_session_id.clone(),
-        request_id: ctx.request_id.to_string(),
+        from: brain_session_id.clone(),
+        request_id: request_id.to_string(),
         executor_id: worker_session.0.clone(),
     });
 
     // Workers get no MCP servers (per spec).
     let session_response = match crate::skip_perm::new_session_with_bypass(
         &mut *connection,
-        ctx.agent_config,
+        agent_config,
         worktree_info.path.clone(),
         vec![],
     )
@@ -2750,7 +2743,7 @@ async fn run_one_worker_attempt(
     let prompt_text = format!(
         "Working directory: {}\n\nTask: {}",
         worktree_info.path.display(),
-        ctx.task
+        task
     );
     let prompt_request = PromptRequest::new(
         session_response.session_id.clone(),
@@ -2776,7 +2769,7 @@ async fn run_one_worker_attempt(
             // before any other notification handling.
             maybe_synthesize_file_touch(
                 &notification,
-                ctx.brain_session_id,
+                brain_session_id,
                 &worker_session.0,
                 &file_touch_dedup,
                 funnel,
@@ -2827,7 +2820,7 @@ async fn run_one_worker_attempt(
     };
 
     let duration = start.elapsed();
-    let cost = spur_cost::estimator::estimate_cost(ctx.agent_config.cost_tier, duration);
+    let cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
 
     let summary = if output_text.is_empty() {
         None
