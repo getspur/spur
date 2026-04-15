@@ -328,6 +328,9 @@ pub struct BrainConfig {
     /// Additional prompt context to inject.
     #[serde(default)]
     pub prompt: BrainPromptConfig,
+    /// Feature flags for the delegation framework.
+    #[serde(default)]
+    pub delegation: BrainDelegationConfig,
 }
 
 impl Default for BrainConfig {
@@ -336,12 +339,33 @@ impl Default for BrainConfig {
             default: default_brain(),
             fallback: vec!["kiro".to_string()],
             prompt: BrainPromptConfig::default(),
+            delegation: BrainDelegationConfig::default(),
         }
     }
 }
 
 fn default_brain() -> String {
     "claude-code".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrainDelegationConfig {
+    /// Which delegation framework version to use in the brain prompt.
+    /// `"v1"` uses the rewritten prompt (workers block, dispatch
+    /// procedure, delegation_plan guidance). `"legacy"` uses the
+    /// pre-framework 5-line prose prompt. Build-aware default:
+    /// debug builds default to `"v1"`; release builds default to
+    /// `"legacy"` at v1 ship, flipping to `"v1"` at v2, removed at v3.
+    pub framework: String,
+}
+
+impl Default for BrainDelegationConfig {
+    fn default() -> Self {
+        Self {
+            framework: if cfg!(debug_assertions) { "v1".into() } else { "legacy".into() },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -632,6 +656,30 @@ mod tests {
             !codex.commands.static_commands.is_empty(),
             "codex must have at least one static command (proves Spec 2)"
         );
+    }
+
+    #[test]
+    fn brain_delegation_framework_defaults_per_build() {
+        // Empty [brain.delegation] block → build-aware default.
+        let toml = r#"
+            [brain]
+            default = "claude-code-acp"
+        "#;
+        let cfg: BrainConfig = toml::from_str(toml).unwrap();
+        let expected = if cfg!(debug_assertions) { "v1" } else { "legacy" };
+        assert_eq!(cfg.delegation.framework, expected);
+    }
+
+    #[test]
+    fn brain_delegation_framework_explicit_v1() {
+        let toml = r#"
+            [brain]
+            default = "claude-code-acp"
+            [brain.delegation]
+            framework = "v1"
+        "#;
+        let cfg: BrainConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.delegation.framework, "v1");
     }
 
     #[test]
