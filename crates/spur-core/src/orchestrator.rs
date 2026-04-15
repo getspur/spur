@@ -35,6 +35,26 @@ use spur_worktree::WorktreeManager;
 use crate::lineage::ExecutorId;
 use crate::review_sink::{ReviewSink, ReviewSinkError};
 
+// ─── Agent name normalization ─────────────────────────────────────────
+
+/// Normalize an agent name for equality comparison.
+/// - Lowercases
+/// - Trims surrounding whitespace
+/// - Strips `-acp`, `_acp`, `-cli`, `_cli` suffixes
+///
+/// Used to compare `DelegationPlan.chosen` (possibly a short name
+/// the brain chose) against the dispatched `agent` (possibly a
+/// fully-qualified registered name like `claude-code-acp`).
+pub fn normalize_agent_name(name: &str) -> String {
+    let lower = name.trim().to_lowercase();
+    for suffix in ["-acp", "_acp", "-cli", "_cli"].iter() {
+        if let Some(stripped) = lower.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    lower
+}
+
 // ─── Run options ─────────────────────────────────────────────────────
 
 /// Options for `spur run`.
@@ -4064,5 +4084,47 @@ mod is_connection_death_tests {
 
         let e4 = anyhow::anyhow!("prompt rejected: invalid session id");
         assert!(!is_connection_death(&e4));
+    }
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize_agent_name;
+
+    #[test]
+    fn strips_acp_suffix() {
+        assert_eq!(normalize_agent_name("claude-code-acp"), "claude-code");
+        assert_eq!(normalize_agent_name("kiro-acp"), "kiro");
+    }
+
+    #[test]
+    fn strips_cli_suffix() {
+        assert_eq!(normalize_agent_name("gemini-cli"), "gemini");
+    }
+
+    #[test]
+    fn lowercases() {
+        assert_eq!(normalize_agent_name("CLAUDE"), "claude");
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        assert_eq!(normalize_agent_name("  kiro  "), "kiro");
+    }
+
+    #[test]
+    fn same_agent_matches_across_variants() {
+        assert_eq!(
+            normalize_agent_name("Claude-Code-ACP"),
+            normalize_agent_name("claude-code")
+        );
+    }
+
+    #[test]
+    fn distinct_agents_do_not_collide() {
+        assert_ne!(
+            normalize_agent_name("our-claude"),
+            normalize_agent_name("claude"),
+        );
     }
 }
