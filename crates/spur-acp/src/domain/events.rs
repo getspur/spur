@@ -31,6 +31,15 @@ pub struct ReviewPayload {
     pub diff_summary: Option<DiffSummary>,
     pub pr_url: Option<String>,
     pub error: Option<String>,
+    /// Structured delegation reasoning the brain emitted for this call.
+    /// See design spec section C.5.
+    #[serde(default)]
+    pub delegation_plan: Option<crate::domain::DelegationPlan>,
+    /// `Some(false)` when `delegation_plan.chosen` doesn't match the
+    /// dispatched agent (after `normalize_agent_name`). Never blocks
+    /// dispatch; exposed for reviewer visibility.
+    #[serde(default)]
+    pub chosen_matches_dispatched: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -438,5 +447,43 @@ mod cancel_mode_field_tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod review_payload_tests {
+    use super::*;
+    use crate::domain::DelegationPlan;
+
+    #[test]
+    fn review_payload_default_has_none_plan() {
+        let p = ReviewPayload {
+            summary: "s".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
+        };
+        assert!(p.delegation_plan.is_none());
+        assert!(p.chosen_matches_dispatched.is_none());
+    }
+
+    #[test]
+    fn review_payload_round_trips_with_plan() {
+        let plan = DelegationPlan {
+            chosen: Some("kiro".into()),
+            rationale: Some("because".into()),
+            ..Default::default()
+        };
+        let p = ReviewPayload {
+            summary: "".into(), diff_summary: None, pr_url: None, error: None,
+            delegation_plan: Some(plan),
+            chosen_matches_dispatched: Some(true),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: ReviewPayload = serde_json::from_str(&json).unwrap();
+        assert!(back.delegation_plan.is_some());
+        assert_eq!(back.chosen_matches_dispatched, Some(true));
     }
 }

@@ -106,6 +106,8 @@ fn review_requested_populates_pending_review_and_phase() {
             diff_summary: None,
             pr_url: None,
             error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
         },
     }));
 
@@ -132,6 +134,8 @@ fn review_resolved_clears_pending_review() {
             diff_summary: None,
             pr_url: None,
             error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
         },
     }));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
@@ -399,6 +403,8 @@ fn review_cancelled_clears_pending_review() {
             diff_summary: None,
             pr_url: None,
             error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
         },
     });
     lineage.apply(&req);

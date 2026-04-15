@@ -43,6 +43,8 @@ fn full_flow_brain_to_review_to_resolved() {
             diff_summary: None,
             pr_url: Some("https://x/42".into()),
             error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
         },
     }));
 
@@ -239,6 +241,8 @@ fn replay_produces_byte_identical_state() {
                     diff_summary: None,
                     pr_url: None,
                     error: None,
+                    delegation_plan: None,
+                    chosen_matches_dispatched: None,
                 },
             },
         ),

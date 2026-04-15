@@ -28,6 +28,8 @@ fn review_req(id: &str) -> SpurEvent {
             diff_summary: None,
             pr_url: None,
             error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
         },
     })
 }
