@@ -66,20 +66,20 @@ jobs:
           # which is what handles rusqlite's bundled SQLite C compilation.
           sccache: "true"
 
-      # Fail CI if the wheel bundles or requires external shared libraries.
-      # This catches accidental dynamic linking regressions (e.g. chafa, glib).
+      # Fail CI if the wheel links non-system shared libraries (e.g. chafa, glib).
+      # Standard glibc/libgcc refs are expected and fine for manylinux wheels.
       - name: Reject external dylibs
         if: runner.os == 'Linux'
         run: |
           pip install auditwheel
           for whl in python/dist/*.whl; do
             auditwheel show "$whl" 2>&1 | tee /tmp/aw.txt
-            if grep -q "requires no external shared libraries" /tmp/aw.txt; then
-              echo "✅ Wheel is clean"
-            else
-              echo "::error::Wheel has external shared library dependencies"
+            if grep -qE "would need to be bundled|not-a-platform-wheel" /tmp/aw.txt; then
+              echo "::error::Wheel has non-system shared library dependencies"
+              cat /tmp/aw.txt
               exit 1
             fi
+            echo "✅ $(basename $whl) is clean"
           done
 
       - name: Upload wheel artifact
