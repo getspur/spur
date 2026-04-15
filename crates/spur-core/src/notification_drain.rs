@@ -22,7 +22,7 @@ use spur_acp::connection::AgentConnection;
 
 /// Outcome of a single broadcast receive attempt.
 enum BcastOutcome {
-    Notification(SessionNotification),
+    Notification(Box<SessionNotification>),
     Lagged,
     Closed,
 }
@@ -98,7 +98,7 @@ where
             // 3. Drain the broadcast (real path for native transports).
             bcast_outcome = poll_bcast(&mut notif_rx), if notif_rx.is_some() => {
                 match bcast_outcome {
-                    BcastOutcome::Notification(notif) => on_notification(notif),
+                    BcastOutcome::Notification(notif) => on_notification(*notif),
                     BcastOutcome::Lagged => {
                         // Already warned; continue.
                     }
@@ -133,7 +133,7 @@ async fn poll_bcast(
 ) -> BcastOutcome {
     match rx.as_mut() {
         Some(r) => match r.recv().await {
-            Ok(notif) => BcastOutcome::Notification(notif),
+            Ok(notif) => BcastOutcome::Notification(Box::new(notif)),
             Err(RecvError::Lagged(n)) => {
                 tracing::warn!(skipped = n, "drive_prompt_notifications: broadcast lagged");
                 BcastOutcome::Lagged

@@ -7,7 +7,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
@@ -84,7 +84,7 @@ struct SinkState {
 }
 
 impl SinkState {
-    fn open(dir: &PathBuf) -> std::io::Result<Self> {
+    fn open(dir: &Path) -> std::io::Result<Self> {
         let max_bytes = std::env::var("SPUR_EVENT_LOG_MAX_BYTES")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -93,7 +93,7 @@ impl SinkState {
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
-            dir: dir.clone(),
+            dir: dir.to_path_buf(),
             writer: BufWriter::with_capacity(FLUSH_BYTES, file),
             current_path: path,
             bytes_in_file: bytes,
@@ -135,7 +135,7 @@ fn events_dir() -> PathBuf {
     PathBuf::from(".spur/events")
 }
 
-fn rotated_path(dir: &PathBuf) -> PathBuf {
+fn rotated_path(dir: &Path) -> PathBuf {
     let pid = std::process::id();
     let ts = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
