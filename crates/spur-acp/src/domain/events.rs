@@ -115,6 +115,18 @@ impl SpurEvent {
     }
 }
 
+/// Result of attempting `session/load` on a brain connection. Returned
+/// from `load_brain_session` so the caller can distinguish "state
+/// actually came back" from "we silently created a fresh session."
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoadOutcome {
+    /// `session/load` returned the prior session state.
+    Restored,
+    /// `session/load` failed (unsupported, or errored) and we started a
+    /// new session. `reason` is the underlying error.
+    FellBackToNew { reason: String },
+}
+
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpurEventBody {
@@ -231,6 +243,31 @@ pub enum SpurEventBody {
         session: SessionId,
         message: String,
     },
+    /// Brain subprocess appears to have died; a reconnect attempt is
+    /// starting. Emitted BEFORE `connect_brain` runs so the TUI can
+    /// display a banner immediately (subprocess spawn takes >1s).
+    BrainReconnecting {
+        session: SessionId,
+        brain_name: String,
+        /// Human-readable reason (usually the RPC error that tripped
+        /// the detector).
+        reason: String,
+    },
+    /// Reconnect succeeded. `outcome` says whether session state was
+    /// restored or we fell back to a fresh session.
+    BrainReconnected {
+        session: SessionId,
+        brain_name: String,
+        outcome: LoadOutcome,
+    },
+    /// Reconnect attempt failed OR the circuit breaker tripped. The
+    /// brain stays unset and the user must take an explicit action to
+    /// retry.
+    BrainReconnectFailed {
+        session: SessionId,
+        brain_name: String,
+        reason: String,
+    },
     /// The agent subprocess reported that authentication is required
     /// (e.g. `authRequired` error code, "/login" prompt). The TUI renders
     /// this as a dismissable banner instructing the user to run
@@ -335,6 +372,38 @@ pub enum SpurEventBody {
 pub struct HistoryEntry {
     pub role: String,
     pub text: String,
+}
+
+#[cfg(test)]
+mod reconnect_event_tests {
+    use super::*;
+    use crate::SessionId;
+
+    #[test]
+    fn load_outcome_variants_construct() {
+        let _ = LoadOutcome::Restored;
+        let _ = LoadOutcome::FellBackToNew { reason: "session/load returned error".into() };
+    }
+
+    #[test]
+    fn brain_reconnect_events_construct() {
+        let s = SessionId::new();
+        let _ = SpurEventBody::BrainReconnecting {
+            session: s.clone(),
+            brain_name: "kiro".into(),
+            reason: "ACP thread died during prompt".into(),
+        };
+        let _ = SpurEventBody::BrainReconnected {
+            session: s.clone(),
+            brain_name: "kiro".into(),
+            outcome: LoadOutcome::Restored,
+        };
+        let _ = SpurEventBody::BrainReconnectFailed {
+            session: s,
+            brain_name: "kiro".into(),
+            reason: "circuit breaker tripped".into(),
+        };
+    }
 }
 
 #[cfg(test)]
