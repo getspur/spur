@@ -49,6 +49,7 @@ The parallel spec `brain-worker-refinement-design.md` enriches the feedback loop
 - **Metrics emission.** No Prometheus counters; observability via structured logs + events.
 - **TUI UI for editing descriptors.** Config-only.
 - **Runtime config hot-reload.** Matches roadmap non-goal.
+- **Skill integration as soft upper layer.** Brain and workers invoking superpowers skills (e.g., `dispatching-parallel-agents` for decomposition, `verification-before-completion` for worker self-review, `test-driven-development` for code-writing workers) to supply procedural quality our inline prompts cannot fully specify. Requires a `spur-tools.md` platform mapping (Claude Code `Task` → spur `delegate_to_worker`, multiple `Task` calls → `delegate_parallel`, etc.) and a per-agent `recommend_skills` field in descriptors. Scoped for a follow-up spec (provisional: `2026-04-16-spur-skill-integration-design.md`). This framework's descriptors, `delegation_plan` tool-param, and task prompt structure are designed to accommodate that layer without rework.
 
 ## Design
 
@@ -748,3 +749,4 @@ After all three phases ship:
 - Blocking semantics of `delegate_to_worker`.
 - Brain prompt contracts other than the system prompt (append, task, issue context blocks remain).
 - Build-time dependencies (no new crates required beyond `toml` which spur-acp already uses).
+- Skill invocation paths — brains and workers may invoke superpowers skills natively via their own tool surfaces; our descriptors, `delegation_plan` contract, and task prompt structure remain orthogonal to skill invocation in v1. The soft-upper-layer integration lives in its own follow-up spec.
