@@ -165,3 +165,29 @@ fn enter_pushes_to_history() {
     b.history_prev();
     assert_eq!(b.text(), "msg1");
 }
+
+#[test]
+fn typing_while_browsing_history_exits_history_mode() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "first");
+    submit(&mut b);
+    type_str(&mut b, "second");
+    submit(&mut b);
+
+    // Browse back to "first"
+    b.history_prev();
+    b.history_prev();
+    assert_eq!(b.text(), "first");
+
+    // Type a character — should exit history mode
+    press(&mut b, KeyCode::Char('!'));
+    assert_eq!(b.text(), "first!");
+
+    // Ctrl+P should now save "first!" as draft and recall "second"
+    b.history_prev();
+    assert_eq!(b.text(), "second");
+
+    // Ctrl+N back should restore "first!" (the modified draft)
+    b.history_next();
+    assert_eq!(b.text(), "first!");
+}
