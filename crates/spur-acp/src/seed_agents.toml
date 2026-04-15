@@ -43,19 +43,13 @@ cost_tier = "medium"
 handle = "kiro"
 
 [agents.entries.commands]
-dispatch = "vendor_exec"
-exec_method = "_kiro.dev/commands/execute"
-args_template = "raw_rest"
+dispatch = "prompt_text"
 
 [[agents.entries.commands.ingest]]
 method = "_kiro.dev/commands/available"
 parser = "json_path_list"
 path = "commands"
 item_schema = "acp_available_command"
-
-[[agents.entries.commands.response]]
-method = "_kiro.dev/commands/execute/response"
-render = "system_note"
 
 [agents.entries.permissions]
 args = ["--trust-all-tools"]
