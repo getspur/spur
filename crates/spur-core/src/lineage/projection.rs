@@ -26,9 +26,13 @@ use spur_acp::{SpurEvent, SpurEventBody};
 
 use spur_acp::LifecycleState;
 
-use super::types::{Attempt, AttemptStatus, ExecutorId, ExecutorNode, ReviewRequest};
+use super::types::{
+    Attempt, AttemptStatus, ExecutorId, ExecutorNode, ReviewRequest, WorkerStreamEntry,
+    WorkerStreamKind,
+};
 
 const MAX_ORPHAN_BUFFER_PER_EXEC: usize = 128;
+const STREAM_BUFFER_CAP: usize = 200;
 
 #[derive(Debug, Default, Clone)]
 pub struct ExecutorLineage {
@@ -104,6 +108,7 @@ impl ExecutorLineage {
                     latest_diff_summary: None,
                     latest_diff_text: None,
                     last_error: None,
+                    stream_buffer: VecDeque::new(),
                 };
                 match parent {
                     Some(p) => {
@@ -251,6 +256,52 @@ impl ExecutorLineage {
                     node.attempts.push(new_attempt);
                     node.phase = LifecycleState::Running;
                     node.last_event_at = Some(event.occurred_at);
+                    node.stream_buffer.clear();
+                } else {
+                    self.buffer_orphan(eid, event.clone());
+                }
+            }
+
+            SpurEventBody::WorkerNotification {
+                executor_id,
+                notification,
+                ..
+            } => {
+                let eid = ExecutorId::new(executor_id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    node.last_event_at = Some(event.occurred_at);
+                    let entry = match &notification.update {
+                        spur_acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                            extract_text_content(chunk).map(|t| WorkerStreamEntry {
+                                kind: WorkerStreamKind::Thought,
+                                text: t,
+                                occurred_at: event.occurred_at,
+                            })
+                        }
+                        spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                            extract_text_content(chunk).map(|t| WorkerStreamEntry {
+                                kind: WorkerStreamKind::Message,
+                                text: t,
+                                occurred_at: event.occurred_at,
+                            })
+                        }
+                        spur_acp::SessionUpdate::ToolCall(tc) => {
+                            node.tool_call_count += 1;
+                            node.latest_tool_call = Some(tc.title.clone());
+                            Some(WorkerStreamEntry {
+                                kind: WorkerStreamKind::ToolCall,
+                                text: tc.title.clone(),
+                                occurred_at: event.occurred_at,
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(e) = entry {
+                        if node.stream_buffer.len() >= STREAM_BUFFER_CAP {
+                            node.stream_buffer.pop_front();
+                        }
+                        node.stream_buffer.push_back(e);
+                    }
                 } else {
                     self.buffer_orphan(eid, event.clone());
                 }
@@ -363,6 +414,15 @@ fn terminal_attempt_status(p: LifecycleState) -> Option<AttemptStatus> {
         LifecycleState::Succeeded => Some(AttemptStatus::Succeeded),
         LifecycleState::Failed => Some(AttemptStatus::Failed),
         LifecycleState::Cancelled => Some(AttemptStatus::Cancelled),
+        _ => None,
+    }
+}
+
+/// Extract text from a `ContentChunk`, returning `None` for empty or
+/// non-text content.
+fn extract_text_content(chunk: &spur_acp::ContentChunk) -> Option<String> {
+    match &chunk.content {
+        spur_acp::ContentBlock::Text(tc) if !tc.text.is_empty() => Some(tc.text.clone()),
         _ => None,
     }
 }
