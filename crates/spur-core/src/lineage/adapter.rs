@@ -10,9 +10,7 @@ use std::time::SystemTime;
 use spur_acp::{DelegationStatus, SpurEvent, SpurEventBody};
 
 use super::projection::ExecutorLineage;
-use super::types::{
-    Attempt, AttemptStatus, ExecutorId, ExecutorNode, LifecycleState, Role,
-};
+use super::types::{Attempt, AttemptStatus, ExecutorId, ExecutorNode, LifecycleState, Role};
 
 pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
     match &event.body {
@@ -41,7 +39,11 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             });
         }
 
-        SpurEventBody::WorkerSpawned { agent, session, worktree: _ } => {
+        SpurEventBody::WorkerSpawned {
+            agent,
+            session,
+            worktree: _,
+        } => {
             let id = ExecutorId::new(session.0.clone());
             if lineage.node(&id).is_some() {
                 return;
@@ -50,7 +52,12 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 .root_ids()
                 .iter()
                 .rev()
-                .find(|rid| lineage.node(rid).map(|n| n.role == Role::Brain).unwrap_or(false))
+                .find(|rid| {
+                    lineage
+                        .node(rid)
+                        .map(|n| n.role == Role::Brain)
+                        .unwrap_or(false)
+                })
                 .cloned();
             let node = ExecutorNode {
                 id: id.clone(),
@@ -76,7 +83,12 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             }
         }
 
-        SpurEventBody::DelegationRequested { from: _, to_agent, task, request_id: _ } => {
+        SpurEventBody::DelegationRequested {
+            from: _,
+            to_agent,
+            task,
+            request_id: _,
+        } => {
             // Populate the task_spec of the most recent Executor owned by the
             // worker name, if empty.
             //
@@ -91,7 +103,9 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 .nodes_mut_vec()
                 .into_iter()
                 .rev()
-                .find(|n| n.role == Role::Executor && n.agent == *to_agent && n.task_spec.is_empty())
+                .find(|n| {
+                    n.role == Role::Executor && n.agent == *to_agent && n.task_spec.is_empty()
+                })
                 .map(|n| n.id.clone());
             if let Some(id) = id {
                 if let Some(n) = lineage.node_mut_public(&id) {
@@ -100,14 +114,31 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             }
         }
 
-        SpurEventBody::DelegationCompleted { worker_session, status } => {
+        SpurEventBody::DelegationCompleted {
+            worker_session,
+            status,
+        } => {
             let id = ExecutorId::new(worker_session.0.clone());
             if let Some(n) = lineage.node_mut_public(&id) {
                 let (phase, attempt_status, error) = match status {
-                    DelegationStatus::Success => (LifecycleState::Succeeded, AttemptStatus::Succeeded, None),
-                    DelegationStatus::Failed { error } => (LifecycleState::Failed, AttemptStatus::Failed, Some(error.clone())),
-                    DelegationStatus::Timeout => (LifecycleState::Failed, AttemptStatus::Failed, Some("timeout".into())),
-                    DelegationStatus::Conflict { files } => (LifecycleState::Failed, AttemptStatus::Failed, Some(format!("conflict in {} file(s)", files.len()))),
+                    DelegationStatus::Success => {
+                        (LifecycleState::Succeeded, AttemptStatus::Succeeded, None)
+                    }
+                    DelegationStatus::Failed { error } => (
+                        LifecycleState::Failed,
+                        AttemptStatus::Failed,
+                        Some(error.clone()),
+                    ),
+                    DelegationStatus::Timeout => (
+                        LifecycleState::Failed,
+                        AttemptStatus::Failed,
+                        Some("timeout".into()),
+                    ),
+                    DelegationStatus::Conflict { files } => (
+                        LifecycleState::Failed,
+                        AttemptStatus::Failed,
+                        Some(format!("conflict in {} file(s)", files.len())),
+                    ),
                     DelegationStatus::Rejected { reason } => (
                         LifecycleState::Failed,
                         AttemptStatus::Failed,
@@ -118,7 +149,10 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                         AttemptStatus::Succeeded,
                         Some(format!("reviewer note: {}", reviewer_note)),
                     ),
-                    DelegationStatus::TimedOut { waited_for, fallback } => (
+                    DelegationStatus::TimedOut {
+                        waited_for,
+                        fallback,
+                    } => (
                         LifecycleState::Failed,
                         AttemptStatus::Failed,
                         Some(format!(
@@ -128,7 +162,9 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                         )),
                     ),
                     _ => {
-                        tracing::warn!("unknown DelegationStatus variant — projection needs updating");
+                        tracing::warn!(
+                            "unknown DelegationStatus variant — projection needs updating"
+                        );
                         (LifecycleState::Failed, AttemptStatus::Failed, None)
                     }
                 };
@@ -144,15 +180,27 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
         SpurEventBody::SessionCompleted { session, success } => {
             let id = ExecutorId::new(session.0.clone());
             if let Some(n) = lineage.node_mut_public(&id) {
-                n.phase = if *success { LifecycleState::Succeeded } else { LifecycleState::Failed };
+                n.phase = if *success {
+                    LifecycleState::Succeeded
+                } else {
+                    LifecycleState::Failed
+                };
                 if let Some(a) = n.current_attempt_mut() {
                     a.ended_at = Some(event.occurred_at);
-                    a.status = if *success { AttemptStatus::Succeeded } else { AttemptStatus::Failed };
+                    a.status = if *success {
+                        AttemptStatus::Succeeded
+                    } else {
+                        AttemptStatus::Failed
+                    };
                 }
             }
         }
 
-        SpurEventBody::CostUpdate { session, agent: _, estimated_cost_usd } => {
+        SpurEventBody::CostUpdate {
+            session,
+            agent: _,
+            estimated_cost_usd,
+        } => {
             let id = ExecutorId::new(session.0.clone());
             if let Some(n) = lineage.node_mut_public(&id) {
                 if let Some(a) = n.current_attempt_mut() {

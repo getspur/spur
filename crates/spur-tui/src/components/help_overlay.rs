@@ -34,7 +34,9 @@ impl HelpOverlay {
         let header = |t: &'static str| {
             Line::from(Span::styled(
                 t,
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ))
         };
 
@@ -79,7 +81,9 @@ impl HelpOverlay {
         ];
 
         if mermaid_enabled {
-            out.push(Line::from("  Alt-v              Open mermaid diagram viewer"));
+            out.push(Line::from(
+                "  Alt-v              Open mermaid diagram viewer",
+            ));
         }
 
         out.push(Line::from(""));
@@ -100,15 +104,11 @@ impl HelpOverlay {
         out.push(Line::from(
             "  Option+drag        iTerm2 / WezTerm / Ghostty (macOS)",
         ));
-        out.push(Line::from(
-            "  Fn+drag            macOS Terminal.app",
-        ));
+        out.push(Line::from("  Fn+drag            macOS Terminal.app"));
         out.push(Line::from(
             "  Shift+drag         Kitty / Alacritty / GNOME / Konsole",
         ));
-        out.push(Line::from(
-            "  Alt+drag           Windows Terminal",
-        ));
+        out.push(Line::from("  Alt+drag           Windows Terminal"));
         out.push(Line::from(Span::styled(
             "  (mouse capture intercepts drag so the wheel can scroll;",
             Style::default().fg(Color::DarkGray),
@@ -135,14 +135,22 @@ mod tests {
     fn help_lines(mermaid_enabled: bool) -> Vec<String> {
         HelpOverlay::lines(mermaid_enabled)
             .into_iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect()
     }
 
     #[test]
     fn image_mode_mentions_alt_v_and_mermaid_viewer() {
         let joined = help_lines(true).join("\n");
-        assert!(joined.contains("Alt-v"), "expected Alt-v in image-mode help: {joined}");
+        assert!(
+            joined.contains("Alt-v"),
+            "expected Alt-v in image-mode help: {joined}"
+        );
         assert!(
             joined.contains("Mermaid Viewer"),
             "expected Mermaid Viewer section: {joined}"
@@ -152,7 +160,10 @@ mod tests {
     #[test]
     fn text_mode_omits_alt_v_and_mermaid_viewer() {
         let joined = help_lines(false).join("\n");
-        assert!(!joined.contains("Alt-v"), "Alt-v must be hidden in text mode: {joined}");
+        assert!(
+            !joined.contains("Alt-v"),
+            "Alt-v must be hidden in text mode: {joined}"
+        );
         assert!(
             !joined.contains("Mermaid Viewer"),
             "Mermaid Viewer section must be hidden: {joined}"

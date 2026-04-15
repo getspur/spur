@@ -102,7 +102,10 @@ impl MarkdownStream {
     /// fences render as ordinary code blocks (used when the terminal has
     /// no image-protocol support).
     pub fn new_with_mermaid(mermaid_enabled: bool) -> Self {
-        Self { mermaid_enabled, ..Self::default() }
+        Self {
+            mermaid_enabled,
+            ..Self::default()
+        }
     }
 
     /// Append a chunk of text. Cheap — does not reparse.
@@ -150,8 +153,7 @@ impl MarkdownStream {
                     if let Some(line) = self.fence_placeholders.get(id) {
                         out.push(line.clone());
                     } else {
-                        let placeholder =
-                            format!("[📊 mermaid #{} · press Alt-v to view]", id.0);
+                        let placeholder = format!("[📊 mermaid #{} · press Alt-v to view]", id.0);
                         out.push(Line::from(ratatui::text::Span::styled(
                             placeholder,
                             ratatui::style::Style::default()
@@ -170,7 +172,12 @@ impl MarkdownStream {
     pub fn cached_lines_debug(&self) -> Vec<String> {
         self.lines()
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -209,8 +216,7 @@ impl MarkdownStream {
                             let slice = self.raw_text[..range.end]
                                 .trim_end_matches(['\n', '\r', ' ', '\t']);
                             if slice.ends_with("```") {
-                                discovered
-                                    .push((start..range.end, std::mem::take(&mut buf)));
+                                discovered.push((start..range.end, std::mem::take(&mut buf)));
                             }
                         }
                     }
@@ -233,7 +239,11 @@ impl MarkdownStream {
                 None => {
                     let id = MermaidId(self.next_fence_id);
                     self.next_fence_id += 1;
-                    let f = FenceRef { id, byte_range: range, code };
+                    let f = FenceRef {
+                        id,
+                        byte_range: range,
+                        code,
+                    };
                     new_fences.push(f.clone());
                     refreshed.push(f);
                 }
@@ -311,10 +321,7 @@ impl MarkdownStream {
                 } else {
                     FenceRender::Ready(1) // height unused in the 📊 fallback
                 };
-                placeholders.insert(
-                    id,
-                    super::mermaid::fence_placeholder_line(id, render),
-                );
+                placeholders.insert(id, super::mermaid::fence_placeholder_line(id, render));
                 items.push(StreamItem::Fence(id));
             } else {
                 current_text.push(line);
@@ -338,8 +345,8 @@ impl MarkdownStream {
 // definitions but live in different crates, so we bridge them explicitly.
 
 fn convert_color(c: ratatui_core::style::Color) -> ratatui::style::Color {
-    use ratatui_core::style::Color as C;
     use ratatui::style::Color as R;
+    use ratatui_core::style::Color as C;
     match c {
         C::Reset => R::Reset,
         C::Black => R::Black,
@@ -414,10 +421,15 @@ mod stream_item_tests {
     #[test]
     fn items_preserves_multiple_fences() {
         let mut s = MarkdownStream::new();
-        s.append("A\n\n```mermaid\ngraph TD\nA-->B\n```\n\nB\n\n```mermaid\ngraph TD\nX-->Y\n```\n\nC\n");
+        s.append(
+            "A\n\n```mermaid\ngraph TD\nA-->B\n```\n\nB\n\n```mermaid\ngraph TD\nX-->Y\n```\n\nC\n",
+        );
         let _ = s.flush_now(&StateLookup::empty());
         let items = s.items();
-        let fence_count = items.iter().filter(|i| matches!(i, StreamItem::Fence(_))).count();
+        let fence_count = items
+            .iter()
+            .filter(|i| matches!(i, StreamItem::Fence(_)))
+            .count();
         assert_eq!(fence_count, 2, "expected two fences; got items: {items:?}");
     }
 
@@ -431,7 +443,10 @@ mod stream_item_tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|sp| sp.content.as_ref()))
             .collect();
-        assert!(joined.contains("mermaid #0"), "expected placeholder in back-compat lines(): {joined:?}");
+        assert!(
+            joined.contains("mermaid #0"),
+            "expected placeholder in back-compat lines(): {joined:?}"
+        );
     }
 
     #[test]
@@ -442,12 +457,25 @@ mod stream_item_tests {
 
         // No fence item should be produced — mermaid should fall through to
         // tui-markdown as an ordinary code block.
-        let has_fence = s.items().iter().any(|it| matches!(it, StreamItem::Fence(_)));
-        assert!(!has_fence, "text mode must not produce Fence items: {:?}", s.items());
+        let has_fence = s
+            .items()
+            .iter()
+            .any(|it| matches!(it, StreamItem::Fence(_)));
+        assert!(
+            !has_fence,
+            "text mode must not produce Fence items: {:?}",
+            s.items()
+        );
 
         // Body text should appear verbatim in the rendered output.
         let joined = s.cached_lines_debug().join("\n");
-        assert!(joined.contains("flowchart LR"), "expected mermaid source in output: {joined}");
-        assert!(joined.contains("A-->B"), "expected mermaid source in output: {joined}");
+        assert!(
+            joined.contains("flowchart LR"),
+            "expected mermaid source in output: {joined}"
+        );
+        assert!(
+            joined.contains("A-->B"),
+            "expected mermaid source in output: {joined}"
+        );
     }
 }

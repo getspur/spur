@@ -4,10 +4,7 @@
 //! causing downstream `session/prompt` calls to fire against dead ids.
 
 use agent_client_protocol::{InitializeRequest, ProtocolVersion};
-use spur_acp::{
-    connection::native::NativeAcpConnection,
-    AgentConnection, LoadSessionRequest,
-};
+use spur_acp::{connection::native::NativeAcpConnection, AgentConnection, LoadSessionRequest};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn load_session_propagates_agent_error() {
@@ -15,12 +12,7 @@ async fn load_session_propagates_agent_error() {
     let stub = format!("{manifest_dir}/tests/fixtures/load_error_stub.mjs");
 
     // NativeAcpConnection::new(agent_name, command, extra_args, permission_tx)
-    let mut conn = NativeAcpConnection::new(
-        "load-error-stub",
-        "node",
-        vec![stub],
-        None,
-    );
+    let mut conn = NativeAcpConnection::new("load-error-stub", "node", vec![stub], None);
 
     conn.initialize(InitializeRequest::new(ProtocolVersion::LATEST))
         .await

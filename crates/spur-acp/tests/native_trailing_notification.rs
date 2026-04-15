@@ -62,7 +62,9 @@ async fn trailing_notification_reaches_caller() {
 
     let prompt_req = PromptRequest::new(
         session.session_id.clone(),
-        vec![ContentBlock::Text(TextContent::new("any-prompt".to_string()))],
+        vec![ContentBlock::Text(TextContent::new(
+            "any-prompt".to_string(),
+        ))],
     );
 
     // Fire prompt() — the returned stream is always empty for this transport;

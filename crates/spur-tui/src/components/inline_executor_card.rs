@@ -100,14 +100,8 @@ fn header_line(phase: LifecycleState, id: &str, agent: &str, task: &str) -> Line
             format!("exec/{} · ", short_id(id)),
             Style::default().fg(Color::White),
         ),
-        Span::styled(
-            format!("{agent} · "),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(
-            format!("\"{task}\""),
-            Style::default().fg(Color::Gray),
-        ),
+        Span::styled(format!("{agent} · "), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("\"{task}\""), Style::default().fg(Color::Gray)),
     ])
 }
 
@@ -130,7 +124,10 @@ fn running_status_line(node: &ExecutorNode) -> Line<'static> {
             Style::default().fg(Color::White),
         ),
         Span::styled(
-            format!(" · {} ago {spinner}", format_elapsed(stale_secs.unwrap_or(0))),
+            format!(
+                " · {} ago {spinner}",
+                format_elapsed(stale_secs.unwrap_or(0))
+            ),
             Style::default().fg(stale_color),
         ),
     ])
@@ -151,7 +148,9 @@ fn running_diff_line(node: &ExecutorNode) -> Line<'static> {
 fn attention_header() -> Line<'static> {
     Line::from(Span::styled(
         "┌─ ⚠ ATTENTION ──────────────────────────────────────────────────────",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -195,7 +194,9 @@ fn awaiting_summary_line(node: &ExecutorNode) -> Line<'static> {
 fn awaiting_cta_line() -> Line<'static> {
     Line::from(Span::styled(
         "  ▶ Press 'r' to review (this delegation is blocking the brain)",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -249,9 +250,7 @@ fn focus_hint_line(phase: LifecycleState) -> Line<'static> {
         LifecycleState::AwaitingReview => {
             "[ press 'r' to review · Enter / > to enter executor view ]"
         }
-        LifecycleState::Failed | LifecycleState::Cancelled => {
-            "[ Enter / > to inspect events ]"
-        }
+        LifecycleState::Failed | LifecycleState::Cancelled => "[ Enter / > to inspect events ]",
         _ => "[ Enter / > to open executor view · Tab for next ]",
     };
     Line::from(Span::styled(

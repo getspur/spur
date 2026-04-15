@@ -68,7 +68,11 @@ pub fn route(
                         interrupt,
                     }
                 }
-                Dispatch::VendorExec { method, command, args_template } => {
+                Dispatch::VendorExec {
+                    method,
+                    command,
+                    args_template,
+                } => {
                     let rest = rest_after_first_token(text);
                     let params = match args_template {
                         spur_acp::ArgsTemplateKind::RawRest => {
@@ -171,8 +175,13 @@ mod sessions_slash_tests {
 
         let decision = route("/sessions", &[], &registry, false);
         match decision {
-            SubmitDecision::Local { action: Action::RequestSessions } => {}
-            other => panic!("expected Local {{ action: RequestSessions }}, got {:?}", other),
+            SubmitDecision::Local {
+                action: Action::RequestSessions,
+            } => {}
+            other => panic!(
+                "expected Local {{ action: RequestSessions }}, got {:?}",
+                other
+            ),
         }
     }
 

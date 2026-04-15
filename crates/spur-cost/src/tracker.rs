@@ -3,9 +3,7 @@ use spur_acp::{CostTier, SessionId};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::db::{
-    self, CostSummary, DelegationRecord, ProjectCostSummary, SessionRecord,
-};
+use crate::db::{self, CostSummary, DelegationRecord, ProjectCostSummary, SessionRecord};
 use crate::estimator::estimate_cost;
 
 /// High-level cost-tracking API used by the orchestrator.
@@ -63,13 +61,7 @@ impl CostTracker {
         cost_tier: CostTier,
     ) -> Result<()> {
         let cost = estimate_cost(cost_tier, duration);
-        db::update_session_end(
-            &self.conn,
-            &id.0,
-            status,
-            duration.as_secs() as i64,
-            cost,
-        )
+        db::update_session_end(&self.conn, &id.0, status, duration.as_secs() as i64, cost)
     }
 
     /// Log a delegation from a brain session to a worker session.
@@ -114,11 +106,7 @@ impl CostTracker {
     pub fn week_summary(&self) -> Result<Vec<CostSummary>> {
         let now = chrono::Utc::now();
         let week_ago = now - chrono::TimeDelta::days(7);
-        db::query_cost_range(
-            &self.conn,
-            &week_ago.to_rfc3339(),
-            &now.to_rfc3339(),
-        )
+        db::query_cost_range(&self.conn, &week_ago.to_rfc3339(), &now.to_rfc3339())
     }
 
     /// Cost summary grouped by project (all time).

@@ -10,7 +10,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use spur_acp::config::SpurConfig;
-use spur_acp::connection::{AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter};
+use spur_acp::connection::{
+    AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter,
+};
 use spur_acp::registry::AgentRegistry;
 use spur_acp::types::*;
 use spur_acp::{
@@ -20,9 +22,8 @@ use spur_acp::{
 use spur_pm::Issue;
 
 use agent_client_protocol::{
-    ContentBlock, InitializeRequest, ListSessionsRequest, McpServer, McpServerHttp,
-    PromptRequest, ProtocolVersion, SessionInfo, SessionUpdate, SetSessionModeRequest,
-    TextContent,
+    ContentBlock, InitializeRequest, ListSessionsRequest, McpServer, McpServerHttp, PromptRequest,
+    ProtocolVersion, SessionInfo, SessionUpdate, SetSessionModeRequest, TextContent,
 };
 
 use spur_cost::CostTracker;
@@ -31,8 +32,8 @@ use spur_pm::adapter::PmAdapter;
 use spur_pm::GitHubAdapter;
 use spur_worktree::WorktreeManager;
 
-use crate::review_sink::{ReviewSink, ReviewSinkError};
 use crate::lineage::ExecutorId;
+use crate::review_sink::{ReviewSink, ReviewSinkError};
 
 // ─── Run options ─────────────────────────────────────────────────────
 
@@ -78,16 +79,26 @@ pub struct BrainSession {
 
 /// A user input message from the TUI.
 pub enum InteractiveInput {
-    Message { blocks: Vec<ContentBlock>, interrupt: bool },
+    Message {
+        blocks: Vec<ContentBlock>,
+        interrupt: bool,
+    },
     /// Spawn a fresh brain session and send these blocks as the first prompt
     /// atomically. If a brain is already attached, it is shut down first.
     /// Empty `blocks` means spawn-only with no first prompt.
-    NewSessionWithMessage { blocks: Vec<ContentBlock>, interrupt: bool },
+    NewSessionWithMessage {
+        blocks: Vec<ContentBlock>,
+        interrupt: bool,
+    },
     ListSessions,
-    ResumeSession { session_id: String },
+    ResumeSession {
+        session_id: String,
+    },
     /// Request `set_session_mode` on the active brain session. No-op if
     /// there is no active brain session.
-    SetSessionMode { mode_id: String },
+    SetSessionMode {
+        mode_id: String,
+    },
     /// Invoke an agent vendor-extension RPC on the active brain session.
     /// No-op if there is no active brain session. The method name and params
     /// are chosen by the TUI's config-driven dispatch path — the
@@ -111,7 +122,9 @@ pub enum InteractiveInput {
     /// active turn), dropped with a debug log (the view guards against emitting
     /// this unless a stream is in-flight, but a TurnComplete-vs-Esc race can
     /// still produce a stray one).
-    CancelStream { session: SessionId },
+    CancelStream {
+        session: SessionId,
+    },
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -133,7 +146,7 @@ pub struct Orchestrator {
     /// task drains onto `event_tx`, stamping monotonic `seq` +
     /// `occurred_at` in strict enqueue order (Pitfall P1).
     funnel: crate::event_funnel::FunnelHandle,
-    pub review_sink: ReviewSink,  // Clone type, shares inner Arc<Mutex>
+    pub review_sink: ReviewSink, // Clone type, shares inner Arc<Mutex>
     repo_root: PathBuf,
 }
 
@@ -309,9 +322,7 @@ impl Orchestrator {
         );
 
         // MCP callback server is now HTTP — pass URL directly.
-        let mcp_servers = vec![McpServer::Http(
-            McpServerHttp::new("spur-mcp", &mcp_url),
-        )];
+        let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
 
         let session_response = crate::skip_perm::new_session_with_bypass(
             &mut *connection,
@@ -417,7 +428,9 @@ impl Orchestrator {
         mut self,
         mut user_input_rx: mpsc::Receiver<InteractiveInput>,
         brain_override: Option<String>,
-        permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
     ) -> Result<()> {
         let mut brain: Option<BrainSession> = None;
         let mut pending_messages: VecDeque<InteractiveInput> = VecDeque::new();
@@ -522,7 +535,12 @@ impl Orchestrator {
 
                     let original_session_id = session_id.clone();
                     match self
-                        .load_brain_session(connection, brain_name, permission_tx.clone(), session_id)
+                        .load_brain_session(
+                            connection,
+                            brain_name,
+                            permission_tx.clone(),
+                            session_id,
+                        )
                         .await
                     {
                         Ok((session, mut history_stream)) => {
@@ -541,9 +559,13 @@ impl Orchestrator {
                             // If no history came from the agent (new_session fallback),
                             // replay conversation from disk so the user sees context.
                             if history_count == 0 {
-                                let entries = Self::read_session_history_from_disk(&original_session_id);
+                                let entries =
+                                    Self::read_session_history_from_disk(&original_session_id);
                                 if !entries.is_empty() {
-                                    info!(count = entries.len(), "Replaying conversation history from disk");
+                                    info!(
+                                        count = entries.len(),
+                                        "Replaying conversation history from disk"
+                                    );
                                     self.emit(SpurEvent::now(SpurEventBody::SessionHistory {
                                         session: spur_id.clone(),
                                         entries,
@@ -552,7 +574,9 @@ impl Orchestrator {
                             }
 
                             brain = Some(session);
-                            self.emit(SpurEvent::now(SpurEventBody::TurnComplete { session: spur_id }));
+                            self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
+                                session: spur_id,
+                            }));
                         }
                         Err(e) => {
                             error!(error = %e, "Failed to load brain session");
@@ -565,17 +589,18 @@ impl Orchestrator {
                 }
 
                 // ── VendorExec ───────────────────────────────────────────
-                InteractiveInput::VendorExec { session, method, mut params } => {
+                InteractiveInput::VendorExec {
+                    session,
+                    method,
+                    mut params,
+                } => {
                     if let Some(b) = brain.as_mut() {
                         // Inject ACP session ID — TUI doesn't know it.
                         // Contract: submit_router always produces a JSON object.
                         // Warn (don't fail) if a future args_template emits a
                         // non-object — the call still goes through, minus sessionId.
                         if let Some(obj) = params.as_object_mut() {
-                            obj.insert(
-                                "sessionId".into(),
-                                serde_json::json!(b.acp_session_id),
-                            );
+                            obj.insert("sessionId".into(), serde_json::json!(b.acp_session_id));
                         } else {
                             warn!(
                                 method = %method,
@@ -584,13 +609,11 @@ impl Orchestrator {
                         }
                         match b.connection.call_ext(&method, params).await {
                             Ok(resp) => {
-                                self.emit(SpurEvent::now(
-                                    SpurEventBody::AgentExtNotification {
-                                        session: session.clone(),
-                                        method: format!("{}/response", method),
-                                        params: resp,
-                                    },
-                                ));
+                                self.emit(SpurEvent::now(SpurEventBody::AgentExtNotification {
+                                    session: session.clone(),
+                                    method: format!("{}/response", method),
+                                    params: resp,
+                                }));
                             }
                             Err(e) => {
                                 warn!(
@@ -601,9 +624,7 @@ impl Orchestrator {
                                 );
                                 self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                     session,
-                                    message: format!(
-                                        "vendor exec `{}` failed: {}", method, e
-                                    ),
+                                    message: format!("vendor exec `{}` failed: {}", method, e),
                                 }));
                             }
                         }
@@ -617,9 +638,9 @@ impl Orchestrator {
                     if let Some(b) = brain.as_mut() {
                         let req = SetSessionModeRequest::new(
                             agent_client_protocol::SessionId::new(b.acp_session_id.clone()),
-                            agent_client_protocol::SessionModeId::new(
-                                std::sync::Arc::<str>::from(mode_id.as_str()),
-                            ),
+                            agent_client_protocol::SessionModeId::new(std::sync::Arc::<str>::from(
+                                mode_id.as_str(),
+                            )),
                         );
                         if let Err(e) = b.connection.set_session_mode(req).await {
                             warn!(
@@ -659,12 +680,19 @@ impl Orchestrator {
                         // Use pre-connected agent if available; otherwise connect_brain.
                         let result = match agent_connection.take() {
                             Some((connection, brain_name)) => {
-                                self.create_brain_session(connection, brain_name, permission_tx.clone())
-                                    .await
+                                self.create_brain_session(
+                                    connection,
+                                    brain_name,
+                                    permission_tx.clone(),
+                                )
+                                .await
                             }
                             None => {
-                                self.spawn_brain_session(brain_override.as_deref(), permission_tx.clone())
-                                    .await
+                                self.spawn_brain_session(
+                                    brain_override.as_deref(),
+                                    permission_tx.clone(),
+                                )
+                                .await
                             }
                         };
 
@@ -690,10 +718,7 @@ impl Orchestrator {
                     let b = brain.as_mut().unwrap();
 
                     // ── Send prompt ─────────────────────────────────────
-                    let prompt_request = PromptRequest::new(
-                        b.acp_session_id.clone(),
-                        blocks,
-                    );
+                    let prompt_request = PromptRequest::new(b.acp_session_id.clone(), blocks);
 
                     let prompt_started_at = std::time::Instant::now();
                     let mut stream = match b.connection.prompt(prompt_request).await {
@@ -866,11 +891,7 @@ impl Orchestrator {
     }
 
     /// Execute a task directly on a single agent (no brain, no delegation).
-    pub async fn exec_direct(
-        &mut self,
-        agent_name: &str,
-        task: &str,
-    ) -> Result<RunResult> {
+    pub async fn exec_direct(&mut self, agent_name: &str, task: &str) -> Result<RunResult> {
         let start = Instant::now();
         let session_id = SessionId::new();
 
@@ -920,16 +941,14 @@ impl Orchestrator {
         crate::notification_drain::drive_prompt_notifications(
             &mut *connection,
             prompt_request,
-            |notification| {
-                match &notification.update {
-                    SessionUpdate::AgentThoughtChunk(chunk)
-                    | SessionUpdate::AgentMessageChunk(chunk) => {
-                        if let ContentBlock::Text(tc) = &chunk.content {
-                            print!("{}", tc.text);
-                        }
+            |notification| match &notification.update {
+                SessionUpdate::AgentThoughtChunk(chunk)
+                | SessionUpdate::AgentMessageChunk(chunk) => {
+                    if let ContentBlock::Text(tc) = &chunk.content {
+                        print!("{}", tc.text);
                     }
-                    _ => {}
                 }
+                _ => {}
             },
         )
         .await?;
@@ -1038,7 +1057,9 @@ impl Orchestrator {
     async fn connect_brain(
         &mut self,
         brain_override: Option<&str>,
-        permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
     ) -> Result<(Box<dyn spur_acp::AgentConnection>, String)> {
         let brain_name = brain_override
             .unwrap_or(&self.config.brain.default)
@@ -1070,7 +1091,9 @@ impl Orchestrator {
         &mut self,
         mut connection: Box<dyn spur_acp::AgentConnection>,
         brain_name: String,
-        _permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+        _permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
     ) -> Result<BrainSession> {
         let session_id = SessionId::new();
 
@@ -1116,18 +1139,14 @@ impl Orchestrator {
             );
         }
 
-        let mcp_servers = vec![McpServer::Http(
-            McpServerHttp::new("spur-mcp", &mcp_url),
-        )];
+        let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
 
-        let brain_cfg = self
-            .registry
-            .get(&brain_name)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!(
+        let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
                 "brain agent '{}' not in registry during create_brain_session",
                 brain_name
-            ))?;
+            )
+        })?;
 
         // Pre-subscribe BEFORE new_session so notifications the agent emits
         // during session setup (e.g. claude-code-acp's initial
@@ -1213,9 +1232,14 @@ impl Orchestrator {
         &mut self,
         mut connection: Box<dyn spur_acp::AgentConnection>,
         brain_name: String,
-        _permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+        _permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
         acp_session_id: String,
-    ) -> Result<(BrainSession, std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>)> {
+    ) -> Result<(
+        BrainSession,
+        std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
+    )> {
         let session_id = SessionId::new();
 
         info!(brain = %brain_name, session = %session_id, acp_session = %acp_session_id, "Loading brain session");
@@ -1260,18 +1284,14 @@ impl Orchestrator {
             );
         }
 
-        let mcp_servers = vec![McpServer::Http(
-            McpServerHttp::new("spur-mcp", &mcp_url),
-        )];
+        let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
 
-        let brain_cfg = self
-            .registry
-            .get(&brain_name)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!(
+        let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
                 "brain agent '{}' not in registry during load_brain_session",
                 brain_name
-            ))?;
+            )
+        })?;
 
         // Pre-subscribe BEFORE load_session so the entire history replay
         // (published via the broadcast during load_session for native
@@ -1283,32 +1303,33 @@ impl Orchestrator {
         // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
         // fall back to new_session so we have a working session for subsequent prompts.
         // The historical conversation is displayed from the disk fallback in either case.
-        let (final_acp_session_id, history_stream, resumed) = match crate::skip_perm::load_session_with_bypass(
-            &mut *connection,
-            &brain_cfg,
-            acp_session_id.clone(),
-            self.repo_root.clone(),
-            mcp_servers.clone(),
-        )
-        .await
-        {
-            Ok(stream) => {
-                debug!(brain = %brain_name, "load_session succeeded");
-                (acp_session_id, Some(stream), true)
-            }
-            Err(e) => {
-                warn!(brain = %brain_name, error = %e, "load_session failed, falling back to new_session");
-                let session_response = crate::skip_perm::new_session_with_bypass(
-                    &mut *connection,
-                    &brain_cfg,
-                    self.repo_root.clone(),
-                    mcp_servers,
-                )
-                .await
-                .context("Failed to create fallback session after load_session failure")?;
-                (session_response.session_id.to_string(), None, false)
-            }
-        };
+        let (final_acp_session_id, history_stream, resumed) =
+            match crate::skip_perm::load_session_with_bypass(
+                &mut *connection,
+                &brain_cfg,
+                acp_session_id.clone(),
+                self.repo_root.clone(),
+                mcp_servers.clone(),
+            )
+            .await
+            {
+                Ok(stream) => {
+                    debug!(brain = %brain_name, "load_session succeeded");
+                    (acp_session_id, Some(stream), true)
+                }
+                Err(e) => {
+                    warn!(brain = %brain_name, error = %e, "load_session failed, falling back to new_session");
+                    let session_response = crate::skip_perm::new_session_with_bypass(
+                        &mut *connection,
+                        &brain_cfg,
+                        self.repo_root.clone(),
+                        mcp_servers,
+                    )
+                    .await
+                    .context("Failed to create fallback session after load_session failure")?;
+                    (session_response.session_id.to_string(), None, false)
+                }
+            };
 
         // Spawn delegation handler.
         let max_concurrent = self.config.worktree.max_concurrent;
@@ -1367,11 +1388,12 @@ impl Orchestrator {
         };
 
         // Return an empty stream if we fell back to new_session.
-        let stream: std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>> =
-            match history_stream {
-                Some(s) => s,
-                None => Box::pin(futures::stream::empty()),
-            };
+        let stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>,
+        > = match history_stream {
+            Some(s) => s,
+            None => Box::pin(futures::stream::empty()),
+        };
 
         Ok((brain_session, stream))
     }
@@ -1380,12 +1402,15 @@ impl Orchestrator {
     pub async fn spawn_brain_session(
         &mut self,
         brain_override: Option<&str>,
-        permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
     ) -> Result<BrainSession> {
         let (connection, brain_name) = self
             .connect_brain(brain_override, permission_tx.clone())
             .await?;
-        self.create_brain_session(connection, brain_name, permission_tx).await
+        self.create_brain_session(connection, brain_name, permission_tx)
+            .await
     }
 
     /// Fallback: read sessions from an agent's local storage on disk.
@@ -1393,9 +1418,7 @@ impl Orchestrator {
     fn list_sessions_from_disk(agent_name: &str) -> Result<Vec<SessionInfo>> {
         // kiro-cli stores sessions in ~/.kiro/sessions/cli/<uuid>.json
         if agent_name.contains("kiro") {
-            let home = std::env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default();
+            let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
             let sessions_dir = home.join(".kiro/sessions/cli");
 
             if !sessions_dir.exists() {
@@ -1452,19 +1475,23 @@ impl Orchestrator {
                 b_time.cmp(a_time)
             });
 
-            info!(count = sessions.len(), "Loaded sessions from kiro disk storage");
+            info!(
+                count = sessions.len(),
+                "Loaded sessions from kiro disk storage"
+            );
             return Ok(sessions);
         }
 
-        anyhow::bail!("No filesystem fallback available for agent '{}'", agent_name)
+        anyhow::bail!(
+            "No filesystem fallback available for agent '{}'",
+            agent_name
+        )
     }
 
     /// Read conversation history from a kiro session's JSONL file on disk.
     /// Returns (role, text) pairs for Prompt and AssistantMessage entries.
     fn read_session_history_from_disk(session_uuid: &str) -> Vec<spur_acp::HistoryEntry> {
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
         let jsonl_path = home.join(format!(".kiro/sessions/cli/{}.jsonl", session_uuid));
 
         let content = match std::fs::read_to_string(&jsonl_path) {
@@ -1521,7 +1548,9 @@ impl Orchestrator {
     fn create_connection(
         &self,
         config: &spur_acp::config::AgentConfig,
-        permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
     ) -> Box<dyn AgentConnection> {
         // L1a: effective_args folds skip_permissions_args into the spawn
         // args when bypass is on.
@@ -1727,12 +1756,17 @@ impl Orchestrator {
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
     ) -> (DelegationResult, Option<ExecutorId>) {
-        // Special agent names for PM operations (from MCP server).
+        // PM operations — handled directly, no worker spawn needed.
+        if agent.starts_with("__pm_") {
+            let result = handle_pm_operation(&agent, &original_task, &repo_root).await;
+            return (result, None);
+        }
+        // Other internal operations (progress, cost) — still stubbed.
         if agent.starts_with("__") {
             return (
                 DelegationResult {
                     status: DelegationStatus::Failed {
-                        error: format!("PM operations not yet wired: {}", agent),
+                        error: format!("Internal operation not yet wired: {}", agent),
                     },
                     diff: None,
                     diff_summary: None,
@@ -1997,7 +2031,9 @@ impl Orchestrator {
                     );
                 }
                 Some(ReviewDecision::Reject { reason }) => {
-                    let final_status = DelegationStatus::Rejected { reason: reason.clone() };
+                    let final_status = DelegationStatus::Rejected {
+                        reason: reason.clone(),
+                    };
                     funnel.emit(SpurEventBody::ExecutorReviewResolved {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Reject { reason },
@@ -2026,7 +2062,9 @@ impl Orchestrator {
                     );
                 }
                 Some(ReviewDecision::Modify { note }) => {
-                    let final_status = DelegationStatus::Modified { reviewer_note: note.clone() };
+                    let final_status = DelegationStatus::Modified {
+                        reviewer_note: note.clone(),
+                    };
                     funnel.emit(SpurEventBody::ExecutorReviewResolved {
                         id: eid.0.clone(),
                         decision: ReviewDecision::Modify { note },
@@ -2075,10 +2113,7 @@ impl Orchestrator {
                     // the 4th Retry decision fails.
                     if attempt_n > agent_config.review.max_review_retries {
                         let final_status = DelegationStatus::Failed {
-                            error: format!(
-                                "retry limit exceeded after {} attempts",
-                                attempt_n
-                            ),
+                            error: format!("retry limit exceeded after {} attempts", attempt_n),
                         };
                         // Retry limit → Failed (remove, no commit).
                         apply_worktree_cleanup(
@@ -2134,11 +2169,8 @@ impl Orchestrator {
                     });
                     apply_bloat_cap(&mut retry_history, 2048);
 
-                    current_task = render_retry_context(
-                        &retry_history,
-                        &original_task,
-                        &new_constraints,
-                    );
+                    current_task =
+                        render_retry_context(&retry_history, &original_task, &new_constraints);
                     attempt_n += 1;
                     next_worker_session = retry_session;
 
@@ -2293,10 +2325,7 @@ async fn apply_worktree_cleanup(
 ) {
     if should_commit_worker_diff(final_status) && diff.is_some() {
         if let Err(e) = worktrees
-            .commit_worker_changes(
-                worker_session,
-                &format!("spur: worker {} output", agent),
-            )
+            .commit_worker_changes(worker_session, &format!("spur: worker {} output", agent))
             .await
         {
             tracing::warn!(error = %e, "failed to commit worker diff");
@@ -2391,9 +2420,9 @@ pub(crate) fn cancel_mode_for(transport: spur_acp::types::TransportKind) -> spur
     use spur_acp::types::TransportKind;
     match transport {
         TransportKind::Acp => spur_acp::CancelMode::AcpSoft,
-        TransportKind::Stdio
-        | TransportKind::CliWrap
-        | TransportKind::StreamJson => spur_acp::CancelMode::ProcessKill,
+        TransportKind::Stdio | TransportKind::CliWrap | TransportKind::StreamJson => {
+            spur_acp::CancelMode::ProcessKill
+        }
     }
 }
 
@@ -2401,12 +2430,8 @@ pub(crate) fn cancel_mode_for(transport: spur_acp::types::TransportKind) -> spur
 /// Factored out so both the `Message { interrupt: true }` arm and the
 /// new `CancelStream` arm set the deadline identically and so it is
 /// directly unit-testable without a full mock orchestrator.
-pub(crate) fn arm_cancel_deadline(
-    deadline: &mut Option<tokio::time::Instant>,
-) {
-    *deadline = Some(
-        tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-    );
+pub(crate) fn arm_cancel_deadline(deadline: &mut Option<tokio::time::Instant>) {
+    *deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(5));
 }
 
 /// Build a boxed `AgentConnection` from the transport declared in `config`.
@@ -2772,7 +2797,10 @@ async fn run_one_worker_attempt(
     // `None` if numstat errors OR reports zero files — non-fatal,
     // we still return the raw diff.
     let diff_summary = if diff.is_some() {
-        build_diff_summary(&worktree_path).await.ok().filter(|s| s.files_changed > 0)
+        build_diff_summary(&worktree_path)
+            .await
+            .ok()
+            .filter(|s| s.files_changed > 0)
     } else {
         None
     };
@@ -2854,6 +2882,69 @@ fn truncate_summary(text: &str, cap: usize) -> String {
 }
 
 /// Reads `SPUR_SUMMARY_MAX_BYTES` (default 4000) and applies `truncate_summary`.
+async fn handle_pm_operation(
+    agent: &str,
+    task_json: &str,
+    repo_root: &std::path::Path,
+) -> DelegationResult {
+    let args: serde_json::Value = match serde_json::from_str(task_json) {
+        Ok(v) => v,
+        Err(e) => {
+            return DelegationResult {
+                status: DelegationStatus::Failed { error: format!("Invalid PM task JSON: {e}") },
+                diff: None, diff_summary: None, summary: None, estimated_cost_usd: 0.0,
+            };
+        }
+    };
+
+    let mut adapter = spur_pm::GitHubAdapter::new(None).with_cwd(repo_root);
+    if let Err(e) = adapter.connect().await {
+        return DelegationResult {
+            status: DelegationStatus::Failed { error: e.to_string() },
+            diff: None, diff_summary: None, summary: None, estimated_cost_usd: 0.0,
+        };
+    }
+
+    let result: anyhow::Result<String> = match agent {
+        "__pm_get_issue" => {
+            let id = args["id"].as_str().unwrap_or("");
+            adapter.get_issue(id).await
+                .map(|issue| serde_json::to_string_pretty(&issue).unwrap_or_default())
+        }
+        "__pm_update_issue" => {
+            let id = args["id"].as_str().unwrap_or("");
+            let update = spur_pm::IssueUpdate {
+                status: args.get("status").and_then(|v| v.as_str()).map(String::from),
+                comment: args.get("comment").and_then(|v| v.as_str()).map(String::from),
+                ..Default::default()
+            };
+            adapter.update_issue(id, update).await.map(|_| "Issue updated".into())
+        }
+        "__pm_create_pr" => {
+            let params = spur_pm::PrParams {
+                title: args["title"].as_str().unwrap_or("").into(),
+                body: args["body"].as_str().unwrap_or("").into(),
+                head_branch: args["branch"].as_str().unwrap_or("").into(),
+                base_branch: None,
+                repo: None,
+            };
+            adapter.create_pr(params).await
+        }
+        other => Err(anyhow::anyhow!("Unknown PM operation: {other}")),
+    };
+
+    match result {
+        Ok(summary) => DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None, diff_summary: None, summary: Some(summary), estimated_cost_usd: 0.0,
+        },
+        Err(e) => DelegationResult {
+            status: DelegationStatus::Failed { error: e.to_string() },
+            diff: None, diff_summary: None, summary: None, estimated_cost_usd: 0.0,
+        },
+    }
+}
+
 fn truncate_summary_env_default(text: &str) -> String {
     let cap: usize = std::env::var("SPUR_SUMMARY_MAX_BYTES")
         .ok()
@@ -3086,13 +3177,17 @@ fn strip_bang_prefix(mut blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
 /// This is spawned as a separate task so review-decision latency is
 /// decoupled from brain-turn I/O latency — see spec "Unit 3" for
 /// rationale.
-pub async fn review_dispatcher_loop(
-    mut rx: mpsc::Receiver<InteractiveInput>,
-    sink: ReviewSink,
-) {
+pub async fn review_dispatcher_loop(mut rx: mpsc::Receiver<InteractiveInput>, sink: ReviewSink) {
     while let Some(input) = rx.recv().await {
-        if let InteractiveInput::SubmitReview { executor_id, attempt_n, decision } = input {
-            let _ = sink.submit(ExecutorId::new(executor_id), attempt_n, decision).await;
+        if let InteractiveInput::SubmitReview {
+            executor_id,
+            attempt_n,
+            decision,
+        } = input
+        {
+            let _ = sink
+                .submit(ExecutorId::new(executor_id), attempt_n, decision)
+                .await;
         }
         // All other variants: noop in this loop.
     }
@@ -3257,7 +3352,9 @@ pub async fn run_gate_with_retries(
                 return DelegationStatus::Rejected { reason }
             }
             Some(ReviewDecision::Modify { note }) => {
-                return DelegationStatus::Modified { reviewer_note: note }
+                return DelegationStatus::Modified {
+                    reviewer_note: note,
+                }
             }
             Some(ReviewDecision::Retry { .. }) => {
                 // `>` (not `>=`): see execute_delegation for rationale.
@@ -3267,10 +3364,7 @@ pub async fn run_gate_with_retries(
                 // example.
                 if attempt_n > max_review_retries {
                     return DelegationStatus::Failed {
-                        error: format!(
-                            "retry limit exceeded after {} attempts",
-                            attempt_n
-                        ),
+                        error: format!("retry limit exceeded after {} attempts", attempt_n),
                     };
                 }
                 attempt_n += 1;
@@ -3296,7 +3390,9 @@ fn apply_decision_to_candidate(
     match decision {
         ReviewDecision::Approve => candidate,
         ReviewDecision::Reject { reason } => DelegationStatus::Rejected { reason },
-        ReviewDecision::Modify { note } => DelegationStatus::Modified { reviewer_note: note },
+        ReviewDecision::Modify { note } => DelegationStatus::Modified {
+            reviewer_note: note,
+        },
         ReviewDecision::Retry { .. } => DelegationStatus::Failed {
             error: "internal: Retry reached run_gate_for_candidate \
                     (caller must wrap with retry loop)"
@@ -3308,7 +3404,7 @@ fn apply_decision_to_candidate(
 #[cfg(test)]
 mod cancel_mode_helper_tests {
     use super::cancel_mode_for;
-    use spur_acp::{CancelMode, types::TransportKind};
+    use spur_acp::{types::TransportKind, CancelMode};
 
     #[test]
     fn acp_transport_is_acp_soft() {
@@ -3317,9 +3413,18 @@ mod cancel_mode_helper_tests {
 
     #[test]
     fn subprocess_transports_are_process_kill() {
-        assert_eq!(cancel_mode_for(TransportKind::Stdio), CancelMode::ProcessKill);
-        assert_eq!(cancel_mode_for(TransportKind::CliWrap), CancelMode::ProcessKill);
-        assert_eq!(cancel_mode_for(TransportKind::StreamJson), CancelMode::ProcessKill);
+        assert_eq!(
+            cancel_mode_for(TransportKind::Stdio),
+            CancelMode::ProcessKill
+        );
+        assert_eq!(
+            cancel_mode_for(TransportKind::CliWrap),
+            CancelMode::ProcessKill
+        );
+        assert_eq!(
+            cancel_mode_for(TransportKind::StreamJson),
+            CancelMode::ProcessKill
+        );
     }
 }
 
@@ -3420,7 +3525,11 @@ mod truncate_summary_tests {
         let input = "x".repeat(200);
         let out = super::truncate_summary_env_default(&input);
         assert!(out.len() < input.len());
-        assert!(out.len() <= 100, "output must respect env override, got {}", out.len());
+        assert!(
+            out.len() <= 100,
+            "output must respect env override, got {}",
+            out.len()
+        );
         match prev {
             Some(v) => unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", v) },
             None => unsafe { std::env::remove_var("SPUR_SUMMARY_MAX_BYTES") },
@@ -3438,7 +3547,11 @@ mod build_diff_summary_tests {
 
     fn init_repo() -> tempfile::TempDir {
         fn git(path: &std::path::Path, args: &[&str]) {
-            let out = Command::new("git").args(args).current_dir(path).output().unwrap();
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .unwrap();
             assert!(
                 out.status.success(),
                 "git {:?} failed: {}",
@@ -3483,12 +3596,23 @@ mod build_diff_summary_tests {
         let dir = init_repo();
         // numstat emits "-\t-\tpath" for binary files.
         std::fs::write(dir.path().join("b.bin"), [0u8, 1, 2, 3, 0xFF]).unwrap();
-        Command::new("git").args(["add", "b.bin"]).current_dir(dir.path()).output().unwrap();
-        Command::new("git").args(["commit", "-m", "bin"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git")
+            .args(["add", "b.bin"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "bin"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         std::fs::write(dir.path().join("b.bin"), [9u8, 8, 7]).unwrap();
         let summary = build_diff_summary(dir.path()).await.unwrap();
         assert_eq!(summary.files_changed, 1);
-        assert_eq!(summary.insertions, 0, "binary diff reports '-' for line counts");
+        assert_eq!(
+            summary.insertions, 0,
+            "binary diff reports '-' for line counts"
+        );
         assert_eq!(summary.deletions, 0);
         assert_eq!(summary.files, vec![PathBuf::from("b.bin")]);
     }
@@ -3499,25 +3623,43 @@ mod build_diff_summary_tests {
         let path = dir.path();
         // Create a second file to make git rename-detection engage reliably.
         std::fs::write(path.join("a.txt"), "hello\nworld\nextra\n").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(path).output().unwrap();
-        Command::new("git").args(["commit", "-m", "grow"]).current_dir(path).output().unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "grow"])
+            .current_dir(path)
+            .output()
+            .unwrap();
         // Rename a.txt -> b.txt with a small tweak so line counts are non-zero.
         std::fs::rename(path.join("a.txt"), path.join("b.txt")).unwrap();
         std::fs::write(path.join("b.txt"), "hello\nworld\nextra\nrenamed\n").unwrap();
-        Command::new("git").args(["add", "-A"]).current_dir(path).output().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(path)
+            .output()
+            .unwrap();
 
         let summary = build_diff_summary(path).await.unwrap();
         // Either git reports a rename (1 entry, path=b.txt) OR a delete+add pair
         // (2 entries, both a.txt and b.txt). Both are acceptable — the key
         // invariant is: no path contains " => " after our rename-stripping.
         assert!(
-            summary.files.iter().all(|p| !p.to_string_lossy().contains(" => ")),
+            summary
+                .files
+                .iter()
+                .all(|p| !p.to_string_lossy().contains(" => ")),
             "rename notation leaked into path: {:?}",
             summary.files
         );
         // b.txt must appear in the file list under either shape.
         assert!(
-            summary.files.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("b.txt")),
+            summary
+                .files
+                .iter()
+                .any(|p| p.file_name().and_then(|s| s.to_str()) == Some("b.txt")),
             "b.txt not in file list: {:?}",
             summary.files
         );

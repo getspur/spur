@@ -286,10 +286,7 @@ impl AgentConnection for StreamJsonAdapter {
                 "StreamJsonAdapter: killing process"
             );
             child.kill().await.map_err(|e| {
-                anyhow::anyhow!(
-                    "StreamJsonAdapter '{}': kill failed: {e}",
-                    self.agent_name
-                )
+                anyhow::anyhow!("StreamJsonAdapter '{}': kill failed: {e}", self.agent_name)
             })?;
         }
         self.child = None;

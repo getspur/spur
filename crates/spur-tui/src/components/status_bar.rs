@@ -43,7 +43,9 @@ pub struct StatusBarProps<'a> {
 impl StatusBar {
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         let hints = match props.view {
-            ViewId::Dashboard => " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [?]help [q]uit",
+            ViewId::Dashboard => {
+                " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [?]help [q]uit"
+            }
             ViewId::SessionDetail(_) => hint_for_session_detail(props.stream_in_flight),
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
             #[cfg(feature = "markdown")]
@@ -79,10 +81,7 @@ impl StatusBar {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{} review", props.pending_review),
-                review_style,
-            ),
+            Span::styled(format!("{} review", props.pending_review), review_style),
             Span::styled(" · ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("${:.2}", props.total_cost),
@@ -94,29 +93,28 @@ impl StatusBar {
             ),
             Span::styled(mode_text, Style::default().fg(Color::Magenta)),
             Span::styled(usage_text, Style::default().fg(Color::LightBlue)),
-            Span::styled(
-                "?: help",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("?: help", Style::default().fg(Color::DarkGray)),
             Span::raw(" "),
             Span::styled(
                 "spur",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]);
 
         let right_width = right.width() as u16;
         let hints_line = Line::from(Span::styled(
             hints,
-            Style::default().fg(Color::White).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::DIM),
         ));
 
         // Right-align the metric/brand group; let the hints take the rest.
-        let [hints_area, right_area] = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Length(right_width.max(1)),
-        ])
-        .areas(area);
+        let [hints_area, right_area] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width.max(1))])
+                .areas(area);
 
         frame.render_widget(Paragraph::new(hints_line), hints_area);
         frame.render_widget(Paragraph::new(right).right_aligned(), right_area);

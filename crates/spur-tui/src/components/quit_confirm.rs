@@ -48,9 +48,7 @@ impl QuitConfirmDialog {
                 Span::raw(" Yes    "),
                 Span::styled(
                     "[n/Esc]",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" No"),
             ]),

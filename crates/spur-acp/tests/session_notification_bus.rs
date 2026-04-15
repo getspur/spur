@@ -39,16 +39,13 @@ use std::time::Duration;
 use agent_client_protocol::{InitializeRequest, ProtocolVersion, SessionUpdate};
 use futures::StreamExt;
 use spur_acp::{
-    LoadSessionRequest,
-    connection::native::NativeAcpConnection,
-    connection::AgentConnection,
+    connection::native::NativeAcpConnection, connection::AgentConnection, LoadSessionRequest,
 };
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delayed_available_commands_update_reaches_subscriber() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let script_path =
-        format!("{manifest_dir}/tests/fixtures/agent_delayed_available_commands.sh");
+    let script_path = format!("{manifest_dir}/tests/fixtures/agent_delayed_available_commands.sh");
     assert!(
         std::path::Path::new(&script_path).exists(),
         "fixture missing at {script_path}"
@@ -120,8 +117,7 @@ async fn delayed_available_commands_update_reaches_subscriber() {
                 update.available_commands.len()
             );
             assert_eq!(
-                update.available_commands[0].name,
-                "test-cmd",
+                update.available_commands[0].name, "test-cmd",
                 "expected command name \"test-cmd\", got \"{}\": {notif:?}",
                 update.available_commands[0].name
             );

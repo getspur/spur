@@ -11,7 +11,10 @@ fn executor_phase_changed_rejects_invalid_variant() {
         "body": {"ExecutorPhaseChanged": {"id": "x", "phase": "running"}}
     }"#;
     let result: Result<SpurEvent, _> = serde_json::from_str(json);
-    assert!(result.is_err(), "lowercase 'running' must fail to deserialize");
+    assert!(
+        result.is_err(),
+        "lowercase 'running' must fail to deserialize"
+    );
 }
 
 #[test]
@@ -25,7 +28,10 @@ fn executor_spawned_rejects_invalid_role() {
         }}
     }"#;
     let result: Result<SpurEvent, _> = serde_json::from_str(json);
-    assert!(result.is_err(), "lowercase 'brain' must fail to deserialize");
+    assert!(
+        result.is_err(),
+        "lowercase 'brain' must fail to deserialize"
+    );
 }
 
 #[test]
@@ -53,7 +59,10 @@ fn executor_review_resolved_roundtrips() {
     });
     let json = serde_json::to_string(&ev).unwrap();
     let round: SpurEvent = serde_json::from_str(&json).unwrap();
-    assert!(matches!(round.body, SpurEventBody::ExecutorReviewResolved { .. }));
+    assert!(matches!(
+        round.body,
+        SpurEventBody::ExecutorReviewResolved { .. }
+    ));
 }
 
 #[test]
@@ -71,7 +80,10 @@ fn executor_review_requested_roundtrips() {
     });
     let json = serde_json::to_string(&ev).unwrap();
     let round: SpurEvent = serde_json::from_str(&json).unwrap();
-    assert!(matches!(round.body, SpurEventBody::ExecutorReviewRequested { .. }));
+    assert!(matches!(
+        round.body,
+        SpurEventBody::ExecutorReviewRequested { .. }
+    ));
 }
 
 #[test]

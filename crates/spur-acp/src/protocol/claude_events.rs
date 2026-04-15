@@ -6,8 +6,7 @@
 
 use agent_client_protocol::{
     ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent,
-    ToolCall as AcpToolCall, ToolCallId, ToolCallUpdate as AcpToolCallUpdate,
-    ToolCallUpdateFields,
+    ToolCall as AcpToolCall, ToolCallId, ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields,
 };
 use serde::Deserialize;
 
@@ -93,7 +92,10 @@ pub struct UserMessage<'a> {
 
 impl<'a> UserMessage<'a> {
     pub fn new(content: &'a str) -> Self {
-        Self { msg_type: "user", content }
+        Self {
+            msg_type: "user",
+            content,
+        }
     }
 }
 
@@ -134,10 +136,7 @@ pub fn map_to_notifications(
                         SessionUpdate::AgentThoughtChunk(chunk)
                     }
                     AssistantContentBlock::ToolUse { id, name, input } => {
-                        let mut tc = AcpToolCall::new(
-                            ToolCallId::new(id.as_str()),
-                            name.clone(),
-                        );
+                        let mut tc = AcpToolCall::new(ToolCallId::new(id.as_str()), name.clone());
                         tc.raw_input = Some(input.clone());
                         SessionUpdate::ToolCall(tc)
                     }
@@ -145,12 +144,9 @@ pub fn map_to_notifications(
                         tool_use_id,
                         content,
                     } => {
-                        let fields = ToolCallUpdateFields::new()
-                            .raw_output(content.clone());
-                        let tcu = AcpToolCallUpdate::new(
-                            ToolCallId::new(tool_use_id.as_str()),
-                            fields,
-                        );
+                        let fields = ToolCallUpdateFields::new().raw_output(content.clone());
+                        let tcu =
+                            AcpToolCallUpdate::new(ToolCallId::new(tool_use_id.as_str()), fields);
                         SessionUpdate::ToolCallUpdate(tcu)
                     }
                 };

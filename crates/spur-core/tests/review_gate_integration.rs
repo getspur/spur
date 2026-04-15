@@ -99,9 +99,7 @@ async fn reject_decision_produces_rejected_status() {
             1,
             DelegationStatus::Success,
             std::time::Duration::from_secs(300),
-            TimeoutFallback::Reject {
-                reason: "t".into(),
-            },
+            TimeoutFallback::Reject { reason: "t".into() },
             sink,
         )
         .await
@@ -338,7 +336,9 @@ async fn dispatcher_ignores_non_review_variants() {
     let handle = tokio::spawn(review_dispatcher_loop(input_rx, sink.clone()));
 
     tx.send(InteractiveInput::Message {
-        blocks: vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new("hi".to_string()))],
+        blocks: vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
+            "hi".to_string(),
+        ))],
         interrupt: false,
     })
     .await
@@ -479,7 +479,10 @@ fn review_cancelled_with_timeout_reason_clears_pending_review() {
     }));
 
     let n = lineage.node(&ExecutorId::new("exec-timeout")).unwrap();
-    assert!(n.pending_review.is_some(), "pending_review must be set after review requested");
+    assert!(
+        n.pending_review.is_some(),
+        "pending_review must be set after review requested"
+    );
     assert_eq!(lineage.pending_reviews().len(), 1);
 
     // Simulate the timeout branch emitting ExecutorReviewCancelled.
@@ -529,9 +532,11 @@ fn review_cancelled_with_sender_dropped_reason_clears_pending_review() {
         },
     }));
 
-    assert!(
-        lineage.node(&ExecutorId::new("exec-drop")).unwrap().pending_review.is_some()
-    );
+    assert!(lineage
+        .node(&ExecutorId::new("exec-drop"))
+        .unwrap()
+        .pending_review
+        .is_some());
 
     lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewCancelled {
         id: "exec-drop".into(),
@@ -588,11 +593,7 @@ async fn brain_cancellation_during_review_emits_review_cancelled() {
 
     // Sink entry must be gone.
     let stale = sink
-        .submit(
-            ExecutorId::new("e1"),
-            1,
-            spur_acp::ReviewDecision::Approve,
-        )
+        .submit(ExecutorId::new("e1"), 1, spur_acp::ReviewDecision::Approve)
         .await;
     assert!(!stale, "sink entry must be removed by cleanup");
 }

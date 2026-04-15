@@ -27,9 +27,7 @@ async fn attempt_n_mismatch_drops_decision() {
         .submit(
             ExecutorId("e1".into()),
             1, // stale attempt
-            ReviewDecision::Reject {
-                reason: "r".into(),
-            },
+            ReviewDecision::Reject { reason: "r".into() },
         )
         .await;
     assert!(!submitted, "stale attempt_n must be dropped");

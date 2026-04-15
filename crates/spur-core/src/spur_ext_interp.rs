@@ -92,11 +92,14 @@ pub fn interpret(
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
     use tokio::sync::broadcast;
 
-    fn harness() -> (FunnelHandle, broadcast::Receiver<spur_acp::domain::events::SpurEvent>) {
+    fn harness() -> (
+        FunnelHandle,
+        broadcast::Receiver<spur_acp::domain::events::SpurEvent>,
+    ) {
         let (tx, rx) = broadcast::channel(64);
         let seq = Arc::new(AtomicU64::new(0));
         let h = crate::event_funnel::spawn_funnel(tx, seq);
@@ -121,7 +124,12 @@ mod tests {
         );
         let event = rx.recv().await.unwrap();
         match event.body {
-            SpurEventBody::WorkerProgress { brain_session_id, executor_id, name, pct } => {
+            SpurEventBody::WorkerProgress {
+                brain_session_id,
+                executor_id,
+                name,
+                pct,
+            } => {
                 assert_eq!(brain_session_id, test_brain());
                 assert_eq!(executor_id, "exec-1");
                 assert_eq!(name, "tests_starting");
@@ -145,7 +153,12 @@ mod tests {
         );
         let event = rx.recv().await.unwrap();
         match event.body {
-            SpurEventBody::WorkerFileTouched { brain_session_id, executor_id, path, kind } => {
+            SpurEventBody::WorkerFileTouched {
+                brain_session_id,
+                executor_id,
+                path,
+                kind,
+            } => {
                 assert_eq!(brain_session_id, test_brain());
                 assert_eq!(executor_id, "exec-1");
                 assert_eq!(path, std::path::PathBuf::from("src/foo.rs"));

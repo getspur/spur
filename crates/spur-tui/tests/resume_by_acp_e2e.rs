@@ -11,11 +11,7 @@ fn agent_session_ready_persists_acp_mapping_across_reload() {
     // Simulate what app.rs does on AgentSessionReady.
     {
         let mut store = SessionMetadataStore::load(&path);
-        store.set_acp_mapping(
-            "spur-session-1",
-            "acp-session-xyz",
-            "claude-code-acp",
-        );
+        store.set_acp_mapping("spur-session-1", "acp-session-xyz", "claude-code-acp");
         store.save().unwrap();
     }
 

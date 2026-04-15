@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use agent_client_protocol::{SessionNotification, SessionInfo};
-use crate::types::{CancelMode, SessionId};
 use crate::domain::delegation::DelegationStatus;
+use crate::types::{CancelMode, SessionId};
+use agent_client_protocol::{SessionInfo, SessionNotification};
 
 /// Review kind for `ExecutorReviewRequested`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,14 +107,21 @@ impl SpurEvent {
     /// Note: `seq` defaults to 0; the orchestrator's emit funnel (S2)
     /// overwrites with a real monotonic value before broadcast.
     pub fn now(body: SpurEventBody) -> Self {
-        Self { occurred_at: SystemTime::now(), seq: 0, body }
+        Self {
+            occurred_at: SystemTime::now(),
+            seq: 0,
+            body,
+        }
     }
 }
 
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpurEventBody {
-    BrainSpawned { agent: String, session: SessionId },
+    BrainSpawned {
+        agent: String,
+        session: SessionId,
+    },
     /// Emitted AFTER a brain session is established (fresh or resumed) and
     /// the agent-authoritative ACP session id is known. The TUI persists
     /// the (spur_id → acp_id, brain) mapping so the next `spur watch` run
@@ -135,9 +142,19 @@ pub enum SpurEventBody {
         /// The TUI uses this to render transport-aware cancel feedback.
         cancel_mode: CancelMode,
     },
-    WorkerSpawned { agent: String, session: SessionId, worktree: PathBuf },
-    SessionCompleted { session: SessionId, success: bool },
-    AgentNotification { session: SessionId, notification: Box<SessionNotification> },
+    WorkerSpawned {
+        agent: String,
+        session: SessionId,
+        worktree: PathBuf,
+    },
+    SessionCompleted {
+        session: SessionId,
+        success: bool,
+    },
+    AgentNotification {
+        session: SessionId,
+        notification: Box<SessionNotification>,
+    },
     /// Vendor-extension notification received from the agent side.
     /// Routing by `method` name is the receiver's responsibility.
     /// `method` is the wire form (e.g. `"_kiro.dev/commands/available"`),
@@ -174,22 +191,54 @@ pub enum SpurEventBody {
         /// The executor node now spawned for this delegation.
         executor_id: String,
     },
-    DelegationCompleted { worker_session: SessionId, status: DelegationStatus },
-    ConflictDetected { files: Vec<PathBuf> },
-    RateLimitDetected { agent: String, retry_after: Option<Duration> },
-    BrainFailover { from: String, to: String },
-    CostUpdate { session: SessionId, agent: String, estimated_cost_usd: f64 },
-    IssueReceived { source: String, id: String },
-    PrCreated { url: String },
-    IssueUpdated { source: String, id: String, status: String },
+    DelegationCompleted {
+        worker_session: SessionId,
+        status: DelegationStatus,
+    },
+    ConflictDetected {
+        files: Vec<PathBuf>,
+    },
+    RateLimitDetected {
+        agent: String,
+        retry_after: Option<Duration>,
+    },
+    BrainFailover {
+        from: String,
+        to: String,
+    },
+    CostUpdate {
+        session: SessionId,
+        agent: String,
+        estimated_cost_usd: f64,
+    },
+    IssueReceived {
+        source: String,
+        id: String,
+    },
+    PrCreated {
+        url: String,
+    },
+    IssueUpdated {
+        source: String,
+        id: String,
+        status: String,
+    },
     // ── Interactive loop events ──────────────────────────────────────
-    TurnComplete { session: SessionId },
-    BrainError { session: SessionId, message: String },
+    TurnComplete {
+        session: SessionId,
+    },
+    BrainError {
+        session: SessionId,
+        message: String,
+    },
     /// The agent subprocess reported that authentication is required
     /// (e.g. `authRequired` error code, "/login" prompt). The TUI renders
     /// this as a dismissable banner instructing the user to run
     /// `claude /login` externally.
-    AuthRequired { session: SessionId, message: String },
+    AuthRequired {
+        session: SessionId,
+        message: String,
+    },
     // ── Executor lineage events ────────────────────────────────────
     ExecutorSpawned {
         id: String,
@@ -236,10 +285,18 @@ pub enum SpurEventBody {
         new_session_id: SessionId,
     },
     // ── Session picker events ───────────────────────────────────────
-    SessionsListed { agent: String, sessions: Vec<SessionInfo> },
-    SessionsListError { message: String },
+    SessionsListed {
+        agent: String,
+        sessions: Vec<SessionInfo>,
+    },
+    SessionsListError {
+        message: String,
+    },
     /// Replayed conversation history from disk (when agent doesn't support load_session).
-    SessionHistory { session: SessionId, entries: Vec<HistoryEntry> },
+    SessionHistory {
+        session: SessionId,
+        entries: Vec<HistoryEntry>,
+    },
 
     // ── Worker _spur/* ExtNotification vocabulary (S5) ─────────────
     /// Worker emitted `_spur/heartbeat` — periodic alive signal.

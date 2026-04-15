@@ -61,10 +61,19 @@ render = "system_note"
     );
     assert_eq!(cfg.commands.args_template, ArgsTemplateKind::RawRest);
     assert_eq!(cfg.commands.ingest.len(), 1);
-    assert_eq!(cfg.commands.ingest[0].parser, IngestParserKind::JsonPathList);
-    assert_eq!(cfg.commands.ingest[0].item_schema, ItemSchemaKind::AcpAvailableCommand);
+    assert_eq!(
+        cfg.commands.ingest[0].parser,
+        IngestParserKind::JsonPathList
+    );
+    assert_eq!(
+        cfg.commands.ingest[0].item_schema,
+        ItemSchemaKind::AcpAvailableCommand
+    );
     assert_eq!(cfg.commands.response.len(), 1);
-    assert_eq!(cfg.commands.response[0].render, ResponseRenderKind::SystemNote);
+    assert_eq!(
+        cfg.commands.response[0].render,
+        ResponseRenderKind::SystemNote
+    );
 }
 
 #[test]

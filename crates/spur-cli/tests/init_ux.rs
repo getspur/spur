@@ -77,7 +77,10 @@ fn init_with_zero_agents_writes_no_config() {
         .status()
         .expect("spawn spur init");
 
-    assert!(status.success(), "spur init should exit 0 even with no agents");
+    assert!(
+        status.success(),
+        "spur init should exit 0 even with no agents"
+    );
     assert!(
         !tmp.path().join(".spur/config.toml").exists(),
         "spur init with zero agents must NOT write .spur/config.toml"
@@ -100,7 +103,10 @@ fn init_with_existing_config_requires_force() {
         .status()
         .expect("spawn spur init");
 
-    assert!(status.success(), "overwrite refusal should exit 0, not error");
+    assert!(
+        status.success(),
+        "overwrite refusal should exit 0, not error"
+    );
     let after = fs::read_to_string(tmp.path().join(".spur/config.toml")).unwrap();
     assert_eq!(
         after, existing,

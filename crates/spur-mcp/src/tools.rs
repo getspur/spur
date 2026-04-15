@@ -46,8 +46,7 @@ pub struct ToolDefinition {
 fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
-        description: "Delegate a task to a worker agent. Blocks until the worker completes."
-            .into(),
+        description: "Delegate a task to a worker agent. Blocks until the worker completes.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {

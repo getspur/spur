@@ -8,11 +8,7 @@ use spur_acp::{AvailableCommand, AvailableCommandInput, CommandsConfig, Dispatch
 
 use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
 
-pub fn build_entry(
-    handle: &str,
-    cfg: &CommandsConfig,
-    cmd: &AvailableCommand,
-) -> CommandEntry {
+pub fn build_entry(handle: &str, cfg: &CommandsConfig, cmd: &AvailableCommand) -> CommandEntry {
     let hint = match &cmd.input {
         Some(AvailableCommandInput::Unstructured(u)) => Some(u.hint.clone()),
         _ => None,
@@ -95,7 +91,6 @@ mod tests {
     use super::*;
     use spur_acp::{ArgsTemplateKind, CommandsConfig, DispatchKind};
 
-
     fn cmd(name: &str) -> AvailableCommand {
         AvailableCommand::new(name, "desc")
     }
@@ -136,7 +131,11 @@ mod tests {
         };
         let entry = build_entry("kiro", &cfg, &cmd("context"));
         match entry.dispatch {
-            Dispatch::VendorExec { method, command, args_template } => {
+            Dispatch::VendorExec {
+                method,
+                command,
+                args_template,
+            } => {
                 assert_eq!(method, "_kiro.dev/commands/execute");
                 assert_eq!(command, "context");
                 assert_eq!(args_template, ArgsTemplateKind::RawRest);
@@ -182,7 +181,11 @@ mod tests {
         };
         let entry = build_static_entry("kiro", &cfg, &decl);
         match entry.dispatch {
-            Dispatch::VendorExec { method, command, args_template } => {
+            Dispatch::VendorExec {
+                method,
+                command,
+                args_template,
+            } => {
                 assert_eq!(method, "_kiro.dev/commands/execute");
                 assert_eq!(command, "help");
                 assert_eq!(args_template, ArgsTemplateKind::RawRest);

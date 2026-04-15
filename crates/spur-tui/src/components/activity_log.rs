@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{LogEntry, LogEntryKind, MAX_LOG_ENTRIES, focused_border_style};
+use super::{focused_border_style, LogEntry, LogEntryKind, MAX_LOG_ENTRIES};
 
 pub struct ActivityLog {
     entries: Vec<LogEntry>,
@@ -138,4 +138,3 @@ impl ActivityLog {
         &self.entries
     }
 }
-

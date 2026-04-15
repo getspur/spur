@@ -19,7 +19,9 @@ pub fn render_review(node: &ExecutorNode) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     out.push(Line::from(Span::styled(
         format!("── Review requested: {} ──", kind_label(&req.kind)),
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     )));
     out.push(Line::from(""));
     out.push(Line::from(format!("Summary: {}", req.payload.summary)));

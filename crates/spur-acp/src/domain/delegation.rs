@@ -13,8 +13,12 @@ use std::time::Duration;
 pub enum DelegationStatus {
     // Pre-existing worker-level variants.
     Success,
-    Failed { error: String },
-    Conflict { files: Vec<PathBuf> },
+    Failed {
+        error: String,
+    },
+    Conflict {
+        files: Vec<PathBuf>,
+    },
     /// Worker hung past the hard worker-hang deadline (distinct from
     /// review-gate timeout, which is `TimedOut`).
     Timeout,
@@ -22,10 +26,14 @@ pub enum DelegationStatus {
     // Review-gate variants.
     /// Human reviewer rejected the work. `reason` is actionable feedback
     /// the brain can address on a retry.
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
     /// Human reviewer approved-with-modifications; `reviewer_note` is a
     /// caveat the brain should consider alongside the accepted diff.
-    Modified { reviewer_note: String },
+    Modified {
+        reviewer_note: String,
+    },
     /// Review timeout fired. `fallback` records the configured
     /// `TimeoutFallback` that was applied.
     TimedOut {

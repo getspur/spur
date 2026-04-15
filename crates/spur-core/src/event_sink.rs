@@ -18,7 +18,7 @@ use spur_acp::domain::events::SpurEvent;
 /// Maximum file size before rotation. Override with
 /// `SPUR_EVENT_LOG_MAX_BYTES`.
 const DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
-const FLUSH_BYTES: usize = 64 * 1024;              // 64 KB buffer threshold
+const FLUSH_BYTES: usize = 64 * 1024; // 64 KB buffer threshold
 const FLUSH_INTERVAL_MS: u64 = 100;
 
 /// Per-process rotation counter. Guarantees unique filenames even when
@@ -45,9 +45,8 @@ pub fn spawn_sink(mut rx: broadcast::Receiver<SpurEvent>) {
             }
         };
 
-        let mut flush_timer = tokio::time::interval(
-            std::time::Duration::from_millis(FLUSH_INTERVAL_MS),
-        );
+        let mut flush_timer =
+            tokio::time::interval(std::time::Duration::from_millis(FLUSH_INTERVAL_MS));
 
         loop {
             tokio::select! {
@@ -91,10 +90,7 @@ impl SinkState {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_MAX_BYTES);
         let path = rotated_path(dir);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
             dir: dir.clone(),
@@ -120,7 +116,10 @@ impl SinkState {
     fn rotate(&mut self) -> std::io::Result<()> {
         self.writer.flush()?;
         let new_path = rotated_path(&self.dir);
-        let file = OpenOptions::new().create(true).append(true).open(&new_path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&new_path)?;
         self.writer = BufWriter::with_capacity(FLUSH_BYTES, file);
         self.current_path = new_path;
         self.bytes_in_file = 0;
@@ -183,7 +182,9 @@ mod tests {
         let event = SpurEvent {
             occurred_at: SystemTime::UNIX_EPOCH,
             seq: 42,
-            body: SpurEventBody::TurnComplete { session: SessionId("s1".to_string()) },
+            body: SpurEventBody::TurnComplete {
+                session: SessionId("s1".to_string()),
+            },
         };
         state.write_event(&event).unwrap();
         state.flush().unwrap();
@@ -206,7 +207,9 @@ mod tests {
         let event = SpurEvent {
             occurred_at: SystemTime::UNIX_EPOCH,
             seq: 1,
-            body: SpurEventBody::TurnComplete { session: SessionId("s1".to_string()) },
+            body: SpurEventBody::TurnComplete {
+                session: SessionId("s1".to_string()),
+            },
         };
         state.write_event(&event).unwrap();
         // No sleep needed — `rotated_path()`'s ROTATION_SEQ counter
@@ -215,6 +218,10 @@ mod tests {
         state.flush().unwrap();
 
         let files: Vec<_> = fs::read_dir(&dir).unwrap().collect();
-        assert!(files.len() >= 2, "expected rotation; got {} file(s)", files.len());
+        assert!(
+            files.len() >= 2,
+            "expected rotation; got {} file(s)",
+            files.len()
+        );
     }
 }

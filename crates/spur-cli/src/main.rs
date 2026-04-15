@@ -38,12 +38,18 @@ fn init_tracing(
 /// Contract: every agent in `spur_acp::config::load_seed_template()`
 /// must have an entry here. Enforced by `tests/init_ux.rs`.
 const INSTALL_HINTS: &[(&str, &str)] = &[
-    ("claude-code",     "npm install -g @anthropic-ai/claude-code"),
-    ("kiro",            "brew install kiro-cli"),
-    ("claude-code-acp", "npm install -g npx   # then re-run `spur init`"),
-    ("codex",           "https://github.com/zed-industries/codex-acp/releases"),
-    ("codex-acp",       "npx @zed-industries/codex-acp"),
-    ("gemini",          "npm install -g @google/gemini-cli"),
+    ("claude-code", "npm install -g @anthropic-ai/claude-code"),
+    ("kiro", "brew install kiro-cli"),
+    (
+        "claude-code-acp",
+        "npm install -g npx   # then re-run `spur init`",
+    ),
+    (
+        "codex",
+        "https://github.com/zed-industries/codex-acp/releases",
+    ),
+    ("codex-acp", "npx @zed-industries/codex-acp"),
+    ("gemini", "npm install -g @google/gemini-cli"),
 ];
 
 fn install_hint(name: &str) -> &'static str {
@@ -210,7 +216,11 @@ async fn main() -> Result<()> {
             println!(
                 "[spur] Session {} {} (${:.2})",
                 result.session_id,
-                if result.success { "completed" } else { "failed" },
+                if result.success {
+                    "completed"
+                } else {
+                    "failed"
+                },
                 result.total_cost_usd,
             );
             if let Some(url) = result.pr_url {
@@ -224,7 +234,11 @@ async fn main() -> Result<()> {
             println!(
                 "[spur] Session {} {} (${:.2})",
                 result.session_id,
-                if result.success { "completed" } else { "failed" },
+                if result.success {
+                    "completed"
+                } else {
+                    "failed"
+                },
                 result.total_cost_usd,
             );
             Ok(())
@@ -244,13 +258,15 @@ async fn main() -> Result<()> {
                             );
                             println!("{}", "\u{2500}".repeat(73));
                             for s in &sessions {
-                                let short_id = if s.id.len() > 8 {
-                                    &s.id[..8]
-                                } else {
-                                    &s.id
-                                };
-                                let duration = s.duration_seconds.map(format_duration).unwrap_or_else(|| "-".into());
-                                let cost = s.estimated_cost_usd.map(|c| format!("${:.2}", c)).unwrap_or_else(|| "-".into());
+                                let short_id = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+                                let duration = s
+                                    .duration_seconds
+                                    .map(format_duration)
+                                    .unwrap_or_else(|| "-".into());
+                                let cost = s
+                                    .estimated_cost_usd
+                                    .map(|c| format!("${:.2}", c))
+                                    .unwrap_or_else(|| "-".into());
                                 println!(
                                     "{:<14} {:<14} {:<9} {:<12} {:<12} {:>8}",
                                     short_id, s.agent, s.role, s.status, duration, cost,
@@ -271,22 +287,27 @@ async fn main() -> Result<()> {
                                 println!("Role:     {}", s.role);
                                 println!("Status:   {}", s.status);
                                 println!("Started:  {}", s.started_at);
+                                println!("Ended:    {}", s.ended_at.as_deref().unwrap_or("-"));
                                 println!(
-                                    "Ended:    {}",
-                                    s.ended_at.as_deref().unwrap_or("-")
+                                    "Duration: {}",
+                                    s.duration_seconds
+                                        .map(format_duration)
+                                        .unwrap_or_else(|| "-".into())
                                 );
-                                println!("Duration: {}", s.duration_seconds.map(format_duration).unwrap_or_else(|| "-".into()));
-                                println!("Cost:     {}", s.estimated_cost_usd.map(|c| format!("${:.2}", c)).unwrap_or_else(|| "-".into()));
                                 println!(
-                                    "Task:     {}",
-                                    s.task_summary.as_deref().unwrap_or("-")
+                                    "Cost:     {}",
+                                    s.estimated_cost_usd
+                                        .map(|c| format!("${:.2}", c))
+                                        .unwrap_or_else(|| "-".into())
                                 );
+                                println!("Task:     {}", s.task_summary.as_deref().unwrap_or("-"));
 
                                 let delegations = ct.session_delegations(&sid)?;
                                 if !delegations.is_empty() {
                                     println!("\nDelegations:");
                                     for d in &delegations {
-                                        let del_duration = match (&d.requested_at, &d.completed_at) {
+                                        let del_duration = match (&d.requested_at, &d.completed_at)
+                                        {
                                             (req, Some(comp)) => {
                                                 if let (Ok(start), Ok(end)) = (
                                                     chrono::DateTime::parse_from_rfc3339(req),
@@ -337,10 +358,7 @@ async fn main() -> Result<()> {
                     for s in &summaries {
                         println!(
                             "{},{:.2},{},{}",
-                            s.agent,
-                            s.total_cost_usd,
-                            s.session_count,
-                            s.total_duration_seconds,
+                            s.agent, s.total_cost_usd, s.session_count, s.total_duration_seconds,
                         );
                     }
                 } else {
@@ -366,7 +384,10 @@ async fn main() -> Result<()> {
                         if dim == "project" {
                             println!("\nBy project:");
                             for p in ct.by_project()? {
-                                println!("  {}: ${:.2} ({} sessions)", p.project, p.total_cost_usd, p.session_count);
+                                println!(
+                                    "  {}: ${:.2} ({} sessions)",
+                                    p.project, p.total_cost_usd, p.session_count
+                                );
                             }
                         }
                     }
@@ -382,7 +403,10 @@ async fn main() -> Result<()> {
                     let mut adapter = spur_pm::GitHubAdapter::new(None);
                     use spur_pm::PmAdapter;
                     adapter.connect().await?;
-                    println!("[spur] Connected to GitHub: {}", adapter.repo.unwrap_or_default());
+                    println!(
+                        "[spur] Connected to GitHub: {}",
+                        adapter.repo.unwrap_or_default()
+                    );
                 }
                 _ => println!("[spur] Unknown service: {service}. Supported: github"),
             }
@@ -405,13 +429,15 @@ async fn main() -> Result<()> {
                 std::process::exit(exit);
             }
         },
-        Commands::Watch { brain, sessions, dashboard } => {
+        Commands::Watch {
+            brain,
+            sessions,
+            dashboard,
+        } => {
             let config = match load_config() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!(
-                        "[spur] warning: failed to load config.toml: {e}; using defaults"
-                    );
+                    eprintln!("[spur] warning: failed to load config.toml: {e}; using defaults");
                     Default::default()
                 }
             };
@@ -430,10 +456,14 @@ async fn main() -> Result<()> {
             let (user_tx, user_rx) = tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
 
             // Channel feeding the review dispatcher (SubmitReview only).
-            let (dispatch_tx, dispatch_rx) = tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
+            let (dispatch_tx, dispatch_rx) =
+                tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
 
             // Spawn the review dispatcher task.
-            tokio::spawn(spur_core::review_dispatcher_loop(dispatch_rx, review_sink_for_dispatcher));
+            tokio::spawn(spur_core::review_dispatcher_loop(
+                dispatch_rx,
+                review_sink_for_dispatcher,
+            ));
 
             // Retain a copy of the brain override before it is moved into the
             // orchestrator spawn below, so the auto-resume block can inspect it.
@@ -453,9 +483,9 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
                     let converted = match input {
-                        spur_tui::UserInput::Message { blocks, interrupt, .. } => {
-                            spur_core::InteractiveInput::Message { blocks, interrupt }
-                        }
+                        spur_tui::UserInput::Message {
+                            blocks, interrupt, ..
+                        } => spur_core::InteractiveInput::Message { blocks, interrupt },
                         spur_tui::UserInput::NewSessionWithMessage { blocks, interrupt } => {
                             spur_core::InteractiveInput::NewSessionWithMessage { blocks, interrupt }
                         }
@@ -468,16 +498,24 @@ async fn main() -> Result<()> {
                         spur_tui::UserInput::SetSessionMode { mode_id } => {
                             spur_core::InteractiveInput::SetSessionMode { mode_id }
                         }
-                        spur_tui::UserInput::SubmitReview { executor_id, attempt_n, decision } => {
-                            spur_core::InteractiveInput::SubmitReview { executor_id, attempt_n, decision }
-                        }
-                        spur_tui::UserInput::VendorExec { session, method, params } => {
-                            spur_core::InteractiveInput::VendorExec {
-                                session,
-                                method,
-                                params,
-                            }
-                        }
+                        spur_tui::UserInput::SubmitReview {
+                            executor_id,
+                            attempt_n,
+                            decision,
+                        } => spur_core::InteractiveInput::SubmitReview {
+                            executor_id,
+                            attempt_n,
+                            decision,
+                        },
+                        spur_tui::UserInput::VendorExec {
+                            session,
+                            method,
+                            params,
+                        } => spur_core::InteractiveInput::VendorExec {
+                            session,
+                            method,
+                            params,
+                        },
                         spur_tui::UserInput::CancelStream { session } => {
                             spur_core::InteractiveInput::CancelStream { session }
                         }
@@ -606,8 +644,7 @@ async fn cmd_init(repo_root: PathBuf, force: bool) -> Result<()> {
             .position(|&s| s == a.name.as_str())
             .unwrap_or(usize::MAX)
     });
-    let registered_names: std::collections::HashSet<_> =
-        found_names.iter().cloned().collect();
+    let registered_names: std::collections::HashSet<_> = found_names.iter().cloned().collect();
 
     // ── Agent list: ✓ for registered, ✗ with install hint otherwise. ──
     println!();
@@ -615,7 +652,11 @@ async fn cmd_init(repo_root: PathBuf, force: bool) -> Result<()> {
         if registered_names.contains(&agent.name) {
             println!("  ✓ {}", agent.name);
         } else {
-            println!("  ✗ {:<18}install: {}", agent.name, install_hint(&agent.name));
+            println!(
+                "  ✗ {:<18}install: {}",
+                agent.name,
+                install_hint(&agent.name)
+            );
         }
     }
 
@@ -646,8 +687,7 @@ async fn cmd_init(repo_root: PathBuf, force: bool) -> Result<()> {
     // ── Adaptive fallback: other brain-capable agents in seed order. ──
     let fallbacks: Vec<String> = registered
         .iter()
-        .filter(|a| a.name != brain_name
-            && matches!(a.role, AgentRole::Brain | AgentRole::Both))
+        .filter(|a| a.name != brain_name && matches!(a.role, AgentRole::Brain | AgentRole::Both))
         .map(|a| a.name.clone())
         .collect();
 
@@ -717,7 +757,11 @@ async fn cmd_agents(repo_root: PathBuf, command: Option<AgentsCommands>) -> Resu
                 );
                 println!("{}", "-".repeat(55));
                 for agent in agents {
-                    let health = orch.registry.health(&agent.name).cloned().unwrap_or(spur_acp::AgentHealth::Unknown);
+                    let health = orch
+                        .registry
+                        .health(&agent.name)
+                        .cloned()
+                        .unwrap_or(spur_acp::AgentHealth::Unknown);
                     let health_str = match health {
                         spur_acp::AgentHealth::Ready => "ready",
                         spur_acp::AgentHealth::Unknown => "unknown",

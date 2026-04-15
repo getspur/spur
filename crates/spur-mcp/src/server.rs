@@ -45,7 +45,12 @@ struct JsonRpcError {
 
 impl JsonRpcResponse {
     fn success(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0".into(), id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     fn error(id: Value, code: i64, message: impl Into<String>) -> Self {
@@ -53,7 +58,11 @@ impl JsonRpcResponse {
             jsonrpc: "2.0".into(),
             id,
             result: None,
-            error: Some(JsonRpcError { code, message: message.into(), data: None }),
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
         }
     }
 
@@ -206,7 +215,8 @@ impl McpCallbackServer {
                     serde_json::to_vec(&resp)?
                 }
                 Err(e) => {
-                    let resp = JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {e}"));
+                    let resp =
+                        JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {e}"));
                     serde_json::to_vec(&resp)?
                 }
             }
@@ -239,24 +249,20 @@ impl McpCallbackServer {
         let id = request.id.clone().unwrap_or(Value::Null);
 
         match request.method.as_str() {
-            "initialize" => {
-                JsonRpcResponse::success(
-                    id,
-                    json!({
-                        "protocolVersion": "2024-11-05",
-                        "serverInfo": {
-                            "name": "spur-mcp",
-                            "version": env!("CARGO_PKG_VERSION")
-                        },
-                        "capabilities": {
-                            "tools": {}
-                        }
-                    }),
-                )
-            }
-            "notifications/initialized" => {
-                JsonRpcResponse::success(id, json!({}))
-            }
+            "initialize" => JsonRpcResponse::success(
+                id,
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {
+                        "name": "spur-mcp",
+                        "version": env!("CARGO_PKG_VERSION")
+                    },
+                    "capabilities": {
+                        "tools": {}
+                    }
+                }),
+            ),
+            "notifications/initialized" => JsonRpcResponse::success(id, json!({})),
             "tools/list" => {
                 let defs = tools::tools_list();
                 JsonRpcResponse::success(id, json!({ "tools": defs }))
@@ -274,7 +280,10 @@ impl McpCallbackServer {
             None => return JsonRpcResponse::invalid_params(id, "Missing 'name' in params"),
         };
 
-        let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         debug!(tool = %tool_name, "Handling tool call");
 
@@ -330,17 +339,28 @@ impl McpCallbackServer {
             Ok(result) => {
                 let result_json = match serde_json::to_value(&result) {
                     Ok(v) => v,
-                    Err(e) => return JsonRpcResponse::internal_error(id, format!("Failed to serialize result: {e}")),
+                    Err(e) => {
+                        return JsonRpcResponse::internal_error(
+                            id,
+                            format!("Failed to serialize result: {e}"),
+                        )
+                    }
                 };
-                JsonRpcResponse::success(id, json!({
-                    "content": [{
-                        "type": "text",
-                        "text": serde_json::to_string_pretty(&result_json)
-                            .unwrap_or_else(|_| result_json.to_string())
-                    }]
-                }))
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&result_json)
+                                .unwrap_or_else(|_| result_json.to_string())
+                        }]
+                    }),
+                )
             }
-            Err(_) => JsonRpcResponse::internal_error(id, "Delegation cancelled or orchestrator disconnected"),
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "Delegation cancelled or orchestrator disconnected",
+            ),
         }
     }
 
@@ -359,11 +379,21 @@ impl McpCallbackServer {
         for task_obj in &tasks {
             let agent = match task_obj.get("agent").and_then(|v| v.as_str()) {
                 Some(a) => a.to_string(),
-                None => return JsonRpcResponse::invalid_params(id, "Each task must have an 'agent' field"),
+                None => {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        "Each task must have an 'agent' field",
+                    )
+                }
             };
             let task = match task_obj.get("task").and_then(|v| v.as_str()) {
                 Some(t) => t.to_string(),
-                None => return JsonRpcResponse::invalid_params(id, "Each task must have a 'task' field"),
+                None => {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        "Each task must have a 'task' field",
+                    )
+                }
             };
 
             let request_id = uuid::Uuid::new_v4().to_string();
@@ -403,24 +433,30 @@ impl McpCallbackServer {
             }
         }
 
-        JsonRpcResponse::success(id, json!({
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string_pretty(&results)
-                    .unwrap_or_else(|_| json!(results).to_string())
-            }]
-        }))
+        JsonRpcResponse::success(
+            id,
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&results)
+                        .unwrap_or_else(|_| json!(results).to_string())
+                }]
+            }),
+        )
     }
 
     async fn handle_list_available_workers(&self, id: Value) -> JsonRpcResponse {
         let workers_json = serde_json::to_value(&self.workers).unwrap_or(json!([]));
-        JsonRpcResponse::success(id, json!({
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string_pretty(&workers_json)
-                    .unwrap_or_else(|_| workers_json.to_string())
-            }]
-        }))
+        JsonRpcResponse::success(
+            id,
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&workers_json)
+                        .unwrap_or_else(|_| workers_json.to_string())
+                }]
+            }),
+        )
     }
 
     async fn handle_get_issue(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -436,9 +472,11 @@ impl McpCallbackServer {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
-            id: request_id, agent: "__pm_get_issue".into(),
+            id: request_id,
+            agent: "__pm_get_issue".into(),
             task: json!({ "source": source, "id": issue_id }).to_string(),
-            context_files: Vec::new(), respond_to: tx,
+            context_files: Vec::new(),
+            respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
         };
 
@@ -448,10 +486,17 @@ impl McpCallbackServer {
 
         match rx.await {
             Ok(result) => {
-                let text = result.summary.unwrap_or_else(|| "No issue data returned".into());
-                JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+                let text = result
+                    .summary
+                    .unwrap_or_else(|| "No issue data returned".into());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
-            Err(_) => JsonRpcResponse::internal_error(id, "get_issue failed: orchestrator disconnected"),
+            Err(_) => {
+                JsonRpcResponse::internal_error(id, "get_issue failed: orchestrator disconnected")
+            }
         }
     }
 
@@ -464,15 +509,24 @@ impl McpCallbackServer {
             Some(i) => i.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'id'"),
         };
-        let status = args.get("status").and_then(|v| v.as_str()).map(String::from);
-        let comment = args.get("comment").and_then(|v| v.as_str()).map(String::from);
+        let status = args
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let comment = args
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
-            id: request_id, agent: "__pm_update_issue".into(),
-            task: json!({ "source": source, "id": issue_id, "status": status, "comment": comment }).to_string(),
-            context_files: Vec::new(), respond_to: tx,
+            id: request_id,
+            agent: "__pm_update_issue".into(),
+            task: json!({ "source": source, "id": issue_id, "status": status, "comment": comment })
+                .to_string(),
+            context_files: Vec::new(),
+            respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
         };
 
@@ -483,9 +537,15 @@ impl McpCallbackServer {
         match rx.await {
             Ok(result) => {
                 let text = result.summary.unwrap_or_else(|| "Issue updated".into());
-                JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
-            Err(_) => JsonRpcResponse::internal_error(id, "update_issue failed: orchestrator disconnected"),
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "update_issue failed: orchestrator disconnected",
+            ),
         }
     }
 
@@ -506,9 +566,11 @@ impl McpCallbackServer {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
-            id: request_id, agent: "__pm_create_pr".into(),
+            id: request_id,
+            agent: "__pm_create_pr".into(),
             task: json!({ "title": title, "body": body, "branch": branch }).to_string(),
-            context_files: Vec::new(), respond_to: tx,
+            context_files: Vec::new(),
+            respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
         };
 
@@ -519,9 +581,14 @@ impl McpCallbackServer {
         match rx.await {
             Ok(result) => {
                 let text = result.summary.unwrap_or_else(|| "PR created".into());
-                JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
-            Err(_) => JsonRpcResponse::internal_error(id, "create_pr failed: orchestrator disconnected"),
+            Err(_) => {
+                JsonRpcResponse::internal_error(id, "create_pr failed: orchestrator disconnected")
+            }
         }
     }
 
@@ -534,8 +601,11 @@ impl McpCallbackServer {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
-            id: request_id, agent: "__progress".into(), task: message.clone(),
-            context_files: Vec::new(), respond_to: tx,
+            id: request_id,
+            agent: "__progress".into(),
+            task: message.clone(),
+            context_files: Vec::new(),
+            respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
         };
 
@@ -544,15 +614,21 @@ impl McpCallbackServer {
         }
 
         info!(message = %message, "Progress reported");
-        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": "Progress reported." }] }))
+        JsonRpcResponse::success(
+            id,
+            json!({ "content": [{ "type": "text", "text": "Progress reported." }] }),
+        )
     }
 
     async fn handle_get_session_cost(&self, id: Value) -> JsonRpcResponse {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let delegation = DelegationRequest {
-            id: request_id, agent: "__session_cost".into(), task: String::new(),
-            context_files: Vec::new(), respond_to: tx,
+            id: request_id,
+            agent: "__session_cost".into(),
+            task: String::new(),
+            context_files: Vec::new(),
+            respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
         };
 
@@ -565,9 +641,15 @@ impl McpCallbackServer {
                 let text = result.summary.clone().unwrap_or_else(|| {
                     json!({ "estimated_cost_usd": result.estimated_cost_usd }).to_string()
                 });
-                JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
-            Err(_) => JsonRpcResponse::internal_error(id, "get_session_cost failed: orchestrator disconnected"),
+            Err(_) => JsonRpcResponse::internal_error(
+                id,
+                "get_session_cost failed: orchestrator disconnected",
+            ),
         }
     }
 }

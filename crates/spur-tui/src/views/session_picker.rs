@@ -194,8 +194,7 @@ impl SessionPickerView {
         if *cursor == 0 {
             return None;
         }
-        let indices =
-            Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
+        let indices = Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
         let real_idx = indices.get(*cursor - 1).copied()?;
         Some(sessions[real_idx].session_id.0.as_ref().to_string())
     }
@@ -270,8 +269,7 @@ impl SessionPickerView {
         match &self.state {
             PickerState::Populated {
                 sessions, filter, ..
-            } => Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived)
-                .len(),
+            } => Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived).len(),
             _ => 0,
         }
     }
@@ -352,12 +350,17 @@ impl SessionPickerView {
         let lines = vec![
             Line::from(Span::styled(
                 "Sessions",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(vec![
                 Span::raw("  Connecting to agent"),
-                Span::styled(" \u{00b7}\u{00b7}\u{00b7}", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    " \u{00b7}\u{00b7}\u{00b7}",
+                    Style::default().fg(Color::Cyan),
+                ),
             ]),
         ];
         let chunks = Layout::vertical([
@@ -410,8 +413,7 @@ impl SessionPickerView {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
         let visible_height = area.height.saturating_sub(4) as usize;
 
-        let indices =
-            Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
+        let indices = Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
 
         // Clamp scroll_offset so cursor is always visible.
         // `cursor` indexes a virtual list where 0 = [+ New session] row and
@@ -430,12 +432,11 @@ impl SessionPickerView {
         let mut header_spans = vec![
             Span::styled(
                 "Sessions ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("({})", agent),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("({})", agent), Style::default().fg(Color::DarkGray)),
         ];
         if self.show_archived {
             header_spans.push(Span::styled(
@@ -487,8 +488,7 @@ impl SessionPickerView {
             Style::default().fg(Color::DarkGray),
         )));
 
-        for (display_i, real_i) in indices.iter().enumerate().skip(scroll).take(visible_height)
-        {
+        for (display_i, real_i) in indices.iter().enumerate().skip(scroll).take(visible_height) {
             let session = &sessions[*real_i];
             let is_selected = cursor == display_i + 1;
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
@@ -555,10 +555,7 @@ impl SessionPickerView {
             spans.push(Span::styled(display, style));
             spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                time_str,
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled(time_str, Style::default().fg(Color::DarkGray)));
             if archived {
                 spans.push(Span::styled(
                     " [archived]",
@@ -588,11 +585,7 @@ impl SessionPickerView {
         frame.render_widget(Paragraph::new(lines), chunks[0]);
 
         // When preview is visible, the status/footer chunks shift by one.
-        let (status_idx, footer_idx) = if self.preview_visible {
-            (2, 3)
-        } else {
-            (1, 2)
-        };
+        let (status_idx, footer_idx) = if self.preview_visible { (2, 3) } else { (1, 2) };
 
         if self.preview_visible {
             use crate::components::session_preview::{PreviewContent, SessionPreview};
@@ -605,12 +598,8 @@ impl SessionPickerView {
                     ..Default::default()
                 }
             } else {
-                let indices = Self::filtered_indices(
-                    sessions,
-                    filter,
-                    &self.metadata,
-                    self.show_archived,
-                );
+                let indices =
+                    Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
                 let real_idx = indices.get(cursor - 1).copied();
                 if let Some(i) = real_idx {
                     let session = &sessions[i];
@@ -622,10 +611,7 @@ impl SessionPickerView {
                     let archived = entry.map(|e| e.archived).unwrap_or(false);
                     let draft = entry.map(|e| e.draft.clone()).unwrap_or_default();
 
-                    let mut rows = vec![
-                        ("Session".into(), id),
-                        ("CWD".into(), cwd),
-                    ];
+                    let mut rows = vec![("Session".into(), id), ("CWD".into(), cwd)];
                     if !updated.is_empty() {
                         rows.push(("Updated".into(), updated));
                     }
@@ -644,7 +630,10 @@ impl SessionPickerView {
                         };
                         rows.push(("Draft".into(), truncated));
                     }
-                    PreviewContent { rows, placeholder: None }
+                    PreviewContent {
+                        rows,
+                        placeholder: None,
+                    }
                 } else {
                     PreviewContent::default()
                 }
@@ -678,7 +667,9 @@ impl SessionPickerView {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     prompt,
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 chunks[status_idx],
             );
@@ -706,7 +697,9 @@ impl SessionPickerView {
         let lines = vec![
             Line::from(Span::styled(
                 "Sessions",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
@@ -758,9 +751,9 @@ impl View for SessionPickerView {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                     let out = match target {
-                        ConfirmSwitchTarget::Resume(id) => {
-                            Action::ResumeSession { session_id: id.clone() }
-                        }
+                        ConfirmSwitchTarget::Resume(id) => Action::ResumeSession {
+                            session_id: id.clone(),
+                        },
                         ConfirmSwitchTarget::NewSession => Action::NewSessionRequested,
                     };
                     self.confirm_switch = None;
@@ -805,7 +798,10 @@ impl View for SessionPickerView {
         // search isn't focused (so capital P typed in search box still filters).
         let can_toggle_preview = matches!(
             &self.state,
-            PickerState::Populated { search_focused: false, .. }
+            PickerState::Populated {
+                search_focused: false,
+                ..
+            }
         );
         if can_toggle_preview {
             if let KeyCode::Char('P') = key.code {
@@ -1061,10 +1057,7 @@ mod current_session_shortcut_tests {
             Some(Action::NavigateTo(ViewId::SessionDetail(sid))) => {
                 assert_eq!(sid.0, "A");
             }
-            other => panic!(
-                "expected NavigateTo(SessionDetail(A)), got {:?}",
-                other
-            ),
+            other => panic!("expected NavigateTo(SessionDetail(A)), got {:?}", other),
         }
     }
 

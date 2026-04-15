@@ -11,8 +11,8 @@
 //!    commit 408dc23: aborts pump 1, starts pump 2 on the same broadcast
 //!    with a different session id, and asserts only pump 2 emits.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::{
@@ -40,7 +40,11 @@ async fn collect_agent_notifications(
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(ev)) => {
-                if let SpurEventBody::AgentNotification { session, notification } = ev.body {
+                if let SpurEventBody::AgentNotification {
+                    session,
+                    notification,
+                } = ev.body
+                {
                     results.push((session, notification));
                 }
             }
@@ -64,26 +68,19 @@ async fn pump_emits_agent_notification_with_correct_session_id() {
 
     // ── Spawn pump with spur_session_id = "sess-A" ──────────────────────────
     let spur_session_id = SessionId("sess-A".to_string());
-    let _pump_handle = spawn_session_notification_pump(
-        notif_rx,
-        spur_session_id.clone(),
-        funnel,
-    );
+    let _pump_handle = spawn_session_notification_pump(notif_rx, spur_session_id.clone(), funnel);
 
     // ── Exercise: send one notification ─────────────────────────────────────
-    let sent_update = SessionUpdate::AvailableCommandsUpdate(
-        AvailableCommandsUpdate::new(vec![AvailableCommand::new("cmd1", "desc1")]),
-    );
+    let sent_update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+        AvailableCommand::new("cmd1", "desc1"),
+    ]));
     let acp_session_id = agent_client_protocol::SessionId::new("acp-sess-1");
     notif_tx
         .send(SessionNotification::new(acp_session_id, sent_update))
         .expect("notification broadcast send should succeed");
 
     // ── Assert: within 2 s, observe the AgentNotification on the event bus ──
-    let notifications = collect_agent_notifications(
-        &mut bcast_rx,
-        Duration::from_secs(2),
-    ).await;
+    let notifications = collect_agent_notifications(&mut bcast_rx, Duration::from_secs(2)).await;
 
     assert_eq!(
         notifications.len(),
@@ -94,8 +91,7 @@ async fn pump_emits_agent_notification_with_correct_session_id() {
 
     let (emitted_session, emitted_notif) = &notifications[0];
     assert_eq!(
-        emitted_session,
-        &spur_session_id,
+        emitted_session, &spur_session_id,
         "AgentNotification must be tagged with the pump's spur_session_id"
     );
 
@@ -104,9 +100,7 @@ async fn pump_emits_agent_notification_with_correct_session_id() {
             assert_eq!(update.available_commands.len(), 1);
             assert_eq!(update.available_commands[0].name, "cmd1");
         }
-        other => panic!(
-            "expected AvailableCommandsUpdate, got {other:?}"
-        ),
+        other => panic!("expected AvailableCommandsUpdate, got {other:?}"),
     }
 
     // ── Teardown: dropping notif_tx causes pump to receive Closed and exit ──
@@ -135,36 +129,34 @@ async fn pump_abort_stops_emission_for_retired_session() {
 
     // ── Spawn pump 2 with "sess-B" on the same broadcast ────────────────────
     let notif_rx_2 = notif_tx.subscribe();
-    let _pump_handle_2 = spawn_session_notification_pump(
-        notif_rx_2,
-        SessionId("sess-B".to_string()),
-        funnel,
-    );
+    let _pump_handle_2 =
+        spawn_session_notification_pump(notif_rx_2, SessionId("sess-B".to_string()), funnel);
 
     // ── Exercise: send a notification ────────────────────────────────────────
     let acp_session_id = agent_client_protocol::SessionId::new("acp-sess-2");
     notif_tx
         .send(SessionNotification::new(
             acp_session_id,
-            SessionUpdate::AvailableCommandsUpdate(
-                AvailableCommandsUpdate::new(vec![AvailableCommand::new("cmd2", "desc2")]),
-            ),
+            SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+                AvailableCommand::new("cmd2", "desc2"),
+            ])),
         ))
         .expect("notification broadcast send should succeed");
 
     // ── Assert: exactly one notification arrives, tagged with "sess-B" ───────
     // Allow 500 ms to catch any spurious doubles from an unaborted pump 1.
-    let notifications = collect_agent_notifications(
-        &mut bcast_rx,
-        Duration::from_millis(500),
-    ).await;
+    let notifications =
+        collect_agent_notifications(&mut bcast_rx, Duration::from_millis(500)).await;
 
     assert_eq!(
         notifications.len(),
         1,
         "expected exactly one AgentNotification (from pump 2 only), got {}: {:?}",
         notifications.len(),
-        notifications.iter().map(|(s, _)| s.0.as_str()).collect::<Vec<_>>()
+        notifications
+            .iter()
+            .map(|(s, _)| s.0.as_str())
+            .collect::<Vec<_>>()
     );
 
     let (emitted_session, _) = &notifications[0];

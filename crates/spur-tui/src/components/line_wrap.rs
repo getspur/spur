@@ -299,8 +299,14 @@ mod tests {
         // All non-whitespace chars of "blue words here" must appear with
         // Blue style. Whitespace at break points is intentionally dropped,
         // so we check non-whitespace parity.
-        let expected_blue: String = "blue words here".chars().filter(|c| !c.is_whitespace()).collect();
-        let actual_blue: String = blue_chars_found.chars().filter(|c| !c.is_whitespace()).collect();
+        let expected_blue: String = "blue words here"
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let actual_blue: String = blue_chars_found
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         assert_eq!(actual_blue, expected_blue);
     }
 
@@ -309,7 +315,12 @@ mod tests {
         let line = s("字字字字字");
         let out = wrap_line_to_width(&line, 5);
         for part in &out {
-            assert!(w(part) <= 5, "part {:?} has width {}", part.to_string(), w(part));
+            assert!(
+                w(part) <= 5,
+                "part {:?} has width {}",
+                part.to_string(),
+                w(part)
+            );
         }
         let joined: String = out.iter().map(|l| l.to_string()).collect();
         assert_eq!(joined, "字字字字字");

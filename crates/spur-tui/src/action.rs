@@ -31,11 +31,17 @@ pub enum Action {
     Tick,
     PermissionGrant(PermissionChoice),
     RequestSessions,
-    ResumeSession { session_id: String },
+    ResumeSession {
+        session_id: String,
+    },
     /// Toggle the pinned flag for a session in the picker metadata store.
-    ToggleSessionPin { session_id: String },
+    ToggleSessionPin {
+        session_id: String,
+    },
     /// Toggle the archived flag for a session in the picker metadata store.
-    ToggleSessionArchive { session_id: String },
+    ToggleSessionArchive {
+        session_id: String,
+    },
     /// Toggle the picker's view-level show-archived flag.
     ToggleShowArchived,
     /// Commit an inline rename from the picker to metadata `title_override`.
@@ -44,7 +50,10 @@ pub enum Action {
         new_title: String,
     },
     /// Persist a session's unsent InputBar text to metadata.
-    SaveDraft { session_id: String, draft: String },
+    SaveDraft {
+        session_id: String,
+        draft: String,
+    },
     /// User requested spawning a new session from the picker.
     NewSessionRequested,
     /// Re-issue `ListSessions` to refresh the picker's agent-side state.
@@ -96,7 +105,9 @@ pub enum Action {
     /// `SessionDetailView` when the user presses `Esc` and a stream is live.
     /// The orchestrator matches the corresponding `UserInput::CancelStream`
     /// inside its streaming `select!` loop and calls `AgentConnection::cancel`.
-    CancelStream { session: SessionId },
+    CancelStream {
+        session: SessionId,
+    },
 }
 
 /// Which permission option the user selected.

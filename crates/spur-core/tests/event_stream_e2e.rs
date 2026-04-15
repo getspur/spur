@@ -2,8 +2,8 @@
 //! subscribers receive them in order AND they land in the JSONL sink.
 
 use std::fs;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Duration;
 
 use spur_acp::domain::events::{SpurEvent, SpurEventBody};
