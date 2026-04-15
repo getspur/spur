@@ -358,4 +358,23 @@ transport = "acp""#, name);
         assert!(!msgs.iter().any(|m| m.message.contains("exceeds 80")),
                 "should not flag 50-char entry even though it's 150 bytes");
     }
+
+    #[test]
+    fn end_to_end_config_load_applies_defaults_and_lints() {
+        use crate::agents::defaults::apply_builtin_defaults;
+        let toml = r#"
+            name = "claude-code-acp"
+            command = "npx"
+            args = ["--yes", "@agentclientprotocol/claude-agent-acp"]
+            transport = "acp"
+        "#;
+        let mut cfg: AgentConfig = toml::from_str(toml).unwrap();
+        apply_builtin_defaults(&mut cfg);
+        // Descriptor filled from defaults.toml:
+        assert!(cfg.delegation.description.is_some());
+        assert!(!cfg.delegation.good_for.is_empty());
+        // And the clean config should produce no lint warnings:
+        let msgs = validate_delegation_config(&[cfg]);
+        assert!(msgs.is_empty());
+    }
 }

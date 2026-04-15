@@ -1,3 +1,4 @@
+use crate::agents::defaults::{apply_builtin_defaults, validate_delegation_config, LintLevel};
 use crate::config::AgentConfig;
 use crate::types::{AgentHealth, AgentRole, TransportKind};
 use std::collections::HashMap;
@@ -20,7 +21,20 @@ impl AgentRegistry {
     }
 
     /// Load agents from a list of configs (parsed from agents.toml).
+    /// Automatically applies built-in delegation defaults and emits
+    /// tracing diagnostics for any delegation-config lint warnings.
     pub fn load(configs: Vec<AgentConfig>) -> Self {
+        let mut configs = configs;
+        for cfg in &mut configs {
+            apply_builtin_defaults(cfg);
+        }
+        let msgs = validate_delegation_config(&configs);
+        for m in &msgs {
+            match m.level {
+                LintLevel::Warn => tracing::warn!(agent = %m.agent, "{}", m.message),
+                LintLevel::Error => tracing::error!(agent = %m.agent, "{}", m.message),
+            }
+        }
         let mut registry = Self::new();
         for config in configs {
             registry.register(config);
