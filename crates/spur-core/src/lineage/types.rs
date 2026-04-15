@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use spur_acp::SessionId;
@@ -6,6 +7,23 @@ use spur_acp::SessionId;
 pub use spur_acp::{
     Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };
+
+/// Kind of entry in a worker's live stream buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerStreamKind {
+    Thought,
+    Message,
+    ToolCall,
+}
+
+/// A single entry in a worker's live stream buffer, derived from
+/// `WorkerNotification` events. Stored on `ExecutorNode::stream_buffer`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerStreamEntry {
+    pub kind: WorkerStreamKind,
+    pub text: String,
+    pub occurred_at: SystemTime,
+}
 
 /// Stable identifier for a logical executor. Survives retries (retries produce
 /// a new `Attempt` under the same `ExecutorId`).
@@ -88,6 +106,11 @@ pub struct ExecutorNode {
     /// Most recent error message, if any. Derived from the current
     /// attempt's error field.
     pub last_error: Option<String>,
+    /// Bounded ring buffer of live worker stream entries. Populated by
+    /// the lineage projection from `WorkerNotification` events. Cleared
+    /// on `ExecutorRetryStarted`. Capped at `STREAM_BUFFER_CAP`.
+    #[serde(default)]
+    pub stream_buffer: VecDeque<WorkerStreamEntry>,
 }
 
 impl ExecutorNode {

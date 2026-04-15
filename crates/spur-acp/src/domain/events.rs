@@ -355,6 +355,18 @@ pub enum SpurEventBody {
         pct: Option<u8>,
     },
 
+    /// Live session notification from a running worker agent. Emitted
+    /// by the orchestrator for every `SessionNotification` received
+    /// from a worker's `drive_prompt_notifications` stream. The TUI
+    /// lineage projection converts these into `WorkerStreamEntry`
+    /// items on the executor's `stream_buffer` for the detail-pane
+    /// Stream tab.
+    WorkerNotification {
+        brain_session_id: SessionId,
+        executor_id: String,
+        notification: Box<SessionNotification>,
+    },
+
     /// Worker read or wrote a file. Either emitted explicitly by the
     /// worker via `_spur/file_touched`, or synthesized by the
     /// orchestrator from observed ToolCall events with a 200ms

@@ -10,6 +10,7 @@ pub mod spur_ext_interp;
 
 pub use lineage::{
     Attempt, AttemptStatus, ExecutorId, ExecutorLineage, ExecutorNode, ReviewRequest,
+    WorkerStreamEntry, WorkerStreamKind,
 };
 pub use orchestrator::test_support;
 pub use orchestrator::{
