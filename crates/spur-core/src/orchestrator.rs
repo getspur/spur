@@ -1903,6 +1903,7 @@ impl Orchestrator {
                 context_files,
                 respond_to,
                 brain_session_id,
+                delegation_plan: _,
             } = request;
 
             debug!(
