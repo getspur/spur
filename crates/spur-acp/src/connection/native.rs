@@ -38,19 +38,16 @@ use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::{
     Agent, AuthenticateRequest, AuthenticateResponse, CancelNotification, Client,
-    ClientSideConnection, ExtNotification, ExtRequest, ExtResponse, InitializeRequest,
-    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    McpServer, NewSessionRequest,
-    NewSessionResponse, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    ClientSideConnection, CreateTerminalRequest, CreateTerminalResponse, ExtNotification,
+    ExtRequest, ExtResponse, InitializeRequest, InitializeResponse, KillTerminalRequest,
+    KillTerminalResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer,
+    NewSessionRequest, NewSessionResponse, PromptRequest, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest,
-    SetSessionModeResponse, WriteTextFileRequest, WriteTextFileResponse,
-    CreateTerminalRequest, CreateTerminalResponse,
-    KillTerminalRequest, KillTerminalResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse,
-    TerminalOutputRequest, TerminalOutputResponse,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    TerminalExitStatus, TerminalId,
+    SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 
 use crate::connection::{AgentConnection, ExtNotificationPayload};
@@ -323,25 +320,21 @@ impl AgentConnection for NativeAcpConnection {
         mcp_servers: Vec<McpServer>,
     ) -> anyhow::Result<NewSessionResponse> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': not initialized",
-                self.agent_name
-            )
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
 
         let mut request = NewSessionRequest::new(&cwd);
         request.mcp_servers = mcp_servers;
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        cmd_tx.send(AcpCommand::NewSession {
-            request,
-            reply: reply_tx,
-        }).map_err(|_| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': ACP thread died",
-                self.agent_name
-            )
-        })?;
+        cmd_tx
+            .send(AcpCommand::NewSession {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
 
         let result = reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
@@ -366,10 +359,7 @@ impl AgentConnection for NativeAcpConnection {
         request: PromptRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': not initialized",
-                self.agent_name
-            )
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
 
         let session_id = request.session_id.clone();
@@ -381,15 +371,14 @@ impl AgentConnection for NativeAcpConnection {
         );
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        cmd_tx.send(AcpCommand::Prompt {
-            request,
-            reply: reply_tx,
-        }).map_err(|_| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': ACP thread died",
-                self.agent_name
-            )
-        })?;
+        cmd_tx
+            .send(AcpCommand::Prompt {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
 
         let notification_rx = reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
@@ -410,10 +399,7 @@ impl AgentConnection for NativeAcpConnection {
 
     async fn cancel(&mut self, session_id: &str) -> anyhow::Result<()> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': not initialized",
-                self.agent_name
-            )
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
 
         tracing::debug!(
@@ -423,15 +409,14 @@ impl AgentConnection for NativeAcpConnection {
         );
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        cmd_tx.send(AcpCommand::Cancel {
-            session_id: session_id.to_string(),
-            reply: reply_tx,
-        }).map_err(|_| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': ACP thread died",
-                self.agent_name
-            )
-        })?;
+        cmd_tx
+            .send(AcpCommand::Cancel {
+                session_id: session_id.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
 
         reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
@@ -477,22 +462,18 @@ impl AgentConnection for NativeAcpConnection {
         request: LoadSessionRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': not initialized",
-                self.agent_name
-            )
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        cmd_tx.send(AcpCommand::LoadSession {
-            request,
-            reply: reply_tx,
-        }).map_err(|_| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': ACP thread died",
-                self.agent_name
-            )
-        })?;
+        cmd_tx
+            .send(AcpCommand::LoadSession {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
 
         let notification_rx = reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
@@ -514,22 +495,18 @@ impl AgentConnection for NativeAcpConnection {
         request: ListSessionsRequest,
     ) -> anyhow::Result<ListSessionsResponse> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': not initialized",
-                self.agent_name
-            )
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        cmd_tx.send(AcpCommand::ListSessions {
-            request,
-            reply: reply_tx,
-        }).map_err(|_| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': ACP thread died",
-                self.agent_name
-            )
-        })?;
+        cmd_tx
+            .send(AcpCommand::ListSessions {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
 
         reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
@@ -546,22 +523,18 @@ impl AgentConnection for NativeAcpConnection {
         request: SetSessionModeRequest,
     ) -> anyhow::Result<SetSessionModeResponse> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': not initialized",
-                self.agent_name
-            )
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        cmd_tx.send(AcpCommand::SetSessionMode {
-            request,
-            reply: reply_tx,
-        }).map_err(|_| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': ACP thread died",
-                self.agent_name
-            )
-        })?;
+        cmd_tx
+            .send(AcpCommand::SetSessionMode {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
 
         reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
@@ -578,22 +551,18 @@ impl AgentConnection for NativeAcpConnection {
         request: AuthenticateRequest,
     ) -> anyhow::Result<AuthenticateResponse> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': not initialized",
-                self.agent_name
-            )
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        cmd_tx.send(AcpCommand::Authenticate {
-            request,
-            reply: reply_tx,
-        }).map_err(|_| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': ACP thread died",
-                self.agent_name
-            )
-        })?;
+        cmd_tx
+            .send(AcpCommand::Authenticate {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
 
         reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
@@ -611,18 +580,14 @@ impl AgentConnection for NativeAcpConnection {
         params: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "NativeAcpConnection '{}': not initialized",
-                self.agent_name
-            )
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
 
         // The ACP SDK re-prepends `_` when serializing `ExtRequest::method`
         // to the wire, so strip a single leading `_` here if present.
         let sdk_method = method.strip_prefix('_').unwrap_or(method).to_string();
 
-        let raw: Box<serde_json::value::RawValue> =
-            serde_json::value::to_raw_value(&params)?;
+        let raw: Box<serde_json::value::RawValue> = serde_json::value::to_raw_value(&params)?;
         let raw_arc: std::sync::Arc<serde_json::value::RawValue> = raw.into();
         let request = ExtRequest::new(sdk_method, raw_arc);
 
@@ -633,10 +598,7 @@ impl AgentConnection for NativeAcpConnection {
                 reply: reply_tx,
             })
             .map_err(|_| {
-                anyhow::anyhow!(
-                    "NativeAcpConnection '{}': ACP thread died",
-                    self.agent_name
-                )
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
             })?;
 
         let response: ExtResponse = reply_rx.await.map_err(|_| {
@@ -670,6 +632,7 @@ impl AgentConnection for NativeAcpConnection {
 /// This function creates its own single-threaded Tokio runtime + `LocalSet`
 /// and runs the SDK's I/O loop alongside a command handler that processes
 /// requests from the main thread.
+#[allow(clippy::too_many_arguments)]
 fn acp_thread_main(
     agent_name: String,
     command: String,
@@ -1099,9 +1062,7 @@ impl Client for SpurAcpClientDynamic {
                 let option_id = agent_client_protocol::PermissionOptionId::new(response.option_id);
                 tracing::debug!(option = %option_id, "NativeAcpConnection: permission responded");
                 Ok(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Selected(
-                        SelectedPermissionOutcome::new(option_id),
-                    ),
+                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
                 ))
             }
             Ok(Err(_)) => {
@@ -1151,16 +1112,13 @@ impl Client for SpurAcpClientDynamic {
         Ok(())
     }
 
-    async fn ext_notification(
-        &self,
-        args: ExtNotification,
-    ) -> agent_client_protocol::Result<()> {
+    async fn ext_notification(&self, args: ExtNotification) -> agent_client_protocol::Result<()> {
         // The SDK already stripped the leading `_` from the wire method, so
         // reattach it when reporting upward so consumers see the full
         // `_foo.dev/...` form.
         let method = format!("_{}", args.method);
-        let params: serde_json::Value = serde_json::from_str(args.params.get())
-            .unwrap_or(serde_json::Value::Null);
+        let params: serde_json::Value =
+            serde_json::from_str(args.params.get()).unwrap_or(serde_json::Value::Null);
         tracing::debug!(
             method = %method,
             "NativeAcpConnection: ext_notification"
@@ -1204,11 +1162,7 @@ impl Client for SpurAcpClientDynamic {
             }
             (Some(start_line), None) => {
                 let start = (start_line.saturating_sub(1)) as usize;
-                content
-                    .lines()
-                    .skip(start)
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                content.lines().skip(start).collect::<Vec<_>>().join("\n")
             }
             (None, Some(limit)) => content
                 .lines()
@@ -1240,8 +1194,10 @@ impl Client for SpurAcpClientDynamic {
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                agent_client_protocol::Error::internal_error()
-                    .data(format!("Failed to create directories for {}: {e}", path.display()))
+                agent_client_protocol::Error::internal_error().data(format!(
+                    "Failed to create directories for {}: {e}",
+                    path.display()
+                ))
             })?;
         }
 
@@ -1257,7 +1213,10 @@ impl Client for SpurAcpClientDynamic {
         &self,
         args: CreateTerminalRequest,
     ) -> agent_client_protocol::Result<CreateTerminalResponse> {
-        let cwd = args.cwd.clone().unwrap_or_else(|| self.cwd.borrow().clone());
+        let cwd = args
+            .cwd
+            .clone()
+            .unwrap_or_else(|| self.cwd.borrow().clone());
         let byte_limit = args.output_byte_limit.or(Some(10 * 1024 * 1024));
 
         let mut cmd = tokio::process::Command::new(&args.command);
@@ -1288,14 +1247,27 @@ impl Client for SpurAcpClientDynamic {
         let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
 
         tokio::task::spawn_local(terminal_reader(
-            child_stdout, child_stderr, child,
-            output.clone(), truncated.clone(), byte_limit, exit_tx,
+            child_stdout,
+            child_stderr,
+            child,
+            output.clone(),
+            truncated.clone(),
+            byte_limit,
+            exit_tx,
         ));
 
         let terminal_id = TerminalId::new(uuid::Uuid::new_v4().to_string());
         let id_string = terminal_id.to_string();
         tracing::debug!(terminal = %id_string, command = %args.command, pid = pid, "Terminal created");
-        self.terminals.borrow_mut().insert(id_string, TerminalState { output, truncated, exit_rx, pid });
+        self.terminals.borrow_mut().insert(
+            id_string,
+            TerminalState {
+                output,
+                truncated,
+                exit_rx,
+                pid,
+            },
+        );
         Ok(CreateTerminalResponse::new(terminal_id))
     }
 
@@ -1306,7 +1278,8 @@ impl Client for SpurAcpClientDynamic {
         let key = args.terminal_id.to_string();
         let map = self.terminals.borrow();
         let terminal = map.get(&key).ok_or_else(|| {
-            agent_client_protocol::Error::invalid_params().data(format!("Terminal '{}' not found", key))
+            agent_client_protocol::Error::invalid_params()
+                .data(format!("Terminal '{}' not found", key))
         })?;
         let output = terminal.output.borrow().clone();
         let truncated = terminal.truncated.get();
@@ -1322,7 +1295,8 @@ impl Client for SpurAcpClientDynamic {
         let mut exit_rx = {
             let map = self.terminals.borrow();
             let terminal = map.get(&key).ok_or_else(|| {
-                agent_client_protocol::Error::invalid_params().data(format!("Terminal '{}' not found", key))
+                agent_client_protocol::Error::invalid_params()
+                    .data(format!("Terminal '{}' not found", key))
             })?;
             terminal.exit_rx.clone()
         };
@@ -1337,7 +1311,10 @@ impl Client for SpurAcpClientDynamic {
                     }
                 }
                 Err(_) => {
-                    let status = exit_rx.borrow().clone().unwrap_or_else(TerminalExitStatus::new);
+                    let status = exit_rx
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(TerminalExitStatus::new);
                     return Ok(WaitForTerminalExitResponse::new(status));
                 }
             }
@@ -1352,14 +1329,18 @@ impl Client for SpurAcpClientDynamic {
         let (pid, is_running) = {
             let map = self.terminals.borrow();
             let terminal = map.get(&key).ok_or_else(|| {
-                agent_client_protocol::Error::invalid_params().data(format!("Terminal '{}' not found", key))
+                agent_client_protocol::Error::invalid_params()
+                    .data(format!("Terminal '{}' not found", key))
             })?;
             let is_running = terminal.exit_rx.borrow().is_none();
             (terminal.pid, is_running)
         };
         if is_running {
             tracing::debug!(terminal = %key, pid = pid, "Killing terminal");
-            let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            let _ = std::process::Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .status();
         }
         Ok(KillTerminalResponse::new())
     }
@@ -1372,12 +1353,21 @@ impl Client for SpurAcpClientDynamic {
         let pid_to_kill = {
             let map = self.terminals.borrow();
             if let Some(terminal) = map.get(&key) {
-                if terminal.exit_rx.borrow().is_none() { Some(terminal.pid) } else { None }
-            } else { None }
+                if terminal.exit_rx.borrow().is_none() {
+                    Some(terminal.pid)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
         if let Some(pid) = pid_to_kill {
             tracing::debug!(terminal = %key, pid = pid, "Killing terminal on release");
-            let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            let _ = std::process::Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .status();
         }
         self.terminals.borrow_mut().remove(&key);
         Ok(ReleaseTerminalResponse::new())
@@ -1425,11 +1415,13 @@ fn auto_approve(
     let option_id = args
         .options
         .iter()
-        .find(|o| matches!(
-            o.kind,
-            agent_client_protocol::PermissionOptionKind::AllowAlways
-                | agent_client_protocol::PermissionOptionKind::AllowOnce
-        ))
+        .find(|o| {
+            matches!(
+                o.kind,
+                agent_client_protocol::PermissionOptionKind::AllowAlways
+                    | agent_client_protocol::PermissionOptionKind::AllowOnce
+            )
+        })
         .map(|o| o.option_id.clone())
         .or_else(|| args.options.first().map(|o| o.option_id.clone()))
         .unwrap_or_else(|| agent_client_protocol::PermissionOptionId::new("allow"));
@@ -1501,7 +1493,9 @@ async fn terminal_reader(
     let mut stderr_done = false;
 
     loop {
-        if stdout_done && stderr_done { break; }
+        if stdout_done && stderr_done {
+            break;
+        }
         tokio::select! {
             result = AsyncReadExt::read(&mut stdout, &mut stdout_buf), if !stdout_done => {
                 match result {

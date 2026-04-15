@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess-cx-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-exec-001",
+    "title": "exec_command",
+    "kind": "execute",
+    "rawInput": {
+      "cmd": "ls",
+      "cwd": "/tmp"
+    }
+  }
+}

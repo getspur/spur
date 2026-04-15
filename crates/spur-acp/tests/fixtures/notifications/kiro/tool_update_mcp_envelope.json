@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess-ki-001",
+  "update": {
+    "sessionUpdate": "tool_call_update",
+    "toolCallId": "tc-mcp-001",
+    "status": "completed",
+    "rawOutput": {
+      "items": [
+        { "Json": { "ok": true } }
+      ]
+    }
+  }
+}

@@ -109,6 +109,7 @@ fn kiro_available_notification_populates_registry() {
         command: "kiro-cli".into(),
         args: vec!["acp".into()],
         transport: spur_acp::types::TransportKind::Acp,
+        kind: spur_acp::types::AgentKind::Generic,
         role: spur_acp::types::AgentRole::Both,
         capabilities: vec![],
         cost_tier: spur_acp::types::CostTier::Medium,
@@ -182,6 +183,7 @@ fn kiro_execute_response_renders_as_system_note() {
         command: "kiro-cli".into(),
         args: vec!["acp".into()],
         transport: spur_acp::types::TransportKind::Acp,
+        kind: spur_acp::types::AgentKind::Generic,
         role: spur_acp::types::AgentRole::Both,
         capabilities: vec![],
         cost_tier: spur_acp::types::CostTier::Medium,
@@ -222,7 +224,9 @@ fn kiro_execute_response_renders_as_system_note() {
 
     let last_trace = view.trace_snapshot_for_test();
     assert!(
-        last_trace.iter().any(|t| t.contains("kiro") && t.contains("response")),
+        last_trace
+            .iter()
+            .any(|t| t.contains("kiro") && t.contains("response")),
         "expected a kiro-tagged response system note; got {last_trace:?}"
     );
 }

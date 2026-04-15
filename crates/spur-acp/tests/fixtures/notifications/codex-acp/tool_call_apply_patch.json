@@ -1,0 +1,12 @@
+{
+  "sessionId": "sess-cx-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-patch-001",
+    "title": "apply_patch",
+    "kind": "edit",
+    "rawInput": {
+      "patch": "--- a\n+++ b\n@@\n-x\n+y"
+    }
+  }
+}

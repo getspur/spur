@@ -1,0 +1,5 @@
+12:00:00 ⧉ mcp mcp__server__run_tool
+
+12:00:01 ✓ ran
+   $ exit 0
+   done

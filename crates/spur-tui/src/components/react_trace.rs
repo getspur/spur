@@ -1,5 +1,10 @@
 use std::cell::Cell;
 
+use spur_acp::{
+    adapter::{mode_badge, ObservePayload, ToolFamily, ToolInputDisplay},
+    AgentKind,
+};
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -15,9 +20,17 @@ use super::MAX_LOG_ENTRIES;
 #[derive(Debug, Clone)]
 pub enum TraceKind {
     Think,
-    AgentMessage { agent: String },
-    Act { tool: String, args: String },
-    Observe,
+    AgentMessage {
+        agent: String,
+    },
+    Act {
+        tool: String,
+        family: ToolFamily,
+        input: ToolInputDisplay,
+    },
+    Observe {
+        payload: Option<ObservePayload>,
+    },
     Delegate {
         agent: String,
         task: String,
@@ -30,7 +43,11 @@ pub enum TraceKind {
         executor_id: Option<String>,
     },
     UserMessage,
-    Permission { description: String, pending: bool, countdown: u8 },
+    Permission {
+        description: String,
+        pending: bool,
+        countdown: u8,
+    },
 }
 
 /// A single entry in the full ReAct trace.
@@ -98,9 +115,16 @@ pub(crate) fn segment_visible_rows(
                 while i < end_idx && matches!(rows[i], VirtualRow::Text(_)) {
                     i += 1;
                 }
-                out.push(Segment::Text { start, len: i - start });
+                out.push(Segment::Text {
+                    start,
+                    len: i - start,
+                });
             }
-            VirtualRow::ImageRow { id, row_within, total_rows } => {
+            VirtualRow::ImageRow {
+                id,
+                row_within,
+                total_rows,
+            } => {
                 let run_id = *id;
                 let run_total = *total_rows;
                 let first_within = *row_within;
@@ -151,8 +175,8 @@ pub(crate) fn compute_inline_height_rows(
         return 6;
     }
     // display_h_px = image_h × (pane_w_px / image_w); rows = display_h_px / cell_h.
-    let scaled_h_px = ((image.height() as u64) * (pane_width_px as u64))
-        .div_ceil(image.width() as u64) as u32;
+    let scaled_h_px =
+        ((image.height() as u64) * (pane_width_px as u64)).div_ceil(image.width() as u64) as u32;
     let rows = scaled_h_px.div_ceil(cell_h_px);
     rows.clamp(6, 60) as u16
 }
@@ -168,13 +192,14 @@ fn compute_fence_states(
     use crate::components::mermaid::{FenceRender, MermaidState};
     let mut out = std::collections::HashMap::new();
     for (id, state) in ctx.mermaid_registry.iter() {
-        let r = match state {
-            MermaidState::Ready { image, .. } => FenceRender::Ready(
-                compute_inline_height_rows(image.as_ref(), pane_width_cols, ctx.picker),
-            ),
-            MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
-            MermaidState::Error { .. } => FenceRender::Error,
-        };
+        let r =
+            match state {
+                MermaidState::Ready { image, .. } => FenceRender::Ready(
+                    compute_inline_height_rows(image.as_ref(), pane_width_cols, ctx.picker),
+                ),
+                MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
+                MermaidState::Error { .. } => FenceRender::Error,
+            };
         out.insert(*id, r);
     }
     out
@@ -193,8 +218,10 @@ fn render_inline_image(
     use crate::components::mermaid::MermaidState;
     use ratatui_image::{Resize, StatefulImage};
 
-    let Some(MermaidState::Ready { image, inline_protocol }) =
-        ctx.mermaid_registry.get(&id)
+    let Some(MermaidState::Ready {
+        image,
+        inline_protocol,
+    }) = ctx.mermaid_registry.get(&id)
     else {
         return false;
     };
@@ -232,6 +259,281 @@ pub struct ReactTrace {
     /// `MarkdownStream` instances so ```mermaid fences render as ordinary
     /// code blocks when the terminal lacks image-protocol support.
     mermaid_enabled: bool,
+    /// Which agent brain backs this session; drives pane title + accent color.
+    agent_kind: AgentKind,
+    /// Current session mode, if known (e.g. "plan", "acceptEdits"). Updated
+    /// by `set_mode`. Rendered as a badge appended to the pane title.
+    current_mode: Option<String>,
+}
+
+/// Map `ToolFamily` to a display glyph + color.
+fn family_glyph(f: ToolFamily) -> (&'static str, Color) {
+    match f {
+        ToolFamily::Read => ("⚙ reads", Color::Cyan),
+        ToolFamily::Edit => ("✎ edits", Color::Yellow),
+        ToolFamily::Delete => ("✗ deletes", Color::Red),
+        ToolFamily::Move => ("→ moves", Color::Yellow),
+        ToolFamily::Search => ("🔎 search", Color::Blue),
+        ToolFamily::Execute => ("$ runs", Color::Magenta),
+        ToolFamily::Think => ("◈ thinks", Color::DarkGray),
+        ToolFamily::Fetch => ("↯ fetch", Color::Blue),
+        ToolFamily::SwitchMode => ("⇄ mode", Color::Cyan),
+        ToolFamily::Plan => ("▸ plan", Color::Cyan),
+        ToolFamily::Mcp => ("⧉ mcp", Color::DarkGray),
+        ToolFamily::Unknown => ("🔧 ACT", Color::Yellow),
+    }
+}
+
+/// Map `ObservePayload` to an outcome glyph + color.
+fn outcome_glyph(p: &ObservePayload) -> (&'static str, Color) {
+    match p {
+        ObservePayload::CommandOutput {
+            exit_code: Some(0), ..
+        } => ("✓", Color::Green),
+        ObservePayload::CommandOutput {
+            exit_code: Some(_), ..
+        } => ("✗", Color::Red),
+        // Unknown exit code ≠ success. Render as "?" amber so operators
+        // don't misread "we don't know how it went" as "it went fine".
+        ObservePayload::CommandOutput {
+            exit_code: None, ..
+        } => ("?", Color::Yellow),
+        ObservePayload::Error { .. } => ("✗", Color::Red),
+        _ => ("✓", Color::Green),
+    }
+}
+
+/// Verb used in the observe header (past tense).
+fn observe_verb(p: &ObservePayload) -> &'static str {
+    match p {
+        ObservePayload::CommandOutput { .. } => "ran",
+        ObservePayload::FileRead { .. } => "read",
+        ObservePayload::EditResult { .. } => "edited",
+        ObservePayload::Json { .. } | ObservePayload::Text { .. } => "done",
+        ObservePayload::Error { .. } => "erred",
+    }
+}
+
+/// Build display lines for a `ToolInputDisplay` value.
+/// Lines are 3-space indented.
+fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match input {
+        ToolInputDisplay::Path(p) => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(p.clone(), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        ToolInputDisplay::Diff { path, diff } => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    path.clone(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            let mut count = 0usize;
+            let mut total = 0usize;
+            for dl in diff.lines() {
+                total += 1;
+                let _ = dl;
+            }
+            for dl in diff.lines() {
+                if count >= 6 {
+                    let remaining = total.saturating_sub(6);
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(
+                            format!("[… {} more]", remaining),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                    break;
+                }
+                let color = if dl.starts_with('+') {
+                    Color::Green
+                } else if dl.starts_with('-') {
+                    Color::Red
+                } else {
+                    Color::DarkGray
+                };
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(dl.to_string(), Style::default().fg(color)),
+                ]));
+                count += 1;
+            }
+        }
+        ToolInputDisplay::Command { cmd, cwd } => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(format!("$ {}", cmd), Style::default().fg(Color::Magenta)),
+            ]));
+            if let Some(cwd) = cwd {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("(cwd: {})", cwd),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+        ToolInputDisplay::Query(q) => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    q.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
+        ToolInputDisplay::Json(p) => {
+            for jl in p.lines().take(8) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+        ToolInputDisplay::Text(t) => {
+            for tl in t.lines() {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(tl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+        }
+        ToolInputDisplay::Empty => {}
+    }
+    lines
+}
+
+/// Build display lines for an `ObservePayload`.
+fn observe_payload_lines(payload: &ObservePayload) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match payload {
+        ObservePayload::CommandOutput {
+            exit_code,
+            stdout,
+            stderr,
+        } => {
+            let exit_str = match exit_code {
+                Some(c) => format!("$ exit {}", c),
+                None => "$ exit -".to_string(),
+            };
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(exit_str, Style::default().fg(Color::Magenta)),
+            ]));
+            for sl in stdout.lines().take(8) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(sl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+            for el in stderr.lines().take(4) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(el.to_string(), Style::default().fg(Color::Red)),
+                ]));
+            }
+        }
+        ObservePayload::FileRead {
+            path,
+            content,
+            truncated,
+        } => {
+            let line_count = content.lines().count();
+            let path_str = path.as_deref().unwrap_or("<unknown>");
+            let header = format!(
+                "{} · {} lines{}",
+                path_str,
+                line_count,
+                if *truncated { " (truncated)" } else { "" }
+            );
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(header, Style::default().fg(Color::Cyan)),
+            ]));
+            for cl in content.lines().take(8) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(cl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+        }
+        ObservePayload::EditResult {
+            path,
+            replacements,
+            diff,
+        } => {
+            if let Some(n) = replacements {
+                let msg = format!("{} replacement{}", n, if *n == 1 { "" } else { "s" });
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(msg, Style::default().fg(Color::Yellow)),
+                ]));
+            } else if let Some(d) = diff {
+                for dl in d.lines().take(6) {
+                    let color = if dl.starts_with('+') {
+                        Color::Green
+                    } else if dl.starts_with('-') {
+                        Color::Red
+                    } else {
+                        Color::DarkGray
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(dl.to_string(), Style::default().fg(color)),
+                    ]));
+                }
+            } else if let Some(p) = path {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(p.clone(), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+        ObservePayload::Json { pretty } => {
+            for jl in pretty.lines().take(8) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            let total = pretty.lines().count();
+            if total > 8 {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        "[… expand]".to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+        ObservePayload::Text { body } => {
+            for tl in body.lines() {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(tl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+        }
+        ObservePayload::Error { message } => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(message.clone(), Style::default().fg(Color::Red)),
+            ]));
+        }
+    }
+    lines
 }
 
 impl ReactTrace {
@@ -244,7 +546,47 @@ impl ReactTrace {
             last_total_lines: Cell::new(0),
             last_visible_height: Cell::new(20),
             mermaid_enabled: true,
+            agent_kind: AgentKind::Generic,
+            current_mode: None,
         }
+    }
+
+    /// Create a `ReactTrace` with an explicit `AgentKind` for title + accent color.
+    /// `new()` defaults to `AgentKind::Generic`.
+    pub fn with_kind(kind: AgentKind) -> Self {
+        Self {
+            agent_kind: kind,
+            ..Self::new()
+        }
+    }
+
+    /// Store the current session mode id (e.g. "plan", "acceptEdits").
+    /// Pass `None` to clear it.  Rendered as a badge appended to the pane title.
+    pub fn set_mode(&mut self, mode: Option<String>) {
+        self.current_mode = mode;
+    }
+
+    /// Build the styled pane title + accent color from `agent_kind` and
+    /// optional mode badge.
+    fn pane_title_and_color(&self) -> (String, Color) {
+        let (base_title, accent) = match self.agent_kind {
+            AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => {
+                (" Session · claude ", Color::Magenta)
+            }
+            AgentKind::CodexAcp => (" Session · codex ", Color::Yellow),
+            AgentKind::Kiro => (" Session · kiro ", Color::Cyan),
+            AgentKind::Generic => (" Session ", Color::DarkGray),
+        };
+        let title = if let Some(mode_id) = &self.current_mode {
+            if let Some(badge) = mode_badge(mode_id, self.agent_kind) {
+                format!("{}· {} ", base_title, badge.short)
+            } else {
+                base_title.to_string()
+            }
+        } else {
+            base_title.to_string()
+        };
+        (title, accent)
     }
 
     /// Set whether ```mermaid fences should be rendered as images. Called
@@ -265,7 +607,7 @@ impl ReactTrace {
             TraceKind::Think => "think",
             TraceKind::AgentMessage { .. } => "agent_message",
             TraceKind::Act { .. } => "act",
-            TraceKind::Observe => "observe",
+            TraceKind::Observe { .. } => "observe",
             TraceKind::Delegate { .. } => "delegate",
             TraceKind::UserMessage => "user_message",
             TraceKind::Permission { .. } => "permission",
@@ -321,7 +663,7 @@ impl ReactTrace {
                 // Don't walk past user turns or other agents' messages.
                 TraceKind::UserMessage => break,
                 TraceKind::AgentMessage { .. } => break, // different agent
-                _ => continue,                            // tool call / think / etc.
+                _ => continue,                           // tool call / think / etc.
             }
         }
 
@@ -342,7 +684,9 @@ impl ReactTrace {
                 super::markdown_stream::MarkdownStream::new_with_mermaid(self.mermaid_enabled);
             stream.append(text);
             self.push(TraceEntry {
-                kind: TraceKind::AgentMessage { agent: agent.to_string() },
+                kind: TraceKind::AgentMessage {
+                    agent: agent.to_string(),
+                },
                 text: String::new(), // stream owns the raw text
                 timestamp,
                 markdown: Some(stream),
@@ -361,7 +705,9 @@ impl ReactTrace {
                 }
             }
             self.push(TraceEntry {
-                kind: TraceKind::AgentMessage { agent: agent.to_string() },
+                kind: TraceKind::AgentMessage {
+                    agent: agent.to_string(),
+                },
                 text: text.to_string(),
                 timestamp,
             });
@@ -456,9 +802,7 @@ impl ReactTrace {
 
         for entry in &mut self.entries {
             if let TraceKind::Permission {
-                pending,
-                countdown,
-                ..
+                pending, countdown, ..
             } = &mut entry.kind
             {
                 if *pending && *countdown > 0 {
@@ -535,12 +879,9 @@ impl ReactTrace {
 
     /// Returns true if any entry has a pending permission request.
     pub fn has_pending_permission(&self) -> bool {
-        self.entries.iter().any(|e| {
-            matches!(
-                &e.kind,
-                TraceKind::Permission { pending: true, .. }
-            )
-        })
+        self.entries
+            .iter()
+            .any(|e| matches!(&e.kind, TraceKind::Permission { pending: true, .. }))
     }
 
     /// Mark all pending permission entries as resolved.
@@ -556,7 +897,11 @@ impl ReactTrace {
     /// before wrapping. Shared between `render` and `build_virtual_rows`.
     ///
     /// All returned lines have `'static` content.
-    fn build_display_lines(&self, spinner_frame: &str, lineage: Option<&spur_core::lineage::projection::ExecutorLineage>) -> Vec<Line<'static>> {
+    fn build_display_lines(
+        &self,
+        spinner_frame: &str,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+    ) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         for entry in &self.entries {
@@ -595,7 +940,9 @@ impl ReactTrace {
                         ts_span.clone(),
                         Span::styled(
                             format!("✉ {}", agent),
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]));
 
@@ -645,67 +992,81 @@ impl ReactTrace {
                     }
                 }
 
-                TraceKind::Act { tool, args } => {
-                    // Header line: timestamp + "🔧 ACT  {tool}"
+                TraceKind::Act {
+                    tool,
+                    family,
+                    input,
+                } => {
+                    let (glyph, glyph_color) = family_glyph(*family);
                     lines.push(Line::from(vec![
                         ts_span.clone(),
                         Span::styled(
-                            format!("🔧 ACT  {}", tool),
+                            format!("{} {}", glyph, tool),
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(glyph_color)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
-                    // Args below if present
-                    if !args.is_empty() {
-                        for arg_line in args.lines() {
-                            lines.push(Line::from(vec![
-                                Span::raw("   "),
-                                Span::styled(
-                                    arg_line.to_string(),
-                                    Style::default().fg(Color::Yellow),
-                                ),
-                            ]));
-                        }
-                    }
-                    // Entry text (e.g. additional description)
-                    if !entry.text.is_empty() {
+                    if matches!(input, ToolInputDisplay::Empty) {
+                        // Fallback: render entry.text
                         for text_line in entry.text.lines() {
                             lines.push(Line::from(vec![
                                 Span::raw("   "),
                                 Span::styled(
                                     text_line.to_string(),
-                                    Style::default().fg(Color::Yellow),
+                                    Style::default().fg(glyph_color),
+                                ),
+                            ]));
+                        }
+                    } else {
+                        lines.extend(input_display_lines(input));
+                    }
+                }
+
+                TraceKind::Observe { payload } => {
+                    if let Some(p) = payload {
+                        let (glyph, glyph_color) = outcome_glyph(p);
+                        let verb = observe_verb(p);
+                        lines.push(Line::from(vec![
+                            ts_span.clone(),
+                            Span::styled(
+                                format!("{} {}", glyph, verb),
+                                Style::default()
+                                    .fg(glyph_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                        lines.extend(observe_payload_lines(p));
+                    } else {
+                        // Fallback: render as today
+                        lines.push(Line::from(vec![
+                            ts_span.clone(),
+                            Span::styled(
+                                "👁 OBSERVE",
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                        for text_line in entry.text.lines() {
+                            lines.push(Line::from(vec![
+                                Span::raw("   "),
+                                Span::styled(
+                                    text_line.to_string(),
+                                    Style::default().fg(Color::Green),
                                 ),
                             ]));
                         }
                     }
                 }
 
-                TraceKind::Observe => {
-                    // Header line: timestamp + "👁 OBSERVE"
-                    lines.push(Line::from(vec![
-                        ts_span.clone(),
-                        Span::styled(
-                            "👁 OBSERVE",
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                    // Body lines indented
-                    for text_line in entry.text.lines() {
-                        lines.push(Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(
-                                text_line.to_string(),
-                                Style::default().fg(Color::Green),
-                            ),
-                        ]));
-                    }
-                }
-
-                TraceKind::Delegate { agent, task, status, request_id: _, executor_id } => {
+                TraceKind::Delegate {
+                    agent,
+                    task,
+                    status,
+                    request_id: _,
+                    executor_id,
+                } => {
                     // Header line: timestamp + "→ DELEGATE to {agent}"
                     lines.push(Line::from(vec![
                         ts_span.clone(),
@@ -720,15 +1081,13 @@ impl ReactTrace {
                     if !task.is_empty() {
                         lines.push(Line::from(vec![
                             Span::raw("   "),
-                            Span::styled(
-                                task.clone(),
-                                Style::default().fg(Color::Cyan),
-                            ),
+                            Span::styled(task.clone(), Style::default().fg(Color::Cyan)),
                         ]));
                     }
                     // Status with spinner if active
                     if !status.is_empty() {
-                        let is_active = status == "running" || status == "active" || status == "delegated";
+                        let is_active =
+                            status == "running" || status == "active" || status == "delegated";
                         let status_text = if is_active {
                             format!("   {} {}", spinner_frame, status)
                         } else {
@@ -768,10 +1127,7 @@ impl ReactTrace {
                     for text_line in entry.text.lines() {
                         lines.push(Line::from(vec![
                             Span::raw("   "),
-                            Span::styled(
-                                text_line.to_string(),
-                                Style::default().fg(Color::Yellow),
-                            ),
+                            Span::styled(text_line.to_string(), Style::default().fg(Color::Yellow)),
                         ]));
                     }
                 }
@@ -847,8 +1203,7 @@ impl ReactTrace {
     ) -> Vec<VirtualRow> {
         use crate::components::markdown_stream::StreamItem;
 
-        let spinner_frame =
-            SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+        let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
 
         let mut rows: Vec<VirtualRow> = Vec::new();
 
@@ -997,34 +1352,25 @@ impl ReactTrace {
                     }
                 }
 
-                TraceKind::Act { tool, args } => {
+                TraceKind::Act {
+                    tool,
+                    family,
+                    input,
+                } => {
+                    let (glyph, glyph_color) = family_glyph(*family);
                     push_wrapped(
                         &mut rows,
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
-                                format!("🔧 ACT  {}", tool),
+                                format!("{} {}", glyph, tool),
                                 Style::default()
-                                    .fg(Color::Yellow)
+                                    .fg(glyph_color)
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]),
                     );
-                    if !args.is_empty() {
-                        for arg_line in args.lines() {
-                            push_wrapped(
-                                &mut rows,
-                                Line::from(vec![
-                                    Span::raw("   "),
-                                    Span::styled(
-                                        arg_line.to_string(),
-                                        Style::default().fg(Color::Yellow),
-                                    ),
-                                ]),
-                            );
-                        }
-                    }
-                    if !entry.text.is_empty() {
+                    if matches!(input, ToolInputDisplay::Empty) {
                         for text_line in entry.text.lines() {
                             push_wrapped(
                                 &mut rows,
@@ -1032,7 +1378,58 @@ impl ReactTrace {
                                     Span::raw("   "),
                                     Span::styled(
                                         text_line.to_string(),
-                                        Style::default().fg(Color::Yellow),
+                                        Style::default().fg(glyph_color),
+                                    ),
+                                ]),
+                            );
+                        }
+                    } else {
+                        for line in input_display_lines(input) {
+                            push_wrapped(&mut rows, line);
+                        }
+                    }
+                }
+
+                TraceKind::Observe { payload } => {
+                    if let Some(p) = payload {
+                        let (glyph, glyph_color) = outcome_glyph(p);
+                        let verb = observe_verb(p);
+                        push_wrapped(
+                            &mut rows,
+                            Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    format!("{} {}", glyph, verb),
+                                    Style::default()
+                                        .fg(glyph_color)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]),
+                        );
+                        for line in observe_payload_lines(p) {
+                            push_wrapped(&mut rows, line);
+                        }
+                    } else {
+                        push_wrapped(
+                            &mut rows,
+                            Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    "👁 OBSERVE",
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]),
+                        );
+                        for text_line in entry.text.lines() {
+                            push_wrapped(
+                                &mut rows,
+                                Line::from(vec![
+                                    Span::raw("   "),
+                                    Span::styled(
+                                        text_line.to_string(),
+                                        Style::default().fg(Color::Green),
                                     ),
                                 ]),
                             );
@@ -1040,34 +1437,13 @@ impl ReactTrace {
                     }
                 }
 
-                TraceKind::Observe => {
-                    push_wrapped(
-                        &mut rows,
-                        Line::from(vec![
-                            ts_span.clone(),
-                            Span::styled(
-                                "👁 OBSERVE",
-                                Style::default()
-                                    .fg(Color::Green)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]),
-                    );
-                    for text_line in entry.text.lines() {
-                        push_wrapped(
-                            &mut rows,
-                            Line::from(vec![
-                                Span::raw("   "),
-                                Span::styled(
-                                    text_line.to_string(),
-                                    Style::default().fg(Color::Green),
-                                ),
-                            ]),
-                        );
-                    }
-                }
-
-                TraceKind::Delegate { agent, task, status, request_id: _, executor_id } => {
+                TraceKind::Delegate {
+                    agent,
+                    task,
+                    status,
+                    request_id: _,
+                    executor_id,
+                } => {
                     push_wrapped(
                         &mut rows,
                         Line::from(vec![
@@ -1085,17 +1461,13 @@ impl ReactTrace {
                             &mut rows,
                             Line::from(vec![
                                 Span::raw("   "),
-                                Span::styled(
-                                    task.clone(),
-                                    Style::default().fg(Color::Cyan),
-                                ),
+                                Span::styled(task.clone(), Style::default().fg(Color::Cyan)),
                             ]),
                         );
                     }
                     if !status.is_empty() {
-                        let is_active = status == "running"
-                            || status == "active"
-                            || status == "delegated";
+                        let is_active =
+                            status == "running" || status == "active" || status == "delegated";
                         let status_text = if is_active {
                             format!("   {} {}", spinner_frame, status)
                         } else {
@@ -1168,10 +1540,7 @@ impl ReactTrace {
                     );
                     if *pending {
                         let hint_text = if *countdown > 0 {
-                            format!(
-                                "   [y]es [n]o [a]lways  (auto-deny in {}s)",
-                                countdown
-                            )
+                            format!("   [y]es [n]o [a]lways  (auto-deny in {}s)", countdown)
                         } else {
                             "   [y]es [n]o [a]lways".to_string()
                         };
@@ -1213,21 +1582,26 @@ impl ReactTrace {
     ///
     /// Non-markdown path. For markdown-enabled sessions, callers should use
     /// `render_with_ctx` which supports inline image segments.
-    pub fn render(&self, frame: &mut Frame, area: Rect, lineage: Option<&spur_core::lineage::projection::ExecutorLineage>) {
+    pub fn render(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+    ) {
         let following_indicator = if self.is_following {
             " ▼ following "
         } else {
             ""
         };
 
+        let (title_str, accent) = self.pane_title_and_color();
         let block = Block::default()
-            .title(" Session ")
+            .title(Span::styled(title_str, Style::default().fg(accent)))
             .title_bottom(following_indicator)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray));
 
-        let spinner_frame = SPINNER_FRAMES
-            [(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+        let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
 
         let lines = self.build_display_lines(spinner_frame, lineage);
 
@@ -1294,8 +1668,9 @@ impl ReactTrace {
             ""
         };
 
+        let (title_str, accent) = self.pane_title_and_color();
         let block = Block::default()
-            .title(" Session ")
+            .title(Span::styled(title_str, Style::default().fg(accent)))
             .title_bottom(following_indicator)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray));
@@ -1329,7 +1704,12 @@ impl ReactTrace {
             match seg {
                 Segment::Text { start, len } => {
                     let height = len as u16;
-                    let rect = Rect { x: inner.x, y, width: inner.width, height };
+                    let rect = Rect {
+                        x: inner.x,
+                        y,
+                        width: inner.width,
+                        height,
+                    };
                     let lines: Vec<Line<'static>> = rows[start..start + len]
                         .iter()
                         .map(|r| match r {
@@ -1341,10 +1721,19 @@ impl ReactTrace {
                     frame.render_widget(Paragraph::new(lines), rect);
                     y += height;
                 }
-                Segment::Image { id, total_rows, first_row_within, run_len } => {
-                    let rect = Rect { x: inner.x, y, width: inner.width, height: run_len };
-                    let fully_visible =
-                        first_row_within == 0 && run_len == total_rows;
+                Segment::Image {
+                    id,
+                    total_rows,
+                    first_row_within,
+                    run_len,
+                } => {
+                    let rect = Rect {
+                        x: inner.x,
+                        y,
+                        width: inner.width,
+                        height: run_len,
+                    };
+                    let fully_visible = first_row_within == 0 && run_len == total_rows;
 
                     let drew_image = if fully_visible {
                         render_inline_image(frame, rect, id, ctx)
@@ -1354,7 +1743,10 @@ impl ReactTrace {
 
                     if !drew_image {
                         let msg = if !fully_visible {
-                            format!("   [📊 mermaid #{} · scroll to align · Alt-v to zoom]", id.0)
+                            format!(
+                                "   [📊 mermaid #{} · scroll to align · Alt-v to zoom]",
+                                id.0
+                            )
                         } else if !matches!(
                             ctx.mermaid_registry.get(&id),
                             Some(MermaidState::Ready { .. })
@@ -1460,18 +1852,12 @@ impl ReactTrace {
     }
 }
 
-#[cfg(test)]
 impl ReactTrace {
-    /// Test-only helper: mutable access to the entry list so tests can
-    /// inspect per-entry `MarkdownStream` state.
-    pub(crate) fn entries_mut_for_test(&mut self) -> &mut [TraceEntry] {
-        &mut self.entries
-    }
-
-    /// Test-only helper: mimics the line-building portion of `render` but
-    /// returns each line as a joined `String` of span text, so tests can
-    /// assert on visible content without needing a real `Frame`.
-    pub(crate) fn render_lines_for_test(&self, _width: u16) -> Vec<String> {
+    /// Render every entry to plain strings (one per logical line), joining
+    /// span text without color codes.  Wrapping is not applied.
+    /// Primarily for integration tests that need to assert on visible text
+    /// content without spinning up a real terminal frame.
+    pub fn render_to_strings(&self) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
 
         for entry in &self.entries {
@@ -1520,24 +1906,51 @@ impl ReactTrace {
                     }
                 }
 
-                TraceKind::Act { tool, args } => {
-                    lines.push(format!("{} 🔧 ACT  {}", entry.timestamp, tool));
-                    for arg_line in args.lines() {
-                        lines.push(format!("   {}", arg_line));
-                    }
-                    for text_line in entry.text.lines() {
-                        lines.push(format!("   {}", text_line));
+                TraceKind::Act {
+                    tool,
+                    family,
+                    input,
+                } => {
+                    let (glyph, _) = family_glyph(*family);
+                    lines.push(format!("{} {} {}", entry.timestamp, glyph, tool));
+                    if matches!(input, ToolInputDisplay::Empty) {
+                        for text_line in entry.text.lines() {
+                            lines.push(format!("   {}", text_line));
+                        }
+                    } else {
+                        for l in input_display_lines(input) {
+                            let joined: String =
+                                l.spans.iter().map(|s| s.content.as_ref()).collect();
+                            lines.push(joined);
+                        }
                     }
                 }
 
-                TraceKind::Observe => {
-                    lines.push(format!("{} 👁 OBSERVE", entry.timestamp));
-                    for text_line in entry.text.lines() {
-                        lines.push(format!("   {}", text_line));
+                TraceKind::Observe { payload } => {
+                    if let Some(p) = payload {
+                        let (glyph, _) = outcome_glyph(p);
+                        let verb = observe_verb(p);
+                        lines.push(format!("{} {} {}", entry.timestamp, glyph, verb));
+                        for l in observe_payload_lines(p) {
+                            let joined: String =
+                                l.spans.iter().map(|s| s.content.as_ref()).collect();
+                            lines.push(joined);
+                        }
+                    } else {
+                        lines.push(format!("{} 👁 OBSERVE", entry.timestamp));
+                        for text_line in entry.text.lines() {
+                            lines.push(format!("   {}", text_line));
+                        }
                     }
                 }
 
-                TraceKind::Delegate { agent, task, status, request_id: _, executor_id: _ } => {
+                TraceKind::Delegate {
+                    agent,
+                    task,
+                    status,
+                    request_id: _,
+                    executor_id: _,
+                } => {
                     lines.push(format!("{} → DELEGATE to {}", entry.timestamp, agent));
                     if !task.is_empty() {
                         lines.push(format!("   {}", task));
@@ -1554,7 +1967,11 @@ impl ReactTrace {
                     }
                 }
 
-                TraceKind::Permission { description, pending, countdown } => {
+                TraceKind::Permission {
+                    description,
+                    pending,
+                    countdown,
+                } => {
                     lines.push(format!("{} ⚠ PERMISSION: {}", entry.timestamp, description));
                     if *pending {
                         if *countdown > 0 {
@@ -1576,6 +1993,23 @@ impl ReactTrace {
         }
 
         lines
+    }
+}
+
+#[cfg(test)]
+impl ReactTrace {
+    /// Test-only helper: mutable access to the entry list so tests can
+    /// inspect per-entry `MarkdownStream` state.
+    pub(crate) fn entries_mut_for_test(&mut self) -> &mut [TraceEntry] {
+        &mut self.entries
+    }
+
+    /// Test-only helper: mimics the line-building portion of `render` but
+    /// returns each line as a joined `String` of span text, so tests can
+    /// assert on visible content without needing a real `Frame`.
+    /// Delegates to `render_to_strings`; `_width` is kept for call-site compat.
+    pub(crate) fn render_lines_for_test(&self, _width: u16) -> Vec<String> {
+        self.render_to_strings()
     }
 }
 
@@ -1614,8 +2048,14 @@ mod markdown_integration_tests {
 
         let rendered = trace.render_lines_for_test(60);
         let joined = rendered.join("\n");
-        assert!(joined.contains("Heading"), "expected heading text after flush: {joined}");
-        assert!(joined.contains("Body text"), "expected body text after flush: {joined}");
+        assert!(
+            joined.contains("Heading"),
+            "expected heading text after flush: {joined}"
+        );
+        assert!(
+            joined.contains("Body text"),
+            "expected body text after flush: {joined}"
+        );
     }
 
     #[test]
@@ -1698,21 +2138,30 @@ mod virtual_row_tests {
         use std::collections::HashMap;
         let mut states: HashMap<crate::components::mermaid::MermaidId, FenceRender> =
             HashMap::new();
-        states.insert(crate::components::mermaid::MermaidId(0), FenceRender::Ready(12));
+        states.insert(
+            crate::components::mermaid::MermaidId(0),
+            FenceRender::Ready(12),
+        );
 
         let rows = trace.build_virtual_rows(60, &states, None);
 
         let image_rows: Vec<_> = rows
             .iter()
             .filter_map(|r| match r {
-                VirtualRow::ImageRow { id, row_within, total_rows } => {
-                    Some((*id, *row_within, *total_rows))
-                }
+                VirtualRow::ImageRow {
+                    id,
+                    row_within,
+                    total_rows,
+                } => Some((*id, *row_within, *total_rows)),
                 _ => None,
             })
             .collect();
 
-        assert_eq!(image_rows.len(), 12, "expected 12 image rows; got {image_rows:?}");
+        assert_eq!(
+            image_rows.len(),
+            12,
+            "expected 12 image rows; got {image_rows:?}"
+        );
         assert_eq!(image_rows[0].2, 12, "total_rows");
         assert_eq!(image_rows[0].1, 0, "first row_within");
         assert_eq!(image_rows[11].1, 11, "last row_within");
@@ -1752,7 +2201,10 @@ mod virtual_row_tests {
         let _ = trace.force_flush_all(&StateLookup::empty());
 
         let mut states = std::collections::HashMap::new();
-        states.insert(crate::components::mermaid::MermaidId(0), FenceRender::Ready(8));
+        states.insert(
+            crate::components::mermaid::MermaidId(0),
+            FenceRender::Ready(8),
+        );
 
         let segments = trace.render_plan_for_test(80, 40, 0, &states);
 
@@ -1760,8 +2212,18 @@ mod virtual_row_tests {
             .iter()
             .filter(|s| matches!(s, Segment::Image { .. }))
             .collect();
-        assert_eq!(image_segs.len(), 1, "expected exactly one image segment: {segments:?}");
-        if let Segment::Image { total_rows, first_row_within, run_len, .. } = image_segs[0] {
+        assert_eq!(
+            image_segs.len(),
+            1,
+            "expected exactly one image segment: {segments:?}"
+        );
+        if let Segment::Image {
+            total_rows,
+            first_row_within,
+            run_len,
+            ..
+        } = image_segs[0]
+        {
             assert_eq!(*total_rows, 8);
             assert_eq!(*first_row_within, 0);
             assert_eq!(*run_len, 8);
@@ -1786,21 +2248,29 @@ mod virtual_row_tests {
         let _ = trace.force_flush_all(&StateLookup::empty());
 
         let mut states = std::collections::HashMap::new();
-        states.insert(crate::components::mermaid::MermaidId(0), FenceRender::Ready(10));
+        states.insert(
+            crate::components::mermaid::MermaidId(0),
+            FenceRender::Ready(10),
+        );
 
         // Iterate offsets; some must produce a partial image (run_len < total).
         let mut saw_partial = false;
         for offset in 0..20 {
             let segs = trace.render_plan_for_test(80, 6, offset, &states);
-            if segs.iter().any(|s| matches!(
-                s,
-                Segment::Image { total_rows, run_len, .. } if run_len < total_rows
-            )) {
+            if segs.iter().any(|s| {
+                matches!(
+                    s,
+                    Segment::Image { total_rows, run_len, .. } if run_len < total_rows
+                )
+            }) {
                 saw_partial = true;
                 break;
             }
         }
-        assert!(saw_partial, "expected some offset to produce partial image segment");
+        assert!(
+            saw_partial,
+            "expected some offset to produce partial image segment"
+        );
     }
 }
 
@@ -1825,7 +2295,8 @@ mod tests {
         trace.push(TraceEntry {
             kind: TraceKind::Act {
                 tool: "read_file".to_string(),
-                args: String::new(),
+                family: ToolFamily::Unknown,
+                input: ToolInputDisplay::Empty,
             },
             text: "read_file(path=...)".to_string(),
             timestamp: "10:00:02".to_string(),
@@ -1838,9 +2309,7 @@ mod tests {
         let entries = trace.entries_for_test();
         let agent_message_count = entries
             .iter()
-            .filter(|e| {
-                matches!(&e.kind, TraceKind::AgentMessage { agent } if agent == "claude")
-            })
+            .filter(|e| matches!(&e.kind, TraceKind::AgentMessage { agent } if agent == "claude"))
             .count();
         assert_eq!(
             agent_message_count, 1,

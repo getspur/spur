@@ -22,6 +22,26 @@ If your agent is one spur knows about (kiro, claude-code, claude-code-acp, codex
 
 **How do I know which my agent speaks?** Run it with `--help`. If you see an ACP flag, pick `"acp"`. If the docs mention stream-json, pick `"stream-json"`. If it accepts a prompt as a positional argument, `"cli-wrap"`. When in doubt start with `"cli-wrap"` — it's the simplest and works for most CLIs.
 
+### Step 1b — Choose an AgentKind
+
+`kind` tells the TUI's adapter layer which per-agent rendering rules to apply (tool-family classification, observe-payload extraction, mode-badge vocabulary, signature tint). It is **orthogonal to `transport`** — multiple kinds can share the same transport.
+
+```toml
+kind = "claude-code-acp"   # or one of the values below
+```
+
+| If your agent is… | `kind =` |
+|---|---|
+| Claude Code via `claude -p --output-format stream-json` | `"claude-stream-json"` |
+| Claude Code via `@agentclientprotocol/claude-agent-acp` | `"claude-code-acp"` |
+| Codex via `codex-acp` (binary) or `@zed-industries/codex-acp` (npx) | `"codex-acp"` |
+| Kiro CLI (`kiro-cli acp`) | `"kiro"` |
+| Anything else | `"generic"` (this is also the default when the field is omitted) |
+
+`"generic"` applies heuristic fallbacks (case-insensitive title matching, ACP `ToolKind` passthrough). Your agent will work fine — you'll just get generic glyphs and no mode-badge translation. File an issue if your agent's tool vocabulary is widely used and deserves a dedicated `AgentKind` variant.
+
+**Don't infer — declare.** spur does not try to guess `kind` from `command`/`args` substrings. An explicit value in the TOML is cheap, reviewable, and immune to upstream rename.
+
 ### Step 2 — Choose a dispatch
 
 | Your agent… | `[commands]` |

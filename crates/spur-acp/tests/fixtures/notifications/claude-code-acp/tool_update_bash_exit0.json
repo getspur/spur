@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess-cc-001",
+  "update": {
+    "sessionUpdate": "tool_call_update",
+    "toolCallId": "tc-bash-001",
+    "status": "completed",
+    "rawOutput": {
+      "stdout": "ok\n",
+      "stderr": "",
+      "exit_code": 0
+    }
+  }
+}

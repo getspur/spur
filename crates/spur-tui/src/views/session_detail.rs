@@ -108,15 +108,15 @@ impl SessionDetailView {
         cwd: std::path::PathBuf,
         agent_cfg: std::sync::Arc<spur_acp::AgentConfig>,
     ) -> Self {
-        let command_registry = crate::commands::CommandRegistry::from_configs(
-            std::slice::from_ref(&*agent_cfg),
-        );
+        let command_registry =
+            crate::commands::CommandRegistry::from_configs(std::slice::from_ref(&*agent_cfg));
+        let agent_kind = agent_cfg.kind;
         Self {
             session_id,
             agent_name,
             role,
             agent_cfg,
-            react_trace: ReactTrace::new(),
+            react_trace: ReactTrace::with_kind(agent_kind),
             input_bar: InputBar::new(),
             cost: 0.0,
             started_at: Instant::now(),
@@ -245,7 +245,10 @@ impl SessionDetailView {
     pub fn invalidate_inline_protocols(&mut self) {
         use crate::components::mermaid::MermaidState;
         for state in self.mermaid_registry.values() {
-            if let MermaidState::Ready { inline_protocol, .. } = state {
+            if let MermaidState::Ready {
+                inline_protocol, ..
+            } = state
+            {
                 *inline_protocol.borrow_mut() = None;
             }
         }
@@ -306,6 +309,18 @@ impl SessionDetailView {
         crate::components::now_stamp()
     }
 
+    /// Agent kind for this session, used by the adapter layer.
+    fn agent_kind(&self) -> spur_acp::AgentKind {
+        self.agent_cfg.kind
+    }
+
+    /// Set the current session mode and propagate it into the trace pane so
+    /// the pane-title badge renders the new mode.
+    pub(crate) fn set_current_mode(&mut self, mode: Option<String>) {
+        self.current_mode = mode.clone();
+        self.react_trace.set_mode(mode);
+    }
+
     /// Format elapsed time since view was opened.
     fn elapsed(&self) -> String {
         crate::components::format_elapsed(self.started_at)
@@ -314,10 +329,8 @@ impl SessionDetailView {
     /// Update the brain status label shown in the InputBar.
     pub fn set_brain_status(&mut self, status: &str) {
         if self.cancelling_in_flight {
-            self.input_bar.set_status(Some(format!(
-                "[{}: cancelling\u{2026}]",
-                self.agent_name
-            )));
+            self.input_bar
+                .set_status(Some(format!("[{}: cancelling\u{2026}]", self.agent_name)));
             return;
         }
         let label = match status {
@@ -362,7 +375,7 @@ impl SessionDetailView {
     /// itself, e.g. stubbed kiro execution).
     pub fn push_system_note(&mut self, msg: impl Into<String>) {
         self.react_trace.push(TraceEntry {
-            kind: TraceKind::Observe,
+            kind: TraceKind::Observe { payload: None },
             text: msg.into(),
             timestamp: Self::now_stamp(),
             #[cfg(feature = "markdown")]
@@ -386,12 +399,13 @@ impl SessionDetailView {
     /// the user presses `Esc` to cancel an in-flight stream.
     fn push_cancel_note(&mut self) {
         let text = match self.cancel_mode {
-            Some(spur_acp::CancelMode::AcpSoft) =>
-                "\u{23f9} Cancellation requested \u{2014} waiting for agent\u{2026}",
-            Some(spur_acp::CancelMode::ProcessKill) =>
-                "\u{23f9} Stopping agent (process will restart on next message)",
-            None =>
-                "\u{23f9} Cancellation requested",
+            Some(spur_acp::CancelMode::AcpSoft) => {
+                "\u{23f9} Cancellation requested \u{2014} waiting for agent\u{2026}"
+            }
+            Some(spur_acp::CancelMode::ProcessKill) => {
+                "\u{23f9} Stopping agent (process will restart on next message)"
+            }
+            None => "\u{23f9} Cancellation requested",
         };
         self.react_trace.push(TraceEntry {
             kind: TraceKind::Think,
@@ -526,12 +540,9 @@ impl SessionDetailView {
                 self.active_mention_hits.clear();
             }
             Some(t) if t.kind == TriggerKind::Mention => {
-                let hits = self.mention_registry.query(
-                    &self.session_id,
-                    &self.cwd,
-                    &t.query,
-                    20,
-                );
+                let hits = self
+                    .mention_registry
+                    .query(&self.session_id, &self.cwd, &t.query, 20);
                 let rows: Vec<PopupRow> = hits
                     .iter()
                     .map(|m| {
@@ -609,7 +620,9 @@ impl SessionDetailView {
     /// Build (error_ids, pending_ids) sets from the mermaid registry for use
     /// in constructing a `StateLookup`.
     #[cfg(feature = "markdown")]
-    fn build_state_lookup_sets(&self) -> (
+    fn build_state_lookup_sets(
+        &self,
+    ) -> (
         std::collections::HashSet<crate::components::mermaid::MermaidId>,
         std::collections::HashSet<crate::components::mermaid::MermaidId>,
     ) {
@@ -618,8 +631,12 @@ impl SessionDetailView {
         let mut pending = std::collections::HashSet::new();
         for (id, state) in &self.mermaid_registry {
             match state {
-                MermaidState::Error { .. } => { errors.insert(*id); }
-                MermaidState::Pending { .. } | MermaidState::Rendering => { pending.insert(*id); }
+                MermaidState::Error { .. } => {
+                    errors.insert(*id);
+                }
+                MermaidState::Pending { .. } | MermaidState::Rendering => {
+                    pending.insert(*id);
+                }
                 MermaidState::Ready { .. } => {}
             }
         }
@@ -639,16 +656,11 @@ impl SessionDetailView {
         // Priority 0: Esc-to-cancel takes precedence when a stream is in flight
         // and we're not already cancelling. Second Esc falls through to the
         // existing Esc handlers (popup dismiss / NavigateBack).
-        if matches!(key.code, KeyCode::Esc)
-            && self.stream_in_flight
-            && !self.cancelling_in_flight
-        {
+        if matches!(key.code, KeyCode::Esc) && self.stream_in_flight && !self.cancelling_in_flight {
             self.cancelling_in_flight = true;
             self.push_cancel_note();
-            self.input_bar.set_status(Some(format!(
-                "[{}: cancelling\u{2026}]",
-                self.agent_name
-            )));
+            self.input_bar
+                .set_status(Some(format!("[{}: cancelling\u{2026}]", self.agent_name)));
             return Some(Action::CancelStream {
                 session: self.session_id.clone(),
             });
@@ -674,7 +686,9 @@ impl SessionDetailView {
             && key.modifiers.contains(KeyModifiers::ALT)
             && self.render_picker.is_some()
         {
-            return Some(Action::NavigateTo(ViewId::MermaidOverlay(self.session_id.clone())));
+            return Some(Action::NavigateTo(ViewId::MermaidOverlay(
+                self.session_id.clone(),
+            )));
         }
 
         // Priority 1: Permission handling when a permission is pending.
@@ -746,21 +760,17 @@ impl SessionDetailView {
                     let dec = route(&text, &ranges, &self.command_registry, interrupt);
                     return match dec {
                         SubmitDecision::Empty => None,
-                        SubmitDecision::Send { blocks, interrupt } => {
-                            Some(Action::SendMessage {
-                                session: self.session_id.clone(),
-                                blocks,
-                                interrupt,
-                            })
-                        }
+                        SubmitDecision::Send { blocks, interrupt } => Some(Action::SendMessage {
+                            session: self.session_id.clone(),
+                            blocks,
+                            interrupt,
+                        }),
                         SubmitDecision::Local { action } => Some(action),
-                        SubmitDecision::VendorExec { method, params } => {
-                            Some(Action::VendorExec {
-                                session: self.session_id.clone(),
-                                method,
-                                params,
-                            })
-                        }
+                        SubmitDecision::VendorExec { method, params } => Some(Action::VendorExec {
+                            session: self.session_id.clone(),
+                            method,
+                            params,
+                        }),
                     };
                 }
                 return None;
@@ -871,7 +881,10 @@ impl View for SessionDetailView {
 
     fn handle_spur_event(&mut self, event: &SpurEvent) {
         match &event.body {
-            SpurEventBody::AgentNotification { session, notification } => {
+            SpurEventBody::AgentNotification {
+                session,
+                notification,
+            } => {
                 if session.0 != self.session_id.0 {
                     return;
                 }
@@ -893,10 +906,8 @@ impl View for SessionDetailView {
                         self.stream_in_flight = true;
                         if let Some(text) = extract_text(chunk) {
                             if !text.is_empty() {
-                                let prev_kind = self
-                                    .react_trace
-                                    .last_entry_kind_name()
-                                    .unwrap_or("none");
+                                let prev_kind =
+                                    self.react_trace.last_entry_kind_name().unwrap_or("none");
                                 let will_continue = prev_kind == "agent_message";
                                 tracing::debug!(
                                     streaming_probe = true,
@@ -907,44 +918,76 @@ impl View for SessionDetailView {
                                     session = %self.session_id,
                                     "about to append_message"
                                 );
-                                self.react_trace.append_message(text, &self.agent_name, Self::now_stamp());
+                                self.react_trace.append_message(
+                                    text,
+                                    &self.agent_name,
+                                    Self::now_stamp(),
+                                );
                             }
                         }
                     }
                     spur_acp::SessionUpdate::ToolCall(tc) => {
-                        let null = serde_json::Value::Null;
-                        let args = format_tool_args(tc.raw_input.as_ref().unwrap_or(&null));
+                        use spur_acp::adapter::{self, ToolInputDisplay};
+                        let kind = self.agent_kind();
+                        let family = adapter::classify_tool(tc, kind);
+                        let input = tc
+                            .raw_input
+                            .as_ref()
+                            .map(|v| adapter::format_input(v, kind))
+                            .unwrap_or(ToolInputDisplay::Empty);
+                        let fallback_text = tc
+                            .raw_input
+                            .as_ref()
+                            .map(format_tool_args)
+                            .unwrap_or_default();
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Act {
                                 tool: tc.title.clone(),
-                                args,
+                                family,
+                                input,
                             },
-                            text: String::new(),
+                            text: fallback_text,
                             timestamp: Self::now_stamp(),
                             #[cfg(feature = "markdown")]
                             markdown: None,
                         });
                     }
                     spur_acp::SessionUpdate::ToolCallUpdate(tcu) => {
-                        let null = serde_json::Value::Null;
-                        let text = format_observe_output(tcu.fields.raw_output.as_ref().unwrap_or(&null));
+                        use spur_acp::adapter;
+                        let kind = self.agent_kind();
+                        let payload = tcu
+                            .fields
+                            .raw_output
+                            .as_ref()
+                            .map(|v| adapter::extract_observe(v, kind));
+                        let fallback_text = tcu
+                            .fields
+                            .raw_output
+                            .as_ref()
+                            .map(format_observe_output)
+                            .unwrap_or_default();
                         self.react_trace.push(TraceEntry {
-                            kind: TraceKind::Observe,
-                            text,
+                            kind: TraceKind::Observe { payload },
+                            text: fallback_text,
                             timestamp: Self::now_stamp(),
                             #[cfg(feature = "markdown")]
                             markdown: None,
                         });
                     }
                     spur_acp::SessionUpdate::Plan(plan) => {
-                        let text = plan.entries.iter().map(|e| {
-                            let marker = match &e.status {
-                                spur_acp::PlanEntryStatus::Completed => "[x]",
-                                spur_acp::PlanEntryStatus::InProgress => "[~]",
-                                _ => "[ ]",
-                            };
-                            format!("{} {}", marker, e.content)
-                        }).collect::<Vec<_>>().join("\n");
+                        let text = plan
+                            .entries
+                            .iter()
+                            .map(|e| {
+                                let marker = match &e.status {
+                                    spur_acp::PlanEntryStatus::Completed => "[x]",
+                                    spur_acp::PlanEntryStatus::InProgress => "[~]",
+                                    _ => "[ ]",
+                                };
+                                format!("{} {}", marker, e.content)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Think,
                             text,
@@ -1047,11 +1090,16 @@ impl View for SessionDetailView {
                         use crate::components::markdown_stream::StateLookup;
 
                         let (error_ids, pending_ids) = self.build_state_lookup_sets();
-                        let states = StateLookup { errors: &error_ids, pending: &pending_ids };
+                        let states = StateLookup {
+                            errors: &error_ids,
+                            pending: &pending_ids,
+                        };
                         for (_entry_idx, fence) in self.react_trace.force_flush_all(&states) {
                             self.mermaid_registry.insert(
                                 fence.id,
-                                crate::components::mermaid::MermaidState::Pending { code: fence.code.clone() },
+                                crate::components::mermaid::MermaidState::Pending {
+                                    code: fence.code.clone(),
+                                },
                             );
                             self.pending_fence_actions.push_back(
                                 crate::action::Action::MermaidRenderRequest {
@@ -1068,7 +1116,7 @@ impl View for SessionDetailView {
             SpurEventBody::BrainError { session, message } => {
                 if session.0 == self.session_id.0 {
                     self.react_trace.push(TraceEntry {
-                        kind: TraceKind::Observe,
+                        kind: TraceKind::Observe { payload: None },
                         text: format!("BRAIN ERROR: {}", message),
                         timestamp: Self::now_stamp(),
                         #[cfg(feature = "markdown")]
@@ -1077,7 +1125,11 @@ impl View for SessionDetailView {
                 }
             }
 
-            SpurEventBody::AgentExtNotification { session, method, params } => {
+            SpurEventBody::AgentExtNotification {
+                session,
+                method,
+                params,
+            } => {
                 if session.0 != self.session_id.0 {
                     return;
                 }
@@ -1137,20 +1189,24 @@ impl View for SessionDetailView {
             use crate::components::markdown_stream::StateLookup;
 
             let (error_ids, pending_ids) = self.build_state_lookup_sets();
-            let states = StateLookup { errors: &error_ids, pending: &pending_ids };
+            let states = StateLookup {
+                errors: &error_ids,
+                pending: &pending_ids,
+            };
 
             for (_entry_idx, fence) in self.react_trace.drain_fence_dispatches(&states) {
                 self.mermaid_registry.insert(
                     fence.id,
-                    crate::components::mermaid::MermaidState::Pending { code: fence.code.clone() },
+                    crate::components::mermaid::MermaidState::Pending {
+                        code: fence.code.clone(),
+                    },
                 );
-                self.pending_fence_actions.push_back(
-                    crate::action::Action::MermaidRenderRequest {
+                self.pending_fence_actions
+                    .push_back(crate::action::Action::MermaidRenderRequest {
                         session: self.session_id.clone(),
                         ref_id: fence.id,
                         code: fence.code,
-                    },
-                );
+                    });
             }
         }
     }
@@ -1195,11 +1251,8 @@ impl SessionDetailView {
         // If an auth error is active, split off the top 3 rows for a red
         // banner. This preserves the rest of the layout exactly as before.
         let (banner_area, content_area) = if self.auth_error.is_some() {
-            let [banner, content] = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Min(0),
-            ])
-            .areas(area_rest);
+            let [banner, content] =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area_rest);
             (Some(banner), content)
         } else {
             (None, area_rest)
@@ -1226,7 +1279,7 @@ impl SessionDetailView {
         let input_height = self.input_bar.required_height(content_area.width);
         let chunks = Layout::vertical([
             Constraint::Length(1),            // header
-            Constraint::Min(4),              // react trace (fills)
+            Constraint::Min(4),               // react trace (fills)
             Constraint::Length(input_height), // input bar
             Constraint::Length(1),            // status bar
         ])
@@ -1234,10 +1287,7 @@ impl SessionDetailView {
 
         // ── Header: breadcrumb + elapsed + cost ─────────────────────────
         let header = Line::from(vec![
-            Span::styled(
-                " Dashboard > ",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" Dashboard > ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 &self.agent_name,
                 Style::default()
@@ -1265,7 +1315,8 @@ impl SessionDetailView {
                 mermaid_registry: &self.mermaid_registry,
                 picker: self.render_picker.as_ref(),
             };
-            self.react_trace.render_with_ctx(frame, chunks[1], &ctx, lineage);
+            self.react_trace
+                .render_with_ctx(frame, chunks[1], &ctx, lineage);
         }
         #[cfg(not(feature = "markdown"))]
         self.react_trace.render(frame, chunks[1], lineage);
@@ -1298,9 +1349,7 @@ impl SessionDetailView {
         );
 
         // ── Resume banner (top row, if visible) ─────────────────────────
-        if let (Some(banner), Some(rect)) =
-            (self.resume_banner.as_ref(), resume_banner_area)
-        {
+        if let (Some(banner), Some(rect)) = (self.resume_banner.as_ref(), resume_banner_area) {
             banner.render(frame, rect);
         }
     }
@@ -1433,8 +1482,9 @@ mod invalidate_protocols_tests {
             },
         );
         // Sanity: slot starts None.
-        if let Some(MermaidState::Ready { inline_protocol, .. }) =
-            view.mermaid_registry.get(&id)
+        if let Some(MermaidState::Ready {
+            inline_protocol, ..
+        }) = view.mermaid_registry.get(&id)
         {
             assert!(inline_protocol.borrow().is_none());
         }
@@ -1445,18 +1495,33 @@ mod invalidate_protocols_tests {
             .insert(MermaidId(2), MermaidState::Rendering);
         view.mermaid_registry.insert(
             MermaidId(3),
-            MermaidState::Error { message: "boom".to_string() },
+            MermaidState::Error {
+                message: "boom".to_string(),
+            },
         );
         view.invalidate_inline_protocols();
 
-        assert!(matches!(view.mermaid_registry.get(&MermaidId(1)), Some(MermaidState::Ready { .. })));
-        assert!(matches!(view.mermaid_registry.get(&MermaidId(2)), Some(MermaidState::Rendering)));
-        assert!(matches!(view.mermaid_registry.get(&MermaidId(3)), Some(MermaidState::Error { .. })));
+        assert!(matches!(
+            view.mermaid_registry.get(&MermaidId(1)),
+            Some(MermaidState::Ready { .. })
+        ));
+        assert!(matches!(
+            view.mermaid_registry.get(&MermaidId(2)),
+            Some(MermaidState::Rendering)
+        ));
+        assert!(matches!(
+            view.mermaid_registry.get(&MermaidId(3)),
+            Some(MermaidState::Error { .. })
+        ));
 
-        if let Some(MermaidState::Ready { inline_protocol, .. }) =
-            view.mermaid_registry.get(&MermaidId(1))
+        if let Some(MermaidState::Ready {
+            inline_protocol, ..
+        }) = view.mermaid_registry.get(&MermaidId(1))
         {
-            assert!(inline_protocol.borrow().is_none(), "slot should remain None after invalidate");
+            assert!(
+                inline_protocol.borrow().is_none(),
+                "slot should remain None after invalidate"
+            );
         }
     }
 
@@ -1500,9 +1565,7 @@ mod invalidate_protocols_tests {
 #[cfg(test)]
 mod static_command_seeding_tests {
     use super::*;
-    use spur_acp::{
-        AgentConfig, CommandsConfig, DispatchKind, SessionId, StaticCommandDecl,
-    };
+    use spur_acp::{AgentConfig, CommandsConfig, DispatchKind, SessionId, StaticCommandDecl};
     use std::sync::Arc;
 
     #[test]
@@ -1531,7 +1594,10 @@ mod static_command_seeding_tests {
             .iter()
             .map(|e| e.name.clone())
             .collect();
-        assert!(names.contains(&"compact".to_string()), "static /compact should be visible at startup, got {names:?}");
+        assert!(
+            names.contains(&"compact".to_string()),
+            "static /compact should be visible at startup, got {names:?}"
+        );
     }
 }
 
@@ -1552,13 +1618,10 @@ mod cancel_state_tests {
     }
 
     fn agent_msg_chunk_event(session: &spur_acp::SessionId) -> SpurEvent {
-        let update = spur_acp::SessionUpdate::AgentMessageChunk(
-            spur_acp::ContentChunk::new(spur_acp::ContentBlock::from("hi".to_string())),
-        );
-        let notification = spur_acp::SessionNotification::new(
-            session.0.clone(),
-            update,
-        );
+        let update = spur_acp::SessionUpdate::AgentMessageChunk(spur_acp::ContentChunk::new(
+            spur_acp::ContentBlock::from("hi".to_string()),
+        ));
+        let notification = spur_acp::SessionNotification::new(session.0.clone(), update);
         SpurEvent::now(SpurEventBody::AgentNotification {
             session: session.clone(),
             notification: Box::new(notification),
@@ -1566,10 +1629,15 @@ mod cancel_state_tests {
     }
 
     fn turn_complete_event(session: &spur_acp::SessionId) -> SpurEvent {
-        SpurEvent::now(SpurEventBody::TurnComplete { session: session.clone() })
+        SpurEvent::now(SpurEventBody::TurnComplete {
+            session: session.clone(),
+        })
     }
 
-    fn agent_session_ready_event(session: &spur_acp::SessionId, mode: spur_acp::CancelMode) -> SpurEvent {
+    fn agent_session_ready_event(
+        session: &spur_acp::SessionId,
+        mode: spur_acp::CancelMode,
+    ) -> SpurEvent {
         SpurEvent::now(SpurEventBody::AgentSessionReady {
             session: session.clone(),
             acp_session_id: "acp-1".into(),
@@ -1610,7 +1678,10 @@ mod cancel_state_tests {
     fn agent_session_ready_populates_cancel_mode() {
         let mut v = make_view();
         let sid = v.session_id().clone();
-        v.handle_spur_event(&agent_session_ready_event(&sid, spur_acp::CancelMode::AcpSoft));
+        v.handle_spur_event(&agent_session_ready_event(
+            &sid,
+            spur_acp::CancelMode::AcpSoft,
+        ));
         assert_eq!(v.cancel_mode, Some(spur_acp::CancelMode::AcpSoft));
     }
 
@@ -1634,7 +1705,8 @@ mod cancel_state_tests {
         let mut v = make_view();
         v.stream_in_flight = true;
         v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
-        let action = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let action =
+            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
         assert!(matches!(action, Some(Action::CancelStream { .. })));
         assert!(v.cancelling_in_flight);
     }
@@ -1644,14 +1716,16 @@ mod cancel_state_tests {
         let mut v = make_view();
         v.stream_in_flight = true;
         v.cancelling_in_flight = true;
-        let action = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let action =
+            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
         assert!(matches!(action, Some(Action::NavigateBack)));
     }
 
     #[test]
     fn esc_without_stream_preserves_navigate_back() {
         let mut v = make_view();
-        let action = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let action =
+            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
         assert!(matches!(action, Some(Action::NavigateBack)));
     }
 
@@ -1663,8 +1737,10 @@ mod cancel_state_tests {
         let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
         let trace = v.react_trace();
         let last_text = trace.last_text().unwrap_or_default();
-        assert!(last_text.contains("Cancellation requested"),
-                "expected AcpSoft message; got {last_text:?}");
+        assert!(
+            last_text.contains("Cancellation requested"),
+            "expected AcpSoft message; got {last_text:?}"
+        );
     }
 
     #[test]
@@ -1675,8 +1751,10 @@ mod cancel_state_tests {
         let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
         let trace = v.react_trace();
         let last_text = trace.last_text().unwrap_or_default();
-        assert!(last_text.contains("Stopping agent"),
-                "expected ProcessKill message; got {last_text:?}");
+        assert!(
+            last_text.contains("Stopping agent"),
+            "expected ProcessKill message; got {last_text:?}"
+        );
     }
 
     #[test]
@@ -1687,7 +1765,9 @@ mod cancel_state_tests {
         let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
         let trace = v.react_trace();
         let last_text = trace.last_text().unwrap_or_default();
-        assert!(last_text.contains("Cancellation requested"),
-                "expected generic fallback; got {last_text:?}");
+        assert!(
+            last_text.contains("Cancellation requested"),
+            "expected generic fallback; got {last_text:?}"
+        );
     }
 }

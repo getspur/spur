@@ -30,7 +30,10 @@ skip_permissions_session_mode = "bypassPermissions"
 "#;
     let cfg: AgentConfig = toml::from_str(toml_src).expect("parse");
     assert!(cfg.skip_permissions);
-    assert_eq!(cfg.skip_permissions_args, vec!["--trust-all-tools".to_string()]);
+    assert_eq!(
+        cfg.skip_permissions_args,
+        vec!["--trust-all-tools".to_string()]
+    );
     assert_eq!(
         cfg.skip_permissions_session_mode.as_deref(),
         Some("bypassPermissions")
@@ -44,6 +47,7 @@ fn skip_permissions_round_trips_through_toml() {
         command: "kiro-cli".into(),
         args: vec!["acp".into()],
         transport: spur_acp::types::TransportKind::Acp,
+        kind: spur_acp::types::AgentKind::Generic,
         role: spur_acp::types::AgentRole::Both,
         capabilities: vec![],
         cost_tier: spur_acp::types::CostTier::Medium,
@@ -59,7 +63,10 @@ fn skip_permissions_round_trips_through_toml() {
     let encoded = toml::to_string(&original).expect("serialize");
     let decoded: AgentConfig = toml::from_str(&encoded).expect("deserialize");
     assert!(decoded.skip_permissions);
-    assert_eq!(decoded.skip_permissions_args, vec!["--trust-all-tools".to_string()]);
+    assert_eq!(
+        decoded.skip_permissions_args,
+        vec!["--trust-all-tools".to_string()]
+    );
     assert_eq!(
         decoded.skip_permissions_session_mode.as_deref(),
         Some("bypassPermissions")
@@ -73,6 +80,7 @@ fn effective_args_returns_plain_args_when_disabled() {
         command: "kiro-cli".into(),
         args: vec!["acp".into()],
         transport: spur_acp::types::TransportKind::Acp,
+        kind: spur_acp::types::AgentKind::Generic,
         role: spur_acp::types::AgentRole::Both,
         capabilities: vec![],
         cost_tier: spur_acp::types::CostTier::Medium,
@@ -95,6 +103,7 @@ fn effective_args_appends_skip_args_when_enabled() {
         command: "kiro-cli".into(),
         args: vec!["acp".into()],
         transport: spur_acp::types::TransportKind::Acp,
+        kind: spur_acp::types::AgentKind::Generic,
         role: spur_acp::types::AgentRole::Both,
         capabilities: vec![],
         cost_tier: spur_acp::types::CostTier::Medium,
@@ -120,8 +129,12 @@ fn effective_args_returns_plain_args_when_enabled_but_no_skip_args() {
     let cfg = AgentConfig {
         name: "claude-code-acp".into(),
         command: "npx".into(),
-        args: vec!["--yes".into(), "@agentclientprotocol/claude-agent-acp@0.26.0".into()],
+        args: vec![
+            "--yes".into(),
+            "@agentclientprotocol/claude-agent-acp@0.26.0".into(),
+        ],
         transport: spur_acp::types::TransportKind::Acp,
+        kind: spur_acp::types::AgentKind::Generic,
         role: spur_acp::types::AgentRole::Both,
         capabilities: vec![],
         cost_tier: spur_acp::types::CostTier::Medium,
