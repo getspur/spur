@@ -452,6 +452,11 @@ impl Orchestrator {
         // or load_brain_session without re-running connect_brain.
         let mut agent_connection: Option<(Box<dyn spur_acp::AgentConnection>, String)> = None;
 
+        let mut reconnect_failures: std::collections::VecDeque<std::time::Instant> =
+            std::collections::VecDeque::new();
+        const RECONNECT_CIRCUIT_LIMIT: usize = 2;
+        const RECONNECT_CIRCUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
         loop {
             // ── Get next input (from queue or user) ────────────────────
             let input = if !pending_messages.is_empty() {
@@ -621,7 +626,9 @@ impl Orchestrator {
                                 "VendorExec params is not a JSON object; sessionId not injected"
                             );
                         }
-                        match b.connection.call_ext(&method, params).await {
+                        let brain_name_for_log = b.brain_name.clone();
+                        let call_result = b.connection.call_ext(&method, params).await;
+                        match call_result {
                             Ok(resp) => {
                                 self.emit(SpurEvent::now(SpurEventBody::AgentExtNotification {
                                     session: session.clone(),
@@ -631,15 +638,35 @@ impl Orchestrator {
                             }
                             Err(e) => {
                                 warn!(
-                                    brain = %b.brain_name,
+                                    brain = %brain_name_for_log,
                                     method = %method,
                                     error = %e,
                                     "vendor exec call failed"
                                 );
-                                self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                    session,
-                                    message: format!("vendor exec `{}` failed: {}", method, e),
-                                }));
+                                if is_connection_death(&e) {
+                                    if let Some(dead) = brain.take() {
+                                        let reason = format!("vendor exec `{method}` died: {e}");
+                                        if let Some(new_brain) = self
+                                            .reconnect_with_events(
+                                                dead,
+                                                permission_tx.clone(),
+                                                brain_override.as_deref(),
+                                                reason,
+                                                &mut reconnect_failures,
+                                                RECONNECT_CIRCUIT_LIMIT,
+                                                RECONNECT_CIRCUIT_WINDOW,
+                                            )
+                                            .await
+                                        {
+                                            brain = Some(new_brain);
+                                        }
+                                    }
+                                } else {
+                                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                                        session,
+                                        message: format!("vendor exec `{}` failed: {}", method, e),
+                                    }));
+                                }
                             }
                         }
                     } else {
@@ -733,6 +760,9 @@ impl Orchestrator {
 
                     // ── Send prompt ─────────────────────────────────────
                     let prompt_request = PromptRequest::new(b.acp_session_id.clone(), blocks);
+                    // Pre-capture session ID so the Err branch can use it
+                    // without holding the `b` borrow (needed for brain.take()).
+                    let spur_sid_for_log = b.spur_session_id.clone();
 
                     let prompt_started_at = std::time::Instant::now();
                     let mut stream = match b.connection.prompt(prompt_request).await {
@@ -741,22 +771,49 @@ impl Orchestrator {
                             error!(error = %e, "Brain prompt failed");
                             if Self::is_auth_required_error(&e) {
                                 self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
-                                    session: b.spur_session_id.clone(),
+                                    session: spur_sid_for_log,
                                     message: Self::auth_required_banner(),
                                 }));
-                            } else {
-                                self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                    session: b.spur_session_id.clone(),
-                                    message: e.to_string(),
-                                }));
+                                let mut dead = brain.take().expect("brain.as_mut() just held it");
+                                dead.delegation_handle.abort();
+                                if let Some(h) = dead.notification_pump_handle.take() {
+                                    h.abort();
+                                }
+                                dead.mcp_handle.abort();
+                                let _ = dead.connection.shutdown().await;
+                                continue;
                             }
-                            b.delegation_handle.abort();
-                            if let Some(h) = b.notification_pump_handle.take() {
+                            if is_connection_death(&e) {
+                                let dead = brain.take().expect("brain.as_mut() just held it");
+                                let reason = format!("prompt died: {e}");
+                                if let Some(new_brain) = self
+                                    .reconnect_with_events(
+                                        dead,
+                                        permission_tx.clone(),
+                                        brain_override.as_deref(),
+                                        reason,
+                                        &mut reconnect_failures,
+                                        RECONNECT_CIRCUIT_LIMIT,
+                                        RECONNECT_CIRCUIT_WINDOW,
+                                    )
+                                    .await
+                                {
+                                    brain = Some(new_brain);
+                                }
+                                // Drop this turn's prompt regardless (no auto-replay).
+                                continue;
+                            }
+                            self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                                session: spur_sid_for_log,
+                                message: e.to_string(),
+                            }));
+                            let mut dead = brain.take().expect("brain.as_mut() just held it");
+                            dead.delegation_handle.abort();
+                            if let Some(h) = dead.notification_pump_handle.take() {
                                 h.abort();
                             }
-                            b.mcp_handle.abort();
-                            let _ = b.connection.shutdown().await;
-                            brain = None;
+                            dead.mcp_handle.abort();
+                            let _ = dead.connection.shutdown().await;
                             continue;
                         }
                     };
@@ -1481,6 +1538,79 @@ impl Orchestrator {
         while let Some(_notification) = history_stream.next().await {}
 
         Ok((new_session, outcome))
+    }
+
+    /// Wrap `try_reconnect_brain` with the three event emissions and
+    /// the circuit-breaker bookkeeping. Returns `Some(new_brain)` if
+    /// reconnect succeeded; `None` if the breaker is open or reconnect
+    /// failed (in which case `BrainReconnectFailed` was already
+    /// emitted).
+    async fn reconnect_with_events(
+        &mut self,
+        dead_brain: BrainSession,
+        permission_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
+        >,
+        brain_override: Option<&str>,
+        trigger_reason: String,
+        failures: &mut std::collections::VecDeque<std::time::Instant>,
+        limit: usize,
+        window: std::time::Duration,
+    ) -> Option<BrainSession> {
+        let spur_session_id = dead_brain.spur_session_id.clone();
+        let brain_name = dead_brain.brain_name.clone();
+
+        // Trim stale failure timestamps and check the breaker.
+        let now = std::time::Instant::now();
+        while let Some(front) = failures.front() {
+            if now.duration_since(*front) > window {
+                failures.pop_front();
+            } else {
+                break;
+            }
+        }
+        if failures.len() >= limit {
+            self.emit(SpurEvent::now(SpurEventBody::BrainReconnectFailed {
+                session: spur_session_id,
+                brain_name,
+                reason: format!(
+                    "circuit breaker: {} reconnect failures within {:?}",
+                    failures.len(),
+                    window
+                ),
+            }));
+            return None;
+        }
+
+        self.emit(SpurEvent::now(SpurEventBody::BrainReconnecting {
+            session: spur_session_id.clone(),
+            brain_name: brain_name.clone(),
+            reason: trigger_reason,
+        }));
+
+        match self
+            .try_reconnect_brain(dead_brain, permission_tx, brain_override)
+            .await
+        {
+            Ok((new_brain, outcome)) => {
+                failures.clear();
+                self.emit(SpurEvent::now(SpurEventBody::BrainReconnected {
+                    session: new_brain.spur_session_id.clone(),
+                    brain_name: new_brain.brain_name.clone(),
+                    outcome,
+                }));
+                Some(new_brain)
+            }
+            Err(e) => {
+                failures.push_back(std::time::Instant::now());
+                self.emit(SpurEvent::now(SpurEventBody::BrainReconnectFailed {
+                    session: spur_session_id,
+                    brain_name,
+                    reason: e.to_string(),
+                }));
+                None
+            }
+        }
     }
 
     /// Spawn a brain agent session with MCP callback server and delegation handler.
