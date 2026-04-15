@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -333,6 +333,18 @@ impl DashboardView {
         }
 
         // Priority 1: If key is printable or editing, route to InputBar
+        //
+        // Ctrl+P / Ctrl+N → input history navigation (intercept before
+        // the editing-key block so they don't get routed to InputBar).
+        if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.input_bar.history_prev();
+            return None;
+        }
+        if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.input_bar.history_next();
+            return None;
+        }
+
         let is_editing_key = matches!(
             key.code,
             KeyCode::Char(_)

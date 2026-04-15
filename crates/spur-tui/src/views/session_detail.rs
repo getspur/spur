@@ -681,6 +681,22 @@ impl SessionDetailView {
             return Some(Action::RequestSessions);
         }
 
+        // Ctrl+O → toggle collapse/expand on Observe (tool-result) entries.
+        if matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.react_trace.toggle_observe_collapsed();
+            return None;
+        }
+
+        // Ctrl+P / Ctrl+N → input history navigation.
+        if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.input_bar.history_prev();
+            return None;
+        }
+        if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.input_bar.history_next();
+            return None;
+        }
+
         #[cfg(feature = "markdown")]
         if matches!(key.code, KeyCode::Char('v'))
             && key.modifiers.contains(KeyModifiers::ALT)
