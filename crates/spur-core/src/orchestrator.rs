@@ -435,7 +435,7 @@ impl Orchestrator {
         };
 
         // 3. Build brain prompt.
-        let prompt_text = self.build_brain_prompt(task, issue_context.as_ref());
+        let prompt_text = self.build_brain_prompt(task, issue_context.as_ref(), &session_id);
 
         // 4. Start MCP callback server.
         let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
@@ -1969,9 +1969,9 @@ impl Orchestrator {
         build_connection_from_transport(config, args, perm_tx)
     }
 
-    fn build_brain_prompt(&self, task: &str, issue: Option<&Issue>) -> String {
+    fn build_brain_prompt(&self, task: &str, issue: Option<&Issue>, session_id: &SessionId) -> String {
         if self.config.brain.delegation.framework == "v1" {
-            self.build_brain_prompt_v1(task, issue)
+            self.build_brain_prompt_v1(task, issue, session_id)
         } else {
             self.build_brain_prompt_legacy(task, issue)
         }
@@ -2017,7 +2017,7 @@ impl Orchestrator {
         prompt
     }
 
-    fn build_brain_prompt_v1(&self, task: &str, issue: Option<&Issue>) -> String {
+    fn build_brain_prompt_v1(&self, task: &str, issue: Option<&Issue>, session_id: &SessionId) -> String {
         let mut prompt = String::new();
         prompt.push_str(&self.render_header());
         prompt.push_str(&self.render_workers_block());
@@ -2026,7 +2026,7 @@ impl Orchestrator {
         prompt.push_str(TASK_STRUCTURE);
         prompt.push_str(CANONICAL_EXAMPLE);
         self.append_issue_and_task(&mut prompt, task, issue);
-        self.log_prompt_once(&prompt);
+        self.log_prompt_once(&prompt, session_id);
         prompt
     }
 
@@ -2088,19 +2088,16 @@ impl Orchestrator {
         prompt.push_str(&format!("## Task\n\n{}\n", task));
     }
 
-    fn log_prompt_once(&self, prompt: &str) {
+    fn log_prompt_once(&self, prompt: &str, session_id: &SessionId) {
         let dir = self.repo_root.join(".spur/logs/brain-prompts");
         if let Err(e) = std::fs::create_dir_all(&dir) {
             tracing::debug!(error = %e, "could not create brain-prompts log dir");
             return;
         }
-        // Use a timestamp-based filename since there is no per-call session id
-        // accessor on Orchestrator; a timestamp is unique enough for logging.
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros())
-            .unwrap_or(0);
-        let path = dir.join(format!("{}.md", ts));
+        // Use the spur session id as the filename so that repeated calls within
+        // the same session overwrite the prior log (one log per session intent).
+        // SessionId wraps a UUID string, which is filename-safe by construction.
+        let path = dir.join(format!("{}.md", session_id));
         if let Err(e) = std::fs::write(&path, prompt) {
             tracing::debug!(error = %e, path = %path.display(), "could not write prompt log");
         }
