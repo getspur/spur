@@ -23,6 +23,11 @@ pub struct DelegationRequest {
     /// correctly identify the brain in lineage. Stamped at every
     /// construction site in the MCP server.
     pub brain_session_id: spur_acp::SessionId,
+    /// Structured reasoning trace the brain passed with this call.
+    /// None when brain omitted the parameter. Orchestrator uses this
+    /// for reviewer-visibility and mismatch detection. See design
+    /// spec section C.
+    pub delegation_plan: Option<spur_acp::DelegationPlan>,
 }
 
 /// Channel the orchestrator holds to receive requests from the MCP server.
@@ -46,7 +51,7 @@ pub struct ToolDefinition {
 fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
-        description: "Delegate a task to a worker agent. Blocks until the worker completes.".into(),
+        description: "Delegate a task to a worker agent. Blocks until the worker completes. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Use `list_available_workers` when routing is ambiguous.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -56,12 +61,40 @@ fn delegate_to_worker_def() -> ToolDefinition {
                 },
                 "task": {
                     "type": "string",
-                    "description": "Task description for the worker"
+                    "description": "Task description for the worker. Structure as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT."
                 },
                 "context_files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional list of file paths to provide as context"
+                    "description": "Optional supplementary file paths. Prefer inlining relevant excerpts in the task field's CONTEXT section."
+                },
+                "delegation_plan": {
+                    "type": "object",
+                    "description": "Structured reasoning for this delegation. At minimum pass {chosen, rationale}. For 2+ subtasks or >3 files, include candidates and decomposition.",
+                    "properties": {
+                        "candidates": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "agent":     { "type": "string" },
+                                    "rationale": { "type": "string" }
+                                }
+                            }
+                        },
+                        "decomposition": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "subtask":             { "type": "string" },
+                                    "parallelizable_with": { "type": "array", "items": { "type": "string" } }
+                                }
+                            }
+                        },
+                        "chosen":    { "type": "string" },
+                        "rationale": { "type": "string" }
+                    }
                 }
             },
             "required": ["agent", "task"]
@@ -72,9 +105,7 @@ fn delegate_to_worker_def() -> ToolDefinition {
 fn delegate_parallel_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_parallel".into(),
-        description:
-            "Delegate multiple tasks to worker agents in parallel. Blocks until all complete."
-                .into(),
+        description: "Delegate multiple tasks in parallel. Blocks until all complete. The `delegation_plan.decomposition` field MUST demonstrate subtasks are independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -83,18 +114,22 @@ fn delegate_parallel_def() -> ToolDefinition {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "agent": {
-                                "type": "string",
-                                "description": "Name of the worker agent"
-                            },
-                            "task": {
-                                "type": "string",
-                                "description": "Task description for the worker"
-                            }
+                            "agent": { "type": "string", "description": "Worker agent name" },
+                            "task":  { "type": "string", "description": "Task description" }
                         },
                         "required": ["agent", "task"]
                     },
                     "description": "List of tasks to delegate in parallel"
+                },
+                "delegation_plan": {
+                    "type": "object",
+                    "description": "Structured reasoning for the parallel dispatch. The `decomposition` section MUST demonstrate subtasks are independent.",
+                    "properties": {
+                        "candidates":    { "type": "array" },
+                        "decomposition": { "type": "array" },
+                        "chosen":        { "type": "string" },
+                        "rationale":     { "type": "string" }
+                    }
                 }
             },
             "required": ["tasks"]
@@ -105,7 +140,7 @@ fn delegate_parallel_def() -> ToolDefinition {
 fn list_available_workers_def() -> ToolDefinition {
     ToolDefinition {
         name: "list_available_workers".into(),
-        description: "List all available worker agents and their capabilities.".into(),
+        description: "Returns tier, description, good_for, avoid_for, output_shape, and cost_tier for each worker. Call when the system-prompt one-liner is insufficient.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {}

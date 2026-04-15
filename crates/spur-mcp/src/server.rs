@@ -350,6 +350,9 @@ impl McpCallbackServer {
             .get("context_files")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        let delegation_plan: Option<spur_acp::DelegationPlan> = args
+            .get("delegation_plan")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -361,6 +364,7 @@ impl McpCallbackServer {
             context_files,
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
+            delegation_plan,
         };
 
         info!(agent = %agent, request_id = %request_id, "Sending delegation request");
@@ -409,6 +413,10 @@ impl McpCallbackServer {
             return JsonRpcResponse::invalid_params(id, "'tasks' array must not be empty");
         }
 
+        let shared_plan: Option<spur_acp::DelegationPlan> = args
+            .get("delegation_plan")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
         let mut receivers = Vec::with_capacity(tasks.len());
 
         for task_obj in &tasks {
@@ -441,6 +449,7 @@ impl McpCallbackServer {
                 context_files: Vec::new(),
                 respond_to: tx,
                 brain_session_id: self.brain_session_id.clone(),
+                delegation_plan: shared_plan.clone(),
             };
 
             info!(agent = %agent, request_id = %request_id, "Sending parallel delegation request");
@@ -513,6 +522,7 @@ impl McpCallbackServer {
             context_files: Vec::new(),
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
+            delegation_plan: None,
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -563,6 +573,7 @@ impl McpCallbackServer {
             context_files: Vec::new(),
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
+            delegation_plan: None,
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -607,6 +618,7 @@ impl McpCallbackServer {
             context_files: Vec::new(),
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
+            delegation_plan: None,
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -642,6 +654,7 @@ impl McpCallbackServer {
             context_files: Vec::new(),
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
+            delegation_plan: None,
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -665,6 +678,7 @@ impl McpCallbackServer {
             context_files: Vec::new(),
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
+            delegation_plan: None,
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -701,6 +715,9 @@ impl McpCallbackServer {
             .get("context_files")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        let delegation_plan: Option<spur_acp::DelegationPlan> = args
+            .get("delegation_plan")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -712,6 +729,7 @@ impl McpCallbackServer {
             context_files,
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
+            delegation_plan,
         };
 
         info!(agent = %agent, request_id = %request_id, "Sending async delegation request");
