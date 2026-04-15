@@ -1840,11 +1840,13 @@ impl Orchestrator {
         loop {
             let outcome = match run_one_worker_attempt(
                 next_worker_session.clone(),
-                &brain_session_id,
-                &agent,
-                &current_task,
-                &request_id,
-                &agent_config,
+                &WorkerAttemptCtx {
+                    brain_session_id: &brain_session_id,
+                    agent: &agent,
+                    task: &current_task,
+                    request_id: &request_id,
+                    agent_config: &agent_config,
+                },
                 &mut worktrees,
                 &funnel,
             )
@@ -2694,7 +2696,7 @@ async fn run_one_worker_attempt(
     if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
         let funnel_for_ext = funnel.clone();
         let executor_id_for_ext = worker_session.0.clone();
-        let brain_session_for_ext = brain_session_id.clone();
+        let brain_session_for_ext = ctx.brain_session_id.clone();
         tokio::spawn(async move {
             while let Some(payload) = ext_rx.recv().await {
                 crate::spur_ext_interp::interpret(
@@ -2715,22 +2717,22 @@ async fn run_one_worker_attempt(
 
     // Emit WorkerSpawned event.
     funnel.emit(SpurEventBody::WorkerSpawned {
-        agent: agent.to_string(),
+        agent: ctx.agent.to_string(),
         session: worker_session.clone(),
         worktree: worktree_info.path.clone(),
     });
     // Correlate this executor with the brain's delegate_to_worker call
     // so the brain-side session_detail view can render an inline card.
     funnel.emit(SpurEventBody::DelegationDispatched {
-        from: brain_session_id.clone(),
-        request_id: request_id.to_string(),
+        from: ctx.brain_session_id.clone(),
+        request_id: ctx.request_id.to_string(),
         executor_id: worker_session.0.clone(),
     });
 
     // Workers get no MCP servers (per spec).
     let session_response = match crate::skip_perm::new_session_with_bypass(
         &mut *connection,
-        agent_config,
+        ctx.agent_config,
         worktree_info.path.clone(),
         vec![],
     )
@@ -2748,7 +2750,7 @@ async fn run_one_worker_attempt(
     let prompt_text = format!(
         "Working directory: {}\n\nTask: {}",
         worktree_info.path.display(),
-        task
+        ctx.task
     );
     let prompt_request = PromptRequest::new(
         session_response.session_id.clone(),
@@ -2774,7 +2776,7 @@ async fn run_one_worker_attempt(
             // before any other notification handling.
             maybe_synthesize_file_touch(
                 &notification,
-                brain_session_id,
+                ctx.brain_session_id,
                 &worker_session.0,
                 &file_touch_dedup,
                 funnel,
@@ -2825,7 +2827,7 @@ async fn run_one_worker_attempt(
     };
 
     let duration = start.elapsed();
-    let cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
+    let cost = spur_cost::estimator::estimate_cost(ctx.agent_config.cost_tier, duration);
 
     let summary = if output_text.is_empty() {
         None
@@ -2847,7 +2849,13 @@ async fn run_one_worker_attempt(
             .as_deref()
             .map(|s| {
                 let tail_bytes = 500usize.min(s.len());
-                let start = s.ceil_char_boundary(s.len().saturating_sub(tail_bytes));
+                let start = {
+                    let mut i = s.len().saturating_sub(tail_bytes);
+                    while i < s.len() && !s.is_char_boundary(i) {
+                        i += 1;
+                    }
+                    i
+                };
                 s[start..].to_string()
             })
             .filter(|t| !t.is_empty())
@@ -2883,8 +2891,20 @@ fn truncate_summary(text: &str, cap: usize) -> String {
     let head_budget = cap / 4;
     let tail_budget = cap - head_budget;
 
-    let head_end = text.floor_char_boundary(head_budget.min(text.len()));
-    let tail_start = text.ceil_char_boundary(text.len().saturating_sub(tail_budget));
+    let head_end = {
+        let mut i = head_budget.min(text.len());
+        while i > 0 && !text.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let tail_start = {
+        let mut i = text.len().saturating_sub(tail_budget);
+        while i < text.len() && !text.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    };
 
     // Clamp degenerate case where head and tail would overlap.
     let tail_start = tail_start.max(head_end);
