@@ -82,12 +82,40 @@ impl JsonRpcResponse {
 
 // ─── Worker info (static data set at startup) ─────────────────────────
 
-/// Describes an available worker agent, provided to the server at startup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Descriptor for a worker-capable agent, returned by the
+/// `list_available_workers` MCP tool.
+///
+/// Populated by `build_worker_info` from a merged `AgentConfig`.
+/// See design spec section C.1.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkerInfo {
-    pub name: String,
-    pub description: String,
-    pub cost_tier: CostTier,
+    pub name:         String,
+    pub tier:         Option<String>,
+    pub description:  Option<String>,
+    #[serde(default)]
+    pub good_for:     Vec<String>,
+    #[serde(default)]
+    pub avoid_for:    Vec<String>,
+    pub output_shape: Option<String>,
+    pub cost_tier:    Option<String>,
+}
+
+/// Build the public `WorkerInfo` from a merged `AgentConfig`.
+/// Call AFTER `apply_builtin_defaults` to see inherited values.
+pub fn build_worker_info(cfg: &spur_acp::config::AgentConfig) -> WorkerInfo {
+    use spur_acp::config::Tier;
+    WorkerInfo {
+        name:         cfg.name.clone(),
+        tier:         cfg.delegation.tier.map(|t| match t {
+            Tier::Specialist => "specialist".into(),
+            Tier::Generalist => "generalist".into(),
+        }),
+        description:  cfg.delegation.description.clone(),
+        good_for:     cfg.delegation.good_for.clone(),
+        avoid_for:    cfg.delegation.avoid_for.clone(),
+        output_shape: cfg.delegation.output_shape.clone(),
+        cost_tier:    Some(format!("{:?}", cfg.cost_tier).to_lowercase()),
+    }
 }
 
 // ─── McpCallbackServer ───────────────────────────────────────────────
@@ -746,5 +774,43 @@ impl McpCallbackServer {
                 "Delegation cancelled or orchestrator disconnected",
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod build_worker_info_tests {
+    use super::build_worker_info;
+    use spur_acp::config::AgentConfig;
+
+    fn minimal_agent(name: &str) -> AgentConfig {
+        let toml = format!(
+            r#"name = "{}"
+command = "x"
+transport = "acp""#,
+            name
+        );
+        toml::from_str(&toml).unwrap()
+    }
+
+    #[test]
+    fn build_worker_info_populates_all_fields() {
+        let mut cfg = minimal_agent("claude-code-acp");
+        spur_acp::agents::defaults::apply_builtin_defaults(&mut cfg);
+        let info = build_worker_info(&cfg);
+        assert_eq!(info.name, "claude-code-acp");
+        assert!(info.description.is_some());
+        assert!(info.tier.is_some());
+        assert!(!info.good_for.is_empty());
+        assert!(info.output_shape.is_some());
+    }
+
+    #[test]
+    fn build_worker_info_handles_empty_descriptor() {
+        let cfg = minimal_agent("unknown-agent");
+        // without apply_builtin_defaults, all fields stay empty
+        let info = build_worker_info(&cfg);
+        assert_eq!(info.name, "unknown-agent");
+        assert!(info.description.is_none());
+        assert!(info.good_for.is_empty());
     }
 }

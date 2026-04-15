@@ -295,8 +295,7 @@ impl Orchestrator {
             .iter()
             .map(|c| WorkerInfo {
                 name: c.name.clone(),
-                description: c.capabilities.join(", "),
-                cost_tier: c.cost_tier,
+                ..WorkerInfo::default()
             })
             .collect();
         mcp_server.set_workers(workers);
@@ -1186,8 +1185,7 @@ impl Orchestrator {
             .iter()
             .map(|c| WorkerInfo {
                 name: c.name.clone(),
-                description: c.capabilities.join(", "),
-                cost_tier: c.cost_tier,
+                ..WorkerInfo::default()
             })
             .collect();
         mcp_server.set_workers(workers);
@@ -1339,8 +1337,7 @@ impl Orchestrator {
             .iter()
             .map(|c| WorkerInfo {
                 name: c.name.clone(),
-                description: c.capabilities.join(", "),
-                cost_tier: c.cost_tier,
+                ..WorkerInfo::default()
             })
             .collect();
         mcp_server.set_workers(workers);
