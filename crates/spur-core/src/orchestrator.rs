@@ -2628,6 +2628,15 @@ fn maybe_synthesize_file_touch(
 /// immediately — setup failures short-circuit without retry and the
 /// caller's `finalize` records the error status.
 ///
+/// Read-only context shared across worker attempt retries.
+struct WorkerAttemptCtx<'a> {
+    brain_session_id: &'a SessionId,
+    agent: &'a str,
+    task: &'a str,
+    request_id: &'a str,
+    agent_config: &'a spur_acp::config::AgentConfig,
+}
+
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
 /// worker candidate status — success OR worker-reported errors — both
 /// of which are retry-eligible (the human reviewer decides).
@@ -2639,11 +2648,7 @@ fn maybe_synthesize_file_touch(
 /// the public `DelegationResult` type.
 async fn run_one_worker_attempt(
     worker_session: SessionId,
-    brain_session_id: &SessionId,
-    agent: &str,
-    task: &str,
-    request_id: &str,
-    agent_config: &spur_acp::config::AgentConfig,
+    ctx: &WorkerAttemptCtx<'_>,
     worktrees: &mut WorktreeManager,
     funnel: &crate::event_funnel::FunnelHandle,
 ) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
@@ -2655,10 +2660,10 @@ async fn run_one_worker_attempt(
     // stable executor_id" limitation documented for follow-up work.
     // The projection path (apply_inner) sees each event correctly.
     funnel.emit(SpurEventBody::DelegationRequested {
-        from: brain_session_id.clone(),
-        to_agent: agent.to_string(),
-        task: task.to_string(),
-        request_id: request_id.to_string(),
+        from: ctx.brain_session_id.clone(),
+        to_agent: ctx.agent.to_string(),
+        task: ctx.task.to_string(),
+        request_id: ctx.request_id.to_string(),
     });
 
     let start = Instant::now();
@@ -2670,7 +2675,7 @@ async fn run_one_worker_attempt(
         .map_err(|e| AttemptSetupError::SnapshotFailed(e.to_string()))?;
 
     let worktree_info = worktrees
-        .create_worktree(&worker_session, agent, &snapshot_branch)
+        .create_worktree(&worker_session, ctx.agent, &snapshot_branch)
         .await
         .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
 
@@ -2678,9 +2683,9 @@ async fn run_one_worker_attempt(
     // Workers never receive a permission_tx, so L2 auto-approve is
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
-    let spawn_args = agent_config.effective_args();
+    let spawn_args = ctx.agent_config.effective_args();
     let mut connection: Box<dyn AgentConnection> =
-        build_connection_from_transport(agent_config, spawn_args, None);
+        build_connection_from_transport(ctx.agent_config, spawn_args, None);
 
     // S5 — consume `_spur/*` ExtNotifications from this worker and
     // translate them into SpurEvent variants via the funnel. Must run
@@ -2842,13 +2847,7 @@ async fn run_one_worker_attempt(
             .as_deref()
             .map(|s| {
                 let tail_bytes = 500usize.min(s.len());
-                let start = {
-                    let mut i = s.len().saturating_sub(tail_bytes);
-                    while i < s.len() && !s.is_char_boundary(i) {
-                        i += 1;
-                    }
-                    i
-                };
+                let start = s.ceil_char_boundary(s.len().saturating_sub(tail_bytes));
                 s[start..].to_string()
             })
             .filter(|t| !t.is_empty())
@@ -2884,20 +2883,8 @@ fn truncate_summary(text: &str, cap: usize) -> String {
     let head_budget = cap / 4;
     let tail_budget = cap - head_budget;
 
-    let head_end = {
-        let mut i = head_budget.min(text.len());
-        while i > 0 && !text.is_char_boundary(i) {
-            i -= 1;
-        }
-        i
-    };
-    let tail_start = {
-        let mut i = text.len().saturating_sub(tail_budget);
-        while i < text.len() && !text.is_char_boundary(i) {
-            i += 1;
-        }
-        i
-    };
+    let head_end = text.floor_char_boundary(head_budget.min(text.len()));
+    let tail_start = text.ceil_char_boundary(text.len().saturating_sub(tail_budget));
 
     // Clamp degenerate case where head and tail would overlap.
     let tail_start = tail_start.max(head_end);
