@@ -108,6 +108,7 @@ fn cfg(skip: bool, mode: Option<&str>) -> AgentConfig {
         skip_permissions: skip,
         skip_permissions_args: vec![],
         skip_permissions_session_mode: mode.map(String::from),
+        delegation: Default::default(),
     }
 }
 
