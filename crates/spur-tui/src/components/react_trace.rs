@@ -1,8 +1,8 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use spur_acp::{
     adapter::{mode_badge, ObservePayload, ToolFamily, ToolInputDisplay},
-    AgentKind, LifecycleState,
+    AgentKind,
 };
 
 use ratatui::{
@@ -14,6 +14,10 @@ use ratatui::{
 };
 
 use super::line_wrap::wrap_line_to_width;
+use super::trace_format::{
+    derive_delegate_status, family_glyph, input_display_lines, input_summary, observe_compact,
+    observe_payload_lines, observe_verb, outcome_glyph,
+};
 use super::MAX_LOG_ENTRIES;
 
 /// What kind of ReAct trace step this entry represents.
@@ -243,26 +247,6 @@ fn render_inline_image(
     true
 }
 
-/// Derive a live status label from the lineage for a Delegate trace entry.
-/// Returns `None` when the executor isn't in the lineage (falls back to the
-/// stored `status` field).
-fn derive_delegate_status(
-    executor_id: Option<&str>,
-    lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
-) -> Option<&'static str> {
-    let eid = executor_id?;
-    let lin = lineage?;
-    let node = lin.node(&spur_core::ExecutorId(eid.to_string()))?;
-    Some(match node.phase {
-        LifecycleState::Spawning => "spawning",
-        LifecycleState::Running | LifecycleState::Resuming => "running",
-        LifecycleState::AwaitingReview => "awaiting review",
-        LifecycleState::Succeeded => "done",
-        LifecycleState::Failed => "failed",
-        LifecycleState::Cancelled => "cancelled",
-    })
-}
-
 /// Spinner frames for delegation animation.
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -287,417 +271,36 @@ pub struct ReactTrace {
     /// When true (default), Observe entries show a truncated preview.
     /// Ctrl+O toggles this to false, expanding all tool-result bodies.
     observe_collapsed: bool,
+    /// Generation counter bumped on every content mutation. The line cache
+    /// compares its stored generation to detect staleness.
+    generation: u64,
+    /// Cached pre-wrapped display lines. Invalidated when `generation`
+    /// advances or the terminal width changes. Uses `RefCell` because
+    /// `render()` takes `&self` (same pattern as `last_total_lines`).
+    #[cfg(not(feature = "markdown"))]
+    line_cache: RefCell<Option<LineCacheEntry>>,
+    /// Cached virtual rows for the markdown render path.
+    #[cfg(feature = "markdown")]
+    line_cache: RefCell<Option<VirtualRowCacheEntry>>,
 }
 
-/// Map `ToolFamily` to a display glyph + color.
-fn family_glyph(f: ToolFamily) -> (&'static str, Color) {
-    match f {
-        ToolFamily::Read => ("⚙ reads", Color::Cyan),
-        ToolFamily::Edit => ("✎ edits", Color::Yellow),
-        ToolFamily::Delete => ("✗ deletes", Color::Red),
-        ToolFamily::Move => ("→ moves", Color::Yellow),
-        ToolFamily::Search => ("🔎 search", Color::Blue),
-        ToolFamily::Execute => ("$ runs", Color::Magenta),
-        ToolFamily::Think => ("◈ thinks", Color::DarkGray),
-        ToolFamily::Fetch => ("↯ fetch", Color::Blue),
-        ToolFamily::SwitchMode => ("⇄ mode", Color::Cyan),
-        ToolFamily::Plan => ("▸ plan", Color::Cyan),
-        ToolFamily::Mcp => ("⧉ mcp", Color::DarkGray),
-        ToolFamily::Unknown => ("🔧 ACT", Color::Yellow),
-    }
+/// Cached wrapped lines for the non-markdown render path.
+#[cfg(not(feature = "markdown"))]
+struct LineCacheEntry {
+    lines: Vec<Line<'static>>,
+    width: u16,
+    generation: u64,
 }
 
-/// Map `ObservePayload` to an outcome glyph + color.
-fn outcome_glyph(p: &ObservePayload) -> (&'static str, Color) {
-    match p {
-        ObservePayload::CommandOutput {
-            exit_code: Some(0), ..
-        } => ("✓", Color::Green),
-        ObservePayload::CommandOutput {
-            exit_code: Some(_), ..
-        } => ("✗", Color::Red),
-        // Unknown exit code ≠ success. Render as "?" amber so operators
-        // don't misread "we don't know how it went" as "it went fine".
-        ObservePayload::CommandOutput {
-            exit_code: None, ..
-        } => ("?", Color::Yellow),
-        ObservePayload::Error { .. } => ("✗", Color::Red),
-        _ => ("✓", Color::Green),
-    }
-}
-
-/// Verb used in the observe header (past tense).
-fn observe_verb(p: &ObservePayload) -> &'static str {
-    match p {
-        ObservePayload::CommandOutput { .. } => "ran",
-        ObservePayload::FileRead { .. } => "read",
-        ObservePayload::EditResult { .. } => "edited",
-        ObservePayload::Json { .. } | ObservePayload::Text { .. } => "done",
-        ObservePayload::Error { .. } => "erred",
-    }
-}
-
-/// Extract a compact single-line identifier for a tool invocation, used
-/// in the collapsed grouped Act+Observe rendering. Falls back to the tool
-/// title when the input has no natural identifier (MCP tools, unknown
-/// shapes, empty input).
-fn input_summary(input: &ToolInputDisplay, tool: &str) -> String {
-    match input {
-        ToolInputDisplay::Path(p) => p.clone(),
-        ToolInputDisplay::Diff { path, .. } => path.clone(),
-        ToolInputDisplay::Command { cmd, .. } => cmd.clone(),
-        ToolInputDisplay::Query(q) => format!("\"{}\"", q),
-        ToolInputDisplay::Text(t) => t
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .to_string(),
-        ToolInputDisplay::Json(_) | ToolInputDisplay::Empty => tool.to_string(),
-    }
-}
-
-/// Compact outcome representation for the collapsed grouped rendering:
-/// (outcome glyph, glyph color, compact stats string).
-fn observe_compact(payload: &ObservePayload) -> (&'static str, Color, String) {
-    match payload {
-        ObservePayload::CommandOutput {
-            exit_code,
-            stdout,
-            stderr,
-        } => {
-            let total = stdout.lines().count() + stderr.lines().count();
-            match exit_code {
-                Some(0) => ("✓", Color::Green, format!("{} lines", total)),
-                Some(c) => ("✗", Color::Red, format!("exit {} · {} lines", c, total)),
-                None => ("?", Color::Yellow, format!("{} lines", total)),
-            }
-        }
-        ObservePayload::FileRead {
-            content, truncated, ..
-        } => {
-            let n = content.lines().count();
-            let suffix = if *truncated { " (truncated)" } else { "" };
-            ("✓", Color::Green, format!("{} lines{}", n, suffix))
-        }
-        ObservePayload::EditResult {
-            replacements, diff, ..
-        } => {
-            if let Some(n) = replacements {
-                (
-                    "✓",
-                    Color::Green,
-                    format!("{} replacement{}", n, if *n == 1 { "" } else { "s" }),
-                )
-            } else if let Some(d) = diff {
-                let plus = d.lines().filter(|l| l.starts_with('+')).count();
-                let minus = d.lines().filter(|l| l.starts_with('-')).count();
-                ("✓", Color::Green, format!("+{}/-{}", plus, minus))
-            } else {
-                ("✓", Color::Green, String::new())
-            }
-        }
-        ObservePayload::Json { pretty } => {
-            let n = pretty.lines().count();
-            ("✓", Color::Green, format!("{} lines", n))
-        }
-        ObservePayload::Text { body } => {
-            let n = body.lines().count();
-            ("✓", Color::Green, format!("{} lines", n))
-        }
-        ObservePayload::Error { message } => {
-            let truncated = if message.chars().count() > 60 {
-                let mut end = 60;
-                while !message.is_char_boundary(end) && end > 0 {
-                    end -= 1;
-                }
-                format!("{}…", &message[..end])
-            } else {
-                message.clone()
-            };
-            ("✗", Color::Red, truncated)
-        }
-    }
-}
-
-/// Build display lines for a `ToolInputDisplay` value.
-/// Lines are 3-space indented.
-fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    match input {
-        ToolInputDisplay::Path(p) => {
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(p.clone(), Style::default().fg(Color::DarkGray)),
-            ]));
-        }
-        ToolInputDisplay::Diff { path, diff } => {
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(
-                    path.clone(),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            let mut count = 0usize;
-            let mut total = 0usize;
-            for dl in diff.lines() {
-                total += 1;
-                let _ = dl;
-            }
-            for dl in diff.lines() {
-                if count >= 6 {
-                    let remaining = total.saturating_sub(6);
-                    lines.push(Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled(
-                            format!("[… {} more]", remaining),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
-                    break;
-                }
-                let color = if dl.starts_with('+') {
-                    Color::Green
-                } else if dl.starts_with('-') {
-                    Color::Red
-                } else {
-                    Color::DarkGray
-                };
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(dl.to_string(), Style::default().fg(color)),
-                ]));
-                count += 1;
-            }
-        }
-        ToolInputDisplay::Command { cmd, cwd } => {
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(format!("$ {}", cmd), Style::default().fg(Color::Magenta)),
-            ]));
-            if let Some(cwd) = cwd {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(
-                        format!("(cwd: {})", cwd),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-            }
-        }
-        ToolInputDisplay::Query(q) => {
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(
-                    q.clone(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ]));
-        }
-        ToolInputDisplay::Json(p) => {
-            for jl in p.lines().take(8) {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
-                ]));
-            }
-        }
-        ToolInputDisplay::Text(t) => {
-            for tl in t.lines() {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(tl.to_string(), Style::default().fg(Color::White)),
-                ]));
-            }
-        }
-        ToolInputDisplay::Empty => {}
-    }
-    lines
-}
-
-/// Build display lines for an `ObservePayload`.
-/// When `collapsed` is true, output is truncated to a short preview.
-fn observe_payload_lines(payload: &ObservePayload, collapsed: bool) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    match payload {
-        ObservePayload::CommandOutput {
-            exit_code,
-            stdout,
-            stderr,
-        } => {
-            let exit_str = match exit_code {
-                Some(c) => format!("$ exit {}", c),
-                None => "$ exit -".to_string(),
-            };
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(exit_str, Style::default().fg(Color::Magenta)),
-            ]));
-            let stdout_limit = if collapsed { 8 } else { usize::MAX };
-            let stderr_limit = if collapsed { 4 } else { usize::MAX };
-            let stdout_total = stdout.lines().count();
-            for sl in stdout.lines().take(stdout_limit) {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(sl.to_string(), Style::default().fg(Color::White)),
-                ]));
-            }
-            if collapsed && stdout_total > stdout_limit {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(
-                        format!(
-                            "[… {} more lines · Ctrl+O expand]",
-                            stdout_total - stdout_limit
-                        ),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-            }
-            let stderr_total = stderr.lines().count();
-            for el in stderr.lines().take(stderr_limit) {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(el.to_string(), Style::default().fg(Color::Red)),
-                ]));
-            }
-            if collapsed && stderr_total > stderr_limit {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(
-                        format!("[… {} more lines]", stderr_total - stderr_limit),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-            }
-        }
-        ObservePayload::FileRead {
-            path,
-            content,
-            truncated,
-        } => {
-            let line_count = content.lines().count();
-            let path_str = path.as_deref().unwrap_or("<unknown>");
-            let header = format!(
-                "{} · {} lines{}",
-                path_str,
-                line_count,
-                if *truncated { " (truncated)" } else { "" }
-            );
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(header, Style::default().fg(Color::Cyan)),
-            ]));
-            let limit = if collapsed { 8 } else { usize::MAX };
-            for cl in content.lines().take(limit) {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(cl.to_string(), Style::default().fg(Color::White)),
-                ]));
-            }
-            if collapsed && line_count > limit {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(
-                        format!("[… {} more lines · Ctrl+O expand]", line_count - limit),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-            }
-        }
-        ObservePayload::EditResult {
-            path,
-            replacements,
-            diff,
-        } => {
-            if let Some(n) = replacements {
-                let msg = format!("{} replacement{}", n, if *n == 1 { "" } else { "s" });
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(msg, Style::default().fg(Color::Yellow)),
-                ]));
-            } else if let Some(d) = diff {
-                let limit = if collapsed { 6 } else { usize::MAX };
-                let total = d.lines().count();
-                for dl in d.lines().take(limit) {
-                    let color = if dl.starts_with('+') {
-                        Color::Green
-                    } else if dl.starts_with('-') {
-                        Color::Red
-                    } else {
-                        Color::DarkGray
-                    };
-                    lines.push(Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled(dl.to_string(), Style::default().fg(color)),
-                    ]));
-                }
-                if collapsed && total > limit {
-                    lines.push(Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled(
-                            format!("[… {} more lines]", total - limit),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
-                }
-            } else if let Some(p) = path {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(p.clone(), Style::default().fg(Color::DarkGray)),
-                ]));
-            }
-        }
-        ObservePayload::Json { pretty } => {
-            let limit = if collapsed { 8 } else { usize::MAX };
-            let total = pretty.lines().count();
-            for jl in pretty.lines().take(limit) {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
-                ]));
-            }
-            if collapsed && total > limit {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(
-                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-            }
-        }
-        ObservePayload::Text { body } => {
-            let limit = if collapsed { 8 } else { usize::MAX };
-            let total = body.lines().count();
-            for tl in body.lines().take(limit) {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(tl.to_string(), Style::default().fg(Color::White)),
-                ]));
-            }
-            if collapsed && total > limit {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(
-                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-            }
-        }
-        ObservePayload::Error { message } => {
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(message.clone(), Style::default().fg(Color::Red)),
-            ]));
-        }
-    }
-    lines
+/// Cached virtual rows for the markdown render path.
+#[cfg(feature = "markdown")]
+struct VirtualRowCacheEntry {
+    rows: Vec<VirtualRow>,
+    width: u16,
+    generation: u64,
+    /// Snapshot of mermaid fence states at cache time. If any state changes
+    /// (e.g. Pending→Ready), the cache must be rebuilt.
+    fence_gen: u64,
 }
 
 impl ReactTrace {
@@ -713,6 +316,8 @@ impl ReactTrace {
             agent_kind: AgentKind::Generic,
             current_mode: None,
             observe_collapsed: true,
+            generation: 0,
+            line_cache: RefCell::new(None),
         }
     }
 
@@ -729,12 +334,14 @@ impl ReactTrace {
     /// Pass `None` to clear it.  Rendered as a badge appended to the pane title.
     pub fn set_mode(&mut self, mode: Option<String>) {
         self.current_mode = mode;
+        self.invalidate_cache();
     }
 
     /// Toggle the collapsed state for Observe (tool-result) entries.
     /// Returns the new state (true = collapsed).
     pub fn toggle_observe_collapsed(&mut self) -> bool {
         self.observe_collapsed = !self.observe_collapsed;
+        self.invalidate_cache();
         self.observe_collapsed
     }
 
@@ -774,6 +381,13 @@ impl ReactTrace {
     /// capability is known. Affects streams created after this call.
     pub fn set_mermaid_enabled(&mut self, enabled: bool) {
         self.mermaid_enabled = enabled;
+        self.invalidate_cache();
+    }
+
+    /// Bump the generation counter, which causes the next `render()` call
+    /// to rebuild the line cache. Cheap (no allocation).
+    fn invalidate_cache(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Return a short kind name for the most recent entry, or `None` if empty.
@@ -806,6 +420,7 @@ impl ReactTrace {
                 } else {
                     last.text = text.to_string();
                 }
+                self.invalidate_cache();
                 if self.is_following {
                     self.scroll_to_bottom();
                 }
@@ -849,6 +464,7 @@ impl ReactTrace {
                     if let Some(stream) = entry.markdown.as_mut() {
                         stream.append(text);
                     }
+                    self.invalidate_cache();
                     if self.is_following {
                         self.scroll_to_bottom();
                     }
@@ -873,6 +489,7 @@ impl ReactTrace {
             if let Some(idx) = target_idx {
                 if let Some(entry) = self.entries.get_mut(idx) {
                     entry.text.push_str(text);
+                    self.invalidate_cache();
                     if self.is_following {
                         self.scroll_to_bottom();
                     }
@@ -898,6 +515,7 @@ impl ReactTrace {
             self.entries.drain(..drain);
             self.scroll_offset = self.scroll_offset.saturating_sub(drain);
         }
+        self.invalidate_cache();
         if self.is_following {
             self.scroll_to_bottom();
         }
@@ -971,10 +589,12 @@ impl ReactTrace {
     }
 
     /// Called on each tick: advance spinner counter and decrement pending
-    /// permission countdowns.
+    /// permission countdowns. Invalidates the line cache only when spinners
+    /// or countdowns are actively animating.
     pub fn tick(&mut self) {
         self.tick_counter = self.tick_counter.wrapping_add(1);
 
+        let mut has_animation = false;
         for entry in &mut self.entries {
             if let TraceKind::Permission {
                 pending, countdown, ..
@@ -982,9 +602,51 @@ impl ReactTrace {
             {
                 if *pending && *countdown > 0 {
                     *countdown = countdown.saturating_sub(1);
+                    has_animation = true;
                 }
             }
         }
+        // Spinners animate on pending Act entries (no paired Observe yet)
+        // and running Delegate entries. Only invalidate when visible.
+        if !has_animation {
+            has_animation = self.has_active_spinner();
+        }
+        if has_animation {
+            self.invalidate_cache();
+        }
+    }
+
+    /// Returns true if any entry is showing an animated spinner (pending
+    /// Act without paired Observe, or running Delegate).
+    fn has_active_spinner(&self) -> bool {
+        let len = self.entries.len();
+        for (i, entry) in self.entries.iter().enumerate() {
+            match &entry.kind {
+                TraceKind::Act { .. } if self.observe_collapsed => {
+                    // Pending if no following Observe with payload
+                    let has_observe = i + 1 < len
+                        && matches!(
+                            &self.entries[i + 1].kind,
+                            TraceKind::Observe { payload: Some(_) }
+                        );
+                    if !has_observe {
+                        return true;
+                    }
+                }
+                TraceKind::Delegate { executor_id, .. } => {
+                    // Spinner shown when executor is running (no terminal status yet)
+                    if executor_id.is_some() {
+                        // derive_delegate_status would check lineage, but we
+                        // don't have it here. Conservatively assume running
+                        // delegates animate. This over-invalidates slightly
+                        // but is safe.
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Drain any mermaid fences detected during the last debounce window.
@@ -1005,6 +667,9 @@ impl ReactTrace {
                     out.push((idx, fence));
                 }
             }
+        }
+        if !out.is_empty() {
+            self.invalidate_cache();
         }
         out
     }
@@ -1031,6 +696,9 @@ impl ReactTrace {
                 }
             }
         }
+        if !out.is_empty() {
+            self.invalidate_cache();
+        }
         out
     }
 
@@ -1050,6 +718,7 @@ impl ReactTrace {
                 stream.mark_dirty_now();
             }
         }
+        self.invalidate_cache();
     }
 
     /// Returns true if any entry has a pending permission request.
@@ -1066,6 +735,7 @@ impl ReactTrace {
                 *pending = false;
             }
         }
+        self.invalidate_cache();
     }
 
     /// Build the flat sequence of display lines produced by the trace,
@@ -1906,20 +1576,60 @@ impl ReactTrace {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray));
 
-        let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
-
-        let lines = self.build_display_lines(spinner_frame, lineage);
-
-        // Pre-wrap every built Line to the inner width so the Paragraph
-        // renders row-exact and scroll offsets are exact visual rows.
         let inner = block.inner(area);
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
 
-        let wrapped: Vec<Line> = lines
-            .into_iter()
-            .flat_map(|l| wrap_line_to_width(&l, effective_width))
-            .collect();
+        // Cache check: rebuild only when generation or width changed.
+        // Only used in non-markdown builds; markdown builds use render_with_ctx.
+        #[cfg(not(feature = "markdown"))]
+        let wrapped_owned: Vec<Line<'static>>;
+        #[cfg(not(feature = "markdown"))]
+        {
+            let mut cache = self.line_cache.borrow_mut();
+            let hit = cache
+                .as_ref()
+                .map(|c| c.generation == self.generation && c.width == effective_width)
+                .unwrap_or(false);
+            if !hit {
+                let spinner_frame =
+                    SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+                let lines = self.build_display_lines(spinner_frame, lineage);
+                let built: Vec<Line<'static>> = lines
+                    .into_iter()
+                    .flat_map(|l| wrap_line_to_width(&l, effective_width))
+                    .collect();
+                *cache = Some(LineCacheEntry {
+                    lines: built,
+                    width: effective_width,
+                    generation: self.generation,
+                });
+            }
+            wrapped_owned = Vec::new(); // placeholder — we borrow from cache below
+        }
+
+        // In markdown builds, render() is a fallback that doesn't use the
+        // VirtualRow cache. Build lines directly (this path is rarely hit).
+        #[cfg(feature = "markdown")]
+        let wrapped_owned: Vec<Line<'static>> = {
+            let spinner_frame =
+                SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+            let lines = self.build_display_lines(spinner_frame, lineage);
+            lines
+                .into_iter()
+                .flat_map(|l| wrap_line_to_width(&l, effective_width))
+                .collect()
+        };
+
+        #[cfg(not(feature = "markdown"))]
+        let cache_borrow;
+        #[cfg(not(feature = "markdown"))]
+        let wrapped: &[Line<'static>] = {
+            cache_borrow = self.line_cache.borrow();
+            &cache_borrow.as_ref().expect("cache just populated").lines
+        };
+        #[cfg(feature = "markdown")]
+        let wrapped: &[Line<'static>] = &wrapped_owned;
 
         let total_lines = wrapped.len();
         self.last_total_lines.set(total_lines);
@@ -1933,12 +1643,11 @@ impl ReactTrace {
             self.scroll_offset.min(max_offset)
         };
 
-        // Paragraph renders each pre-wrapped Line as one visual row. No
-        // `.wrap()` — we already sized every Line to `effective_width`.
-        let paragraph = Paragraph::new(wrapped)
-            .block(block)
-            .scroll((offset as u16, 0));
+        // Viewport slice: only clone the visible lines instead of all lines.
+        let visible_end = (offset + visible_height).min(total_lines);
+        let viewport: Vec<Line> = wrapped[offset..visible_end].to_vec();
 
+        let paragraph = Paragraph::new(viewport).block(block);
         frame.render_widget(paragraph, area);
 
         // Scrollbar: proportional thumb via viewport_content_length.
@@ -1986,8 +1695,37 @@ impl ReactTrace {
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
 
-        let states = compute_fence_states(ctx, effective_width);
-        let rows = self.build_virtual_rows(effective_width, &states, lineage);
+        // Use a simple hash of mermaid registry state count as a cheap
+        // fence-generation signal. A full hash is overkill — the generation
+        // counter already covers content mutations; this catches
+        // Pending→Ready transitions that don't touch entries.
+        let fence_gen = ctx.mermaid_registry.len() as u64;
+
+        // Cache check: rebuild only when generation, width, or fence state changed.
+        {
+            let mut cache = self.line_cache.borrow_mut();
+            let hit = cache
+                .as_ref()
+                .map(|c| {
+                    c.generation == self.generation
+                        && c.width == effective_width
+                        && c.fence_gen == fence_gen
+                })
+                .unwrap_or(false);
+            if !hit {
+                let states = compute_fence_states(ctx, effective_width);
+                let rows = self.build_virtual_rows(effective_width, &states, lineage);
+                *cache = Some(VirtualRowCacheEntry {
+                    rows,
+                    width: effective_width,
+                    generation: self.generation,
+                    fence_gen,
+                });
+            }
+        }
+
+        let cache = self.line_cache.borrow();
+        let rows = &cache.as_ref().expect("cache just populated").rows;
 
         let total = rows.len();
         self.last_total_lines.set(total);
@@ -2001,7 +1739,7 @@ impl ReactTrace {
         };
 
         let visible_end = (offset + visible_height).min(total);
-        let segments = segment_visible_rows(&rows, offset, visible_end);
+        let segments = segment_visible_rows(rows, offset, visible_end);
 
         // Walk segments and render into sub-Rects of `inner`.
         let mut y: u16 = inner.y;
@@ -2019,7 +1757,6 @@ impl ReactTrace {
                         .iter()
                         .map(|r| match r {
                             VirtualRow::Text(l) => l.clone(),
-                            // Should not happen — segmenter groups by kind.
                             VirtualRow::ImageRow { .. } => Line::from(""),
                         })
                         .collect();
@@ -2119,6 +1856,7 @@ impl ReactTrace {
             {
                 if rid == request_id {
                     *slot = Some(executor_id.to_string());
+                    self.invalidate_cache();
                     return;
                 }
             }
