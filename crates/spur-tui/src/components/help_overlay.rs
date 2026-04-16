@@ -78,6 +78,7 @@ impl HelpOverlay {
             Line::from("  Esc                Back to Dashboard"),
             Line::from("  y / n / a          Permission: yes/no/always"),
             Line::from("  Alt-m              Toggle plan mode"),
+            Line::from("  Alt-d              Toggle workers panel"),
             Line::from(""),
             header(" Editing Shortcuts"),
             Line::from("  Ctrl-P / Ctrl-N    Previous / next input history"),
