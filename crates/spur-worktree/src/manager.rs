@@ -336,4 +336,60 @@ impl WorktreeManager {
             .get(&key)
             .ok_or_else(|| anyhow!("no active worktree for session {key}"))
     }
+
+    /// Remove orphaned SPUR worktrees left on disk from previous runs.
+    /// Discovers worktrees via `git worktree list --porcelain` and removes
+    /// any with a `spur/` branch prefix that aren't in `self.active`.
+    pub async fn cleanup_orphans(&self) -> Result<usize> {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&self.repo_root)
+            .output()
+            .await
+            .context("failed to list worktrees")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut removed = 0usize;
+
+        // Parse porcelain output: blocks separated by blank lines.
+        // Each block has "worktree <path>" and optionally "branch <ref>".
+        let mut wt_path: Option<&str> = None;
+        for line in stdout.lines().chain(std::iter::once("")) {
+            if line.is_empty() {
+                wt_path = None;
+                continue;
+            }
+            if let Some(p) = line.strip_prefix("worktree ") {
+                wt_path = Some(p);
+            }
+            if let Some(branch) = line.strip_prefix("branch ") {
+                if branch.contains("spur/") {
+                    if let Some(path) = wt_path {
+                        // Skip if it's tracked in our active set
+                        if self.active.values().any(|info| info.path.to_str() == Some(path)) {
+                            continue;
+                        }
+                        debug!(path = %path, branch = %branch, "removing orphaned spur worktree");
+                        let rm = Command::new("git")
+                            .args(["worktree", "remove", "--force", path])
+                            .current_dir(&self.repo_root)
+                            .output()
+                            .await;
+                        match rm {
+                            Ok(o) if o.status.success() => removed += 1,
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                tracing::warn!(path = %path, err = %stderr, "failed to remove orphaned worktree");
+                            }
+                            Err(e) => {
+                                tracing::warn!(path = %path, err = %e, "failed to remove orphaned worktree");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
+    }
 }
