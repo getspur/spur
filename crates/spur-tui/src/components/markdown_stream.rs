@@ -250,6 +250,11 @@ impl MarkdownStream {
         &self.cached_items
     }
 
+    /// Whether the stream has pending changes awaiting flush.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty_since.is_some()
+    }
+
     /// Back-compat flat view. Substitutes the placeholder text line for each
     /// `Fence(id)`. Uses a state-aware placeholder if one was captured during
     /// the most recent `rebuild`; otherwise falls back to the default

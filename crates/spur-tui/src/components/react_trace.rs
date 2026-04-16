@@ -274,6 +274,10 @@ pub struct ReactTrace {
     /// Generation counter bumped on every content mutation. The line cache
     /// compares its stored generation to detect staleness.
     generation: u64,
+    /// Index of the first entry needing row rebuild. `Some(0)` = full rebuild.
+    /// `Some(n)` = incremental from entry n. `None` = cache fully valid.
+    /// Uses `Cell` because `render()` takes `&self`.
+    dirty_from: Cell<Option<usize>>,
     /// Cached pre-wrapped display lines. Invalidated when `generation`
     /// advances or the terminal width changes. Uses `RefCell` because
     /// `render()` takes `&self` (same pattern as `last_total_lines`).
@@ -296,6 +300,9 @@ struct LineCacheEntry {
 #[cfg(feature = "markdown")]
 struct VirtualRowCacheEntry {
     rows: Vec<VirtualRow>,
+    /// Row index where each entry's virtual rows begin.
+    /// `entry_row_starts[i]` = index into `rows` where entry `i` starts.
+    entry_row_starts: Vec<usize>,
     width: u16,
     generation: u64,
     /// Snapshot of mermaid fence states at cache time. If any state changes
@@ -317,6 +324,7 @@ impl ReactTrace {
             current_mode: None,
             observe_collapsed: true,
             generation: 0,
+            dirty_from: Cell::new(None),
             line_cache: RefCell::new(None),
         }
     }
@@ -388,6 +396,15 @@ impl ReactTrace {
     /// to rebuild the line cache. Cheap (no allocation).
     fn invalidate_cache(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.dirty_from.set(Some(0));
+    }
+
+    /// Mark entries from `idx` onward as needing row rebuild. Coalesces
+    /// with any existing dirty mark by taking the minimum index.
+    fn mark_dirty_from(&mut self, idx: usize) {
+        self.generation = self.generation.wrapping_add(1);
+        let prev = self.dirty_from.get();
+        self.dirty_from.set(Some(prev.map_or(idx, |d| d.min(idx))));
     }
 
     /// Return a short kind name for the most recent entry, or `None` if empty.
@@ -420,7 +437,7 @@ impl ReactTrace {
                 } else {
                     last.text = text.to_string();
                 }
-                self.invalidate_cache();
+                self.mark_dirty_from(self.entries.len() - 1);
                 if self.is_following {
                     self.scroll_to_bottom();
                 }
@@ -464,7 +481,7 @@ impl ReactTrace {
                     if let Some(stream) = entry.markdown.as_mut() {
                         stream.append(text);
                     }
-                    self.invalidate_cache();
+                    self.mark_dirty_from(idx);
                     if self.is_following {
                         self.scroll_to_bottom();
                     }
@@ -489,7 +506,7 @@ impl ReactTrace {
             if let Some(idx) = target_idx {
                 if let Some(entry) = self.entries.get_mut(idx) {
                     entry.text.push_str(text);
-                    self.invalidate_cache();
+                    self.mark_dirty_from(idx);
                     if self.is_following {
                         self.scroll_to_bottom();
                     }
@@ -514,8 +531,12 @@ impl ReactTrace {
             let drain = self.entries.len() - MAX_LOG_ENTRIES;
             self.entries.drain(..drain);
             self.scroll_offset = self.scroll_offset.saturating_sub(drain);
+            // Eviction shifts all indices — full rebuild required.
+            self.invalidate_cache();
+        } else {
+            // Rebuild last 2 entries to handle collapsed Act+Observe pairs.
+            self.mark_dirty_from(self.entries.len().saturating_sub(2));
         }
-        self.invalidate_cache();
         if self.is_following {
             self.scroll_to_bottom();
         }
@@ -594,31 +615,30 @@ impl ReactTrace {
     pub fn tick(&mut self) {
         self.tick_counter = self.tick_counter.wrapping_add(1);
 
-        let mut has_animation = false;
-        for entry in &mut self.entries {
+        let mut animation_idx: Option<usize> = None;
+        for (i, entry) in self.entries.iter_mut().enumerate() {
             if let TraceKind::Permission {
                 pending, countdown, ..
             } = &mut entry.kind
             {
                 if *pending && *countdown > 0 {
                     *countdown = countdown.saturating_sub(1);
-                    has_animation = true;
+                    animation_idx = Some(animation_idx.map_or(i, |a| a.min(i)));
                 }
             }
         }
-        // Spinners animate on pending Act entries (no paired Observe yet)
-        // and running Delegate entries. Only invalidate when visible.
-        if !has_animation {
-            has_animation = self.has_active_spinner();
+        // Spinners animate on pending Act entries (no paired Observe yet).
+        if animation_idx.is_none() {
+            animation_idx = self.first_active_spinner();
         }
-        if has_animation {
-            self.invalidate_cache();
+        if let Some(idx) = animation_idx {
+            self.mark_dirty_from(idx);
         }
     }
 
-    /// Returns true if any entry is showing an animated spinner (pending
-    /// Act without paired Observe, or permission countdown).
-    fn has_active_spinner(&self) -> bool {
+    /// Returns the index of the first entry showing an animated spinner
+    /// (pending Act without paired Observe in collapsed mode).
+    fn first_active_spinner(&self) -> Option<usize> {
         let len = self.entries.len();
         for (i, entry) in self.entries.iter().enumerate() {
             if let TraceKind::Act { .. } = &entry.kind {
@@ -629,16 +649,12 @@ impl ReactTrace {
                             TraceKind::Observe { payload: Some(_) }
                         );
                     if !has_observe {
-                        return true;
+                        return Some(i);
                     }
                 }
             }
-            // Delegate spinners are driven by lineage state, which changes
-            // via SpurEvents → content mutations → cache invalidation.
-            // Checking delegates here would permanently defeat the cache
-            // once any delegation completes (executor_id is never cleared).
         }
-        false
+        None
     }
 
     /// Drain any mermaid fences detected during the last debounce window.
@@ -653,16 +669,23 @@ impl ReactTrace {
         states: &super::markdown_stream::StateLookup<'_>,
     ) -> Vec<(usize, super::markdown_stream::FenceRef)> {
         let mut out = Vec::new();
+        let mut first_flushed: Option<usize> = None;
         for (idx, entry) in self.entries.iter_mut().enumerate() {
             if let Some(stream) = entry.markdown.as_mut() {
+                let was_dirty = stream.is_dirty();
                 for fence in stream.maybe_flush(states) {
                     out.push((idx, fence));
                 }
+                // Detect dirty→clean transition = a flush occurred that may
+                // have changed styled lines even without producing new fences.
+                if was_dirty && !stream.is_dirty() {
+                    first_flushed = Some(first_flushed.map_or(idx, |d| d.min(idx)));
+                }
             }
         }
-        // Always invalidate: maybe_flush may rebuild styled lines even
-        // without producing new fences, making cached VirtualRows stale.
-        self.invalidate_cache();
+        if let Some(idx) = first_flushed {
+            self.mark_dirty_from(idx);
+        }
         out
     }
 
@@ -1095,19 +1118,21 @@ impl ReactTrace {
     #[cfg(feature = "markdown")]
     pub(crate) fn build_virtual_rows(
         &self,
+        from: usize,
         effective_width: u16,
         states: &std::collections::HashMap<
             crate::components::mermaid::MermaidId,
             crate::components::mermaid::FenceRender,
         >,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
-    ) -> Vec<VirtualRow> {
+    ) -> (Vec<VirtualRow>, Vec<usize>) {
         use crate::components::markdown_stream::StreamItem;
 
         let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
         let collapsed = self.observe_collapsed;
 
         let mut rows: Vec<VirtualRow> = Vec::new();
+        let mut entry_row_starts: Vec<usize> = Vec::new();
 
         // Helper: wrap a Line to effective_width and push each wrapped visual
         // line as a VirtualRow::Text.
@@ -1125,8 +1150,19 @@ impl ReactTrace {
             }
         };
 
-        let mut i = 0;
+        let mut i = from;
+        // When starting mid-trace in collapsed mode, skip an Observe that
+        // was consumed by the preceding Act (the Act+Observe pair renders
+        // as one line and the Act is in the frozen prefix).
+        if collapsed && i > 0 {
+            if matches!(&self.entries.get(i).map(|e| &e.kind), Some(TraceKind::Observe { payload: Some(_) })) {
+                if matches!(&self.entries.get(i - 1).map(|e| &e.kind), Some(TraceKind::Act { .. })) {
+                    i += 1;
+                }
+            }
+        }
         while i < self.entries.len() {
+            entry_row_starts.push(rows.len());
             let entry = &self.entries[i];
             let ts_span = Span::styled(
                 format!("{} ", entry.timestamp),
@@ -1540,7 +1576,7 @@ impl ReactTrace {
             i += 1;
         }
 
-        rows
+        (rows, entry_row_starts)
     }
 
     /// Render the full ReAct trace into the given frame area.
@@ -1692,25 +1728,65 @@ impl ReactTrace {
         let fence_gen = ctx.mermaid_registry.len() as u64;
 
         // Cache check: rebuild only when generation, width, or fence state changed.
+        // Incremental path: if only the tail entries are dirty, truncate and
+        // rebuild from the dirty index — O(tail) instead of O(n).
         {
+            let dirty = self.dirty_from.get();
             let mut cache = self.line_cache.borrow_mut();
-            let hit = cache
-                .as_ref()
-                .map(|c| {
-                    c.generation == self.generation
-                        && c.width == effective_width
-                        && c.fence_gen == fence_gen
-                })
-                .unwrap_or(false);
-            if !hit {
+
+            let width_ok = cache.as_ref().map_or(false, |c| c.width == effective_width);
+            let fence_ok = cache.as_ref().map_or(false, |c| c.fence_gen == fence_gen);
+
+            if width_ok && fence_ok {
+                match dirty {
+                    None => { /* cache fully valid, nothing to do */ }
+                    Some(dirty_idx) if dirty_idx > 0 => {
+                        // Incremental: rebuild from dirty_idx onward.
+                        let c = cache.as_mut().unwrap();
+                        let trunc_row = if dirty_idx < c.entry_row_starts.len() {
+                            c.entry_row_starts[dirty_idx]
+                        } else {
+                            c.rows.len()
+                        };
+                        c.rows.truncate(trunc_row);
+                        c.entry_row_starts.truncate(dirty_idx);
+                        let states = compute_fence_states(ctx, effective_width);
+                        let (new_rows, new_starts) =
+                            self.build_virtual_rows(dirty_idx, effective_width, &states, lineage);
+                        let base = c.rows.len();
+                        c.rows.extend(new_rows);
+                        c.entry_row_starts.extend(new_starts.iter().map(|s| s + base));
+                        c.generation = self.generation;
+                        self.dirty_from.set(None);
+                    }
+                    _ => {
+                        // Full rebuild (dirty_idx == 0 or no cache).
+                        let states = compute_fence_states(ctx, effective_width);
+                        let (rows, entry_row_starts) =
+                            self.build_virtual_rows(0, effective_width, &states, lineage);
+                        *cache = Some(VirtualRowCacheEntry {
+                            rows,
+                            entry_row_starts,
+                            width: effective_width,
+                            generation: self.generation,
+                            fence_gen,
+                        });
+                        self.dirty_from.set(None);
+                    }
+                }
+            } else {
+                // Width or fence state changed — full rebuild.
                 let states = compute_fence_states(ctx, effective_width);
-                let rows = self.build_virtual_rows(effective_width, &states, lineage);
+                let (rows, entry_row_starts) =
+                    self.build_virtual_rows(0, effective_width, &states, lineage);
                 *cache = Some(VirtualRowCacheEntry {
                     rows,
+                    entry_row_starts,
                     width: effective_width,
                     generation: self.generation,
                     fence_gen,
                 });
+                self.dirty_from.set(None);
             }
         }
 
@@ -1810,6 +1886,23 @@ impl ReactTrace {
         }
     }
 
+    /// Collect executor IDs from all Delegate trace entries that have been
+    /// dispatched (i.e. have an executor_id). Used by the workers panel to
+    /// look up live status from ExecutorLineage. Deduplicated (retries
+    /// reuse the same executor_id across multiple Delegate entries).
+    pub fn active_executor_ids(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for e in &self.entries {
+            if let TraceKind::Delegate { executor_id: Some(id), .. } = &e.kind {
+                if seen.insert(id.as_str()) {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out
+    }
+
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -1879,7 +1972,7 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
     ) -> Vec<Segment> {
-        let rows = self.build_virtual_rows(effective_width, states, None);
+        let (rows, _starts) = self.build_virtual_rows(0, effective_width, states, None);
         let end = (offset + visible_height).min(rows.len());
         segment_visible_rows(&rows, offset, end)
     }
@@ -2198,7 +2291,8 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         let total = trace
-            .build_virtual_rows(60, &std::collections::HashMap::new(), None)
+            .build_virtual_rows(0, 60, &std::collections::HashMap::new(), None)
+            .0
             .len();
         // Header (1) + 3 body lines + blank separator (1) = 5
         assert_eq!(total, 5, "unexpected virtual row count: {total}");
@@ -2226,7 +2320,7 @@ mod virtual_row_tests {
             FenceRender::Ready(12),
         );
 
-        let rows = trace.build_virtual_rows(60, &states, None);
+        let (rows, _starts) = trace.build_virtual_rows(0, 60, &states, None);
 
         let image_rows: Vec<_> = rows
             .iter()
@@ -2263,7 +2357,7 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         let empty = std::collections::HashMap::new();
-        let rows = trace.build_virtual_rows(60, &empty, None);
+        let (rows, _starts) = trace.build_virtual_rows(0, 60, &empty, None);
 
         let image_rows = rows
             .iter()
