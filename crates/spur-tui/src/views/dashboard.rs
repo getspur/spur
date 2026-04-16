@@ -241,7 +241,7 @@ impl DashboardView {
 
     /// Render the dashboard with access to the current lineage projection.
     /// This is the canonical render path; called directly from `App::render`.
-    pub fn render_with_lineage(&self, frame: &mut Frame, area: Rect, lineage: &ExecutorLineage) {
+    pub fn render_with_lineage(&mut self, frame: &mut Frame, area: Rect, lineage: &ExecutorLineage) {
         let node_count = lineage.nodes().count();
 
         // Compute aggregates once for both empty and non-empty paths.
@@ -460,12 +460,20 @@ impl DashboardView {
                     let action = match ch {
                         'j' if self.focused_panel == Panel::Agents => Some(Action::SelectNext),
                         'j' => {
-                            self.activity_log.scroll_down(20);
+                            if self.focused_node.is_some() {
+                                self.detail_pane.scroll_down();
+                            } else {
+                                self.activity_log.scroll_down(20);
+                            }
                             Some(Action::ScrollDown)
                         }
                         'k' if self.focused_panel == Panel::Agents => Some(Action::SelectPrev),
                         'k' => {
-                            self.activity_log.scroll_up();
+                            if self.focused_node.is_some() {
+                                self.detail_pane.scroll_up();
+                            } else {
+                                self.activity_log.scroll_up();
+                            }
                             Some(Action::ScrollUp)
                         }
                         'r' => Some(Action::JumpToReview),
@@ -473,11 +481,19 @@ impl DashboardView {
                             Some(Action::ToggleCollapse)
                         }
                         'g' => {
-                            self.activity_log.scroll_to_top();
+                            if self.focused_node.is_some() {
+                                self.detail_pane.scroll_to_top();
+                            } else {
+                                self.activity_log.scroll_to_top();
+                            }
                             Some(Action::ScrollToTop)
                         }
                         'G' => {
-                            self.activity_log.scroll_to_bottom();
+                            if self.focused_node.is_some() {
+                                self.detail_pane.scroll_to_bottom();
+                            } else {
+                                self.activity_log.scroll_to_bottom();
+                            }
                             Some(Action::ScrollToBottom)
                         }
                         'v' => {
@@ -573,7 +589,11 @@ impl DashboardView {
                     }
                     'j' => {
                         self.input_bar.clear();
-                        self.activity_log.scroll_down(20);
+                        if self.focused_node.is_some() {
+                            self.detail_pane.scroll_down();
+                        } else {
+                            self.activity_log.scroll_down(20);
+                        }
                         return Some(Action::ScrollDown);
                     }
                     'k' if self.focused_panel == Panel::Agents => {
@@ -582,7 +602,11 @@ impl DashboardView {
                     }
                     'k' => {
                         self.input_bar.clear();
-                        self.activity_log.scroll_up();
+                        if self.focused_node.is_some() {
+                            self.detail_pane.scroll_up();
+                        } else {
+                            self.activity_log.scroll_up();
+                        }
                         return Some(Action::ScrollUp);
                     }
                     'r' => {
@@ -595,12 +619,20 @@ impl DashboardView {
                     }
                     'g' => {
                         self.input_bar.clear();
-                        self.activity_log.scroll_to_top();
+                        if self.focused_node.is_some() {
+                            self.detail_pane.scroll_to_top();
+                        } else {
+                            self.activity_log.scroll_to_top();
+                        }
                         return Some(Action::ScrollToTop);
                     }
                     'G' => {
                         self.input_bar.clear();
-                        self.activity_log.scroll_to_bottom();
+                        if self.focused_node.is_some() {
+                            self.detail_pane.scroll_to_bottom();
+                        } else {
+                            self.activity_log.scroll_to_bottom();
+                        }
                         return Some(Action::ScrollToBottom);
                     }
                     'v' => {
@@ -639,11 +671,19 @@ impl DashboardView {
         if self.input_bar.is_empty() {
             match key.code {
                 KeyCode::Up => {
-                    self.activity_log.scroll_up();
+                    if self.focused_node.is_some() {
+                        self.detail_pane.scroll_up();
+                    } else {
+                        self.activity_log.scroll_up();
+                    }
                     return Some(Action::ScrollUp);
                 }
                 KeyCode::Down => {
-                    self.activity_log.scroll_down(20);
+                    if self.focused_node.is_some() {
+                        self.detail_pane.scroll_down();
+                    } else {
+                        self.activity_log.scroll_down(20);
+                    }
                     return Some(Action::ScrollDown);
                 }
                 KeyCode::Tab => {
