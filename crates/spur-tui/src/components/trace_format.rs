@@ -1,0 +1,445 @@
+//! Formatting helpers for ReAct trace entries.
+//!
+//! Pure functions that convert trace data into styled `ratatui::text::Line`
+//! values. Extracted from `react_trace.rs` for testability and to reduce
+//! the size of the god-component.
+
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
+
+use spur_acp::{
+    adapter::{ObservePayload, ToolFamily, ToolInputDisplay},
+    LifecycleState,
+};
+
+// ─── Glyph / label helpers ──────────────────────────────────────────
+
+/// Map `ToolFamily` to a display glyph + color.
+pub(crate) fn family_glyph(f: ToolFamily) -> (&'static str, Color) {
+    match f {
+        ToolFamily::Read => ("⚙ reads", Color::Cyan),
+        ToolFamily::Edit => ("✎ edits", Color::Yellow),
+        ToolFamily::Delete => ("✗ deletes", Color::Red),
+        ToolFamily::Move => ("→ moves", Color::Yellow),
+        ToolFamily::Search => ("🔎 search", Color::Blue),
+        ToolFamily::Execute => ("$ runs", Color::Magenta),
+        ToolFamily::Think => ("◈ thinks", Color::DarkGray),
+        ToolFamily::Fetch => ("↯ fetch", Color::Blue),
+        ToolFamily::SwitchMode => ("⇄ mode", Color::Cyan),
+        ToolFamily::Plan => ("▸ plan", Color::Cyan),
+        ToolFamily::Mcp => ("⧉ mcp", Color::DarkGray),
+        ToolFamily::Unknown => ("🔧 ACT", Color::Yellow),
+    }
+}
+
+/// Map `ObservePayload` to an outcome glyph + color.
+pub(crate) fn outcome_glyph(p: &ObservePayload) -> (&'static str, Color) {
+    match p {
+        ObservePayload::CommandOutput {
+            exit_code: Some(0), ..
+        } => ("✓", Color::Green),
+        ObservePayload::CommandOutput {
+            exit_code: Some(_), ..
+        } => ("✗", Color::Red),
+        ObservePayload::CommandOutput {
+            exit_code: None, ..
+        } => ("?", Color::Yellow),
+        ObservePayload::Error { .. } => ("✗", Color::Red),
+        _ => ("✓", Color::Green),
+    }
+}
+
+/// Verb used in the observe header (past tense).
+pub(crate) fn observe_verb(p: &ObservePayload) -> &'static str {
+    match p {
+        ObservePayload::CommandOutput { .. } => "ran",
+        ObservePayload::FileRead { .. } => "read",
+        ObservePayload::EditResult { .. } => "edited",
+        ObservePayload::Json { .. } | ObservePayload::Text { .. } => "done",
+        ObservePayload::Error { .. } => "erred",
+    }
+}
+
+/// Compact single-line identifier for a tool invocation.
+pub(crate) fn input_summary(input: &ToolInputDisplay, tool: &str) -> String {
+    match input {
+        ToolInputDisplay::Path(p) => p.clone(),
+        ToolInputDisplay::Diff { path, .. } => path.clone(),
+        ToolInputDisplay::Command { cmd, .. } => cmd.clone(),
+        ToolInputDisplay::Query(q) => format!("\"{}\"", q),
+        ToolInputDisplay::Text(t) => t
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .to_string(),
+        ToolInputDisplay::Json(_) | ToolInputDisplay::Empty => tool.to_string(),
+    }
+}
+
+/// Compact outcome for collapsed grouped rendering:
+/// (outcome glyph, glyph color, compact stats string).
+pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color, String) {
+    match payload {
+        ObservePayload::CommandOutput {
+            exit_code,
+            stdout,
+            stderr,
+        } => {
+            let total = stdout.lines().count() + stderr.lines().count();
+            match exit_code {
+                Some(0) => ("✓", Color::Green, format!("{} lines", total)),
+                Some(c) => ("✗", Color::Red, format!("exit {} · {} lines", c, total)),
+                None => ("?", Color::Yellow, format!("{} lines", total)),
+            }
+        }
+        ObservePayload::FileRead {
+            content, truncated, ..
+        } => {
+            let n = content.lines().count();
+            let suffix = if *truncated { " (truncated)" } else { "" };
+            ("✓", Color::Green, format!("{} lines{}", n, suffix))
+        }
+        ObservePayload::EditResult {
+            replacements, diff, ..
+        } => {
+            if let Some(n) = replacements {
+                (
+                    "✓",
+                    Color::Green,
+                    format!("{} replacement{}", n, if *n == 1 { "" } else { "s" }),
+                )
+            } else if let Some(d) = diff {
+                let plus = d.lines().filter(|l| l.starts_with('+')).count();
+                let minus = d.lines().filter(|l| l.starts_with('-')).count();
+                ("✓", Color::Green, format!("+{}/-{}", plus, minus))
+            } else {
+                ("✓", Color::Green, String::new())
+            }
+        }
+        ObservePayload::Json { pretty } => {
+            let n = pretty.lines().count();
+            ("✓", Color::Green, format!("{} lines", n))
+        }
+        ObservePayload::Text { body } => {
+            let n = body.lines().count();
+            ("✓", Color::Green, format!("{} lines", n))
+        }
+        ObservePayload::Error { message } => {
+            let truncated = if message.chars().count() > 60 {
+                let mut end = 60;
+                while !message.is_char_boundary(end) && end > 0 {
+                    end -= 1;
+                }
+                format!("{}…", &message[..end])
+            } else {
+                message.clone()
+            };
+            ("✗", Color::Red, truncated)
+        }
+    }
+}
+
+// ─── Line builders ──────────────────────────────────────────────────
+
+/// Build display lines for a `ToolInputDisplay` value (3-space indented).
+pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match input {
+        ToolInputDisplay::Path(p) => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(p.clone(), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        ToolInputDisplay::Diff { path, diff } => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    path.clone(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            let mut count = 0usize;
+            let mut total = 0usize;
+            for dl in diff.lines() {
+                total += 1;
+                let _ = dl;
+            }
+            for dl in diff.lines() {
+                if count >= 6 {
+                    let remaining = total.saturating_sub(6);
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(
+                            format!("[… {} more]", remaining),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                    break;
+                }
+                let color = if dl.starts_with('+') {
+                    Color::Green
+                } else if dl.starts_with('-') {
+                    Color::Red
+                } else {
+                    Color::DarkGray
+                };
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(dl.to_string(), Style::default().fg(color)),
+                ]));
+                count += 1;
+            }
+        }
+        ToolInputDisplay::Command { cmd, cwd } => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(format!("$ {}", cmd), Style::default().fg(Color::Magenta)),
+            ]));
+            if let Some(cwd) = cwd {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("(cwd: {})", cwd),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+        ToolInputDisplay::Query(q) => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    q.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
+        ToolInputDisplay::Json(p) => {
+            for jl in p.lines().take(8) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+        ToolInputDisplay::Text(t) => {
+            for tl in t.lines() {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(tl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+        }
+        ToolInputDisplay::Empty => {}
+    }
+    lines
+}
+
+/// Build display lines for an `ObservePayload`.
+/// When `collapsed` is true, output is truncated to a short preview.
+pub(crate) fn observe_payload_lines(
+    payload: &ObservePayload,
+    collapsed: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match payload {
+        ObservePayload::CommandOutput {
+            exit_code,
+            stdout,
+            stderr,
+        } => {
+            let exit_str = match exit_code {
+                Some(c) => format!("$ exit {}", c),
+                None => "$ exit -".to_string(),
+            };
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(exit_str, Style::default().fg(Color::Magenta)),
+            ]));
+            let stdout_limit = if collapsed { 8 } else { usize::MAX };
+            let stderr_limit = if collapsed { 4 } else { usize::MAX };
+            let stdout_total = stdout.lines().count();
+            for sl in stdout.lines().take(stdout_limit) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(sl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+            if collapsed && stdout_total > stdout_limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!(
+                            "[… {} more lines · Ctrl+O expand]",
+                            stdout_total - stdout_limit
+                        ),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+            let stderr_total = stderr.lines().count();
+            for el in stderr.lines().take(stderr_limit) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(el.to_string(), Style::default().fg(Color::Red)),
+                ]));
+            }
+            if collapsed && stderr_total > stderr_limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more lines]", stderr_total - stderr_limit),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+        ObservePayload::FileRead {
+            path,
+            content,
+            truncated,
+        } => {
+            let line_count = content.lines().count();
+            let path_str = path.as_deref().unwrap_or("<unknown>");
+            let header = format!(
+                "{} · {} lines{}",
+                path_str,
+                line_count,
+                if *truncated { " (truncated)" } else { "" }
+            );
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(header, Style::default().fg(Color::Cyan)),
+            ]));
+            let limit = if collapsed { 8 } else { usize::MAX };
+            for cl in content.lines().take(limit) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(cl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+            if collapsed && line_count > limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more lines · Ctrl+O expand]", line_count - limit),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+        ObservePayload::EditResult {
+            path,
+            replacements,
+            diff,
+        } => {
+            if let Some(n) = replacements {
+                let msg = format!("{} replacement{}", n, if *n == 1 { "" } else { "s" });
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(msg, Style::default().fg(Color::Yellow)),
+                ]));
+            } else if let Some(d) = diff {
+                let limit = if collapsed { 6 } else { usize::MAX };
+                let total = d.lines().count();
+                for dl in d.lines().take(limit) {
+                    let color = if dl.starts_with('+') {
+                        Color::Green
+                    } else if dl.starts_with('-') {
+                        Color::Red
+                    } else {
+                        Color::DarkGray
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(dl.to_string(), Style::default().fg(color)),
+                    ]));
+                }
+                if collapsed && total > limit {
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(
+                            format!("[… {} more lines]", total - limit),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                }
+            } else if let Some(p) = path {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(p.clone(), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+        ObservePayload::Json { pretty } => {
+            let limit = if collapsed { 8 } else { usize::MAX };
+            let total = pretty.lines().count();
+            for jl in pretty.lines().take(limit) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            if collapsed && total > limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+        ObservePayload::Text { body } => {
+            let limit = if collapsed { 8 } else { usize::MAX };
+            let total = body.lines().count();
+            for tl in body.lines().take(limit) {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(tl.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+            if collapsed && total > limit {
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+        ObservePayload::Error { message } => {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(message.clone(), Style::default().fg(Color::Red)),
+            ]));
+        }
+    }
+    lines
+}
+
+/// Derive a live status label from the lineage for a Delegate trace entry.
+pub(crate) fn derive_delegate_status(
+    executor_id: Option<&str>,
+    lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+) -> Option<&'static str> {
+    let eid = executor_id?;
+    let lin = lineage?;
+    let node = lin.node(&spur_core::ExecutorId(eid.to_string()))?;
+    Some(match node.phase {
+        LifecycleState::Spawning => "spawning",
+        LifecycleState::Running | LifecycleState::Resuming => "running",
+        LifecycleState::AwaitingReview => "awaiting review",
+        LifecycleState::Succeeded => "done",
+        LifecycleState::Failed => "failed",
+        LifecycleState::Cancelled => "cancelled",
+    })
+}
