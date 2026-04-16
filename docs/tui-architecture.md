@@ -230,9 +230,9 @@ stateDiagram-v2
 
 | Problem | Severity | Evidence |
 |---|---|---|
-| **react_trace.rs is a God Component** | High | 2433 LOC doing markdown, code blocks, mermaid, virtual rows, scroll, trace entries |
+| **react_trace.rs is a God Component** | ~~High~~ Fixed | ~~2433 LOC doing markdown, code blocks, mermaid, virtual rows, scroll, trace entries~~ Split into 4 files, max 1087 LOC |
 | **session_detail.rs has 20+ public fields** | High | App reaches directly into view state — leaky abstraction |
-| **View trait is bypassed** | Medium | `render_with_lineage`, `handle_key_with_lineage` take extra params outside the trait |
+| **View trait is bypassed** | ~~Medium~~ Fixed | ~~`render_with_lineage`, `handle_key_with_lineage` take extra params outside the trait~~ ViewContext parameter on all trait methods |
 | **Triple event handling** | Medium | Every SpurEventBody must be handled in app.rs + dashboard.rs + session_detail.rs |
 | **No render caching** | ~~Medium~~ Fixed | ~~Virtual rows and line wrapping recomputed every frame — O(n) per frame~~ Incremental dirty tracking; O(1) amortized during streaming |
 | **No component lifecycle** | Low | Views created/destroyed ad-hoc, no mount/unmount hooks |
@@ -311,43 +311,41 @@ entries from `dirty_from` onward are rebuilt; the frozen prefix is reused.
 
 ### Priority 3: Architecture (Medium Risk)
 
-**3a. Decompose react_trace.rs**
+**3a. Decompose react_trace.rs** ✅
 
-Split into focused modules:
+Split into focused directory module:
 
 ```
-components/
-  react_trace/
-    mod.rs          — TraceModel (entry storage, append/merge)
-    renderer.rs     — VirtualRowLayout, scroll, viewport
-    markdown.rs     — Markdown → Line[] (absorb markdown_stream.rs)
-    code_block.rs   — Syntax-highlighted code rendering
-    mermaid.rs      — Fence detection, render dispatch
-    tool_call.rs    — ToolCall card rendering
+components/react_trace/
+    types.rs    — TraceKind, TraceEntry, VirtualRow, Segment, RenderContext (85 LOC)
+    mod.rs      — ReactTrace struct, data methods, tests (1087 LOC)
+    builder.rs  — build_virtual_rows, build_display_lines (811 LOC)
+    render.rs   — render, render_with_ctx, cache structs, viewport helpers (507 LOC)
 ```
 
-Each module ≤500 LOC with a clean interface.
+No file exceeds 1100 LOC (was 2527 in one file).
 
-**3b. Clean View Trait**
+**3b. Clean View Trait** ✅
 
-Replace bypass methods with a context parameter:
+Replaced bypass methods with a context parameter:
 
 ```rust
+pub struct ViewContext<'a> {
+    pub lineage: &'a ExecutorLineage,
+    pub brain_status: &'a BrainStatus,
+}
+
 pub trait View {
-    fn handle_key(&mut self, key: KeyEvent, ctx: &mut ViewContext) -> Option<Action>;
+    fn handle_key(&mut self, key: KeyEvent, ctx: &ViewContext) -> Option<Action>;
     fn handle_spur_event(&mut self, event: &SpurEvent, ctx: &ViewContext);
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &ViewContext);
     fn tick(&mut self);
 }
-
-pub struct ViewContext<'a> {
-    pub lineage: &'a ExecutorLineage,
-    pub brain_status: &'a BrainStatus,
-    pub metadata: &'a mut SessionMetadataStore,
-}
 ```
 
-Eliminates `render_with_lineage`, `handle_key_with_lineage`, and direct field access from App into views.
+Eliminated `render_with_lineage`, `handle_key_with_lineage`. Views access
+lineage and brain status through `ctx` instead of bypass methods. `render`
+changed from `&self` to `&mut self` (honest about interior mutation).
 
 **3c. Centralize Event Routing**
 
@@ -378,7 +376,7 @@ When a review is pending, offer a split view:
 ```
 Sprint 1: 1a (inline workers) + 1b (diff viewer)     — ✅ done
 Sprint 2: 2a (render caching)                         — ✅ done
-Sprint 3: 3a (decompose react_trace)                  — maintainability
-Sprint 4: 3b (clean View trait) + 3c (event routing)  — architecture
+Sprint 3: 3a (decompose react_trace)                  — ✅ done
+Sprint 4: 3b (clean View trait) + 3c (event routing)  — ✅ 3b done; 3c deferred (ViewContext reduces pain)
 Sprint 5: 4a (unified review)                         — UX polish
 ```
