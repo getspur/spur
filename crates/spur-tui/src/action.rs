@@ -61,6 +61,9 @@ pub enum Action {
     /// Cycle the active Claude session between `default` and `plan` mode.
     /// Dispatched by `Alt-m` in `SessionDetailView`.
     TogglePlanMode,
+    /// Toggle input bar between Emacs and Vim editing modes.
+    /// Dispatched by `Alt-v` or `/vim` slash command.
+    ToggleVimMode,
     /// Invoke an agent vendor-extension RPC.
     VendorExec {
         session: SessionId,
