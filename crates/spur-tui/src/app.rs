@@ -145,7 +145,7 @@ impl App {
         #[cfg(feature = "markdown")]
         let (mermaid_tx, mermaid_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let app = Self {
+        let mut app = Self {
             current_view,
             dashboard: DashboardView::new(),
             session_detail: None,
@@ -197,6 +197,8 @@ impl App {
                 let _ = tx.try_send(UserInput::ListSessions);
             }
         }
+
+        app.sync_input_history();
 
         app
     }
@@ -720,11 +722,10 @@ impl App {
                 // or acts on it. Buffering here caused BUG-1 (cross-session
                 // replay into an unrelated session that happens to spawn next).
 
-                if let Some(ref tx) = self.user_input_tx {
-                    let _ = tx.try_send(UserInput::NewSessionWithMessage { blocks: blocks.clone(), interrupt });
-                }
-
                 let preview = crate::commands::submit_router::blocks_preview(&blocks);
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::NewSessionWithMessage { blocks, interrupt });
+                }
                 self.push_input_history(&preview);
                 self.sync_brain_status();
                 self.dirty = true;
@@ -1134,6 +1135,16 @@ impl App {
         }
         if let Err(e) = self.metadata_store.save() {
             tracing::warn!(error = %e, "failed to persist input history");
+        }
+        self.sync_input_history();
+    }
+
+    /// Reseed all active InputBars with the current global history.
+    fn sync_input_history(&mut self) {
+        let hist = self.metadata_store.metadata().input_history.clone();
+        self.dashboard.seed_input_history(hist.clone());
+        if let Some(ref mut detail) = self.session_detail {
+            detail.seed_input_history(hist);
         }
     }
 
