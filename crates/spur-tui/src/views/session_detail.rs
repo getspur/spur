@@ -103,6 +103,8 @@ pub struct SessionDetailView {
     history_search: Option<String>,
     /// Full history texts parallel to the popup rows during history search.
     history_search_hits: Vec<String>,
+    /// Whether the inline workers panel is collapsed. Toggled by Alt+D.
+    workers_panel_collapsed: bool,
 }
 
 impl SessionDetailView {
@@ -151,6 +153,7 @@ impl SessionDetailView {
             cancel_mode: None,
             history_search: None,
             history_search_hits: Vec::new(),
+            workers_panel_collapsed: false,
         }
     }
 
@@ -801,6 +804,12 @@ impl SessionDetailView {
         // highest-priority worker executor.
         if matches!(key.code, KeyCode::Char('w')) && key.modifiers.contains(KeyModifiers::ALT) {
             return Some(Action::InspectWorkers);
+        }
+
+        // Alt+D → toggle inline workers panel collapse.
+        if matches!(key.code, KeyCode::Char('d')) && key.modifiers.contains(KeyModifiers::ALT) {
+            self.workers_panel_collapsed = !self.workers_panel_collapsed;
+            return None;
         }
 
         // Alt+I → toggle vim/emacs input mode.
@@ -1553,11 +1562,30 @@ impl SessionDetailView {
         }
 
         let input_height = self.input_bar.required_height(content_area.width);
+
+        // Compute workers panel height (dynamic: 0 when no active workers).
+        // Suppress on very small terminals to avoid squeezing the trace.
+        let executor_ids = self.react_trace.active_executor_ids();
+        let workers_h = if content_area.height < 12 {
+            0
+        } else {
+            lineage
+                .map(|lin| {
+                    crate::components::workers_panel::compute_height(
+                        lin,
+                        &executor_ids,
+                        self.workers_panel_collapsed,
+                    )
+                })
+                .unwrap_or(0)
+        };
+
         let chunks = Layout::vertical([
-            Constraint::Length(1),            // header
+            Constraint::Length(1),             // header
             Constraint::Min(4),               // react trace (fills)
-            Constraint::Length(input_height), // input bar
-            Constraint::Length(1),            // status bar
+            Constraint::Length(workers_h),     // workers panel
+            Constraint::Length(input_height),  // input bar
+            Constraint::Length(1),             // status bar
         ])
         .split(content_area);
 
@@ -1597,24 +1625,56 @@ impl SessionDetailView {
         #[cfg(not(feature = "markdown"))]
         self.react_trace.render(frame, chunks[1], lineage);
 
+        // ── Workers panel ───────────────────────────────────────────────
+        if let Some(lin) = lineage {
+            if workers_h > 0 {
+                crate::components::workers_panel::render(
+                    frame,
+                    chunks[2],
+                    lin,
+                    &executor_ids,
+                    self.workers_panel_collapsed,
+                );
+            }
+        }
+
         // ── Input bar ───────────────────────────────────────────────────
-        self.input_bar.render(frame, chunks[2]);
+        self.input_bar.render(frame, chunks[3]);
 
         // ── Completion popup (overlay above the InputBar) ──────────────
         if self.popup_open() {
             self.completion_popup
                 .borrow_mut()
-                .render(frame, chunks[2], area);
+                .render(frame, chunks[3], area);
         }
 
-        // ── Status bar ──────────────────────────────────────────────────
+        // ── Status bar (with live worker counts) ────────────────────────
+        let (running, pending_review) = lineage
+            .map(|lin| {
+                let mut r = 0usize;
+                let mut p = 0usize;
+                for eid in &executor_ids {
+                    if let Some(node) = lin.node(&spur_core::ExecutorId(eid.clone())) {
+                        match node.phase {
+                            spur_acp::domain::events::LifecycleState::Running
+                            | spur_acp::domain::events::LifecycleState::Spawning
+                            | spur_acp::domain::events::LifecycleState::Resuming => r += 1,
+                            spur_acp::domain::events::LifecycleState::AwaitingReview => p += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                (r, p)
+            })
+            .unwrap_or((0, 0));
+
         StatusBar::render(
             frame,
-            chunks[3],
+            chunks[4],
             StatusBarProps {
                 view: &ViewId::SessionDetail(self.session_id.clone()),
-                running: 0,
-                pending_review: 0,
+                running,
+                pending_review,
                 total_cost: self.cost,
                 elapsed: &elapsed,
                 current_mode: self.current_mode.as_deref(),

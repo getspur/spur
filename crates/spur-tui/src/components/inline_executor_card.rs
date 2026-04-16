@@ -259,7 +259,7 @@ fn focus_hint_line(phase: LifecycleState) -> Line<'static> {
     ))
 }
 
-fn phase_glyph(phase: LifecycleState) -> (char, Color) {
+pub(crate) fn phase_glyph(phase: LifecycleState) -> (char, Color) {
     match phase {
         LifecycleState::Spawning => ('○', Color::DarkGray),
         LifecycleState::Running | LifecycleState::Resuming => ('▶', Color::Green),
@@ -298,11 +298,11 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     id.chars().take(4).collect()
 }
 
-fn format_elapsed(secs: u64) -> String {
+pub(crate) fn format_elapsed(secs: u64) -> String {
     let m = secs / 60;
     let s = secs % 60;
     if m > 0 {

@@ -270,6 +270,16 @@ impl DetailPane {
                 });
             }
         }
+        // Render full diff text when available.
+        if let Some(ref diff_text) = node.latest_diff_text {
+            if !diff_text.is_empty() {
+                out.push(Line::from(Span::styled(
+                    "─".repeat(40),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                out.extend(super::diff_viewer::render_diff_lines(diff_text));
+            }
+        }
         if out.is_empty() {
             out.push(Line::from(Span::styled(
                 "(no artifacts yet)",

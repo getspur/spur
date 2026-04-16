@@ -3,6 +3,7 @@ pub mod agents_tree;
 pub mod completion_popup;
 pub mod completion_trigger;
 pub mod detail_pane;
+pub mod diff_viewer;
 pub mod help_overlay;
 pub mod inline_executor_card;
 pub mod input_bar;
@@ -18,6 +19,7 @@ pub mod review_card;
 pub mod session_preview;
 pub mod status_bar;
 pub(crate) mod trace_format;
+pub mod workers_panel;
 
 use ratatui::style::{Color, Style};
 use std::time::Instant;
