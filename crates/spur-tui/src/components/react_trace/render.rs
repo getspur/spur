@@ -129,13 +129,14 @@ fn compute_fence_states(
     use crate::components::mermaid::{FenceRender, MermaidState};
     let mut out = std::collections::HashMap::new();
     for (id, state) in ctx.mermaid_registry.iter() {
-        let r = match state {
-            MermaidState::Ready { image, .. } => FenceRender::Ready(
-                compute_inline_height_rows(image.as_ref(), pane_width_cols, ctx.picker),
-            ),
-            MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
-            MermaidState::Error { .. } => FenceRender::Error,
-        };
+        let r =
+            match state {
+                MermaidState::Ready { image, .. } => FenceRender::Ready(
+                    compute_inline_height_rows(image.as_ref(), pane_width_cols, ctx.picker),
+                ),
+                MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
+                MermaidState::Error { .. } => FenceRender::Error,
+            };
         out.insert(*id, r);
     }
     out
@@ -185,7 +186,7 @@ impl ReactTrace {
     /// Non-markdown path. For markdown-enabled sessions, callers should use
     /// `render_with_ctx` which supports inline image segments.
     pub fn render(
-        &self,
+        &mut self,
         frame: &mut Frame,
         area: Rect,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
@@ -213,8 +214,8 @@ impl ReactTrace {
         let wrapped_owned: Vec<Line<'static>>;
         #[cfg(not(feature = "markdown"))]
         {
-            let mut cache = self.line_cache.borrow_mut();
-            let hit = cache
+            let hit = self
+                .line_cache
                 .as_ref()
                 .map(|c| c.generation == self.generation && c.width == effective_width)
                 .unwrap_or(false);
@@ -226,7 +227,7 @@ impl ReactTrace {
                     .into_iter()
                     .flat_map(|l| wrap_line_to_width(&l, effective_width))
                     .collect();
-                *cache = Some(LineCacheEntry {
+                self.line_cache = Some(LineCacheEntry {
                     lines: built,
                     width: effective_width,
                     generation: self.generation,
@@ -249,18 +250,19 @@ impl ReactTrace {
         };
 
         #[cfg(not(feature = "markdown"))]
-        let cache_borrow;
-        #[cfg(not(feature = "markdown"))]
         let wrapped: &[Line<'static>] = {
-            cache_borrow = self.line_cache.borrow();
-            &cache_borrow.as_ref().expect("cache just populated").lines
+            &self
+                .line_cache
+                .as_ref()
+                .expect("cache just populated")
+                .lines
         };
         #[cfg(feature = "markdown")]
         let wrapped: &[Line<'static>] = &wrapped_owned;
 
         let total_lines = wrapped.len();
-        self.last_total_lines.set(total_lines);
-        self.last_visible_height.set(visible_height);
+        self.last_total_lines = total_lines;
+        self.last_visible_height = visible_height;
 
         // Clamp or pin scroll offset.
         let max_offset = total_lines.saturating_sub(visible_height);
@@ -295,7 +297,7 @@ impl ReactTrace {
     /// as a single-row placeholder instead — the v1 graceful-clip policy.
     #[cfg(feature = "markdown")]
     pub fn render_with_ctx(
-        &self,
+        &mut self,
         frame: &mut Frame,
         area: Rect,
         ctx: &RenderContext<'_>,
@@ -330,18 +332,24 @@ impl ReactTrace {
         // Incremental path: if only the tail entries are dirty, truncate and
         // rebuild from the dirty index — O(tail) instead of O(n).
         {
-            let dirty = self.dirty_from.get();
-            let mut cache = self.line_cache.borrow_mut();
+            let dirty = self.dirty_from;
 
-            let width_ok = cache.as_ref().map_or(false, |c| c.width == effective_width);
-            let fence_ok = cache.as_ref().map_or(false, |c| c.fence_gen == fence_gen);
+            let width_ok = self
+                .line_cache
+                .as_ref()
+                .map_or(false, |c| c.width == effective_width);
+            let fence_ok = self
+                .line_cache
+                .as_ref()
+                .map_or(false, |c| c.fence_gen == fence_gen);
 
             if width_ok && fence_ok {
                 match dirty {
                     None => { /* cache fully valid, nothing to do */ }
                     Some(dirty_idx) if dirty_idx > 0 => {
                         // Incremental: rebuild from dirty_idx onward.
-                        let c = cache.as_mut().unwrap();
+                        // Truncate first, then build (avoids overlapping borrow).
+                        let c = self.line_cache.as_mut().unwrap();
                         let trunc_row = if dirty_idx < c.entry_row_starts.len() {
                             c.entry_row_starts[dirty_idx]
                         } else {
@@ -349,28 +357,31 @@ impl ReactTrace {
                         };
                         c.rows.truncate(trunc_row);
                         c.entry_row_starts.truncate(dirty_idx);
+                        let base = c.rows.len();
+                        // Drop the mutable borrow before calling &self method.
                         let states = compute_fence_states(ctx, effective_width);
                         let (new_rows, new_starts) =
                             self.build_virtual_rows(dirty_idx, effective_width, &states, lineage);
-                        let base = c.rows.len();
+                        let c = self.line_cache.as_mut().unwrap();
                         c.rows.extend(new_rows);
-                        c.entry_row_starts.extend(new_starts.iter().map(|s| s + base));
+                        c.entry_row_starts
+                            .extend(new_starts.iter().map(|s| s + base));
                         c.generation = self.generation;
-                        self.dirty_from.set(None);
+                        self.dirty_from = None;
                     }
                     _ => {
                         // Full rebuild (dirty_idx == 0 or no cache).
                         let states = compute_fence_states(ctx, effective_width);
                         let (rows, entry_row_starts) =
                             self.build_virtual_rows(0, effective_width, &states, lineage);
-                        *cache = Some(VirtualRowCacheEntry {
+                        self.line_cache = Some(VirtualRowCacheEntry {
                             rows,
                             entry_row_starts,
                             width: effective_width,
                             generation: self.generation,
                             fence_gen,
                         });
-                        self.dirty_from.set(None);
+                        self.dirty_from = None;
                     }
                 }
             } else {
@@ -378,23 +389,22 @@ impl ReactTrace {
                 let states = compute_fence_states(ctx, effective_width);
                 let (rows, entry_row_starts) =
                     self.build_virtual_rows(0, effective_width, &states, lineage);
-                *cache = Some(VirtualRowCacheEntry {
+                self.line_cache = Some(VirtualRowCacheEntry {
                     rows,
                     entry_row_starts,
                     width: effective_width,
                     generation: self.generation,
                     fence_gen,
                 });
-                self.dirty_from.set(None);
+                self.dirty_from = None;
             }
         }
 
-        let cache = self.line_cache.borrow();
-        let rows = &cache.as_ref().expect("cache just populated").rows;
+        let rows = &self.line_cache.as_ref().expect("cache just populated").rows;
 
         let total = rows.len();
-        self.last_total_lines.set(total);
-        self.last_visible_height.set(visible_height);
+        self.last_total_lines = total;
+        self.last_visible_height = visible_height;
 
         let max_offset = total.saturating_sub(visible_height);
         let offset = if self.is_following {

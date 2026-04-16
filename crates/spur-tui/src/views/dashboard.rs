@@ -34,9 +34,9 @@ pub enum Panel {
 /// All agent-state is now read from `ExecutorLineage` (owned by `App`);
 /// this struct only owns the activity log and UI controls.
 ///
-/// Dashboard rendering flows through `render_with_lineage` so the detail
-/// pane can access the event-sourced projection owned by `App`. The
-/// `View::render` method is a no-op — `App::render` dispatches directly.
+/// Dashboard rendering flows through `View::render`, which delegates to
+/// the private `render_with_lineage` helper so the detail pane can access
+/// the event-sourced lineage projection via `ViewContext`.
 pub struct DashboardView {
     agents_tree: AgentsTree,
     activity_log: ActivityLog,
@@ -240,8 +240,7 @@ impl DashboardView {
     }
 
     /// Render the dashboard with access to the current lineage projection.
-    /// This is the canonical render path; called directly from `App::render`.
-    pub fn render_with_lineage(&mut self, frame: &mut Frame, area: Rect, lineage: &ExecutorLineage) {
+    fn render_with_lineage(&mut self, frame: &mut Frame, area: Rect, lineage: &ExecutorLineage) {
         let node_count = lineage.nodes().count();
 
         // Compute aggregates once for both empty and non-empty paths.
@@ -423,7 +422,10 @@ impl DashboardView {
         // Mode-entry keys (i/a/A/I/o/O) fall through to InputBar.
         if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
             if let KeyCode::Char(ch) = key.code {
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
                     // Review decision keys when in Review tab
                     if self.focused_node.is_some()
                         && self.detail_pane.current_tab == DetailTab::Review
@@ -434,9 +436,7 @@ impl DashboardView {
                             if let Some(id) = self.focused_node.clone() {
                                 let attempt_n = lineage
                                     .and_then(|l| l.node(&id))
-                                    .and_then(|n| {
-                                        n.pending_review.as_ref().map(|r| r.attempt_n)
-                                    })
+                                    .and_then(|n| n.pending_review.as_ref().map(|r| r.attempt_n))
                                     .unwrap_or(1);
                                 return Some(Action::SubmitReview {
                                     executor_id: id.0,
@@ -466,9 +466,7 @@ impl DashboardView {
                             Some(Action::ScrollUp)
                         }
                         'r' => Some(Action::JumpToReview),
-                        'c' if self.focused_panel == Panel::Agents => {
-                            Some(Action::ToggleCollapse)
-                        }
+                        'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
                         'g' => {
                             if self.focused_node.is_some() {
                                 self.detail_pane.scroll_to_top();
