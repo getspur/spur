@@ -55,6 +55,10 @@ pub struct SessionMetadata {
     pub last_active_brain: Option<String>,
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionEntry>,
+    /// Global input history across all sessions, newest last.
+    /// Persisted so Ctrl-P/Ctrl-N recall works across restarts.
+    #[serde(default)]
+    pub input_history: Vec<String>,
 }
 
 fn default_version() -> u32 {
@@ -81,6 +85,10 @@ impl SessionMetadataStore {
 
     pub fn metadata(&self) -> &SessionMetadata {
         &self.metadata
+    }
+
+    pub fn metadata_mut(&mut self) -> &mut SessionMetadata {
+        &mut self.metadata
     }
 
     pub fn entry(&self, session_id: &str) -> Option<&SessionEntry> {
