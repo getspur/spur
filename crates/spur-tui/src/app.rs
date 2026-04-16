@@ -444,10 +444,12 @@ impl App {
                 let hist = &mut self.metadata_store.metadata_mut().input_history;
                 let mut changed = false;
                 for entry in entries {
-                    if entry.role == "user" && !entry.text.is_empty() && !hist.contains(&entry.text)
-                    {
-                        hist.push(entry.text.clone());
-                        changed = true;
+                    if entry.role == "user" {
+                        let text = Self::sanitize_history_entry(&entry.text);
+                        if !text.is_empty() && !hist.contains(&text) {
+                            hist.push(text);
+                            changed = true;
+                        }
                     }
                 }
                 if hist.len() > 100 {
@@ -1147,13 +1149,13 @@ impl App {
 
     /// Append a submitted message to the global input history (dedup + cap).
     fn push_input_history(&mut self, text: &str) {
+        let text = Self::sanitize_history_entry(text);
         if text.is_empty() {
             return;
         }
         let hist = &mut self.metadata_store.metadata_mut().input_history;
-        // Dedup: remove previous occurrence so the most recent is always last.
-        hist.retain(|e| e != text);
-        hist.push(text.to_string());
+        hist.retain(|e| *e != text);
+        hist.push(text);
         if hist.len() > 100 {
             hist.remove(0);
         }
@@ -1161,6 +1163,24 @@ impl App {
             tracing::warn!(error = %e, "failed to persist input history");
         }
         self.sync_input_history();
+    }
+
+    /// Trim whitespace and truncate to 4 KiB so pasted code blocks don't
+    /// bloat `session_metadata.json`.
+    fn sanitize_history_entry(text: &str) -> String {
+        let text = text.trim();
+        if text.is_empty() {
+            return String::new();
+        }
+        const MAX: usize = 4096;
+        if text.len() <= MAX {
+            return text.to_string();
+        }
+        let mut end = MAX;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text[..end].to_string()
     }
 
     /// Reseed all active InputBars with the current global history.
