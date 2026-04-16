@@ -684,6 +684,14 @@ impl SessionDetailView {
 
 impl SessionDetailView {
     fn handle_key_inner(&mut self, key: KeyEvent) -> Option<Action> {
+        // ── macOS Option-key normalisation ─────────────────────────────
+        // macOS terminals send Unicode characters (e.g. `∑` for Option-W)
+        // instead of Alt escape sequences when "Use Option as Meta key" is
+        // off (the default).  Map the most common US-QWERTY Option-letter
+        // characters back to Alt+<ascii> so the keybindings work
+        // out-of-the-box.
+        let key = super::normalize_macos_option(key);
+
         // Dismiss the auth banner on any keystroke (before any further routing).
         // The mode-toggle binding below still fires because the action is
         // dispatched regardless.

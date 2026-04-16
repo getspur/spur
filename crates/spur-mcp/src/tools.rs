@@ -51,7 +51,7 @@ pub struct ToolDefinition {
 fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
-        description: "Delegate a task to a worker agent. Blocks until the worker completes. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Use `list_available_workers` when routing is ambiguous.".into(),
+        description: "Delegate a task to a worker agent. Blocks until the worker completes or a 90-second safety timeout is reached. If the worker is still running at timeout, returns a delegation_id — call check_delegation_status to poll for the result. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Use `list_available_workers` when routing is ambiguous.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -281,13 +281,30 @@ fn delegate_async_def() -> ToolDefinition {
 fn wait_delegation_def() -> ToolDefinition {
     ToolDefinition {
         name: "wait_delegation".into(),
-        description: "Block until an async delegation completes and return its result. Use after delegate_async.".into(),
+        description: "Block until an async delegation completes and return its result. Use after delegate_async. If the worker is still running after 90 seconds, returns a 'still running' message — call check_delegation_status to poll again.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "delegation_id": {
                     "type": "string",
                     "description": "The delegation_id returned by delegate_async"
+                }
+            },
+            "required": ["delegation_id"]
+        }),
+    }
+}
+
+fn check_delegation_status_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "check_delegation_status".into(),
+        description: "Non-blocking poll for a delegation result. Returns the result immediately if the worker has finished, or {\"status\":\"running\"} if still in progress. Use after delegate_async or when delegate_to_worker / wait_delegation returned a delegation_id due to timeout.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "delegation_id": {
+                    "type": "string",
+                    "description": "The delegation_id to check"
                 }
             },
             "required": ["delegation_id"]
@@ -302,6 +319,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         delegate_parallel_def(),
         delegate_async_def(),
         wait_delegation_def(),
+        check_delegation_status_def(),
         list_available_workers_def(),
         get_issue_def(),
         update_issue_def(),

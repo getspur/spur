@@ -4,12 +4,79 @@ pub mod mermaid_viewer;
 pub mod session_detail;
 pub mod session_picker;
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::Frame;
 use spur_acp::SpurEvent;
 
 use crate::action::Action;
+
+// ── macOS Option-key normalisation ────────────────────────────────────
+//
+// macOS terminals emit a Unicode character (e.g. `∑` for Option-W on
+// US-QWERTY) instead of an Alt escape sequence when the "Use Option as
+// Meta key" setting is off — which is the default on Terminal.app,
+// iTerm2, and most other macOS terminals.
+//
+// The table below maps the US-QWERTY Option-letter characters back to
+// `Alt+<ascii>` so that SPUR's keybindings work out-of-the-box on macOS
+// without requiring users to change their terminal settings.
+//
+// This is intentionally NOT gated behind `cfg(target_os = "macos")`
+// because it must also work when a macOS terminal SSHs into a Linux
+// host running SPUR — the terminal still sends Unicode, but the binary
+// is compiled for Linux.  The false-positive risk (a user intentionally
+// typing `∑` or `µ` in a TUI) is negligible.
+
+/// Normalise a macOS Option-key Unicode character to `Alt+<ascii>`.
+/// Returns the key unchanged on non-macOS or when no mapping applies.
+pub(crate) fn normalize_macos_option(key: KeyEvent) -> KeyEvent {
+    if let KeyCode::Char(ch) = key.code {
+        if let Some(ascii) = macos_option_char(ch) {
+            return KeyEvent::new(
+                KeyCode::Char(ascii),
+                key.modifiers | KeyModifiers::ALT,
+            );
+        }
+    }
+    key
+}
+
+/// US-QWERTY Option-letter → ASCII mapping.  Covers most of the
+/// alphabet; dead-key letters (e → ´, n → ˜, u → ¨) are excluded
+/// because macOS does not emit a standalone character for those — it
+/// waits for a second keystroke to compose an accented letter.
+fn macos_option_char(ch: char) -> Option<char> {
+    match ch {
+        'å' => Some('a'),
+        '∫' => Some('b'),
+        'ç' => Some('c'),
+        '∂' => Some('d'),
+        // 'e' → dead-key (´), skip
+        'ƒ' => Some('f'),
+        '©' => Some('g'),
+        '˙' => Some('h'),
+        'ˆ' => Some('i'),
+        '∆' => Some('j'),
+        '˚' => Some('k'),
+        '¬' => Some('l'),
+        'µ' => Some('m'),
+        // 'n' → dead-key (˜), skip
+        'ø' => Some('o'),
+        'π' => Some('p'),
+        'œ' => Some('q'),
+        '®' => Some('r'),
+        'ß' => Some('s'),
+        '†' => Some('t'),
+        // 'u' → dead-key (¨), skip
+        '√' => Some('v'),
+        '∑' => Some('w'),
+        '≈' => Some('x'),
+        '¥' => Some('y'),
+        'Ω' => Some('z'),
+        _ => None,
+    }
+}
 
 /// Trait for top-level views (Dashboard, Session Detail, etc.).
 pub trait View {
