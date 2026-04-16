@@ -289,6 +289,27 @@ impl SessionPickerView {
         self.state = PickerState::Error { message };
     }
 
+    pub fn handle_paste(&mut self, text: &str) {
+        let first_line = text.lines().next().unwrap_or("");
+        if first_line.is_empty() {
+            return;
+        }
+        if let Some(ref mut rs) = self.rename_state {
+            rs.buffer.push_str(first_line);
+            return;
+        }
+        if let PickerState::Populated {
+            search_focused: true,
+            filter,
+            cursor,
+            ..
+        } = &mut self.state
+        {
+            filter.push_str(first_line);
+            *cursor = 0;
+        }
+    }
+
     fn relative_time(iso: &str) -> String {
         let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) else {
             return String::new();
