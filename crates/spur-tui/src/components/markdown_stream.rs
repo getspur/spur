@@ -82,23 +82,31 @@ fn is_table_separator(line: &str) -> bool {
     })
 }
 
-/// Wrap runs of consecutive GFM-table-like lines in a fenced code block so
-/// they render verbatim (line-preserving) instead of being reflowed as a
-/// CommonMark paragraph.
+/// Force GFM-table-like blocks to render with each row on its own line by
+/// (a) separating the block from surrounding prose with a blank line and
+/// (b) appending two trailing spaces ("  ") to every row except the last,
+/// which is CommonMark's hard-break syntax.
 ///
-/// Why: `tui-markdown 0.3` does not support the GFM tables extension and
-/// pulldown-cmark is not told to enable it here. Without intervention,
-/// consecutive `|...|` lines are parsed as one paragraph and flow together
-/// into a single rendered line.
+/// Why: `tui-markdown 0.3` does not support the GFM tables extension.
+/// Without intervention, pulldown-cmark parses consecutive `|...|` lines
+/// as a single CommonMark paragraph — rows flow together into one line.
+/// Hard breaks preserve line boundaries in source without producing
+/// visible markers (unlike ``` fences, which tui-markdown renders as
+/// literal text).
 ///
-/// A "run" is wrapped only when it contains at least one separator row
+/// A "block" is transformed only when it has at least one separator row
 /// (e.g. `|---|---|`) — otherwise it's likely not a table and we leave
-/// it alone. Runs inside existing fenced code blocks are untouched.
-fn wrap_tables_in_fences(input: &str) -> String {
+/// it alone. Blocks inside existing fenced code blocks are untouched.
+fn inject_hard_breaks_in_tables(input: &str) -> String {
     let lines: Vec<&str> = input.lines().collect();
     let mut out = String::with_capacity(input.len() + 16);
     let mut in_code_fence = false;
     let mut i = 0;
+
+    // Helper: does the current output end with a blank line (or is empty)?
+    let ends_with_blank = |s: &str| -> bool {
+        s.is_empty() || s.ends_with("\n\n") || s.ends_with('\n') && s.len() == 1
+    };
 
     while i < lines.len() {
         let line = lines[i];
@@ -124,13 +132,27 @@ fn wrap_tables_in_fences(input: &str) -> String {
             let has_sep = block.iter().any(|l| is_table_separator(l));
 
             if has_sep && block.len() >= 2 {
-                // Surrounding blank lines so the fence is its own block.
-                out.push_str("\n```\n");
-                for l in block {
-                    out.push_str(l);
+                // Ensure a blank line before the block so preceding prose
+                // doesn't merge with the first row.
+                if !ends_with_blank(&out) {
                     out.push('\n');
                 }
-                out.push_str("```\n");
+                // Append "  " to every row except the last to force a
+                // hard break at end-of-line. The last row's line break
+                // naturally ends the paragraph.
+                let last = block.len() - 1;
+                for (idx, l) in block.iter().enumerate() {
+                    out.push_str(l);
+                    if idx < last && !l.ends_with("  ") {
+                        out.push_str("  ");
+                    }
+                    out.push('\n');
+                }
+                // Ensure a trailing blank line so following prose doesn't
+                // merge with the last row.
+                if i < lines.len() && !lines[i].is_empty() {
+                    out.push('\n');
+                }
             } else {
                 for l in block {
                     out.push_str(l);
@@ -358,11 +380,12 @@ impl MarkdownStream {
             out
         };
 
-        // ── Stage 3.5: wrap GFM-table-like blocks in fenced code blocks ──
-        // `tui-markdown` does not yet render tables; without this, rows are
-        // reflowed into a single paragraph line. Fencing preserves line
-        // boundaries so the table renders as a readable monospace block.
-        let transformed = wrap_tables_in_fences(&transformed);
+        // ── Stage 3.5: force table-like rows onto their own lines ────────
+        // `tui-markdown` does not yet render GFM tables; without this,
+        // rows are reflowed into a single paragraph line. Injecting
+        // CommonMark hard breaks preserves line boundaries without
+        // producing any visible markers in the output.
+        let transformed = inject_hard_breaks_in_tables(&transformed);
 
         // ── Stage 4: parse transformed text via tui-markdown ──────────────
         if transformed.is_empty() {
@@ -596,27 +619,61 @@ mod stream_item_tests {
     }
 
     #[test]
-    fn non_table_pipe_lines_are_not_wrapped() {
+    fn non_table_pipe_lines_are_not_transformed() {
         // Lines with `|` but without a separator row must NOT be treated as
         // tables. This avoids false positives on shell pipelines, regex
         // alternations, etc.
         let input = "Use `ls | grep foo` to filter.\nAnother | pipe line.\n";
-        let out = wrap_tables_in_fences(input);
-        assert!(
-            !out.contains("```"),
-            "non-table pipe content must not be fenced; got:\n{out}"
+        let out = inject_hard_breaks_in_tables(input);
+        assert_eq!(
+            out, input,
+            "non-table pipe content must pass through unchanged; got:\n{out}"
         );
     }
 
     #[test]
-    fn wrap_ignores_content_inside_existing_code_fence() {
-        // A table-like block INSIDE a ``` fence must not be re-wrapped.
+    fn transform_ignores_content_inside_existing_code_fence() {
+        // A table-like block INSIDE a ``` fence must be left alone — no
+        // trailing "  " injected into rows.
         let input = "```\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n";
-        let out = wrap_tables_in_fences(input);
-        let fence_count = out.matches("```").count();
+        let out = inject_hard_breaks_in_tables(input);
         assert_eq!(
-            fence_count, 2,
-            "existing code fence must not be re-wrapped (expected 2 ``` markers, got {fence_count}):\n{out}"
+            out, input,
+            "content inside existing code fence must pass through unchanged:\n{out}"
+        );
+    }
+
+    #[test]
+    fn transformed_table_has_no_visible_backtick_markers() {
+        // End-to-end: the rendered output must not contain literal ``` that
+        // would appear as visible text to the user (the tui-markdown 0.3
+        // renderer emits ``` lines for code blocks, which is why we use
+        // hard breaks instead of fencing).
+        let mut s = MarkdownStream::new();
+        s.append("| Key | Action |\n|---|---|\n| Esc | cancel |\n");
+        let _ = s.flush_now(&StateLookup::empty());
+        let joined = s.cached_lines_debug().join("\n");
+        assert!(
+            !joined.contains("```"),
+            "rendered output must not contain ``` markers; got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn prose_adjacent_table_separates_first_row_from_prose() {
+        // When prose precedes a table without a blank line, the first row
+        // must still render on its own line (not merged with prose).
+        let mut s = MarkdownStream::new();
+        s.append("Here are bindings:\n| Key | Action |\n|---|---|\n| Esc | cancel |\n");
+        let _ = s.flush_now(&StateLookup::empty());
+        let joined = s.cached_lines_debug().join("\n");
+        let lines: Vec<&str> = joined.lines().collect();
+        let prose_and_row_on_same_line = lines
+            .iter()
+            .any(|l| l.contains("bindings:") && l.contains("| Key"));
+        assert!(
+            !prose_and_row_on_same_line,
+            "prose must not merge with first table row; got:\n{joined}"
         );
     }
 
@@ -637,5 +694,43 @@ mod stream_item_tests {
         assert!(is_table_separator("| --- | :---: | ---: |"));
         assert!(!is_table_separator("| a | b |"));
         assert!(!is_table_separator("|---| b |"));
+    }
+
+    #[test]
+    fn end_to_end_table_sandwiched_between_prose_renders_cleanly() {
+        // Realistic LLM output: prose, table, more prose, no blank-line
+        // separators. Must render every row on its own line, separated
+        // from surrounding prose, with no visible ``` markers.
+        let mut s = MarkdownStream::new();
+        s.append(
+            "Here are the keybindings:\n\
+             | Key | Action |\n\
+             |---|---|\n\
+             | Esc | cancel |\n\
+             | Enter | submit |\n\
+             That's it.\n",
+        );
+        let _ = s.flush_now(&StateLookup::empty());
+        let joined = s.cached_lines_debug().join("\n");
+
+        assert!(!joined.contains("```"), "got:\n{joined}");
+        for needle in [
+            "keybindings:",
+            "| Key | Action |",
+            "|---|---|",
+            "| Esc | cancel |",
+            "| Enter | submit |",
+            "That's it.",
+        ] {
+            assert!(
+                joined.lines().any(|l| l.contains(needle)),
+                "expected {needle:?} on its own line; got:\n{joined}"
+            );
+        }
+
+        let merged = joined
+            .lines()
+            .any(|l| l.contains("keybindings:") && l.contains("| Key"));
+        assert!(!merged, "prose merged with first row:\n{joined}");
     }
 }
