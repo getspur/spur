@@ -579,7 +579,45 @@ impl App {
             SpurEventBody::BrainError { message, .. } => {
                 self.brain_status = BrainStatus::Error(message.clone());
             }
-            _ => {}
+            SpurEventBody::BrainReconnecting { .. } => {
+                self.brain_status = BrainStatus::Thinking;
+            }
+            SpurEventBody::BrainReconnected { .. } => {
+                self.brain_status = BrainStatus::Ready;
+            }
+            SpurEventBody::BrainReconnectFailed { reason, .. } => {
+                self.brain_status = BrainStatus::Error(reason.clone());
+            }
+            SpurEventBody::SessionCompleted { .. } => {
+                self.brain_status = BrainStatus::Idle;
+            }
+            // Variants that don't affect brain status — handled by views.
+            SpurEventBody::DelegationRequested { .. }
+            | SpurEventBody::DelegationCompleted { .. }
+            | SpurEventBody::DelegationDispatched { .. }
+            | SpurEventBody::WorkerSpawned { .. }
+            | SpurEventBody::WorkerNotification { .. }
+            | SpurEventBody::WorkerProgress { .. }
+            | SpurEventBody::WorkerFileTouched { .. }
+            | SpurEventBody::WorkerHeartbeat { .. }
+            | SpurEventBody::ExecutorPhaseChanged { .. }
+            | SpurEventBody::ExecutorRetryStarted { .. }
+            | SpurEventBody::ExecutorArtifact { .. }
+            | SpurEventBody::ExecutorReviewRequested { .. }
+            | SpurEventBody::ExecutorReviewResolved { .. }
+            | SpurEventBody::ExecutorReviewCancelled { .. }
+            | SpurEventBody::CostUpdate { .. }
+            | SpurEventBody::ConflictDetected { .. }
+            | SpurEventBody::RateLimitDetected { .. }
+            | SpurEventBody::BrainFailover { .. }
+            | SpurEventBody::IssueReceived { .. }
+            | SpurEventBody::PrCreated { .. }
+            | SpurEventBody::IssueUpdated { .. }
+            | SpurEventBody::AgentExtNotification { .. } => {}
+            // Catch-all for future variants — log so we notice.
+            _ => {
+                tracing::debug!("unhandled SpurEventBody variant in brain status tracking");
+            }
         }
 
         // Forward to views
@@ -1494,7 +1532,7 @@ pub async fn run_tui_with_config(
         // iteration; no event is lost, just deferred by one frame. `Lagged`
         // counts toward the cap so a subscriber that's badly behind still makes
         // progress instead of spinning on drop notifications.
-        const DRAIN_CAP_PER_FRAME: u32 = 8;
+        const DRAIN_CAP_PER_FRAME: u32 = 64;
         let mut drained_this_phase: u32 = 0;
         while drained_this_phase < DRAIN_CAP_PER_FRAME {
             match event_rx.try_recv() {
