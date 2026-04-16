@@ -750,3 +750,214 @@ After all three phases ship:
 - Brain prompt contracts other than the system prompt (append, task, issue context blocks remain).
 - Build-time dependencies (no new crates required beyond `toml` which spur-acp already uses).
 - Skill invocation paths — brains and workers may invoke superpowers skills natively via their own tool surfaces; our descriptors, `delegation_plan` contract, and task prompt structure remain orthogonal to skill invocation in v1. The soft-upper-layer integration lives in its own follow-up spec.
+
+---
+
+## Amendment 1 — Skill-Based Brain Prompt Resources
+
+**Date:** 2026-04-15
+**Amends:** Part B (Brain prompt rewrite)
+**Motivation:** The original spec treats the brain agent as a black box that receives a shared prompt. Different agents have different native behaviors that conflict with the brain role (Kiro tries to run `/spec-*`, Claude Code uses native `Task` instead of SPUR delegation tools, Codex has limited context). Per-agent brain role guidance is needed. Industry convergence on the Agent Skills open standard (adopted by 20+ platforms: Claude Code, Cursor, VS Code/Copilot, Gemini CLI, OpenAI Codex) provides the right format.
+
+### Amendment A1.1 — SKILL.md format for brain prompt resources
+
+The four static Rust constants (`DISPATCH_PROCEDURE`, `PLAN_REQUIREMENT`, `TASK_STRUCTURE`, `CANONICAL_EXAMPLE`) in `orchestrator.rs` are replaced by a single bundled `SKILL.md` file. Per-agent brain role guidance is added as separate `SKILL.md` files.
+
+Files follow the [Agent Skills](https://agentskills.io) open standard with three SPUR extension frontmatter fields:
+
+| Field | Standard | Values | Purpose |
+|---|---|---|---|
+| `name` | Agent Skills | string | Identity / discovery |
+| `description` | Agent Skills | string | Trigger — when to inject (not a workflow summary) |
+| `role` | SPUR extension | `"brain"` \| `"worker"` | Scopes to brain or worker role |
+| `agent` | SPUR extension | agent name or omitted | Per-agent scoping; omitted = shared |
+| `activation` | SPUR extension | `"always"` \| `"on-dispatch"` | When to inject into prompt |
+
+Extension fields are ignored by agent-native skill loaders (which only read `name` and `description`), preserving cross-platform compatibility.
+
+### Amendment A1.2 — File structure
+
+**Bundled defaults** (compiled via `include_str!()`):
+
+```
+crates/spur-core/src/skills/
+├── brain-delegation/
+│   └── SKILL.md                          # shared delegation procedure
+├── brain-delegation-claude-code-acp/
+│   └── SKILL.md                          # Claude Code brain role guidance
+├── brain-delegation-kiro/
+│   └── SKILL.md                          # Kiro brain role guidance
+├── brain-delegation-codex/
+│   └── SKILL.md                          # Codex brain role guidance
+└── brain-delegation-gemini/
+    └── SKILL.md                          # Gemini brain role guidance
+```
+
+**User overrides** (per-project, read at startup):
+
+```
+.spur/skills/
+├── README.md                             # explains override mechanism
+├── brain-delegation/
+│   └── SKILL.md                          # override shared procedure
+└── brain-delegation-{agent}/
+    └── SKILL.md                          # override per-agent guidance
+```
+
+User file wins if present. Otherwise bundled default. Same override pattern as `defaults.toml` → user config.
+
+### Amendment A1.3 — Prompt assembly pipeline (replaces B.1)
+
+```
+1. Header                                  ← render_header() (static Rust, unchanged)
+2. Available workers block                  ← render_workers_block() (from config, unchanged)
+3. Shared delegation framework             ← brain-delegation/SKILL.md body (NEW, replaces 4 constants)
+4. Per-agent brain role guidance            ← brain-delegation-{brain_name}/SKILL.md body (NEW)
+5. Issue context                            ← unchanged
+6. Project context (brain.prompt.append)    ← unchanged
+7. Task                                     ← unchanged
+```
+
+Block 3 replaces the four static constants. Block 4 is new. Blocks 5-7 are unchanged.
+
+### Amendment A1.4 — Loader
+
+Location: `crates/spur-core/src/skills/mod.rs` (new module).
+
+```rust
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// Bundled skill bodies, keyed by skill directory name.
+/// Frontmatter is stripped; only the markdown body is stored.
+static BUNDLED: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+
+fn bundled() -> &'static HashMap<&'static str, &'static str> {
+    BUNDLED.get_or_init(|| {
+        let mut m = HashMap::new();
+        m.insert("brain-delegation",
+            strip_frontmatter(include_str!("brain-delegation/SKILL.md")));
+        m.insert("brain-delegation-kiro",
+            strip_frontmatter(include_str!("brain-delegation-kiro/SKILL.md")));
+        m.insert("brain-delegation-claude-code-acp",
+            strip_frontmatter(include_str!("brain-delegation-claude-code-acp/SKILL.md")));
+        m.insert("brain-delegation-codex",
+            strip_frontmatter(include_str!("brain-delegation-codex/SKILL.md")));
+        m.insert("brain-delegation-gemini",
+            strip_frontmatter(include_str!("brain-delegation-gemini/SKILL.md")));
+        m
+    })
+}
+
+/// Load a skill body: user override wins, else bundled default.
+pub fn load_skill(name: &str, repo_root: &Path) -> Option<String> {
+    let override_path = repo_root
+        .join(".spur/skills")
+        .join(name)
+        .join("SKILL.md");
+    if override_path.exists() {
+        std::fs::read_to_string(&override_path)
+            .ok()
+            .map(|s| strip_frontmatter_owned(&s))
+    } else {
+        bundled().get(name).map(|s| s.to_string())
+    }
+}
+
+fn strip_frontmatter(s: &str) -> &str {
+    // Skip YAML frontmatter delimited by "---\n"
+    if let Some(rest) = s.strip_prefix("---") {
+        if let Some(idx) = rest.find("\n---") {
+            return &rest[idx + 4..];
+        }
+    }
+    s
+}
+```
+
+### Amendment A1.5 — Orchestrator integration
+
+`build_brain_prompt_v1` changes from:
+
+```rust
+prompt.push_str(DISPATCH_PROCEDURE);
+prompt.push_str(PLAN_REQUIREMENT);
+prompt.push_str(TASK_STRUCTURE);
+prompt.push_str(CANONICAL_EXAMPLE);
+```
+
+To:
+
+```rust
+if let Some(framework) = skills::load_skill("brain-delegation", &self.repo_root) {
+    prompt.push_str(&framework);
+}
+let agent_skill = format!("brain-delegation-{}", self.brain_agent_name());
+if let Some(guidance) = skills::load_skill(&agent_skill, &self.repo_root) {
+    prompt.push_str(&guidance);
+}
+```
+
+The four static `const` declarations are deleted.
+
+### Amendment A1.6 — Validator additions
+
+Two new Warn-level lints added to `validate_delegation_config`:
+
+| # | Check | Message |
+|---|---|---|
+| 5 | Agent is `brain.default` or in `brain.fallback` AND no bundled or user brain skill exists for that agent | `"agent '{name}': configured as brain but no brain-delegation-{name} skill found — delegation behavior may be unpredictable"` |
+| 6 | User override `.spur/skills/{name}/SKILL.md` exists but body is empty after stripping frontmatter | `"brain skill override '{path}' has empty body — bundled default will NOT be used"` |
+
+### Amendment A1.7 — Token accounting update
+
+| Block | Tokens |
+|---|---|
+| Header | ~80 |
+| Workers block (15 agents × 100 chars) | ~400 |
+| Shared delegation framework (SKILL.md body) | ~1,000 |
+| Per-agent brain role guidance | ~150-250 |
+| **System-prompt overhead (once per session)** | **~1,650-1,730 tokens** |
+
+Comparable to the original ~1,700 estimate. Per-agent guidance adds ~150-250 tokens; the shared skill is slightly more compact than four separate constants because section headers are not duplicated.
+
+### Amendment A1.8 — File touch summary additions
+
+| File | Section | Change |
+|---|---|---|
+| `crates/spur-core/src/skills/brain-delegation/SKILL.md` | A1 | **New** — shared delegation procedure |
+| `crates/spur-core/src/skills/brain-delegation-kiro/SKILL.md` | A1 | **New** — Kiro brain role guidance |
+| `crates/spur-core/src/skills/brain-delegation-claude-code-acp/SKILL.md` | A1 | **New** — Claude Code brain role guidance |
+| `crates/spur-core/src/skills/brain-delegation-codex/SKILL.md` | A1 | **New** — Codex brain role guidance |
+| `crates/spur-core/src/skills/brain-delegation-gemini/SKILL.md` | A1 | **New** — Gemini brain role guidance |
+| `crates/spur-core/src/skills/mod.rs` | A1 | **New** — skill loader (bundled + user override) |
+| `.spur/skills/README.md` | A1 | **New** — documents override mechanism |
+| `crates/spur-core/src/orchestrator.rs` | A1 | Replace 4 static constants with `skills::load_skill` calls |
+| `crates/spur-acp/src/agents/defaults.rs` | A1 | 2 new lint checks (#5, #6) |
+
+### Amendment A1.9 — Rollout integration
+
+This amendment slots into **Phase 3** (brain prompt rewrite). No phase disruption:
+
+- Phase 1 (data model + defaults) — unchanged
+- Phase 2 (MCP tools) — unchanged
+- Phase 3 (brain prompt) — static constants → SKILL.md files + per-agent guidance
+
+The `spur init` command creates `.spur/skills/` with the README. Bundled skills are compiled in and require no user action.
+
+### Amendment A1.10 — Tests
+
+| Test | Location |
+|---|---|
+| `bundled_skills_parse_and_strip_frontmatter` | `spur-core/src/skills/mod.rs` |
+| `load_skill_returns_bundled_when_no_override` | same |
+| `load_skill_prefers_user_override` | same |
+| `brain_prompt_contains_delegation_framework` | `spur-core/src/orchestrator.rs` |
+| `brain_prompt_contains_agent_guidance_when_available` | same |
+| `brain_prompt_omits_agent_guidance_for_unknown_agent` | same |
+| `lint_flags_brain_without_skill` | `spur-acp/src/agents/defaults.rs` |
+| `lint_flags_empty_skill_override` | same |
+
+### Amendment A1.11 — Non-goal preserved
+
+The original non-goal "Model-specific prompt flavors" is preserved in spirit. The shared delegation framework is identical across all agents. Per-agent guidance is a small addendum (~150-250 tokens) for role reconciliation, not a full prompt rewrite. The core delegation procedure, plan requirement, task structure, and canonical example are shared.

@@ -18,9 +18,9 @@ pub struct StatusBar;
 /// misleading `[Esc]stop` disappears once a cancel is already in progress.
 pub(crate) fn hint_for_session_detail(stream_in_flight: bool) -> &'static str {
     if stream_in_flight {
-        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [?]help"
+        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [Alt-w]workers [?]help"
     } else {
-        " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [?]help"
+        " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [Alt-w]workers [?]help"
     }
 }
 

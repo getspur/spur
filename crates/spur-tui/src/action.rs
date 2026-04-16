@@ -108,6 +108,10 @@ pub enum Action {
     CancelStream {
         session: SessionId,
     },
+    /// Navigate to Dashboard with Agents panel focused and the
+    /// highest-priority executor pre-selected (AwaitingReview > Running
+    /// > most recent worker). Emitted by Alt+w in SessionDetailView.
+    InspectWorkers,
 }
 
 /// Which permission option the user selected.

@@ -80,6 +80,9 @@ fn check_or_update(actual: &str, golden_name: &str) {
 #[test]
 fn claude_edit_renders_golden() {
     let mut trace = make_trace(AgentKind::ClaudeCodeAcp);
+    // Expand so the Act/Observe pair renders as separate blocks with full
+    // body content — this test validates the expanded form.
+    trace.toggle_observe_collapsed();
 
     // ACT: an Edit tool call with a diff input
     push_act(
@@ -108,11 +111,106 @@ fn claude_edit_renders_golden() {
     check_or_update(&actual, "claude_edit.txt");
 }
 
+#[test]
+fn pending_act_collapsed_renders_spinner_one_liner() {
+    // When an Act has no following Observe(payload) (tool still running),
+    // collapsed mode must render a stable 1-line format with a pending
+    // indicator — not fall back to the 2+ line full Act rendering.
+    let mut trace = make_trace(AgentKind::ClaudeCodeAcp);
+    // Default is collapsed.
+
+    push_act(
+        &mut trace,
+        "Bash",
+        ToolFamily::Execute,
+        ToolInputDisplay::Command {
+            cmd: "cargo test".to_string(),
+            cwd: None,
+        },
+        "",
+    );
+    // No Observe pushed — tool is pending.
+
+    let actual = render_to_string(&trace);
+    // Must be a single 1-line summary with the pending indicator "…".
+    let non_empty_lines = actual
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    assert_eq!(
+        non_empty_lines, 1,
+        "pending Act must render as 1 line in collapsed mode, got:\n{actual}"
+    );
+    assert!(
+        actual.contains("cargo test"),
+        "pending line must show command, got:\n{actual}"
+    );
+    assert!(
+        actual.contains('\u{2026}'),
+        "pending line must include '…' indicator, got:\n{actual}"
+    );
+    // Must NOT contain a ✓ or ✗ outcome glyph (no result yet).
+    assert!(
+        !actual.contains('\u{2713}') && !actual.contains('\u{2717}'),
+        "pending line must not show ✓/✗ outcome, got:\n{actual}"
+    );
+}
+
+#[test]
+fn claude_edit_collapsed_renders_one_line_summary() {
+    let mut trace = make_trace(AgentKind::ClaudeCodeAcp);
+    // Default is collapsed — leave as-is.
+
+    push_act(
+        &mut trace,
+        "Edit",
+        ToolFamily::Edit,
+        ToolInputDisplay::Diff {
+            path: "/tmp/foo.rs".to_string(),
+            diff: "-a\n+b\n".to_string(),
+        },
+        "",
+    );
+
+    push_observe(
+        &mut trace,
+        Some(ObservePayload::EditResult {
+            path: Some("/tmp/foo.rs".to_string()),
+            replacements: Some(1),
+            diff: None,
+        }),
+        "",
+    );
+
+    let actual = render_to_string(&trace);
+    // Grouped one-line summary: glyph + path + outcome + stats
+    assert!(
+        actual.contains("/tmp/foo.rs"),
+        "expected path in collapsed line, got:\n{actual}"
+    );
+    assert!(
+        actual.contains("✓"),
+        "expected success glyph in collapsed line, got:\n{actual}"
+    );
+    assert!(
+        actual.contains("1 replacement"),
+        "expected replacement count in collapsed line, got:\n{actual}"
+    );
+    // The one-line summary must collapse both entries into a single line.
+    let non_empty_lines = actual.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(
+        non_empty_lines, 1,
+        "expected exactly 1 non-empty line in collapsed output, got:\n{actual}"
+    );
+}
+
 // ─── Test 2: codex exec exit0 ───────────────────────────────────────────────
 
 #[test]
 fn codex_exec_exit0_renders_golden() {
     let mut trace = make_trace(AgentKind::CodexAcp);
+    // Expand so the Observe body (exit code + stdout) is rendered in full.
+    trace.toggle_observe_collapsed();
 
     // ACT: an Execute tool call
     push_act(
@@ -162,6 +260,9 @@ fn generic_mcp_envelope_renders_golden() {
     // Rendered as: "✓ ran" header + "$ exit 0" + "done" body
 
     let mut trace = make_trace(AgentKind::Generic);
+    // Expand so the Observe body is rendered in full (this test validates
+    // the MCP envelope unwrap path; exit code + stdout must be visible).
+    trace.toggle_observe_collapsed();
 
     // Push an MCP tool call (already classified as Mcp family)
     push_act(
