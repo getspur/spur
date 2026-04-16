@@ -2083,12 +2083,19 @@ impl Orchestrator {
             let review_sink = review_sink.clone();
 
             tokio::spawn(async move {
+                let mut guard = DelegationGuard {
+                    funnel: funnel.clone(),
+                    respond_to: Some(respond_to),
+                    request_id: request_id.clone(),
+                    disarmed: false,
+                };
+
                 // Acquire a permit before starting the delegation.
                 let _permit = match semaphore.acquire().await {
                     Ok(permit) => permit,
                     Err(_) => {
                         error!("Semaphore closed — aborting delegation");
-                        return;
+                        return; // guard fires DelegationCompleted(Failed)
                     }
                 };
 
@@ -2118,6 +2125,10 @@ impl Orchestrator {
                     review_sink.clone(),
                 )
                 .await;
+
+                // Normal path: disarm the guard and send result manually.
+                guard.disarmed = true;
+                let respond_to = guard.respond_to.take().unwrap();
 
                 if let Err(_returned_result) = respond_to.send(result) {
                     // Brain's MCP tool call was cancelled — the oneshot
@@ -2627,6 +2638,19 @@ impl Orchestrator {
                             "failed to remove retry-attempt worktree; next attempt may fail at create_worktree"
                         );
                     }
+
+                    // Exponential backoff: 1s, 2s, 4s, 8s, … capped at 30s.
+                    let backoff_secs = std::cmp::min(
+                        1u64 << (attempt_n.saturating_sub(1) as u64),
+                        30,
+                    );
+                    tracing::info!(
+                        attempt_n = attempt_n,
+                        backoff_secs = backoff_secs,
+                        "retry backoff before next attempt"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+
                     continue;
                 }
                 None => {
@@ -2777,6 +2801,45 @@ async fn apply_worktree_cleanup(
         );
     } else {
         let _ = worktrees.remove_worktree(worker_session).await;
+    }
+}
+
+/// RAII guard that ensures every delegation emits `DelegationCompleted`
+/// even on early-exit or task abort. Disarmed by the normal completion
+/// path; fires on Drop otherwise.
+struct DelegationGuard {
+    funnel: crate::event_funnel::FunnelHandle,
+    respond_to: Option<tokio::sync::oneshot::Sender<DelegationResult>>,
+    request_id: String,
+    disarmed: bool,
+}
+
+impl Drop for DelegationGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        error!(
+            request_id = %self.request_id,
+            "DelegationGuard fired — emitting DelegationCompleted(Failed)"
+        );
+        self.funnel.emit(SpurEventBody::DelegationCompleted {
+            worker_session: SessionId(self.request_id.clone()),
+            status: DelegationStatus::Failed {
+                error: "delegation aborted (early exit or task cancelled)".into(),
+            },
+        });
+        if let Some(tx) = self.respond_to.take() {
+            let _ = tx.send(DelegationResult {
+                status: DelegationStatus::Failed {
+                    error: "delegation aborted".into(),
+                },
+                diff: None,
+                diff_summary: None,
+                summary: None,
+                estimated_cost_usd: 0.0,
+            });
+        }
     }
 }
 
