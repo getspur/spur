@@ -617,13 +617,12 @@ impl ReactTrace {
     }
 
     /// Returns true if any entry is showing an animated spinner (pending
-    /// Act without paired Observe, or running Delegate).
+    /// Act without paired Observe, or permission countdown).
     fn has_active_spinner(&self) -> bool {
         let len = self.entries.len();
         for (i, entry) in self.entries.iter().enumerate() {
-            match &entry.kind {
-                TraceKind::Act { .. } if self.observe_collapsed => {
-                    // Pending if no following Observe with payload
+            if let TraceKind::Act { .. } = &entry.kind {
+                if self.observe_collapsed {
                     let has_observe = i + 1 < len
                         && matches!(
                             &self.entries[i + 1].kind,
@@ -633,18 +632,11 @@ impl ReactTrace {
                         return true;
                     }
                 }
-                TraceKind::Delegate { executor_id, .. } => {
-                    // Spinner shown when executor is running (no terminal status yet)
-                    if executor_id.is_some() {
-                        // derive_delegate_status would check lineage, but we
-                        // don't have it here. Conservatively assume running
-                        // delegates animate. This over-invalidates slightly
-                        // but is safe.
-                        return true;
-                    }
-                }
-                _ => {}
             }
+            // Delegate spinners are driven by lineage state, which changes
+            // via SpurEvents → content mutations → cache invalidation.
+            // Checking delegates here would permanently defeat the cache
+            // once any delegation completes (executor_id is never cleared).
         }
         false
     }
@@ -668,9 +660,9 @@ impl ReactTrace {
                 }
             }
         }
-        if !out.is_empty() {
-            self.invalidate_cache();
-        }
+        // Always invalidate: maybe_flush may rebuild styled lines even
+        // without producing new fences, making cached VirtualRows stale.
+        self.invalidate_cache();
         out
     }
 
@@ -696,9 +688,7 @@ impl ReactTrace {
                 }
             }
         }
-        if !out.is_empty() {
-            self.invalidate_cache();
-        }
+        self.invalidate_cache();
         out
     }
 
