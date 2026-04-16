@@ -438,6 +438,30 @@ impl App {
                 } else {
                     tracing::warn!("SessionHistory: session_detail is None, history lost!");
                 }
+
+                // Backfill global input history from replayed user messages
+                // so Ctrl-P recalls past inputs even from older sessions.
+                let hist = &mut self.metadata_store.metadata_mut().input_history;
+                let mut changed = false;
+                for entry in entries {
+                    if entry.role == "user" && !entry.text.is_empty() && !hist.contains(&entry.text)
+                    {
+                        hist.push(entry.text.clone());
+                        changed = true;
+                    }
+                }
+                if hist.len() > 100 {
+                    let excess = hist.len() - 100;
+                    hist.drain(..excess);
+                    changed = true;
+                }
+                if changed {
+                    if let Err(e) = self.metadata_store.save() {
+                        tracing::warn!(error = %e, "failed to persist backfilled input history");
+                    }
+                    self.sync_input_history();
+                }
+
                 return;
             }
             _ => {}
