@@ -2,13 +2,11 @@ mod builder;
 mod render;
 mod types;
 
-pub use types::{TraceEntry, TraceKind};
 #[cfg(feature = "markdown")]
 pub use types::RenderContext;
 #[cfg(all(test, feature = "markdown"))]
 pub(crate) use types::{Segment, VirtualRow};
-
-use std::cell::{Cell, RefCell};
+pub use types::{TraceEntry, TraceKind};
 
 use spur_acp::{
     adapter::{mode_badge, ToolInputDisplay},
@@ -24,18 +22,17 @@ use super::trace_format::{
 use super::MAX_LOG_ENTRIES;
 
 /// Spinner frames for delegation animation.
-pub(super) const SPINNER_FRAMES: &[&str] =
-    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(super) const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub struct ReactTrace {
     pub(super) entries: Vec<TraceEntry>,
     pub(super) scroll_offset: usize,
     pub(super) is_following: bool,
     pub(super) tick_counter: u8,
-    /// Cached total rendered lines from last render (interior mutability for &self render).
-    pub(super) last_total_lines: Cell<usize>,
+    /// Cached total rendered lines from last render.
+    pub(super) last_total_lines: usize,
     /// Cached visible height from last render.
-    pub(super) last_visible_height: Cell<usize>,
+    pub(super) last_visible_height: usize,
     /// Whether mermaid rendering is available.
     pub(super) mermaid_enabled: bool,
     /// Which agent brain backs this session; drives pane title + accent color.
@@ -47,13 +44,13 @@ pub struct ReactTrace {
     /// Generation counter bumped on every content mutation.
     pub(super) generation: u64,
     /// Index of the first entry needing row rebuild.
-    pub(super) dirty_from: Cell<Option<usize>>,
+    pub(super) dirty_from: Option<usize>,
     /// Cached pre-wrapped display lines.
     #[cfg(not(feature = "markdown"))]
-    pub(super) line_cache: RefCell<Option<render::LineCacheEntry>>,
+    pub(super) line_cache: Option<render::LineCacheEntry>,
     /// Cached virtual rows for the markdown render path.
     #[cfg(feature = "markdown")]
-    pub(super) line_cache: RefCell<Option<render::VirtualRowCacheEntry>>,
+    pub(super) line_cache: Option<render::VirtualRowCacheEntry>,
 }
 
 impl ReactTrace {
@@ -63,15 +60,15 @@ impl ReactTrace {
             scroll_offset: 0,
             is_following: true,
             tick_counter: 0,
-            last_total_lines: Cell::new(0),
-            last_visible_height: Cell::new(20),
+            last_total_lines: 0,
+            last_visible_height: 20,
             mermaid_enabled: true,
             agent_kind: AgentKind::Generic,
             current_mode: None,
             observe_collapsed: true,
             generation: 0,
-            dirty_from: Cell::new(None),
-            line_cache: RefCell::new(None),
+            dirty_from: None,
+            line_cache: None,
         }
     }
 
@@ -137,14 +134,14 @@ impl ReactTrace {
     /// to rebuild the line cache.
     fn invalidate_cache(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        self.dirty_from.set(Some(0));
+        self.dirty_from = Some(0);
     }
 
     /// Mark entries from `idx` onward as needing row rebuild.
     fn mark_dirty_from(&mut self, idx: usize) {
         self.generation = self.generation.wrapping_add(1);
-        let prev = self.dirty_from.get();
-        self.dirty_from.set(Some(prev.map_or(idx, |d| d.min(idx))));
+        let prev = self.dirty_from;
+        self.dirty_from = Some(prev.map_or(idx, |d| d.min(idx)));
     }
 
     /// Return a short kind name for the most recent entry, or `None` if empty.
@@ -263,8 +260,7 @@ impl ReactTrace {
 
     fn max_offset(&self) -> usize {
         self.last_total_lines
-            .get()
-            .saturating_sub(self.last_visible_height.get())
+            .saturating_sub(self.last_visible_height)
     }
 
     pub fn scroll_up(&mut self) {
@@ -303,13 +299,13 @@ impl ReactTrace {
         if self.is_following {
             self.scroll_offset = self.max_offset();
         }
-        let jump = self.last_visible_height.get().saturating_sub(2).max(1);
+        let jump = self.last_visible_height.saturating_sub(2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_sub(jump);
         self.is_following = false;
     }
 
     pub fn page_down(&mut self) {
-        let jump = self.last_visible_height.get().saturating_sub(2).max(1);
+        let jump = self.last_visible_height.saturating_sub(2).max(1);
         let max = self.max_offset();
         self.scroll_offset = self.scroll_offset.saturating_add(jump).min(max);
         if self.scroll_offset >= max {
@@ -459,7 +455,11 @@ impl ReactTrace {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for e in &self.entries {
-            if let TraceKind::Delegate { executor_id: Some(id), .. } = &e.kind {
+            if let TraceKind::Delegate {
+                executor_id: Some(id),
+                ..
+            } = &e.kind
+            {
                 if seen.insert(id.as_str()) {
                     out.push(id.clone());
                 }
@@ -539,9 +539,8 @@ impl ReactTrace {
                 {
                     let (act_glyph, _) = family_glyph(*family);
                     let id_str = input_summary(input, tool);
-                    let (tail, consumed) = if let Some(TraceKind::Observe {
-                        payload: Some(p),
-                    }) = self.entries.get(i + 1).map(|e| &e.kind)
+                    let (tail, consumed) = if let Some(TraceKind::Observe { payload: Some(p) }) =
+                        self.entries.get(i + 1).map(|e| &e.kind)
                     {
                         let (obs_glyph, _, stats) = observe_compact(p);
                         let mut t = obs_glyph.to_string();
@@ -804,8 +803,8 @@ mod markdown_integration_tests {
 #[cfg(all(test, feature = "markdown"))]
 mod virtual_row_tests {
     use super::*;
-    use crate::components::mermaid::FenceRender;
     use crate::components::markdown_stream::StateLookup;
+    use crate::components::mermaid::FenceRender;
     use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
 
     #[test]
