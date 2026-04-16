@@ -151,6 +151,11 @@ impl DashboardView {
         self.input_bar.set_mode(mode);
     }
 
+    /// Seed the InputBar with global input history (loaded from metadata).
+    pub fn seed_input_history(&mut self, entries: Vec<String>) {
+        self.input_bar.seed_history(entries);
+    }
+
     pub fn handle_paste(&mut self, text: &str) {
         self.input_bar.insert_paste(text);
     }
