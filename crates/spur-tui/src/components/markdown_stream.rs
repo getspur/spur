@@ -60,6 +60,94 @@ pub enum StreamItem {
     Fence(MermaidId),
 }
 
+/// Whether a trimmed line looks like a GFM table row: starts and ends with
+/// `|` after trimming, and has content between. Lone `|` or empty lines
+/// don't count.
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 3 && t.starts_with('|') && t.ends_with('|')
+}
+
+/// Whether a line is a GFM table separator row — cells contain only `-`,
+/// `:`, and whitespace. Requires `is_table_row` to be true.
+fn is_table_separator(line: &str) -> bool {
+    if !is_table_row(line) {
+        return false;
+    }
+    let t = line.trim();
+    let inner = &t[1..t.len() - 1];
+    inner.split('|').all(|cell| {
+        let c = cell.trim();
+        !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':')
+    })
+}
+
+/// Wrap runs of consecutive GFM-table-like lines in a fenced code block so
+/// they render verbatim (line-preserving) instead of being reflowed as a
+/// CommonMark paragraph.
+///
+/// Why: `tui-markdown 0.3` does not support the GFM tables extension and
+/// pulldown-cmark is not told to enable it here. Without intervention,
+/// consecutive `|...|` lines are parsed as one paragraph and flow together
+/// into a single rendered line.
+///
+/// A "run" is wrapped only when it contains at least one separator row
+/// (e.g. `|---|---|`) — otherwise it's likely not a table and we leave
+/// it alone. Runs inside existing fenced code blocks are untouched.
+fn wrap_tables_in_fences(input: &str) -> String {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut out = String::with_capacity(input.len() + 16);
+    let mut in_code_fence = false;
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed_start = line.trim_start();
+
+        // Track code-fence state so we don't transform content already
+        // inside a ``` or ~~~ block.
+        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+            out.push_str(line);
+            out.push('\n');
+            i += 1;
+            continue;
+        }
+
+        if !in_code_fence && is_table_row(line) {
+            // Scan forward for consecutive table-ish rows.
+            let start = i;
+            while i < lines.len() && is_table_row(lines[i]) {
+                i += 1;
+            }
+            let block = &lines[start..i];
+            let has_sep = block.iter().any(|l| is_table_separator(l));
+
+            if has_sep && block.len() >= 2 {
+                // Surrounding blank lines so the fence is its own block.
+                out.push_str("\n```\n");
+                for l in block {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+                out.push_str("```\n");
+            } else {
+                for l in block {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+            continue;
+        }
+
+        out.push_str(line);
+        out.push('\n');
+        i += 1;
+    }
+
+    out
+}
+
 /// Accumulated-text markdown renderer.
 #[derive(Debug, Clone)]
 pub struct MarkdownStream {
@@ -270,6 +358,12 @@ impl MarkdownStream {
             out
         };
 
+        // ── Stage 3.5: wrap GFM-table-like blocks in fenced code blocks ──
+        // `tui-markdown` does not yet render tables; without this, rows are
+        // reflowed into a single paragraph line. Fencing preserves line
+        // boundaries so the table renders as a readable monospace block.
+        let transformed = wrap_tables_in_fences(&transformed);
+
         // ── Stage 4: parse transformed text via tui-markdown ──────────────
         if transformed.is_empty() {
             self.cached_items.clear();
@@ -477,5 +571,71 @@ mod stream_item_tests {
             joined.contains("A-->B"),
             "expected mermaid source in output: {joined}"
         );
+    }
+
+    // ── Table-wrapping tests ────────────────────────────────────────────
+
+    #[test]
+    fn gfm_table_is_wrapped_and_preserves_line_boundaries() {
+        // Without the wrap, tui-markdown flows these rows into one paragraph
+        // line. With the wrap, they must render as separate lines.
+        let mut s = MarkdownStream::new();
+        s.append("| Key | Action |\n|---|---|\n| Esc | cancel |\n| Enter | submit |\n");
+        let _ = s.flush_now(&StateLookup::empty());
+
+        let joined = s.cached_lines_debug().join("\n");
+        let row_lines: Vec<_> = joined
+            .lines()
+            .filter(|l| l.contains("Esc") || l.contains("Enter"))
+            .collect();
+        assert_eq!(
+            row_lines.len(),
+            2,
+            "each table row must render on its own line; got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn non_table_pipe_lines_are_not_wrapped() {
+        // Lines with `|` but without a separator row must NOT be treated as
+        // tables. This avoids false positives on shell pipelines, regex
+        // alternations, etc.
+        let input = "Use `ls | grep foo` to filter.\nAnother | pipe line.\n";
+        let out = wrap_tables_in_fences(input);
+        assert!(
+            !out.contains("```"),
+            "non-table pipe content must not be fenced; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn wrap_ignores_content_inside_existing_code_fence() {
+        // A table-like block INSIDE a ``` fence must not be re-wrapped.
+        let input = "```\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n";
+        let out = wrap_tables_in_fences(input);
+        let fence_count = out.matches("```").count();
+        assert_eq!(
+            fence_count, 2,
+            "existing code fence must not be re-wrapped (expected 2 ``` markers, got {fence_count}):\n{out}"
+        );
+    }
+
+    #[test]
+    fn table_row_detection() {
+        assert!(is_table_row("| a | b |"));
+        assert!(is_table_row("  | a | b |  "));
+        assert!(is_table_row("|---|---|"));
+        assert!(!is_table_row("text"));
+        assert!(!is_table_row("|"));
+        assert!(!is_table_row("||"));
+        assert!(!is_table_row(""));
+    }
+
+    #[test]
+    fn table_separator_detection() {
+        assert!(is_table_separator("|---|---|"));
+        assert!(is_table_separator("| --- | :---: | ---: |"));
+        assert!(!is_table_separator("| a | b |"));
+        assert!(!is_table_separator("|---| b |"));
     }
 }
