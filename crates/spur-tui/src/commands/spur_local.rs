@@ -42,6 +42,13 @@ impl SpurLocalSource {
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::Quit),
             },
+            CommandEntry {
+                name: "vim".into(),
+                description: "Toggle vim / emacs input mode".into(),
+                hint: Some("[Alt+I]".into()),
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::ToggleVimMode),
+            },
         ]
     }
 }

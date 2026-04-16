@@ -17,7 +17,7 @@ use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
 use crate::components::detail_pane::{DetailPane, DetailTab};
-use crate::components::input_bar::InputBar;
+use crate::components::input_bar::{EditMode, InputBar};
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 use crate::components::{LogEntry, LogEntryKind};
 
@@ -86,7 +86,7 @@ impl DashboardView {
         let hint = if text.is_empty() && !self.input_bar.has_status() {
             // Empty state hint
             Paragraph::new(Span::styled(
-                " [/] command \u{00b7} [@] mention \u{00b7} [!] interrupt \u{00b7} [Alt+Enter] newline \u{00b7} ? for help",
+                " [/] command \u{00b7} [@] mention \u{00b7} [!] interrupt \u{00b7} [Alt+I] vim \u{00b7} [Alt+Enter] newline \u{00b7} ? for help",
                 Style::default().fg(Color::DarkGray),
             ))
         } else if text.starts_with('/') && !text[1..].contains(char::is_whitespace) {
@@ -145,6 +145,14 @@ impl DashboardView {
 
     pub fn set_focused_panel(&mut self, panel: Panel) {
         self.focused_panel = panel;
+    }
+
+    pub fn set_edit_mode(&mut self, mode: EditMode) {
+        self.input_bar.set_mode(mode);
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        self.input_bar.insert_paste(text);
     }
 
     pub fn focused_node(&self) -> Option<&ExecutorId> {
@@ -408,6 +416,81 @@ impl DashboardView {
             return None;
         }
 
+        // Alt+I → toggle vim/emacs input mode.
+        if matches!(key.code, KeyCode::Char('i')) && key.modifiers.contains(KeyModifiers::ALT) {
+            return Some(Action::ToggleVimMode);
+        }
+
+        // Vim Normal + empty InputBar: handle nav keys directly.
+        // In Vim Normal mode, chars are consumed as commands (not inserted),
+        // so the single-char-nav pattern (insert → check len==1) doesn't work.
+        // Mode-entry keys (i/a/A/I/o/O) fall through to InputBar.
+        if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
+            if let KeyCode::Char(ch) = key.code {
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                    // Review decision keys when in Review tab
+                    if self.focused_node.is_some()
+                        && self.detail_pane.current_tab == DetailTab::Review
+                    {
+                        if let Some(decision) =
+                            crate::components::review_card::decision_for_key(ch, None)
+                        {
+                            if let Some(id) = self.focused_node.clone() {
+                                let attempt_n = lineage
+                                    .and_then(|l| l.node(&id))
+                                    .and_then(|n| {
+                                        n.pending_review.as_ref().map(|r| r.attempt_n)
+                                    })
+                                    .unwrap_or(1);
+                                return Some(Action::SubmitReview {
+                                    executor_id: id.0,
+                                    attempt_n,
+                                    decision,
+                                });
+                            }
+                        }
+                    }
+                    let action = match ch {
+                        'j' if self.focused_panel == Panel::Agents => Some(Action::SelectNext),
+                        'j' => {
+                            self.activity_log.scroll_down(20);
+                            Some(Action::ScrollDown)
+                        }
+                        'k' if self.focused_panel == Panel::Agents => Some(Action::SelectPrev),
+                        'k' => {
+                            self.activity_log.scroll_up();
+                            Some(Action::ScrollUp)
+                        }
+                        'r' => Some(Action::JumpToReview),
+                        'c' if self.focused_panel == Panel::Agents => {
+                            Some(Action::ToggleCollapse)
+                        }
+                        'g' => {
+                            self.activity_log.scroll_to_top();
+                            Some(Action::ScrollToTop)
+                        }
+                        'G' => {
+                            self.activity_log.scroll_to_bottom();
+                            Some(Action::ScrollToBottom)
+                        }
+                        'v' => {
+                            self.verbose = !self.verbose;
+                            Some(Action::ToggleVerbose)
+                        }
+                        'q' => Some(Action::Quit),
+                        '?' => Some(Action::ShowHelp),
+                        's' => Some(Action::RequestSessions),
+                        // Mode-entry keys fall through to InputBar
+                        'i' | 'a' | 'A' | 'I' | 'o' | 'O' => None,
+                        _ => return None, // Unrecognized: no-op
+                    };
+                    if let Some(a) = action {
+                        return Some(a);
+                    }
+                }
+            }
+        }
+
         let is_editing_key = matches!(
             key.code,
             KeyCode::Char(_)
@@ -418,7 +501,7 @@ impl DashboardView {
                 | KeyCode::Home
                 | KeyCode::End
                 | KeyCode::Enter
-        );
+        ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc());
 
         if is_editing_key {
             // Check if InputBar handles it (Enter on non-empty submits)

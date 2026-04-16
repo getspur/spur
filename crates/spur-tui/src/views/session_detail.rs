@@ -12,7 +12,7 @@ use ratatui::{
 use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 
 use crate::action::{Action, ViewId};
-use crate::components::input_bar::InputBar;
+use crate::components::input_bar::{EditMode, InputBar};
 use crate::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 
@@ -319,6 +319,14 @@ impl SessionDetailView {
     pub(crate) fn set_current_mode(&mut self, mode: Option<String>) {
         self.current_mode = mode.clone();
         self.react_trace.set_mode(mode);
+    }
+
+    pub fn set_edit_mode(&mut self, mode: EditMode) {
+        self.input_bar.set_mode(mode);
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        self.input_bar.insert_paste(text);
     }
 
     /// Format elapsed time since view was opened.
@@ -686,7 +694,12 @@ impl SessionDetailView {
         // Priority 0: Esc-to-cancel takes precedence when a stream is in flight
         // and we're not already cancelling. Second Esc falls through to the
         // existing Esc handlers (popup dismiss / NavigateBack).
-        if matches!(key.code, KeyCode::Esc) && self.stream_in_flight && !self.cancelling_in_flight {
+        // Exception: in Vim Insert/Visual mode, Esc first exits to Normal mode.
+        if matches!(key.code, KeyCode::Esc)
+            && self.stream_in_flight
+            && !self.cancelling_in_flight
+            && !self.input_bar.wants_esc()
+        {
             self.cancelling_in_flight = true;
             self.push_cancel_note();
             self.input_bar
@@ -715,6 +728,46 @@ impl SessionDetailView {
         // highest-priority worker executor.
         if matches!(key.code, KeyCode::Char('w')) && key.modifiers.contains(KeyModifiers::ALT) {
             return Some(Action::InspectWorkers);
+        }
+
+        // Alt+I → toggle vim/emacs input mode.
+        if matches!(key.code, KeyCode::Char('i')) && key.modifiers.contains(KeyModifiers::ALT) {
+            return Some(Action::ToggleVimMode);
+        }
+
+        // Vim Normal + empty InputBar: handle nav keys directly.
+        // In Vim Normal mode, chars are consumed as commands (not inserted),
+        // so the single-char-nav pattern (insert → check len==1) doesn't work.
+        // Mode-entry keys (i/a/A/I/o/O) fall through to InputBar.
+        if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
+            if let KeyCode::Char(ch) = key.code {
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                    let action = match ch {
+                        'j' => {
+                            self.react_trace.scroll_down();
+                            Some(Action::ScrollDown)
+                        }
+                        'k' => {
+                            self.react_trace.scroll_up();
+                            Some(Action::ScrollUp)
+                        }
+                        'g' => {
+                            self.react_trace.scroll_to_top();
+                            Some(Action::ScrollToTop)
+                        }
+                        'G' => {
+                            self.react_trace.scroll_to_bottom();
+                            Some(Action::ScrollToBottom)
+                        }
+                        // Mode-entry keys fall through to InputBar
+                        'i' | 'a' | 'A' | 'I' | 'o' | 'O' => None,
+                        _ => return None, // Unrecognized: no-op
+                    };
+                    if let Some(a) = action {
+                        return Some(a);
+                    }
+                }
+            }
         }
 
         // Ctrl+O → toggle collapse/expand on Observe (tool-result) entries.
@@ -802,7 +855,7 @@ impl SessionDetailView {
                 | KeyCode::Home
                 | KeyCode::End
                 | KeyCode::Enter
-        );
+        ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc());
 
         if is_editing_key {
             if self.input_bar.handle_key(key).is_some() {

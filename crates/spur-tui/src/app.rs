@@ -14,6 +14,7 @@ use ratatui_image::picker::Picker;
 
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
+use crate::components::input_bar::EditMode;
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::session_metadata::SessionMetadataStore;
 use crate::tui;
@@ -106,6 +107,8 @@ pub struct App {
     #[cfg(feature = "markdown")]
     pub(crate) mermaid_viewer: Option<crate::views::mermaid_viewer::MermaidViewerView>,
     metadata_store: SessionMetadataStore,
+    /// Current input editing mode, synced across all InputBar instances.
+    edit_mode: EditMode,
     /// Loaded Spur configuration. Used to resolve per-agent `AgentConfig`
     /// at session-creation time (see `resolve_agent_config`). Defaults to
     /// `SpurConfig::default()` when no config is supplied.
@@ -165,6 +168,7 @@ impl App {
             #[cfg(feature = "markdown")]
             mermaid_viewer: None,
             metadata_store,
+            edit_mode: EditMode::default(),
             config,
         };
 
@@ -313,6 +317,24 @@ impl App {
                 #[cfg(feature = "markdown")]
                 if let Some(detail) = self.session_detail.as_mut() {
                     detail.invalidate_inline_protocols();
+                }
+                self.dirty = true;
+            }
+            Event::Paste(text) => {
+                match self.current_view {
+                    ViewId::Dashboard => self.dashboard.handle_paste(&text),
+                    ViewId::SessionDetail(_) => {
+                        if let Some(ref mut detail) = self.session_detail {
+                            detail.handle_paste(&text);
+                        }
+                    }
+                    ViewId::SessionPicker => {
+                        if let Some(ref mut picker) = self.session_picker {
+                            picker.handle_paste(&text);
+                        }
+                    }
+                    #[cfg(feature = "markdown")]
+                    ViewId::MermaidOverlay(_) => {}
                 }
                 self.dirty = true;
             }
@@ -479,6 +501,11 @@ impl App {
                         }
                     }
                     self.session_detail = Some(view);
+                }
+
+                // Sync edit mode to newly created session detail view.
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.set_edit_mode(self.edit_mode);
                 }
 
                 // Auto-navigate from Dashboard or SessionPicker
@@ -853,6 +880,18 @@ impl App {
                 if let Some(ref mut detail) = self.session_detail {
                     detail.set_current_mode(Some(next.to_string()));
                 }
+            }
+
+            Action::ToggleVimMode => {
+                self.edit_mode = match self.edit_mode {
+                    EditMode::Emacs => EditMode::Vim(crate::components::input_bar::VimMode::Normal),
+                    EditMode::Vim(_) => EditMode::Emacs,
+                };
+                self.dashboard.set_edit_mode(self.edit_mode);
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.set_edit_mode(self.edit_mode);
+                }
+                self.dirty = true;
             }
 
             Action::ToggleVerbose => {
