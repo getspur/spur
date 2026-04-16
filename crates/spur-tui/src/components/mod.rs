@@ -17,6 +17,7 @@ pub mod resume_banner;
 pub mod review_card;
 pub mod session_preview;
 pub mod status_bar;
+pub(crate) mod trace_format;
 
 use ratatui::style::{Color, Style};
 use std::time::Instant;
