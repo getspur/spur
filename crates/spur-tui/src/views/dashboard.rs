@@ -68,12 +68,9 @@ impl DashboardView {
     }
 
     /// Current local time formatted as HH:MM:SS.
-    /// Render the one-line empty-state hint above the InputBar when no brain
-    /// is attached and the user hasn't started typing. No-op otherwise.
-    fn render_empty_state_hint(&self, frame: &mut Frame, area: Rect, input_bar_area: Rect) {
-        if self.input_bar.has_status() || !self.input_bar.text().is_empty() {
-            return;
-        }
+    /// Render the one-line hint above the InputBar. Shows context-sensitive
+    /// hints when typing commands/mentions, or empty-state hints when idle.
+    fn render_input_hint(&self, frame: &mut Frame, area: Rect, input_bar_area: Rect) {
         let hint_y = input_bar_area.y.saturating_sub(1);
         if hint_y < area.y {
             return;
@@ -84,10 +81,35 @@ impl DashboardView {
             width: input_bar_area.width,
             height: 1,
         };
-        let hint = Paragraph::new(Span::styled(
-            " Type to start a new session \u{00b7} s for sessions \u{00b7} ? for help",
-            Style::default().fg(Color::DarkGray),
-        ));
+
+        let text = self.input_bar.text();
+        let hint = if text.is_empty() && !self.input_bar.has_status() {
+            // Empty state hint
+            Paragraph::new(Span::styled(
+                " [/] command \u{00b7} [@] mention \u{00b7} [!] interrupt \u{00b7} [Alt+Enter] newline \u{00b7} ? for help",
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else if text.starts_with('/') && !text[1..].contains(char::is_whitespace) {
+            // Command hint
+            Paragraph::new(Span::styled(
+                " Tab to select command \u{00b7} Esc to dismiss",
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else if text.contains('@')
+            && !text
+                .split('@')
+                .last()
+                .unwrap_or("")
+                .contains(char::is_whitespace)
+        {
+            // Mention hint
+            Paragraph::new(Span::styled(
+                " Tab to select file \u{00b7} Esc to dismiss",
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else {
+            return; // No hint needed
+        };
         frame.render_widget(hint, hint_area);
     }
 
@@ -121,6 +143,10 @@ impl DashboardView {
         self.focused_node = id;
     }
 
+    pub fn set_focused_panel(&mut self, panel: Panel) {
+        self.focused_panel = panel;
+    }
+
     pub fn focused_node(&self) -> Option<&ExecutorId> {
         self.focused_node.as_ref()
     }
@@ -151,14 +177,51 @@ impl DashboardView {
 
     /// Update the brain status label shown in the InputBar.
     pub fn set_brain_status(&mut self, name: Option<&str>, status: &str) {
+        let mention_count = self.input_bar.protected_ranges().len();
+        let mention_suffix = if mention_count > 0 {
+            format!(
+                " \u{00b7} {} mention{}",
+                mention_count,
+                if mention_count > 1 { "s" } else { "" }
+            )
+        } else {
+            String::new()
+        };
+
         let label = match (name, status) {
-            (_, "idle") => None,
-            (Some(n), "thinking") => Some(format!("[{} \u{00b7}\u{00b7}\u{00b7}]", n)),
-            (Some(n), "streaming") => Some(format!("[{} \u{25b8}\u{25b8}\u{25b8}]", n)),
-            (Some(n), "ready") => Some(format!("[{}: ready]", n)),
-            (Some(n), "error") => Some(format!("[{}: error]", n)),
-            (None, _) => None,
-            (Some(n), other) => Some(format!("[{}: {}]", n, other)),
+            (_, "idle") => {
+                if mention_count > 0 {
+                    Some(format!(
+                        "[{} mention{}]",
+                        mention_count,
+                        if mention_count > 1 { "s" } else { "" }
+                    ))
+                } else {
+                    None
+                }
+            }
+            (Some(n), "thinking") => Some(format!(
+                "[{} \u{00b7}\u{00b7}\u{00b7}{}]",
+                n, mention_suffix
+            )),
+            (Some(n), "streaming") => Some(format!(
+                "[{} \u{25b8}\u{25b8}\u{25b8}{}]",
+                n, mention_suffix
+            )),
+            (Some(n), "ready") => Some(format!("[{}: ready{}]", n, mention_suffix)),
+            (Some(n), "error") => Some(format!("[{}: error{}]", n, mention_suffix)),
+            (None, _) => {
+                if mention_count > 0 {
+                    Some(format!(
+                        "[{} mention{}]",
+                        mention_count,
+                        if mention_count > 1 { "s" } else { "" }
+                    ))
+                } else {
+                    None
+                }
+            }
+            (Some(n), other) => Some(format!("[{}: {}{}]", n, other, mention_suffix)),
         };
         self.input_bar.set_status(label);
     }
@@ -230,7 +293,7 @@ impl DashboardView {
             };
             frame.render_widget(paragraph, content_area);
             let input_bar_area = chunks[1];
-            self.render_empty_state_hint(frame, area, input_bar_area);
+            self.render_input_hint(frame, area, input_bar_area);
             self.input_bar.render(frame, input_bar_area);
             StatusBar::render(
                 frame,
@@ -278,7 +341,7 @@ impl DashboardView {
             }
         }
         let input_bar_area = chunks[2];
-        self.render_empty_state_hint(frame, area, input_bar_area);
+        self.render_input_hint(frame, area, input_bar_area);
         self.input_bar.render(frame, input_bar_area);
         StatusBar::render(
             frame,
@@ -773,7 +836,11 @@ impl View for DashboardView {
                     kind: LogEntryKind::Error,
                 });
             }
-            SpurEventBody::BrainReconnecting { session, brain_name, reason } => {
+            SpurEventBody::BrainReconnecting {
+                session,
+                brain_name,
+                reason,
+            } => {
                 let prefix = Self::prefix_for_session(&session.0);
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
@@ -782,7 +849,11 @@ impl View for DashboardView {
                     kind: LogEntryKind::Info,
                 });
             }
-            SpurEventBody::BrainReconnected { session, brain_name, outcome } => {
+            SpurEventBody::BrainReconnected {
+                session,
+                brain_name,
+                outcome,
+            } => {
                 let prefix = Self::prefix_for_session(&session.0);
                 let (message, kind) = match outcome {
                     spur_acp::LoadOutcome::Restored => (
@@ -800,9 +871,18 @@ impl View for DashboardView {
                         LogEntryKind::Error,
                     ),
                 };
-                self.activity_log.push(LogEntry { timestamp: Self::now_stamp(), prefix, message, kind });
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix,
+                    message,
+                    kind,
+                });
             }
-            SpurEventBody::BrainReconnectFailed { session, brain_name, reason } => {
+            SpurEventBody::BrainReconnectFailed {
+                session,
+                brain_name,
+                reason,
+            } => {
                 let prefix = Self::prefix_for_session(&session.0);
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),

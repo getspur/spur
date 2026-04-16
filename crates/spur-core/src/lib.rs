@@ -6,6 +6,7 @@ pub mod notification_pump;
 pub mod orchestrator;
 mod review_sink;
 pub mod skip_perm;
+pub mod skills;
 pub mod spur_ext_interp;
 
 pub use lineage::{

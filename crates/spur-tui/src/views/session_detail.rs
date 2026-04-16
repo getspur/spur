@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_acp::{DelegationStatus, SessionId, SpurEvent, SpurEventBody};
+use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 
 use crate::action::{Action, ViewId};
 use crate::components::input_bar::InputBar;
@@ -224,7 +224,7 @@ impl SessionDetailView {
     }
 
     /// Current text content of the InputBar (read-only accessor for tests).
-    pub fn input_bar_text(&self) -> &str {
+    pub fn input_bar_text(&self) -> String {
         self.input_bar.text()
     }
 
@@ -333,13 +333,43 @@ impl SessionDetailView {
                 .set_status(Some(format!("[{}: cancelling\u{2026}]", self.agent_name)));
             return;
         }
+        let mention_count = self.input_bar.protected_ranges().len();
+        let mention_suffix = if mention_count > 0 {
+            format!(
+                " \u{00b7} {} mention{}",
+                mention_count,
+                if mention_count > 1 { "s" } else { "" }
+            )
+        } else {
+            String::new()
+        };
+
         let label = match status {
-            "idle" => None,
-            "thinking" => Some(format!("[{} \u{00b7}\u{00b7}\u{00b7}]", self.agent_name)),
-            "streaming" => Some(format!("[{} \u{25b8}\u{25b8}\u{25b8}]", self.agent_name)),
-            "ready" => Some(format!("[{}: ready]", self.agent_name)),
-            "error" => Some(format!("[{}: error]", self.agent_name)),
-            other => Some(format!("[{}: {}]", self.agent_name, other)),
+            "idle" => {
+                if mention_count > 0 {
+                    Some(format!(
+                        "[{} mention{}]",
+                        mention_count,
+                        if mention_count > 1 { "s" } else { "" }
+                    ))
+                } else {
+                    None
+                }
+            }
+            "thinking" => Some(format!(
+                "[{} \u{00b7}\u{00b7}\u{00b7}{}]",
+                self.agent_name, mention_suffix
+            )),
+            "streaming" => Some(format!(
+                "[{} \u{25b8}\u{25b8}\u{25b8}{}]",
+                self.agent_name, mention_suffix
+            )),
+            "ready" => Some(format!("[{}: ready{}]", self.agent_name, mention_suffix)),
+            "error" => Some(format!("[{}: error{}]", self.agent_name, mention_suffix)),
+            other => Some(format!(
+                "[{}: {}{}]",
+                self.agent_name, other, mention_suffix
+            )),
         };
         self.input_bar.set_status(label);
     }
@@ -516,7 +546,7 @@ impl SessionDetailView {
 
         let text = self.input_bar.text();
         let cursor = self.input_bar.cursor();
-        let trig = detect(text, cursor);
+        let trig = detect(&text, cursor);
         self.active_trigger = trig.clone();
 
         match trig {
@@ -679,6 +709,12 @@ impl SessionDetailView {
         // brain is torn down).
         if matches!(key.code, KeyCode::Char('s')) && key.modifiers.contains(KeyModifiers::ALT) {
             return Some(Action::RequestSessions);
+        }
+
+        // Alt+w → jump to Dashboard with Agents panel focused on the
+        // highest-priority worker executor.
+        if matches!(key.code, KeyCode::Char('w')) && key.modifiers.contains(KeyModifiers::ALT) {
+            return Some(Action::InspectWorkers);
         }
 
         // Ctrl+O → toggle collapse/expand on Observe (tool-result) entries.
@@ -922,18 +958,6 @@ impl View for SessionDetailView {
                         self.stream_in_flight = true;
                         if let Some(text) = extract_text(chunk) {
                             if !text.is_empty() {
-                                let prev_kind =
-                                    self.react_trace.last_entry_kind_name().unwrap_or("none");
-                                let will_continue = prev_kind == "agent_message";
-                                tracing::debug!(
-                                    streaming_probe = true,
-                                    site = "D_trace_append",
-                                    text_len = text.len(),
-                                    prev_entry_kind = prev_kind,
-                                    will_continue = will_continue,
-                                    session = %self.session_id,
-                                    "about to append_message"
-                                );
                                 self.react_trace.append_message(
                                     text,
                                     &self.agent_name,
@@ -1026,6 +1050,7 @@ impl View for SessionDetailView {
                 if from.0 != self.session_id.0 {
                     return;
                 }
+                self.set_brain_status(&format!("delegating to {}", to_agent));
                 self.react_trace.push(TraceEntry {
                     kind: TraceKind::Delegate {
                         agent: to_agent.clone(),
@@ -1058,34 +1083,17 @@ impl View for SessionDetailView {
                 worker_session,
                 status,
             } => {
-                // Update the most recent delegate entry that matches this worker.
-                // Since we don't have a direct session→agent mapping here, update
-                // the last delegate entry with an active status.
-                let _ = worker_session; // avoid unused warning
-                let status_str = match status {
-                    DelegationStatus::Success => "done",
-                    DelegationStatus::Failed { .. } => "failed",
-                    DelegationStatus::Conflict { .. } => "conflict",
-                    DelegationStatus::Timeout => "timeout",
-                    DelegationStatus::Rejected { .. } => "rejected",
-                    DelegationStatus::Modified { .. } => "modified",
-                    DelegationStatus::TimedOut { .. } => "timed out",
-                    _ => {
-                        tracing::warn!("unknown DelegationStatus variant in session_detail status string — update needed");
-                        "unknown"
-                    }
-                };
-                // This is a best-effort update; walk entries in reverse to find
-                // the most recent active delegation.
-                // Note: ReactTrace doesn't expose entries mutably, so we just
-                // push a new entry noting the completion instead.
-                self.react_trace.push(TraceEntry {
-                    kind: TraceKind::Think,
-                    text: format!("Delegation completed: {}", status_str),
-                    timestamp: Self::now_stamp(),
-                    #[cfg(feature = "markdown")]
-                    markdown: None,
-                });
+                // The inline executor card (rendered from lineage) already
+                // reflects the terminal state. A separate Think entry here
+                // was redundant noise — and couldn't correlate back to the
+                // originating Delegate entry anyway (event lacks request_id).
+                //
+                // Edge case: if worker setup failed before WorkerSpawned
+                // (no executor node, no inline card), this no-op means the
+                // only failure signal is the brain's own response text.
+                // Acceptable — setup failures are rare and the brain always
+                // reports the error in its next message.
+                let _ = (worker_session, status);
             }
 
             SpurEventBody::CostUpdate {
@@ -1141,7 +1149,11 @@ impl View for SessionDetailView {
                     });
                 }
             }
-            SpurEventBody::BrainReconnecting { session, brain_name, reason } => {
+            SpurEventBody::BrainReconnecting {
+                session,
+                brain_name,
+                reason,
+            } => {
                 if session.0 == self.session_id.0 {
                     self.react_trace.push(TraceEntry {
                         kind: TraceKind::Observe { payload: None },
@@ -1152,7 +1164,11 @@ impl View for SessionDetailView {
                     });
                 }
             }
-            SpurEventBody::BrainReconnected { session, brain_name, outcome } => {
+            SpurEventBody::BrainReconnected {
+                session,
+                brain_name,
+                outcome,
+            } => {
                 if session.0 == self.session_id.0 {
                     let text = match outcome {
                         spur_acp::LoadOutcome::Restored => {
@@ -1177,7 +1193,11 @@ impl View for SessionDetailView {
                     });
                 }
             }
-            SpurEventBody::BrainReconnectFailed { session, brain_name, reason } => {
+            SpurEventBody::BrainReconnectFailed {
+                session,
+                brain_name,
+                reason,
+            } => {
                 if session.0 == self.session_id.0 {
                     self.react_trace.push(TraceEntry {
                         kind: TraceKind::Observe { payload: None },

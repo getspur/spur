@@ -2,14 +2,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    text::Span,
+    widgets::{Block, Borders},
     Frame,
 };
+use tui_textarea::{CursorMove, Input, Key, TextArea};
 
-/// A protected byte range inside `InputBar::text` representing an atomic
-/// token (today: a resource mention). Full edit semantics land in Task 12;
-/// this task only stubs the field so `SubmitRouter` can consume it.
+/// A protected byte range inside the text representing an atomic token
+/// (e.g., a resource mention). These ranges are skipped atomically by
+/// cursor movement and deleted as a unit.
 #[derive(Debug, Clone)]
 pub struct ProtectedRange {
     pub start: usize,
@@ -18,20 +19,42 @@ pub struct ProtectedRange {
     pub name: String,
 }
 
+/// Editing mode for the input bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EditMode {
+    /// Emacs-style keybindings (default, uses TextArea's built-ins)
+    #[default]
+    Emacs,
+    /// Vim modal editing
+    Vim(VimMode),
+}
+
+/// Vim modal states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VimMode {
+    Normal,
+    Insert,
+    Visual,
+    Operator(char),
+}
+
 const HISTORY_CAP: usize = 100;
 
-/// A text input widget for chatting with the brain agent.
+/// A text input widget for chatting with the brain agent, built on tui-textarea.
 pub struct InputBar {
-    /// Current input text.
-    text: String,
-    /// Cursor position as a byte index into `text`.
-    cursor: usize,
-    status: Option<String>,
-    /// Sorted, non-overlapping protected ranges representing atomic tokens
-    /// (e.g. resource mentions). Always empty in v1 until Task 12 lands.
+    /// The underlying textarea widget.
+    textarea: TextArea<'static>,
+    /// Current editing mode.
+    mode: EditMode,
+    /// Vim state for pending two-key sequences (e.g., `gg`).
+    vim_pending: Option<Input>,
+    /// Sorted, non-overlapping protected ranges representing atomic tokens.
     protected_ranges: Vec<ProtectedRange>,
+    /// Line cache: byte offset where each line starts.
+    line_cache: Vec<usize>,
+    /// Status label shown before the prompt.
+    status: Option<String>,
     /// Capture of the most recent Enter-submit: `(text, ranges, interrupt)`.
-    /// Populated on Enter, consumed via `take_submit_capture()`.
     submit_capture: Option<(String, Vec<ProtectedRange>, bool)>,
     /// Submitted input history, oldest first. Capped at [`HISTORY_CAP`].
     history: Vec<String>,
@@ -43,11 +66,18 @@ pub struct InputBar {
 
 impl InputBar {
     pub fn new() -> Self {
+        let mut textarea = TextArea::default();
+        textarea.set_cursor_line_style(Style::default());
+        textarea.set_cursor_style(Style::default().fg(Color::Green));
+        textarea.set_max_histories(0); // Disable undo/redo to prevent protected range desync
+
         Self {
-            text: String::new(),
-            cursor: 0,
-            status: None,
+            textarea,
+            mode: EditMode::Emacs,
+            vim_pending: None,
             protected_ranges: Vec::new(),
+            line_cache: vec![0],
+            status: None,
             submit_capture: None,
             history: Vec::new(),
             history_cursor: None,
@@ -55,234 +85,579 @@ impl InputBar {
         }
     }
 
+    /// Set the editing mode.
+    pub fn set_mode(&mut self, mode: EditMode) {
+        self.mode = mode;
+        // Update cursor style based on mode
+        let cursor_style = match mode {
+            EditMode::Emacs => Style::default().fg(Color::Green),
+            EditMode::Vim(VimMode::Normal) => Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::REVERSED),
+            EditMode::Vim(VimMode::Insert) => Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::REVERSED),
+            EditMode::Vim(VimMode::Visual) => Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::REVERSED),
+            EditMode::Vim(VimMode::Operator(_)) => Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::REVERSED),
+        };
+        self.textarea.set_cursor_style(cursor_style);
+    }
+
+    /// Get the current editing mode.
+    pub fn mode(&self) -> EditMode {
+        self.mode
+    }
+
     /// Process a key event.
-    ///
-    /// Returns `Some((text, interrupt))` when the user presses Enter on non-empty
-    /// input, where `interrupt` is `true` when the text starts with `'!'`.
-    /// Returns `None` for all other keys.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<(String, bool)> {
-        match key.code {
-            // Ctrl+J inserts a newline (multiline input).
-            // Only fires when the Kitty keyboard protocol is enabled.
-            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(idx) = self.range_at(self.cursor) {
-                    self.delete_range(idx);
-                }
-                let at = self.cursor;
-                self.text.insert(at, '\n');
-                self.shift_ranges(at, 1);
-                self.cursor = at + 1;
-                None
-            }
-            // Ctrl+U: delete from cursor to start of line.
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.cursor > 0 {
-                    let removed = self.cursor as isize;
-                    self.protected_ranges.retain(|r| r.start >= self.cursor);
-                    self.text.drain(..self.cursor);
-                    self.shift_ranges(0, -removed);
-                    self.cursor = 0;
-                    self.history_cursor = None;
-                }
-                None
-            }
-            // Ctrl+K: delete from cursor to end of line.
-            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.cursor < self.text.len() {
-                    self.protected_ranges.retain(|r| r.end <= self.cursor);
-                    self.text.truncate(self.cursor);
-                    self.history_cursor = None;
-                }
-                None
-            }
-            // Ctrl+W: delete previous word.
-            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.cursor > 0 {
-                    let dest = self.prev_word_boundary();
-                    let delta = -((self.cursor - dest) as isize);
-                    self.text.drain(dest..self.cursor);
-                    self.shift_ranges(dest, delta);
-                    self.cursor = dest;
-                    self.history_cursor = None;
-                }
-                None
-            }
-            KeyCode::Char(c) => {
-                if let Some(idx) = self.range_at(self.cursor) {
-                    self.delete_range(idx);
-                }
-                let at = self.cursor;
-                self.text.insert(at, c);
-                self.shift_ranges(at, c.len_utf8() as isize);
-                self.cursor = at + c.len_utf8();
-                self.history_cursor = None;
-                None
-            }
-            KeyCode::Backspace => {
-                if let Some(idx) = self.range_at(self.cursor) {
-                    self.delete_range(idx);
-                } else if let Some(idx) = self.range_ending_at(self.cursor) {
-                    self.delete_range(idx);
-                } else if let Some(idx) = self.range_starting_at(self.cursor) {
-                    // Cursor sits on the left edge of an atom (e.g. after
-                    // arrow-skipping into it from the right). Treat the atom
-                    // as the unit-to-delete rather than the character before
-                    // it — this keeps atom semantics consistent with how
-                    // arrow keys treat the same boundary.
-                    self.delete_range(idx);
-                } else if self.cursor > 0 {
-                    let prev = self.prev_char_boundary(self.cursor);
-                    let delta = -((self.cursor - prev) as isize);
-                    self.text.drain(prev..self.cursor);
-                    self.shift_ranges(prev, delta);
-                    self.cursor = prev;
-                }
-                self.history_cursor = None;
-                None
-            }
-            KeyCode::Delete => {
-                if let Some(idx) = self.range_at(self.cursor) {
-                    self.delete_range(idx);
-                } else if let Some(idx) = self.range_starting_at(self.cursor) {
-                    self.delete_range(idx);
-                } else if self.cursor < self.text.len() {
-                    let next = self.next_char_boundary(self.cursor);
-                    let delta = -((next - self.cursor) as isize);
-                    self.text.drain(self.cursor..next);
-                    self.shift_ranges(self.cursor, delta);
-                }
-                self.history_cursor = None;
-                None
-            }
-            KeyCode::Left => {
-                if let Some(idx) = self
-                    .range_at(self.cursor)
-                    .or_else(|| self.range_ending_at(self.cursor))
-                {
-                    // Cursor is inside or at the right edge of an atom — jump
-                    // to its left edge (atomic skip).
-                    let r = &self.protected_ranges[idx];
-                    self.cursor = r.start;
-                } else if self.cursor > 0 {
-                    self.cursor = self.prev_char_boundary(self.cursor);
-                } else if let Some(idx) = self.range_starting_at(self.cursor) {
-                    // Cursor is at byte 0 with an atom starting there and
-                    // nothing to its left — re-enter the atom from its left
-                    // side so a subsequent character key triggers the
-                    // "typing inside an atom replaces it" path.
-                    let r = &self.protected_ranges[idx];
-                    if r.end > r.start + 1 {
-                        self.cursor = r.start + 1;
-                    }
-                }
-                None
-            }
-            KeyCode::Right => {
-                if let Some(idx) = self
-                    .range_at(self.cursor)
-                    .or_else(|| self.range_starting_at(self.cursor))
-                {
-                    let r = &self.protected_ranges[idx];
-                    self.cursor = r.end;
-                } else if self.cursor < self.text.len() {
-                    self.cursor = self.next_char_boundary(self.cursor);
-                }
-                None
-            }
-            KeyCode::Home => {
-                self.cursor = 0;
-                None
-            }
-            KeyCode::End => {
-                self.cursor = self.text.len();
-                None
-            }
-            // Alt+Enter inserts a newline (works in all terminals).
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                if let Some(idx) = self.range_at(self.cursor) {
-                    self.delete_range(idx);
-                }
-                let at = self.cursor;
-                self.text.insert(at, '\n');
-                self.shift_ranges(at, 1);
-                self.cursor = at + 1;
-                None
-            }
-            KeyCode::Enter => {
-                if self.text.is_empty() {
-                    return None;
-                }
-                let submitted = self.text.clone();
-                let interrupt = submitted.starts_with('!');
-                let ranges = self.protected_ranges.clone();
-                self.submit_capture = Some((submitted.clone(), ranges, interrupt));
-                // Push to history.
-                self.history.push(submitted.clone());
-                if self.history.len() > HISTORY_CAP {
-                    self.history.remove(0);
-                }
-                self.history_cursor = None;
-                self.draft.clear();
-                self.clear();
-                Some((submitted, interrupt))
-            }
-            _ => None,
+        let input = self.keyevent_to_input(key);
+
+        match self.mode {
+            EditMode::Emacs => self.handle_emacs_input(key, input),
+            EditMode::Vim(mode) => self.handle_vim_input(key, input, mode),
         }
     }
 
-    /// Insert a protected atom at the cursor. If the cursor is inside an
-    /// existing range, that range is deleted first.
-    pub fn insert_atom(&mut self, text: impl AsRef<str>, uri: String, name: String) {
-        if let Some(idx) = self.range_at(self.cursor) {
+    fn keyevent_to_input(&self, key: KeyEvent) -> Input {
+        Input {
+            key: match key.code {
+                KeyCode::Char(c) => Key::Char(c),
+                KeyCode::Backspace => Key::Backspace,
+                KeyCode::Enter => Key::Enter,
+                KeyCode::Left => Key::Left,
+                KeyCode::Right => Key::Right,
+                KeyCode::Up => Key::Up,
+                KeyCode::Down => Key::Down,
+                KeyCode::Home => Key::Home,
+                KeyCode::End => Key::End,
+                KeyCode::PageUp => Key::PageUp,
+                KeyCode::PageDown => Key::PageDown,
+                KeyCode::Tab => Key::Tab,
+                KeyCode::BackTab => Key::Tab, // BackTab treated as Tab
+                KeyCode::Delete => Key::Delete,
+                KeyCode::Insert => Key::Null, // Insert not supported
+                KeyCode::Esc => Key::Esc,
+                KeyCode::F(n) => Key::F(n),
+                _ => Key::Null,
+            },
+            ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+            alt: key.modifiers.contains(KeyModifiers::ALT),
+            shift: key.modifiers.contains(KeyModifiers::SHIFT),
+        }
+    }
+
+    fn handle_emacs_input(&mut self, key: KeyEvent, input: Input) -> Option<(String, bool)> {
+        // Handle protected range logic for special keys
+        match key.code {
+            KeyCode::Left => {
+                self.move_cursor_back();
+                return None;
+            }
+            KeyCode::Right => {
+                self.move_cursor_forward();
+                return None;
+            }
+            KeyCode::Backspace => {
+                self.delete_char_before_cursor();
+                return None;
+            }
+            KeyCode::Delete => {
+                self.delete_char_after_cursor();
+                return None;
+            }
+            // Ctrl+J: insert newline (Kitty keyboard protocol)
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.textarea.insert_newline();
+                self.rebuild_line_cache();
+                return None;
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_prev();
+                return None;
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_next();
+                return None;
+            }
+            // Ctrl+U: delete to start of line
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let cursor = self.cursor_to_byte();
+                if cursor > 0 {
+                    // Find start of current line
+                    let text = self.text();
+                    let line_start = text[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                    let delete_len = cursor - line_start;
+                    self.textarea.move_cursor(CursorMove::Head);
+                    self.textarea.delete_str(delete_len);
+                    self.rebuild_line_cache();
+                    self.protected_ranges.retain(|r| r.start >= line_start);
+                    self.shift_ranges(line_start, -(delete_len as isize));
+                }
+                return None;
+            }
+            // Ctrl+K: delete to end of line
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let cursor = self.cursor_to_byte();
+                let text = self.text();
+                let line_end = text[cursor..]
+                    .find('\n')
+                    .map(|i| cursor + i)
+                    .unwrap_or(text.len());
+                if line_end > cursor {
+                    let _delete_len = line_end - cursor;
+                    self.textarea.delete_line_by_end();
+                    self.rebuild_line_cache();
+                    self.protected_ranges.retain(|r| r.end <= cursor);
+                }
+                return None;
+            }
+            // Ctrl+W: delete previous word
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let cursor = self.cursor_to_byte();
+                if cursor > 0 {
+                    let text = self.text();
+                    let bytes = text.as_bytes();
+                    let mut i = cursor;
+                    // Skip trailing whitespace
+                    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+                        i -= 1;
+                    }
+                    // Skip word chars
+                    while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+                        i -= 1;
+                    }
+                    let delete_len = cursor - i;
+                    self.move_cursor_to_byte(i);
+                    self.textarea.delete_str(delete_len);
+                    self.rebuild_line_cache();
+                    self.protected_ranges.retain(|r| r.start >= i);
+                    self.shift_ranges(i, -(delete_len as isize));
+                }
+                return None;
+            }
+            KeyCode::Char(c) => {
+                self.insert_char_with_protected_check(c);
+                return None;
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.textarea.insert_newline();
+                self.rebuild_line_cache();
+                return None;
+            }
+            KeyCode::Enter => {
+                return self.submit();
+            }
+            _ => {}
+        }
+
+        // Delegate to textarea for other keys
+        self.textarea.input(input);
+        self.rebuild_line_cache();
+        None
+    }
+
+    fn handle_vim_input(
+        &mut self,
+        key: KeyEvent,
+        input: Input,
+        mode: VimMode,
+    ) -> Option<(String, bool)> {
+        match mode {
+            VimMode::Normal | VimMode::Visual | VimMode::Operator(_) => {
+                self.handle_vim_normal_input(key, input, mode)
+            }
+            VimMode::Insert => self.handle_vim_insert_input(key, input),
+        }
+    }
+
+    fn handle_vim_normal_input(
+        &mut self,
+        _key: KeyEvent,
+        input: Input,
+        mode: VimMode,
+    ) -> Option<(String, bool)> {
+        // Handle pending two-key sequence
+        if let Some(pending) = self.vim_pending.take() {
+            if let Key::Char('g') = pending.key {
+                if let Key::Char('g') = input.key {
+                    self.textarea.move_cursor(CursorMove::Top);
+                    return None;
+                }
+            }
+        }
+
+        match input.key {
+            Key::Char('h') => self.move_cursor_back(),
+            Key::Char('l') => self.move_cursor_forward(),
+            Key::Char('j') => self.textarea.move_cursor(CursorMove::Down),
+            Key::Char('k') => self.textarea.move_cursor(CursorMove::Up),
+            Key::Char('w') => self.textarea.move_cursor(CursorMove::WordForward),
+            Key::Char('b') => self.textarea.move_cursor(CursorMove::WordBack),
+            Key::Char('^') => self.textarea.move_cursor(CursorMove::Head),
+            Key::Char('$') => self.textarea.move_cursor(CursorMove::End),
+            Key::Char('g') => {
+                self.vim_pending = Some(input);
+            }
+            Key::Char('G') => self.textarea.move_cursor(CursorMove::Bottom),
+            Key::Char('i') => {
+                self.set_mode(EditMode::Vim(VimMode::Insert));
+            }
+            Key::Char('a') => {
+                self.textarea.move_cursor(CursorMove::Forward);
+                self.set_mode(EditMode::Vim(VimMode::Insert));
+            }
+            Key::Char('A') => {
+                self.textarea.move_cursor(CursorMove::End);
+                self.set_mode(EditMode::Vim(VimMode::Insert));
+            }
+            Key::Char('o') => {
+                self.textarea.move_cursor(CursorMove::End);
+                self.textarea.insert_newline();
+                self.rebuild_line_cache();
+                self.set_mode(EditMode::Vim(VimMode::Insert));
+            }
+            Key::Char('O') => {
+                self.textarea.move_cursor(CursorMove::Head);
+                self.textarea.insert_newline();
+                self.textarea.move_cursor(CursorMove::Up);
+                self.rebuild_line_cache();
+                self.set_mode(EditMode::Vim(VimMode::Insert));
+            }
+            Key::Char('I') => {
+                self.textarea.move_cursor(CursorMove::Head);
+                self.set_mode(EditMode::Vim(VimMode::Insert));
+            }
+            Key::Char('x') => {
+                self.delete_char_after_cursor();
+            }
+            Key::Char('d') if input.ctrl => {
+                self.textarea.scroll(tui_textarea::Scrolling::HalfPageDown);
+            }
+            Key::Char('u') if input.ctrl => {
+                self.textarea.scroll(tui_textarea::Scrolling::HalfPageUp);
+            }
+            Key::Char('v') if !input.ctrl && mode == VimMode::Normal => {
+                self.textarea.start_selection();
+                self.set_mode(EditMode::Vim(VimMode::Visual));
+            }
+            // Visual mode operations
+            Key::Char('y') if mode == VimMode::Visual => {
+                self.textarea.move_cursor(CursorMove::Forward); // Vim's selection is inclusive
+                self.textarea.copy();
+                self.textarea.cancel_selection();
+                self.set_mode(EditMode::Vim(VimMode::Normal));
+            }
+            Key::Char('d') if mode == VimMode::Visual => {
+                self.textarea.move_cursor(CursorMove::Forward); // Vim's selection is inclusive
+                self.textarea.cut();
+                self.rebuild_line_cache();
+                self.set_mode(EditMode::Vim(VimMode::Normal));
+            }
+            Key::Char('c') if mode == VimMode::Visual => {
+                self.textarea.move_cursor(CursorMove::Forward); // Vim's selection is inclusive
+                self.textarea.cut();
+                self.rebuild_line_cache();
+                self.set_mode(EditMode::Vim(VimMode::Insert));
+            }
+            Key::Esc => {
+                self.textarea.cancel_selection();
+                self.set_mode(EditMode::Vim(VimMode::Normal));
+            }
+            Key::Enter => {
+                return self.submit();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_vim_insert_input(&mut self, key: KeyEvent, input: Input) -> Option<(String, bool)> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.set_mode(EditMode::Vim(VimMode::Normal));
+                return None;
+            }
+            KeyCode::Left => {
+                self.move_cursor_back();
+                return None;
+            }
+            KeyCode::Right => {
+                self.move_cursor_forward();
+                return None;
+            }
+            KeyCode::Backspace => {
+                self.delete_char_before_cursor();
+                return None;
+            }
+            KeyCode::Delete => {
+                self.delete_char_after_cursor();
+                return None;
+            }
+            KeyCode::Char(c) => {
+                self.insert_char_with_protected_check(c);
+                return None;
+            }
+            KeyCode::Enter => {
+                return self.submit();
+            }
+            _ => {}
+        }
+
+        self.textarea.input(input);
+        self.rebuild_line_cache();
+        None
+    }
+
+    // ── Protected Range Helpers ─────────────────────────────────────────────
+
+    /// Convert cursor (row, col) to byte offset.
+    fn cursor_to_byte(&self) -> usize {
+        let (row, col) = self.textarea.cursor();
+        let lines = self.textarea.lines();
+        if row >= lines.len() {
+            return self.line_cache.last().copied().unwrap_or(0);
+        }
+        let line = &lines[row];
+        let byte_offset = line
+            .char_indices()
+            .nth(col)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len());
+        self.line_cache.get(row).copied().unwrap_or(0) + byte_offset
+    }
+
+    /// Rebuild the line cache after text modification.
+    fn rebuild_line_cache(&mut self) {
+        self.line_cache.clear();
+        let mut offset = 0;
+        for line in self.textarea.lines() {
+            self.line_cache.push(offset);
+            offset += line.len() + 1; // +1 for newline
+        }
+        // Ensure at least one entry
+        if self.line_cache.is_empty() {
+            self.line_cache.push(0);
+        }
+    }
+
+    /// Index of the protected range that strictly contains the cursor.
+    fn range_at_cursor(&self) -> Option<usize> {
+        let pos = self.cursor_to_byte();
+        self.protected_ranges
+            .iter()
+            .position(|r| pos > r.start && pos < r.end)
+    }
+
+    /// Index of the protected range that starts at cursor.
+    fn range_starting_at_cursor(&self) -> Option<usize> {
+        let pos = self.cursor_to_byte();
+        self.protected_ranges.iter().position(|r| r.start == pos)
+    }
+
+    /// Index of the protected range that ends at cursor.
+    fn range_ending_at_cursor(&self) -> Option<usize> {
+        let pos = self.cursor_to_byte();
+        self.protected_ranges.iter().position(|r| r.end == pos)
+    }
+
+    /// Shift all ranges with `start >= at` by `delta` bytes.
+    fn shift_ranges(&mut self, at: usize, delta: isize) {
+        for r in &mut self.protected_ranges {
+            if r.start >= at {
+                r.start = (r.start as isize + delta) as usize;
+                r.end = (r.end as isize + delta) as usize;
+            }
+        }
+    }
+
+    /// Delete a protected range by index.
+    fn delete_range(&mut self, idx: usize) {
+        let r = self.protected_ranges.remove(idx);
+        let len = r.end - r.start;
+        // Move cursor to range start
+        self.move_cursor_to_byte(r.start);
+        // Delete the text
+        self.textarea.delete_str(len);
+        self.rebuild_line_cache();
+    }
+
+    /// Move cursor to a specific byte offset.
+    fn move_cursor_to_byte(&mut self, byte_pos: usize) {
+        // Find the line containing this byte offset
+        for (row, &line_start) in self.line_cache.iter().enumerate() {
+            let line_end = self.line_cache.get(row + 1).copied().unwrap_or(usize::MAX);
+            if byte_pos >= line_start && byte_pos < line_end {
+                let col = byte_pos - line_start;
+                let lines = self.textarea.lines();
+                if row < lines.len() {
+                    let line = &lines[row];
+                    // Convert byte offset to char position
+                    let char_pos = line
+                        .char_indices()
+                        .position(|(i, _)| i >= col)
+                        .unwrap_or(line.chars().count());
+                    self.textarea
+                        .move_cursor(CursorMove::Jump(row as u16, char_pos as u16));
+                }
+                return;
+            }
+        }
+    }
+
+    /// Move cursor back, skipping protected ranges atomically.
+    fn move_cursor_back(&mut self) {
+        let cursor = self.cursor_to_byte();
+        if let Some(idx) = self
+            .range_at_cursor()
+            .or_else(|| self.range_ending_at_cursor())
+        {
+            // Cursor is inside or at the right edge of an atom — jump to its left edge
+            let r = &self.protected_ranges[idx];
+            self.move_cursor_to_byte(r.start);
+        } else if cursor > 0 {
+            self.textarea.move_cursor(CursorMove::Back);
+        } else if let Some(idx) = self.range_starting_at_cursor() {
+            // Cursor is at byte 0 with an atom starting there — re-enter the atom
+            let r = &self.protected_ranges[idx];
+            if r.end > r.start + 1 {
+                self.move_cursor_to_byte(r.start + 1);
+            }
+        }
+    }
+
+    /// Move cursor forward, skipping protected ranges atomically.
+    fn move_cursor_forward(&mut self) {
+        if let Some(idx) = self
+            .range_at_cursor()
+            .or_else(|| self.range_starting_at_cursor())
+        {
+            let r = &self.protected_ranges[idx];
+            self.move_cursor_to_byte(r.end);
+        } else {
+            self.textarea.move_cursor(CursorMove::Forward);
+        }
+    }
+
+    /// Delete character before cursor, handling protected ranges.
+    fn delete_char_before_cursor(&mut self) {
+        if let Some(idx) = self
+            .range_at_cursor()
+            .or_else(|| self.range_ending_at_cursor())
+            .or_else(|| self.range_starting_at_cursor())
+        {
+            self.delete_range(idx);
+        } else {
+            self.textarea.delete_char();
+            self.rebuild_line_cache();
+            let cursor = self.cursor_to_byte();
+            self.shift_ranges(cursor, -1);
+        }
+        self.history_cursor = None;
+    }
+
+    /// Delete character after cursor, handling protected ranges.
+    fn delete_char_after_cursor(&mut self) {
+        if let Some(idx) = self
+            .range_at_cursor()
+            .or_else(|| self.range_starting_at_cursor())
+        {
+            self.delete_range(idx);
+        } else {
+            self.textarea.delete_next_char();
+            self.rebuild_line_cache();
+            let cursor = self.cursor_to_byte();
+            self.shift_ranges(cursor, -1);
+        }
+        self.history_cursor = None;
+    }
+
+    /// Insert a character, replacing protected range if inside one.
+    fn insert_char_with_protected_check(&mut self, c: char) {
+        // Delete range if cursor is strictly inside it
+        if let Some(idx) = self.range_at_cursor() {
             self.delete_range(idx);
         }
-        let at = self.cursor;
+        let cursor = self.cursor_to_byte();
+        self.textarea.insert_char(c);
+        self.rebuild_line_cache();
+        self.shift_ranges(cursor, c.len_utf8() as isize);
+        self.history_cursor = None;
+    }
+
+    /// Submit the current text.
+    fn submit(&mut self) -> Option<(String, bool)> {
+        let text = self.textarea.lines().join("\n");
+        if text.is_empty() {
+            return None;
+        }
+        let interrupt = text.starts_with('!');
+        let ranges = self.protected_ranges.clone();
+        self.submit_capture = Some((text.clone(), ranges, interrupt));
+
+        // Push to history
+        self.history.push(text.clone());
+        if self.history.len() > HISTORY_CAP {
+            self.history.remove(0);
+        }
+        self.history_cursor = None;
+        self.draft.clear();
+        self.clear();
+
+        Some((text, interrupt))
+    }
+
+    // ── Public API ───────────────────────────────────────────────────────────
+
+    /// Insert a protected atom at the cursor.
+    pub fn insert_atom(&mut self, text: impl AsRef<str>, uri: String, name: String) {
+        if let Some(idx) = self.range_at_cursor() {
+            self.delete_range(idx);
+        }
+        let cursor = self.cursor_to_byte();
         let s = text.as_ref();
-        self.text.insert_str(at, s);
-        let end = at + s.len();
-        self.shift_ranges(at, s.len() as isize);
+        self.textarea.insert_str(s);
+        self.rebuild_line_cache();
+        let end = cursor + s.len();
+        self.shift_ranges(cursor, s.len() as isize);
         self.protected_ranges.push(ProtectedRange {
-            start: at,
+            start: cursor,
             end,
             uri,
             name,
         });
         self.protected_ranges.sort_by_key(|r| r.start);
-        self.cursor = end;
-    }
-
-    /// Test-only: set the cursor position without asserting anything else.
-    #[doc(hidden)]
-    pub fn set_text_cursor_for_test(&mut self, cursor: usize) {
-        assert!(cursor <= self.text.len());
-        assert!(self.text.is_char_boundary(cursor));
-        self.cursor = cursor;
     }
 
     /// The current text content.
-    pub fn text(&self) -> &str {
-        &self.text
+    pub fn text(&self) -> String {
+        self.textarea.lines().join("\n")
     }
 
-    /// Current cursor byte offset in `text`.
+    /// Current cursor byte offset.
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.cursor_to_byte()
     }
 
     /// Whether the input buffer is empty.
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.textarea.is_empty()
     }
 
-    /// Reset text and cursor. Also clears `protected_ranges`. Does not
-    /// reset `submit_capture` — that is consumed via `take_submit_capture`.
+    /// Reset text and cursor.
     pub fn clear(&mut self) {
-        self.text.clear();
-        self.cursor = 0;
+        self.textarea = TextArea::default();
+        self.textarea.set_cursor_line_style(Style::default());
+        self.textarea
+            .set_cursor_style(Style::default().fg(Color::Green));
+        self.line_cache = vec![0];
         self.protected_ranges.clear();
     }
 
-    /// Sorted, non-overlapping protected ranges. Empty in v1 until Task 12 lands.
+    /// Sorted, non-overlapping protected ranges.
     pub fn protected_ranges(&self) -> &[ProtectedRange] {
         &self.protected_ranges
     }
@@ -292,164 +667,36 @@ impl InputBar {
         self.submit_capture.take()
     }
 
-    /// Replace `text` and cursor wholesale. Panics if `cursor > text.len()` or
-    /// the cursor is not on a UTF-8 char boundary.
+    /// Replace text and cursor wholesale.
     pub fn set_text(&mut self, text: String, cursor: usize) {
-        assert!(cursor <= text.len(), "cursor past end");
-        assert!(text.is_char_boundary(cursor), "cursor off UTF-8 boundary");
-        self.text = text;
-        self.cursor = cursor;
+        let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        self.textarea = TextArea::new(lines);
+        self.textarea.set_cursor_line_style(Style::default());
+        self.textarea
+            .set_cursor_style(Style::default().fg(Color::Green));
+        self.rebuild_line_cache();
+        self.move_cursor_to_byte(cursor);
+        self.protected_ranges.clear();
     }
 
-    /// Set the status label shown before the prompt (e.g. "[kiro: ready]").
+    /// Set the status label.
     pub fn set_status(&mut self, status: Option<String>) {
         self.status = status;
     }
 
-    /// Whether a brain-status label is currently set. Used by the dashboard
-    /// empty-state hint to decide whether to render the onboarding prompt.
+    /// Whether a status label is set.
     pub fn has_status(&self) -> bool {
         self.status.is_some()
     }
 
-    /// Required render height given the available `width`.
-    ///
-    /// Accounts for explicit newlines and soft-wrapping. The returned value
-    /// includes the border lines (top + bottom). Inner rows are capped at 5
-    /// to keep the input bar from dominating the screen.
-    pub fn required_height(&self, width: u16) -> u16 {
-        // Inner width after borders (1 each side).
-        let inner_w = (width.saturating_sub(2)) as usize;
-        if inner_w == 0 {
-            return 3; // minimum: 1 content row + 2 borders
-        }
-
-        // Prefix length on the first line: status + "> "
-        let prefix_len = self.status.as_ref().map(|s| s.len() + 1).unwrap_or(0) + 2; // "> "
-
-        let mut rows: usize = 0;
-        for (i, line) in self.text.split('\n').enumerate() {
-            let line_len = if i == 0 {
-                line.len() + prefix_len + 1 // +1 for cursor glyph
-            } else {
-                line.len() + 1
-            };
-            rows += 1.max((line_len + inner_w - 1) / inner_w);
-        }
-
-        let inner = (rows as u16).clamp(1, 5);
-        inner + 2 // +2 for top and bottom border
-    }
-
-    /// Render the input bar into `area`.
-    ///
-    /// Displays a green-bordered box with a `> ` prompt and a block cursor
-    /// (`█`) at the current cursor position. Protected ranges (atoms) are
-    /// styled cyan + underlined. Supports multiline text (via Ctrl+J) and
-    /// long-line wrapping.
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Green))
-            .title(Span::styled(" INSERT ", Style::default().fg(Color::Green)));
-
-        let atom_style = Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::UNDERLINED);
-        let plain_style = Style::default();
-        let cursor_style = Style::default().fg(Color::Green);
-
-        // Build split points: 0, len, cursor, newlines, and each range boundary.
-        let mut splits: Vec<usize> = Vec::with_capacity(4 + self.protected_ranges.len() * 2);
-        splits.push(0);
-        splits.push(self.text.len());
-        splits.push(self.cursor);
-        for (i, ch) in self.text.char_indices() {
-            if ch == '\n' {
-                splits.push(i);
-                splits.push(i + 1);
-            }
-        }
-        for r in &self.protected_ranges {
-            splits.push(r.start);
-            splits.push(r.end);
-        }
-        splits.sort();
-        splits.dedup();
-
-        let in_range = |byte: usize| -> bool {
-            self.protected_ranges
-                .iter()
-                .any(|r| byte >= r.start && byte < r.end)
-        };
-
-        // Build spans, splitting into lines at '\n' boundaries.
-        let mut lines: Vec<Line> = Vec::new();
-        let mut cur_spans: Vec<Span> = Vec::new();
-
-        // Status label + prompt on the first line.
-        if let Some(ref status) = self.status {
-            cur_spans.push(Span::styled(
-                format!("{} ", status),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        cur_spans.push(Span::raw("> "));
-
-        for window in splits.windows(2) {
-            let (a, b) = (window[0], window[1]);
-            if self.cursor == a && self.cursor < self.text.len() {
-                cur_spans.push(Span::styled("\u{2588}", cursor_style));
-            }
-            if a == b {
-                continue;
-            }
-            let slice = &self.text[a..b];
-            if slice == "\n" {
-                lines.push(Line::from(std::mem::take(&mut cur_spans)));
-                continue;
-            }
-            let style = if in_range(a) { atom_style } else { plain_style };
-            cur_spans.push(Span::styled(slice.to_string(), style));
-        }
-
-        // Cursor at end of text (including empty text).
-        if self.cursor == self.text.len() {
-            cur_spans.push(Span::styled("\u{2588}", cursor_style));
-        }
-        lines.push(Line::from(cur_spans));
-
-        let paragraph = Paragraph::new(Text::from(lines))
-            .block(block)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
-    }
-
-    // ── helpers ──────────────────────────────────────────────────────────────
-
-    /// Byte offset of the start of the previous word (whitespace-delimited).
-    fn prev_word_boundary(&self) -> usize {
-        let bytes = self.text.as_bytes();
-        let mut i = self.cursor;
-        // Skip trailing whitespace.
-        while i > 0 && bytes[i - 1].is_ascii_whitespace() {
-            i -= 1;
-        }
-        // Skip word chars.
-        while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
-            i -= 1;
-        }
-        i
-    }
-
-    /// Navigate to the previous history entry. Called by the view on Ctrl+P.
+    /// Navigate to previous history entry.
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
         }
         match self.history_cursor {
             None => {
-                self.draft = self.text.clone();
+                self.draft = self.text();
                 let idx = self.history.len() - 1;
                 self.history_cursor = Some(idx);
                 self.load_history_entry(idx);
@@ -462,7 +709,7 @@ impl InputBar {
         }
     }
 
-    /// Navigate to the next history entry. Called by the view on Ctrl+N.
+    /// Navigate to next history entry.
     pub fn history_next(&mut self) {
         match self.history_cursor {
             Some(i) if i < self.history.len() - 1 => {
@@ -486,61 +733,63 @@ impl InputBar {
         self.set_text(entry, len);
     }
 
-    /// Return the byte index of the start of the character that ends at `pos`.
-    fn prev_char_boundary(&self, pos: usize) -> usize {
-        let mut idx = pos.saturating_sub(1);
-        while idx > 0 && !self.text.is_char_boundary(idx) {
-            idx -= 1;
+    /// Test-only: set cursor position.
+    #[doc(hidden)]
+    pub fn set_text_cursor_for_test(&mut self, cursor: usize) {
+        self.move_cursor_to_byte(cursor);
+    }
+
+    /// Required render height given the available `width`.
+    pub fn required_height(&self, width: u16) -> u16 {
+        let inner_w = (width.saturating_sub(2)) as usize;
+        if inner_w == 0 {
+            return 3;
         }
-        idx
-    }
 
-    /// Return the byte index of the start of the next character after `pos`.
-    fn next_char_boundary(&self, pos: usize) -> usize {
-        let mut idx = pos + 1;
-        while idx <= self.text.len() && !self.text.is_char_boundary(idx) {
-            idx += 1;
+        let prefix_len = self.status.as_ref().map(|s| s.len() + 1).unwrap_or(0) + 2;
+        let text = self.text();
+        let mut rows: usize = 0;
+
+        for (i, line) in text.split('\n').enumerate() {
+            let line_len = if i == 0 {
+                line.len() + prefix_len + 1
+            } else {
+                line.len() + 1
+            };
+            rows += 1.max((line_len + inner_w - 1) / inner_w);
         }
-        idx.min(self.text.len())
+
+        let inner = (rows as u16).clamp(1, 5);
+        inner + 2
     }
 
-    /// Index of the protected range that strictly contains `pos`
-    /// (i.e. `r.start < pos < r.end`). Use [`range_starting_at`] /
-    /// [`range_ending_at`] for adjacency at the boundaries.
-    fn range_at(&self, pos: usize) -> Option<usize> {
-        self.protected_ranges
-            .iter()
-            .position(|r| pos > r.start && pos < r.end)
-    }
+    /// Render the input bar.
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let mode_str = match self.mode {
+            EditMode::Emacs => " INSERT ",
+            EditMode::Vim(VimMode::Normal) => " NORMAL ",
+            EditMode::Vim(VimMode::Insert) => " INSERT ",
+            EditMode::Vim(VimMode::Visual) => " VISUAL ",
+            EditMode::Vim(VimMode::Operator(_)) => " OPERATOR ",
+        };
 
-    /// Index of the protected range that ends exactly at `pos`.
-    fn range_ending_at(&self, pos: usize) -> Option<usize> {
-        self.protected_ranges.iter().position(|r| r.end == pos)
-    }
+        // Build title with status label
+        let title = if let Some(ref status) = self.status {
+            format!("{} {}", status, mode_str)
+        } else {
+            mode_str.to_string()
+        };
 
-    /// Index of the protected range that starts exactly at `pos`.
-    fn range_starting_at(&self, pos: usize) -> Option<usize> {
-        self.protected_ranges.iter().position(|r| r.start == pos)
-    }
+        // Create a block for rendering
+        let _block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green))
+            .title(Span::styled(title, Style::default().fg(Color::Green)));
 
-    /// Shift all ranges with `start >= at` by `delta` bytes.
-    fn shift_ranges(&mut self, at: usize, delta: isize) {
-        for r in &mut self.protected_ranges {
-            if r.start >= at {
-                r.start = (r.start as isize + delta) as usize;
-                r.end = (r.end as isize + delta) as usize;
-            }
-        }
-    }
-
-    /// Remove the range at `idx`, drain its bytes from `text`, place the
-    /// cursor at the range start, and shift trailing ranges left.
-    fn delete_range(&mut self, idx: usize) {
-        let r = self.protected_ranges.remove(idx);
-        let len = r.end - r.start;
-        self.text.drain(r.start..r.end);
-        self.cursor = r.start;
-        self.shift_ranges(r.start, -(len as isize));
+        // Render textarea directly - this shows the cursor and selection
+        // Note: We can't set the block/cursor style here because that requires &mut self
+        // The textarea was configured with appropriate styles during construction/mode change
+        frame.render_widget(&self.textarea, area);
     }
 }
 

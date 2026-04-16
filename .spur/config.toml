@@ -1,42 +1,33 @@
 [brain]
 # To try the new ACP-based Claude transport, flip `default` to
 # "claude-code-acp". Keeping the stream-json one as default during rollout.
-default = "claude-code"
+default = "claude-code-acp"
 fallback = ["claude-code-acp", "kiro"]
 
 [brain.prompt]
 
+# Gemini CLI via native ACP mode. Requires `gemini` on PATH.
+# The --acp flag starts Gemini CLI in ACP mode: JSON-RPC 2.0 over stdio.
+# Supports initialize, prompt, cancel, setSessionMode, and MCP passthrough.
+# Note: Gemini's internal slash commands (/mcp, /compact, etc.) are not
+# exposed via ACP — they're REPL-only.
 [[agents.entries]]
 name = "gemini"
 command = "gemini"
-args = []
-transport = "cli-wrap"
+args = ["--acp"]
+transport = "acp"
 role = "both"
 capabilities = []
-cost_tier = "medium"
+cost_tier = "low"
+
+[agents.entries.permissions]
+skip = true
 
 # DEPRECATED: prefer the `claude-code-acp` profile below. This stream-json
 # transport is feature-capped (no plan mode, no slash-command discovery,
 # no UsageUpdate) and will be removed in a future release. Kept for
 # environments without Node.js, which should be rare since Claude Code
 # itself requires Node.
-[[agents.entries]]
-name = "claude-code"
-command = "claude"
-args = [
-    "-p",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-    "--permission-mode",
-    "acceptEdits",
-]
-transport = "stream-json"
-role = "both"
-capabilities = []
-cost_tier = "medium"
-
 [[agents.entries]]
 name = "kiro"
 command = "kiro-cli"
@@ -50,19 +41,13 @@ cost_tier = "medium"
 handle = "kiro"
 
 [agents.entries.commands]
-dispatch = "vendor_exec"
-exec_method = "_kiro.dev/commands/execute"
-args_template = "raw_rest"
+dispatch = "prompt_text"
 
 [[agents.entries.commands.ingest]]
 method = "_kiro.dev/commands/available"
 parser = "json_path_list"
 path = "commands"
 item_schema = "acp_available_command"
-
-[[agents.entries.commands.response]]
-method = "_kiro.dev/commands/execute/response"
-render = "system_note"
 
 [agents.entries.permissions]
 skip = true
@@ -140,7 +125,7 @@ session_mode = "full-auto"
 # Pinned version is critical: @latest would silently pull breaking
 # changes mid-session. Bump deliberately and retest after each bump.
 [[agents.entries]]
-name = "codex-acp"
+name = "codex"
 command = "npx"
 args = ["--yes", "@zed-industries/codex-acp@0.11.1"]
 transport = "acp"

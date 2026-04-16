@@ -25,6 +25,7 @@ tracing = { workspace = true }
 unicode-width = "0.1"
 nucleo-matcher = "0.3"
 ignore = "0.4"
+tui-textarea = "0.7"
 
 # Markdown + mermaid stack (gated by `markdown` feature)
 tui-markdown = { version = "0.3", optional = true }

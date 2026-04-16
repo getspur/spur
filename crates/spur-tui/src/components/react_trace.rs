@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use spur_acp::{
     adapter::{mode_badge, ObservePayload, ToolFamily, ToolInputDisplay},
-    AgentKind,
+    AgentKind, LifecycleState,
 };
 
 use ratatui::{
@@ -243,6 +243,26 @@ fn render_inline_image(
     true
 }
 
+/// Derive a live status label from the lineage for a Delegate trace entry.
+/// Returns `None` when the executor isn't in the lineage (falls back to the
+/// stored `status` field).
+fn derive_delegate_status(
+    executor_id: Option<&str>,
+    lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+) -> Option<&'static str> {
+    let eid = executor_id?;
+    let lin = lineage?;
+    let node = lin.node(&spur_core::ExecutorId(eid.to_string()))?;
+    Some(match node.phase {
+        LifecycleState::Spawning => "spawning",
+        LifecycleState::Running | LifecycleState::Resuming => "running",
+        LifecycleState::AwaitingReview => "awaiting review",
+        LifecycleState::Succeeded => "done",
+        LifecycleState::Failed => "failed",
+        LifecycleState::Cancelled => "cancelled",
+    })
+}
+
 /// Spinner frames for delegation animation.
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -314,6 +334,88 @@ fn observe_verb(p: &ObservePayload) -> &'static str {
         ObservePayload::EditResult { .. } => "edited",
         ObservePayload::Json { .. } | ObservePayload::Text { .. } => "done",
         ObservePayload::Error { .. } => "erred",
+    }
+}
+
+/// Extract a compact single-line identifier for a tool invocation, used
+/// in the collapsed grouped Act+Observe rendering. Falls back to the tool
+/// title when the input has no natural identifier (MCP tools, unknown
+/// shapes, empty input).
+fn input_summary(input: &ToolInputDisplay, tool: &str) -> String {
+    match input {
+        ToolInputDisplay::Path(p) => p.clone(),
+        ToolInputDisplay::Diff { path, .. } => path.clone(),
+        ToolInputDisplay::Command { cmd, .. } => cmd.clone(),
+        ToolInputDisplay::Query(q) => format!("\"{}\"", q),
+        ToolInputDisplay::Text(t) => t
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .to_string(),
+        ToolInputDisplay::Json(_) | ToolInputDisplay::Empty => tool.to_string(),
+    }
+}
+
+/// Compact outcome representation for the collapsed grouped rendering:
+/// (outcome glyph, glyph color, compact stats string).
+fn observe_compact(payload: &ObservePayload) -> (&'static str, Color, String) {
+    match payload {
+        ObservePayload::CommandOutput {
+            exit_code,
+            stdout,
+            stderr,
+        } => {
+            let total = stdout.lines().count() + stderr.lines().count();
+            match exit_code {
+                Some(0) => ("✓", Color::Green, format!("{} lines", total)),
+                Some(c) => ("✗", Color::Red, format!("exit {} · {} lines", c, total)),
+                None => ("?", Color::Yellow, format!("{} lines", total)),
+            }
+        }
+        ObservePayload::FileRead {
+            content, truncated, ..
+        } => {
+            let n = content.lines().count();
+            let suffix = if *truncated { " (truncated)" } else { "" };
+            ("✓", Color::Green, format!("{} lines{}", n, suffix))
+        }
+        ObservePayload::EditResult {
+            replacements, diff, ..
+        } => {
+            if let Some(n) = replacements {
+                (
+                    "✓",
+                    Color::Green,
+                    format!("{} replacement{}", n, if *n == 1 { "" } else { "s" }),
+                )
+            } else if let Some(d) = diff {
+                let plus = d.lines().filter(|l| l.starts_with('+')).count();
+                let minus = d.lines().filter(|l| l.starts_with('-')).count();
+                ("✓", Color::Green, format!("+{}/-{}", plus, minus))
+            } else {
+                ("✓", Color::Green, String::new())
+            }
+        }
+        ObservePayload::Json { pretty } => {
+            let n = pretty.lines().count();
+            ("✓", Color::Green, format!("{} lines", n))
+        }
+        ObservePayload::Text { body } => {
+            let n = body.lines().count();
+            ("✓", Color::Green, format!("{} lines", n))
+        }
+        ObservePayload::Error { message } => {
+            let truncated = if message.chars().count() > 60 {
+                let mut end = 60;
+                while !message.is_char_boundary(end) && end > 0 {
+                    end -= 1;
+                }
+                format!("{}…", &message[..end])
+            } else {
+                message.clone()
+            };
+            ("✗", Color::Red, truncated)
+        }
     }
 }
 
@@ -726,24 +828,19 @@ impl ReactTrace {
     /// interleaved tool calls don't split one logical agent message into
     /// multiple fragments (S1.b fix for H2).
     pub fn append_message(&mut self, text: &str, agent: &str, timestamp: String) {
-        // Walk backwards up to a small bounded window looking for the most
-        // recent AgentMessage for THIS agent, skipping non-message entries
-        // (tool calls, observations, etc.). Stop at a user turn or a
-        // different agent's message — don't merge across those boundaries.
-        const WALKBACK_LIMIT: usize = 10;
-        let mut target_idx: Option<usize> = None;
-        for (offset, entry) in self.entries.iter().rev().take(WALKBACK_LIMIT).enumerate() {
-            match &entry.kind {
-                TraceKind::AgentMessage { agent: entry_agent } if entry_agent == agent => {
-                    target_idx = Some(self.entries.len() - 1 - offset);
-                    break;
-                }
-                // Don't walk past user turns or other agents' messages.
-                TraceKind::UserMessage => break,
-                TraceKind::AgentMessage { .. } => break, // different agent
-                _ => continue,                           // tool call / think / etc.
-            }
-        }
+        // Only continue the immediately previous AgentMessage for the same
+        // agent. If ANY other entry type sits between (Act, Observe, Think,
+        // Delegate, …) the agent has performed an action and is now producing
+        // a NEW text block — it must render AFTER the intervening entries,
+        // not be merged into the earlier block (which would force the user to
+        // scroll up past tool calls to read the final response).
+        let target_idx = match self.entries.last() {
+            Some(entry) => match &entry.kind {
+                TraceKind::AgentMessage { agent: a } if a == agent => Some(self.entries.len() - 1),
+                _ => None,
+            },
+            None => None,
+        };
 
         #[cfg(feature = "markdown")]
         {
@@ -983,11 +1080,62 @@ impl ReactTrace {
         let collapsed = self.observe_collapsed;
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        for entry in &self.entries {
+        let mut i = 0;
+        while i < self.entries.len() {
+            let entry = &self.entries[i];
             let ts_span = Span::styled(
                 format!("{} ", entry.timestamp),
                 Style::default().fg(Color::DarkGray),
             );
+
+            // Collapsed mode: render Act as a one-line summary. When the
+            // next entry is a paired Observe(payload), join them; otherwise
+            // the tool is still running and we show a spinner. Either way,
+            // the line format is stable (no layout jump when results land).
+            if collapsed {
+                if let TraceKind::Act {
+                    tool,
+                    family,
+                    input,
+                } = &entry.kind
+                {
+                    let (act_glyph, act_color) = family_glyph(*family);
+                    let id_str = input_summary(input, tool);
+                    let mut spans = vec![
+                        ts_span.clone(),
+                        Span::styled(
+                            format!("{} {}", act_glyph, id_str),
+                            Style::default().fg(act_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("  "),
+                    ];
+                    let consumed = if let Some(TraceKind::Observe { payload: Some(p) }) =
+                        self.entries.get(i + 1).map(|e| &e.kind)
+                    {
+                        let (obs_glyph, obs_color, stats) = observe_compact(p);
+                        spans.push(Span::styled(
+                            obs_glyph.to_string(),
+                            Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
+                        ));
+                        if !stats.is_empty() {
+                            spans.push(Span::raw(" "));
+                            spans.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+                        }
+                        2
+                    } else {
+                        // Pending: tool still running, no paired Observe yet.
+                        spans.push(Span::styled(
+                            spinner_frame.to_string(),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                        1
+                    };
+                    lines.push(Line::from(spans));
+                    lines.push(Line::from(""));
+                    i += consumed;
+                    continue;
+                }
+            }
 
             match &entry.kind {
                 TraceKind::Think => {
@@ -1163,14 +1311,16 @@ impl ReactTrace {
                             Span::styled(task.clone(), Style::default().fg(Color::Cyan)),
                         ]));
                     }
-                    // Status with spinner if active
-                    if !status.is_empty() {
+                    // Derive live status from lineage when available.
+                    let effective_status = derive_delegate_status(executor_id.as_deref(), lineage)
+                        .unwrap_or_else(|| status.as_str());
+                    if !effective_status.is_empty() {
                         let is_active =
-                            status == "running" || status == "active" || status == "delegated";
+                            effective_status == "spawning" || effective_status == "running";
                         let status_text = if is_active {
-                            format!("   {} {}", spinner_frame, status)
+                            format!("   {} {}", spinner_frame, effective_status)
                         } else {
-                            format!("   {}", status)
+                            format!("   {}", effective_status)
                         };
                         lines.push(Line::from(vec![Span::styled(
                             status_text,
@@ -1255,8 +1405,20 @@ impl ReactTrace {
                 }
             }
 
-            // Blank separator between entries
-            lines.push(Line::from(""));
+            // Blank separator between entries — except when an Act is
+            // immediately followed by its Observe(payload): skip the blank
+            // so the pair reads as a visually joined unit in expanded mode.
+            // (Collapsed mode already grouped them via the block above and
+            // took the `continue` branch, so this only affects expanded.)
+            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
+                && matches!(
+                    self.entries.get(i + 1).map(|e| &e.kind),
+                    Some(TraceKind::Observe { payload: Some(_) })
+                );
+            if !skip_blank {
+                lines.push(Line::from(""));
+            }
+            i += 1;
         }
 
         lines
@@ -1303,11 +1465,62 @@ impl ReactTrace {
             }
         };
 
-        for entry in &self.entries {
+        let mut i = 0;
+        while i < self.entries.len() {
+            let entry = &self.entries[i];
             let ts_span = Span::styled(
                 format!("{} ", entry.timestamp),
                 Style::default().fg(Color::DarkGray),
             );
+
+            // Collapsed mode: render Act as a one-line summary. When the
+            // next entry is a paired Observe(payload), join them; otherwise
+            // the tool is still running and we show a spinner. Either way,
+            // the line format is stable (no layout jump when results land).
+            if collapsed {
+                if let TraceKind::Act {
+                    tool,
+                    family,
+                    input,
+                } = &entry.kind
+                {
+                    let (act_glyph, act_color) = family_glyph(*family);
+                    let id_str = input_summary(input, tool);
+                    let mut spans = vec![
+                        ts_span.clone(),
+                        Span::styled(
+                            format!("{} {}", act_glyph, id_str),
+                            Style::default().fg(act_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("  "),
+                    ];
+                    let consumed = if let Some(TraceKind::Observe { payload: Some(p) }) =
+                        self.entries.get(i + 1).map(|e| &e.kind)
+                    {
+                        let (obs_glyph, obs_color, stats) = observe_compact(p);
+                        spans.push(Span::styled(
+                            obs_glyph.to_string(),
+                            Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
+                        ));
+                        if !stats.is_empty() {
+                            spans.push(Span::raw(" "));
+                            spans.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+                        }
+                        2
+                    } else {
+                        // Pending: tool still running, no paired Observe yet.
+                        spans.push(Span::styled(
+                            spinner_frame.to_string(),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                        1
+                    };
+                    push_wrapped(&mut rows, Line::from(spans));
+                    push_wrapped(&mut rows, Line::from(""));
+                    i += consumed;
+                    continue;
+                }
+            }
 
             match &entry.kind {
                 TraceKind::Think => {
@@ -1545,13 +1758,15 @@ impl ReactTrace {
                             ]),
                         );
                     }
-                    if !status.is_empty() {
+                    let effective_status = derive_delegate_status(executor_id.as_deref(), lineage)
+                        .unwrap_or_else(|| status.as_str());
+                    if !effective_status.is_empty() {
                         let is_active =
-                            status == "running" || status == "active" || status == "delegated";
+                            effective_status == "spawning" || effective_status == "running";
                         let status_text = if is_active {
-                            format!("   {} {}", spinner_frame, status)
+                            format!("   {} {}", spinner_frame, effective_status)
                         } else {
-                            format!("   {}", status)
+                            format!("   {}", effective_status)
                         };
                         push_wrapped(
                             &mut rows,
@@ -1651,8 +1866,18 @@ impl ReactTrace {
                 }
             }
 
-            // Blank separator between entries.
-            push_wrapped(&mut rows, Line::from(""));
+            // Blank separator between entries — except when an Act is
+            // immediately followed by its Observe(payload): skip the blank
+            // so the pair reads as a visually joined unit in expanded mode.
+            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
+                && matches!(
+                    self.entries.get(i + 1).map(|e| &e.kind),
+                    Some(TraceKind::Observe { payload: Some(_) })
+                );
+            if !skip_blank {
+                push_wrapped(&mut rows, Line::from(""));
+            }
+            i += 1;
         }
 
         rows
@@ -1939,8 +2164,48 @@ impl ReactTrace {
     /// content without spinning up a real terminal frame.
     pub fn render_to_strings(&self) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
+        let collapsed = self.observe_collapsed;
 
-        for entry in &self.entries {
+        let mut i = 0;
+        while i < self.entries.len() {
+            let entry = &self.entries[i];
+
+            // Collapsed mode: render Act as a one-line summary. When the
+            // next entry is a paired Observe(payload), join them; otherwise
+            // the tool is still running ("…" pending indicator).
+            if collapsed {
+                if let TraceKind::Act {
+                    tool,
+                    family,
+                    input,
+                } = &entry.kind
+                {
+                    let (act_glyph, _) = family_glyph(*family);
+                    let id_str = input_summary(input, tool);
+                    let (tail, consumed) = if let Some(TraceKind::Observe {
+                        payload: Some(p),
+                    }) = self.entries.get(i + 1).map(|e| &e.kind)
+                    {
+                        let (obs_glyph, _, stats) = observe_compact(p);
+                        let mut t = obs_glyph.to_string();
+                        if !stats.is_empty() {
+                            t.push(' ');
+                            t.push_str(&stats);
+                        }
+                        (t, 2)
+                    } else {
+                        ("\u{2026}".to_string(), 1)
+                    };
+                    lines.push(format!(
+                        "{} {} {}  {}",
+                        entry.timestamp, act_glyph, id_str, tail
+                    ));
+                    lines.push(String::new());
+                    i += consumed;
+                    continue;
+                }
+            }
+
             match &entry.kind {
                 TraceKind::Think => {
                     lines.push(format!("{} 🧠 THINK", entry.timestamp));
@@ -2069,7 +2334,17 @@ impl ReactTrace {
                 }
             }
 
-            lines.push(String::new());
+            // Skip blank between an Act and its paired Observe so they read
+            // as a joined unit in expanded mode.
+            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
+                && matches!(
+                    self.entries.get(i + 1).map(|e| &e.kind),
+                    Some(TraceKind::Observe { payload: Some(_) })
+                );
+            if !skip_blank {
+                lines.push(String::new());
+            }
+            i += 1;
         }
 
         lines
@@ -2358,20 +2633,14 @@ mod virtual_row_tests {
 mod tests {
     use super::*;
 
-    /// H2 regression: when a non-AgentMessage entry (e.g. a tool call
-    /// → `TraceKind::Act`) lands between two `AgentMessageChunk` events
-    /// from the same agent, `append_message` today creates a NEW
-    /// `AgentMessage` entry instead of continuing the previous one.
-    /// The user sees one logical assistant response split into fragments.
-    ///
-    /// Task 4 implements the walkback fix; this test must FAIL until then.
+    /// Post-tool text must appear as a SEPARATE AgentMessage entry, not
+    /// merged into the pre-tool block. Otherwise the agent's final response
+    /// ends up before the tool call visually, forcing the user to scroll up.
     #[test]
-    fn append_message_continues_existing_after_tool_call_interleave() {
+    fn append_message_creates_new_entry_after_tool_call() {
         let mut trace = ReactTrace::new();
         trace.append_message("first chunk. ", "claude", "10:00:01".to_string());
-        // Simulate a tool call landing between chunks (from session/update:
-        // ToolCall or ToolCallUpdate variants). ReactTrace tracks tool calls
-        // as TraceKind::Act.
+        // Simulate a tool call landing between message blocks.
         trace.push(TraceEntry {
             kind: TraceKind::Act {
                 tool: "read_file".to_string(),
@@ -2385,7 +2654,44 @@ mod tests {
         });
         trace.append_message("second chunk.", "claude", "10:00:03".to_string());
 
-        // Count AgentMessage entries with agent="claude" — must be ONE merged.
+        // Must be TWO separate AgentMessage entries — one before the tool
+        // call and one after.
+        let entries = trace.entries_for_test();
+        let agent_messages: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(&e.kind, TraceKind::AgentMessage { agent } if agent == "claude"))
+            .collect();
+        assert_eq!(
+            agent_messages.len(),
+            2,
+            "expected 2 separate AgentMessage entries (pre-tool and post-tool), got {}",
+            agent_messages.len()
+        );
+
+        // Verify ordering: AgentMessage, Act, AgentMessage
+        let kinds: Vec<&str> = entries
+            .iter()
+            .map(|e| match &e.kind {
+                TraceKind::AgentMessage { .. } => "agent_message",
+                TraceKind::Act { .. } => "act",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["agent_message", "act", "agent_message"],
+            "trace should be [msg, tool, msg] but got {kinds:?}"
+        );
+    }
+
+    /// Consecutive AgentMessageChunks (same agent, no intervening entries)
+    /// must still merge into a single entry — this is intra-block streaming.
+    #[test]
+    fn append_message_merges_consecutive_chunks_from_same_agent() {
+        let mut trace = ReactTrace::new();
+        trace.append_message("hello ", "claude", "10:00:01".to_string());
+        trace.append_message("world", "claude", "10:00:01".to_string());
+
         let entries = trace.entries_for_test();
         let agent_message_count = entries
             .iter()
@@ -2393,39 +2699,7 @@ mod tests {
             .count();
         assert_eq!(
             agent_message_count, 1,
-            "interleaved tool call split AgentMessage — H2 regressed"
-        );
-
-        // The single AgentMessage should contain both chunks. Under the
-        // `markdown` feature the raw text lives inside the stream; fall
-        // back to the stream's `raw_text()` when `entry.text` is empty.
-        let msg_text = entries
-            .iter()
-            .find_map(|e| match &e.kind {
-                TraceKind::AgentMessage { .. } => {
-                    #[cfg(feature = "markdown")]
-                    {
-                        if !e.text.is_empty() {
-                            Some(e.text.clone())
-                        } else {
-                            e.markdown.as_ref().map(|s| s.raw_text().to_string())
-                        }
-                    }
-                    #[cfg(not(feature = "markdown"))]
-                    {
-                        Some(e.text.clone())
-                    }
-                }
-                _ => None,
-            })
-            .expect("expected AgentMessage entry");
-        assert!(
-            msg_text.contains("first chunk"),
-            "missing first chunk in merged message: {msg_text:?}"
-        );
-        assert!(
-            msg_text.contains("second chunk"),
-            "missing second chunk in merged message: {msg_text:?}"
+            "consecutive chunks should merge into one entry"
         );
     }
 }

@@ -715,6 +715,28 @@ impl App {
                 }
             }
 
+            Action::InspectWorkers => {
+                use crate::views::dashboard::Panel;
+                use spur_acp::LifecycleState;
+                // Pre-select: AwaitingReview > Running > most recent worker.
+                let priority = self
+                    .lineage
+                    .nodes()
+                    .filter(|n| n.role == spur_acp::Role::Executor)
+                    .max_by_key(|n| match n.phase {
+                        LifecycleState::AwaitingReview => 3,
+                        LifecycleState::Running
+                        | LifecycleState::Resuming
+                        | LifecycleState::Spawning => 2,
+                        _ => 1,
+                    })
+                    .map(|n| n.id.clone());
+                self.dashboard.set_focused_panel(Panel::Agents);
+                self.dashboard.set_focused_node(priority);
+                self.current_view = ViewId::Dashboard;
+                self.dirty = true;
+            }
+
             Action::RequestSessions => {
                 // Flush any unsent typing in the active SessionDetail into
                 // metadata *before* the picker reads metadata to decide the

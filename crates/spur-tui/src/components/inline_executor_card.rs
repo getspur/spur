@@ -193,7 +193,7 @@ fn awaiting_summary_line(node: &ExecutorNode) -> Line<'static> {
 
 fn awaiting_cta_line() -> Line<'static> {
     Line::from(Span::styled(
-        "  ▶ Press 'r' to review (this delegation is blocking the brain)",
+        "  ⏳ Awaiting review — this delegation is blocking the brain",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -215,7 +215,7 @@ fn failed_status_line(node: &ExecutorNode) -> Line<'static> {
 
 fn failed_cta_line() -> Line<'static> {
     Line::from(Span::styled(
-        "  ▶ Press 'i' to inspect events, '<' to return to brain",
+        "  ✗ Worker failed — brain will handle the error",
         Style::default().fg(Color::Red),
     ))
 }

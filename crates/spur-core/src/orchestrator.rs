@@ -27,7 +27,9 @@ use agent_client_protocol::{
 };
 
 use spur_cost::CostTracker;
-use spur_mcp::{build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo};
+use spur_mcp::{
+    build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
+};
 use spur_pm::adapter::PmAdapter;
 use spur_pm::GitHubAdapter;
 use spur_worktree::WorktreeManager;
@@ -180,125 +182,15 @@ pub struct Orchestrator {
 /// revisit if the set of transports grows.
 pub(crate) fn is_connection_death(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
-    msg.contains("ACP thread died")
-        || msg.contains("server shut down unexpectedly")
+    msg.contains("ACP thread died") || msg.contains("server shut down unexpectedly")
 }
-
-// ─── Brain-prompt static constants (v1 framework) ─────────────────────────────
-
-const DISPATCH_PROCEDURE: &str = "\
-## When to delegate vs. do it yourself
-
-Do it yourself when:
-  - The task is <15min of work.
-  - You need tight iterative control (probe, edit, probe).
-  - The task requires your accumulated session context.
-  - No worker's good_for meaningfully matches.
-
-Delegate when:
-  - Subtasks are independent and parallelizable (use delegate_parallel).
-  - A worker's good_for directly matches the task shape.
-  - Scope (LoC, files, or duration) exceeds what you want to spend your
-    context window on.
-  - You need fresh context isolation.
-
-Routing rule: prefer specialist tier when good_for matches exactly;
-fall back to generalist tier otherwise. avoid_for is a SOFT signal —
-you MAY override it with a stated rationale when no better agent exists.
-Prefer lower-cost_tier agents for mechanical tasks; reserve higher-cost
-agents for tasks requiring integration, judgment, or architectural
-decisions.
-
-Your <delegation_plan> replaces, does not supplement, other planning
-artifacts you would emit FOR DELEGATION DECISIONS. Native planning
-tools (Todo, plan mode, etc.) remain for intra-task work.
-
-";
-
-const PLAN_REQUIREMENT: &str = "\
-## Required: delegation_plan parameter
-
-Every delegate_to_worker and delegate_parallel call should include a
-`delegation_plan` argument. Content scales with complexity:
-
-For >=2 subtasks OR >3 files touched — pass the full shape:
-  {
-    \"candidates\":    [{\"agent\": \"...\", \"rationale\": \"...\"}, ...],
-    \"decomposition\": [{\"subtask\": \"...\", \"parallelizable_with\": [\"...\"]}],
-    \"chosen\":        \"agent-name-or-self-or-parallel\",
-    \"rationale\":     \"Why this choice beats the alternatives. If
-                      violating any agent's avoid_for, state why.\"
-  }
-
-For trivial single-step delegations — minimum shape:
-  { \"chosen\": \"agent-name\", \"rationale\": \"short justification\" }
-
-All fields are advisory; the orchestrator accepts the tool call even
-with minimal or missing content. Your rationale is surfaced to the
-review gate so reviewers can see what you decided and why.
-
-If you have access to a sequential-thinking MCP tool, use it to
-generate the candidates and decomposition before committing to the
-delegate_* call.
-
-";
-
-const TASK_STRUCTURE: &str = "\
-## Task prompt structure (what to send workers)
-
-Structure the `task` field of delegate_to_worker as:
-
-  CONTEXT: {scope, constraints from this session, relevant file paths
-           and short excerpts — prefer inlining over passing paths via
-           context_files so the worker doesn't spend turns re-reading}
-  GOAL:    {one-sentence success criterion}
-  CONSTRAINTS: {what the worker must NOT do}
-  EXPECTED OUTPUT: {populated from the chosen agent's output_shape
-                   when declared}
-
-For agents with declared output_shape, EXPECTED OUTPUT must restate it.
-For agents with declared input_expectations, CONTEXT must satisfy those
-expectations before dispatch.
-
-";
-
-const CANONICAL_EXAMPLE: &str = "\
-## Canonical example
-
-Task: 'Refactor the auth module to use the new SessionId format across
-all callers (4 files).'
-
-Reasoning out loud (brain's narrative text):
-  This is a multi-file refactor matching claude-code-acp's good_for.
-  The changes are coupled (can't parallelize across callers).
-
-delegate_to_worker(
-  agent = \"claude-code-acp\",
-  task = \"CONTEXT: Refactor the auth module. Affected files: src/auth/mod.rs, \
-          src/auth/session.rs, src/api/handlers.rs, src/tests/auth.rs. \
-          The new SessionId format is: [snippet]. \
-          GOAL: All callers use the new format; all tests pass. \
-          CONSTRAINTS: Don't touch src/api/v2/; don't modify the database schema. \
-          EXPECTED OUTPUT: Unified diff + summary paragraph + test plan bullets.\",
-  delegation_plan = {
-    \"candidates\": [
-      {\"agent\": \"claude-code-acp\", \"rationale\": \"multi-file refactor matches good_for\"},
-      {\"agent\": \"codex\", \"rationale\": \"cheaper but avoid_for = multi-file coordination\"}
-    ],
-    \"decomposition\": [
-      {\"subtask\": \"refactor auth + callers\", \"parallelizable_with\": []}
-    ],
-    \"chosen\": \"claude-code-acp\",
-    \"rationale\": \"multi-file refactor + coupled callers; codex's avoid_for excludes it.\"
-  }
-)
-
-";
 
 // ─── Free function: log-cap enforcer ──────────────────────────────────────────
 
 fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut files: Vec<(std::path::PathBuf, std::time::SystemTime, u64)> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
@@ -307,11 +199,15 @@ fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
         })
         .collect();
     let total: u64 = files.iter().map(|(_, _, s)| s).sum();
-    if total <= cap { return; }
-    files.sort_by_key(|(_, mtime, _)| *mtime);  // oldest first
+    if total <= cap {
+        return;
+    }
+    files.sort_by_key(|(_, mtime, _)| *mtime); // oldest first
     let mut to_free = total - cap;
     for (path, _, size) in files {
-        if to_free == 0 { break; }
+        if to_free == 0 {
+            break;
+        }
         let _ = std::fs::remove_file(&path);
         to_free = to_free.saturating_sub(size);
     }
@@ -435,7 +331,8 @@ impl Orchestrator {
         };
 
         // 3. Build brain prompt.
-        let prompt_text = self.build_brain_prompt(task, issue_context.as_ref(), &session_id);
+        let prompt_text =
+            self.build_brain_prompt(task, issue_context.as_ref(), &session_id, &brain_name);
 
         // 4. Start MCP callback server.
         let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
@@ -708,8 +605,8 @@ impl Orchestrator {
                             brain_name,
                             permission_tx.clone(),
                             session_id,
-                            None,   // preserve_spur_session_id: fresh view on ResumeSession
-                            false,  // force_new_session: normal load behavior
+                            None,  // preserve_spur_session_id: fresh view on ResumeSession
+                            false, // force_new_session: normal load behavior
                         )
                         .await
                     {
@@ -1693,9 +1590,7 @@ impl Orchestrator {
         let (connection, brain_name) = self
             .connect_brain(brain_override, permission_tx.clone())
             .await
-            .with_context(|| {
-                format!("reconnect: connect_brain failed for '{brain_name_hint}'")
-            })?;
+            .with_context(|| format!("reconnect: connect_brain failed for '{brain_name_hint}'"))?;
 
         let (new_session, mut history_stream, outcome) = self
             .load_brain_session(
@@ -1969,9 +1864,15 @@ impl Orchestrator {
         build_connection_from_transport(config, args, perm_tx)
     }
 
-    fn build_brain_prompt(&self, task: &str, issue: Option<&Issue>, session_id: &SessionId) -> String {
+    fn build_brain_prompt(
+        &self,
+        task: &str,
+        issue: Option<&Issue>,
+        session_id: &SessionId,
+        brain_name: &str,
+    ) -> String {
         if self.config.brain.delegation.framework == "v1" {
-            self.build_brain_prompt_v1(task, issue, session_id)
+            self.build_brain_prompt_v1(task, issue, session_id, brain_name)
         } else {
             self.build_brain_prompt_legacy(task, issue)
         }
@@ -2017,14 +1918,23 @@ impl Orchestrator {
         prompt
     }
 
-    fn build_brain_prompt_v1(&self, task: &str, issue: Option<&Issue>, session_id: &SessionId) -> String {
+    fn build_brain_prompt_v1(
+        &self,
+        task: &str,
+        issue: Option<&Issue>,
+        session_id: &SessionId,
+        brain_name: &str,
+    ) -> String {
         let mut prompt = String::new();
         prompt.push_str(&self.render_header());
         prompt.push_str(&self.render_workers_block());
-        prompt.push_str(DISPATCH_PROCEDURE);
-        prompt.push_str(PLAN_REQUIREMENT);
-        prompt.push_str(TASK_STRUCTURE);
-        prompt.push_str(CANONICAL_EXAMPLE);
+        if let Some(framework) = crate::skills::load_skill("brain-delegation", &self.repo_root) {
+            prompt.push_str(&framework);
+        }
+        let agent_skill = format!("brain-delegation-{}", brain_name);
+        if let Some(guidance) = crate::skills::load_skill(&agent_skill, &self.repo_root) {
+            prompt.push_str(&guidance);
+        }
         self.append_issue_and_task(&mut prompt, task, issue);
         self.log_prompt_once(&prompt, session_id);
         prompt
@@ -2047,14 +1957,20 @@ impl Orchestrator {
                 continue;
             }
             any_listed = true;
-            let tier = agent.delegation.tier
+            let tier = agent
+                .delegation
+                .tier
                 .map(|t| match t {
                     spur_acp::config::Tier::Specialist => "specialist",
                     spur_acp::config::Tier::Generalist => "generalist",
                 })
                 .unwrap_or("generalist");
             let cost = format!("{:?}", agent.cost_tier).to_lowercase();
-            let desc = agent.delegation.description.as_deref().unwrap_or("(no description)");
+            let desc = agent
+                .delegation
+                .description
+                .as_deref()
+                .unwrap_or("(no description)");
             out.push_str(&format!(
                 "### {}  ({}, cost: {})\n{}\n\n",
                 agent.name, tier, cost, desc,
@@ -4399,41 +4315,69 @@ mod normalize_tests {
 
 #[cfg(test)]
 mod prompt_v1_tests {
-    use super::*;
-
-    // --- Static-constant tests: no fixture needed ---
+    // --- Bundled skill content tests: verify SKILL.md bodies contain required keywords ---
 
     #[test]
-    fn dispatch_procedure_contains_required_keywords() {
-        assert!(DISPATCH_PROCEDURE.contains("When to delegate vs. do it yourself"));
-        assert!(DISPATCH_PROCEDURE.contains("Do it yourself when:"));
-        assert!(DISPATCH_PROCEDURE.contains("Delegate when:"));
-        assert!(DISPATCH_PROCEDURE.contains("specialist"));
-        assert!(DISPATCH_PROCEDURE.contains("avoid_for is a SOFT signal"));
+    fn brain_delegation_skill_contains_dispatch_procedure() {
+        let body =
+            crate::skills::load_skill("brain-delegation", std::path::Path::new("/nonexistent"))
+                .expect("bundled brain-delegation skill must exist");
+        assert!(body.contains("When to delegate vs. do it yourself"));
+        assert!(body.contains("Do it yourself when:"));
+        assert!(body.contains("Delegate when:"));
+        assert!(body.contains("specialist"));
+        assert!(body.contains("avoid_for is a SOFT signal"));
     }
 
     #[test]
-    fn plan_requirement_shows_full_and_minimal_shapes() {
-        assert!(PLAN_REQUIREMENT.contains("delegation_plan"));
-        assert!(PLAN_REQUIREMENT.contains("candidates"));
-        assert!(PLAN_REQUIREMENT.contains("decomposition"));
-        assert!(PLAN_REQUIREMENT.contains("minimum shape"));
-        assert!(PLAN_REQUIREMENT.contains(">=2 subtasks OR >3 files"));
+    fn brain_delegation_skill_contains_plan_requirement() {
+        let body =
+            crate::skills::load_skill("brain-delegation", std::path::Path::new("/nonexistent"))
+                .unwrap();
+        assert!(body.contains("delegation_plan"));
+        assert!(body.contains("candidates"));
+        assert!(body.contains("decomposition"));
+        assert!(body.contains("minimum shape"));
+        assert!(body.contains(">=2 subtasks OR >3 files"));
     }
 
     #[test]
-    fn task_structure_contains_four_sections() {
-        assert!(TASK_STRUCTURE.contains("CONTEXT:"));
-        assert!(TASK_STRUCTURE.contains("GOAL:"));
-        assert!(TASK_STRUCTURE.contains("CONSTRAINTS:"));
-        assert!(TASK_STRUCTURE.contains("EXPECTED OUTPUT"));
+    fn brain_delegation_skill_contains_task_structure() {
+        let body =
+            crate::skills::load_skill("brain-delegation", std::path::Path::new("/nonexistent"))
+                .unwrap();
+        assert!(body.contains("CONTEXT:"));
+        assert!(body.contains("GOAL:"));
+        assert!(body.contains("CONSTRAINTS:"));
+        assert!(body.contains("EXPECTED OUTPUT"));
     }
 
     #[test]
-    fn canonical_example_is_syntactically_present() {
-        assert!(CANONICAL_EXAMPLE.contains("Canonical example"));
-        assert!(CANONICAL_EXAMPLE.contains("delegate_to_worker"));
-        assert!(CANONICAL_EXAMPLE.contains("delegation_plan"));
+    fn brain_delegation_skill_contains_canonical_example() {
+        let body =
+            crate::skills::load_skill("brain-delegation", std::path::Path::new("/nonexistent"))
+                .unwrap();
+        assert!(body.contains("Canonical example"));
+        assert!(body.contains("delegate_to_worker"));
+        assert!(body.contains("delegation_plan"));
+    }
+
+    #[test]
+    fn per_agent_skill_exists_for_known_brains() {
+        let fake = std::path::Path::new("/nonexistent");
+        for agent in ["claude-code-acp", "kiro", "codex", "gemini"] {
+            let name = format!("brain-delegation-{}", agent);
+            assert!(
+                crate::skills::load_skill(&name, fake).is_some(),
+                "missing bundled skill for {agent}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_agent_skill_returns_none() {
+        let fake = std::path::Path::new("/nonexistent");
+        assert!(crate::skills::load_skill("brain-delegation-unknown-agent-xyz", fake).is_none());
     }
 
     // --- Workers-block rendering: build minimal fixtures from AgentConfig ---
@@ -4454,21 +4398,31 @@ mod prompt_v1_tests {
         let mut out = String::from("## Available worker agents\n\n");
         let mut any = false;
         for agent in agents {
-            if agent.delegation.good_for.is_empty() { continue; }
+            if agent.delegation.good_for.is_empty() {
+                continue;
+            }
             any = true;
-            let tier = agent.delegation.tier
+            let tier = agent
+                .delegation
+                .tier
                 .map(|t| match t {
                     Tier::Specialist => "specialist",
                     Tier::Generalist => "generalist",
                 })
                 .unwrap_or("generalist");
-            let desc = agent.delegation.description.as_deref().unwrap_or("(no description)");
+            let desc = agent
+                .delegation
+                .description
+                .as_deref()
+                .unwrap_or("(no description)");
             out.push_str(&format!(
                 "### {}  ({}, cost: medium)\n{}\n\n",
                 agent.name, tier, desc,
             ));
         }
-        if !any { out.push_str("(no worker-capable agents with descriptors configured)\n\n"); }
+        if !any {
+            out.push_str("(no worker-capable agents with descriptors configured)\n\n");
+        }
         out
     }
 
@@ -4487,7 +4441,7 @@ mod prompt_v1_tests {
     fn workers_block_excludes_empty_good_for_agents() {
         let agents = vec![
             cfg_with_good_for("has-good-for", vec!["real".into()]),
-            cfg_with_good_for("bare", vec![]),  // will be excluded
+            cfg_with_good_for("bare", vec![]), // will be excluded
         ];
         let block = render_workers_block_over(&agents);
         assert!(block.contains("has-good-for"));
