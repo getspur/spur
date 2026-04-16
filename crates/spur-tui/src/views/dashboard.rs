@@ -386,6 +386,8 @@ impl DashboardView {
         key: KeyEvent,
         lineage: Option<&ExecutorLineage>,
     ) -> Option<Action> {
+        let key = super::normalize_macos_option(key);
+
         // Priority 0: Tab-cycling in detail pane when a node is focused and
         // the input bar is empty. Must be checked before the editing-key block
         // so that Left/Right are not consumed by InputBar cursor movement.

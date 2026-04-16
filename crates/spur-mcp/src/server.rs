@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -13,6 +13,11 @@ use tracing::{debug, error, info, warn};
 use spur_acp::*;
 
 use crate::tools::{self, DelegationChannel, DelegationRequest};
+
+/// Maximum time to block on a delegation result before falling back to
+/// async polling.  Must be well under the brain's MCP-client timeout
+/// (typically 120 s) to leave margin for HTTP round-trip overhead.
+const DELEGATION_BLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
@@ -131,9 +136,11 @@ pub struct McpCallbackServer {
     workers: Vec<WorkerInfo>,
     /// Brain session this server belongs to.
     brain_session_id: SessionId,
-    /// Async delegation receivers awaiting collection via `wait_delegation`.
-    pending_delegations:
-        tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Receiver<DelegationResult>>>,
+    /// Delegation IDs whose background collector is still awaiting a result.
+    active_delegations: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Results that a background collector has received but the brain has
+    /// not yet polled via `check_delegation_status` / `wait_delegation`.
+    completed_delegations: Arc<tokio::sync::Mutex<HashMap<String, DelegationResult>>>,
 }
 
 impl McpCallbackServer {
@@ -148,11 +155,38 @@ impl McpCallbackServer {
             delegation_tx: req_tx,
             workers: Vec::new(),
             brain_session_id: session_id.clone(),
-            pending_delegations: tokio::sync::Mutex::new(HashMap::new()),
+            active_delegations: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
         (server, channel)
+    }
+
+    /// Spawn a background task that awaits a delegation oneshot and stores
+    /// the result in `completed_delegations` for later polling.
+    fn spawn_result_collector(
+        delegation_id: String,
+        rx: tokio::sync::oneshot::Receiver<DelegationResult>,
+        active: Arc<tokio::sync::Mutex<HashSet<String>>>,
+        completed: Arc<tokio::sync::Mutex<HashMap<String, DelegationResult>>>,
+    ) {
+        tokio::spawn(async move {
+            let result = match rx.await {
+                Ok(r) => r,
+                Err(_) => DelegationResult {
+                    status: DelegationStatus::Failed {
+                        error: "Orchestrator disconnected".into(),
+                    },
+                    diff: None,
+                    diff_summary: None,
+                    summary: None,
+                    estimated_cost_usd: 0.0,
+                },
+            };
+            active.lock().await.remove(&delegation_id);
+            completed.lock().await.insert(delegation_id, result);
+        });
     }
 
     /// Set the list of available worker agents.
@@ -325,6 +359,9 @@ impl McpCallbackServer {
             "delegate_parallel" => self.handle_delegate_parallel(id, arguments).await,
             "delegate_async" => self.handle_delegate_async(id, arguments).await,
             "wait_delegation" => self.handle_wait_delegation(id, arguments).await,
+            "check_delegation_status" => {
+                self.handle_check_delegation_status(id, arguments).await
+            }
             "list_available_workers" => self.handle_list_available_workers(id).await,
             "get_issue" => self.handle_get_issue(id, arguments).await,
             "update_issue" => self.handle_update_issue(id, arguments).await,
@@ -374,8 +411,25 @@ impl McpCallbackServer {
             return JsonRpcResponse::internal_error(id, "Failed to send delegation request");
         }
 
-        match rx.await {
-            Ok(result) => {
+        // Spawn a background collector so the oneshot is never dropped by
+        // a timeout.  Then poll the completed-results map with a bounded
+        // wait that stays well under the brain's 120 s HTTP timeout.
+        self.active_delegations
+            .lock()
+            .await
+            .insert(request_id.clone());
+        Self::spawn_result_collector(
+            request_id.clone(),
+            rx,
+            Arc::clone(&self.active_delegations),
+            Arc::clone(&self.completed_delegations),
+        );
+
+        let deadline = tokio::time::Instant::now() + DELEGATION_BLOCK_TIMEOUT;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+            if let Some(result) = self.completed_delegations.lock().await.remove(&request_id) {
                 let result_json = match serde_json::to_value(&result) {
                     Ok(v) => v,
                     Err(e) => {
@@ -385,7 +439,7 @@ impl McpCallbackServer {
                         )
                     }
                 };
-                JsonRpcResponse::success(
+                return JsonRpcResponse::success(
                     id,
                     json!({
                         "content": [{
@@ -394,12 +448,29 @@ impl McpCallbackServer {
                                 .unwrap_or_else(|_| result_json.to_string())
                         }]
                     }),
-                )
+                );
             }
-            Err(_) => JsonRpcResponse::internal_error(
-                id,
-                "Delegation cancelled or orchestrator disconnected",
-            ),
+
+            if tokio::time::Instant::now() >= deadline {
+                info!(
+                    agent = %agent,
+                    request_id = %request_id,
+                    "Delegation exceeded block timeout, returning delegation_id for polling"
+                );
+                return JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Delegation to '{agent}' is still running (exceeded {timeout}s block limit). \
+                                 Call check_delegation_status with delegation_id '{request_id}' to poll for the result.",
+                                timeout = DELEGATION_BLOCK_TIMEOUT.as_secs(),
+                            )
+                        }]
+                    }),
+                );
+            }
         }
     }
 
@@ -459,22 +530,47 @@ impl McpCallbackServer {
                 return JsonRpcResponse::internal_error(id, "Failed to send delegation request");
             }
 
-            receivers.push((request_id, rx));
+            self.active_delegations
+                .lock()
+                .await
+                .insert(request_id.clone());
+            Self::spawn_result_collector(
+                request_id.clone(),
+                rx,
+                Arc::clone(&self.active_delegations),
+                Arc::clone(&self.completed_delegations),
+            );
+            receivers.push((request_id, agent));
         }
 
+        // Poll completed-results map with a batch timeout.
+        let deadline = tokio::time::Instant::now() + DELEGATION_BLOCK_TIMEOUT;
         let mut results = Vec::with_capacity(receivers.len());
-        for (request_id, rx) in receivers {
-            match rx.await {
-                Ok(result) => {
+        let mut pending: Vec<(String, String)> = receivers;
+
+        while !pending.is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let mut still_pending = Vec::new();
+            for (request_id, agent) in pending {
+                if let Some(result) =
+                    self.completed_delegations.lock().await.remove(&request_id)
+                {
                     results.push(serde_json::to_value(&result).unwrap_or(json!(null)));
-                }
-                Err(_) => {
-                    results.push(json!({
-                        "status": "Failed",
-                        "error": format!("Delegation {request_id} cancelled or orchestrator disconnected")
-                    }));
+                } else {
+                    still_pending.push((request_id, agent));
                 }
             }
+            pending = still_pending;
+        }
+
+        // Any still-pending delegations get returned as "running".
+        for (request_id, agent) in pending {
+            results.push(json!({
+                "status": "running",
+                "delegation_id": request_id,
+                "agent": agent,
+                "message": "Use check_delegation_status to poll for the result."
+            }));
         }
 
         JsonRpcResponse::success(
@@ -486,6 +582,56 @@ impl McpCallbackServer {
                         .unwrap_or_else(|_| json!(results).to_string())
                 }]
             }),
+        )
+    }
+
+    async fn handle_check_delegation_status(
+        &self,
+        id: Value,
+        args: Value,
+    ) -> JsonRpcResponse {
+        let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
+            Some(d) => d.to_string(),
+            None => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    "Missing required field 'delegation_id'",
+                )
+            }
+        };
+
+        // Completed — return and remove.
+        if let Some(result) = self.completed_delegations.lock().await.remove(&delegation_id) {
+            let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
+            return JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&result_json)
+                            .unwrap_or_else(|_| result_json.to_string())
+                    }]
+                }),
+            );
+        }
+
+        // Still running.
+        if self.active_delegations.lock().await.contains(&delegation_id) {
+            return JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": json!({"status": "running", "delegation_id": delegation_id}).to_string()
+                    }]
+                }),
+            );
+        }
+
+        JsonRpcResponse::error(
+            id,
+            -32602,
+            format!("Unknown delegation: {delegation_id}"),
         )
     }
 
@@ -738,10 +884,17 @@ impl McpCallbackServer {
             return JsonRpcResponse::internal_error(id, "Failed to send delegation request");
         }
 
-        self.pending_delegations
+        self.active_delegations
             .lock()
             .await
-            .insert(request_id.clone(), rx);
+            .insert(request_id.clone());
+
+        Self::spawn_result_collector(
+            request_id.clone(),
+            rx,
+            Arc::clone(&self.active_delegations),
+            Arc::clone(&self.completed_delegations),
+        );
 
         JsonRpcResponse::success(
             id,
@@ -762,21 +915,38 @@ impl McpCallbackServer {
             }
         };
 
-        let rx = match self.pending_delegations.lock().await.remove(&delegation_id) {
-            Some(rx) => rx,
-            None => {
-                return JsonRpcResponse::error(
-                    id,
-                    -32602,
-                    format!("Unknown or already-collected delegation: {delegation_id}"),
-                )
-            }
-        };
+        // Already completed — return immediately.
+        if let Some(result) = self.completed_delegations.lock().await.remove(&delegation_id) {
+            let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
+            return JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&result_json)
+                            .unwrap_or_else(|_| result_json.to_string())
+                    }]
+                }),
+            );
+        }
 
-        match rx.await {
-            Ok(result) => {
+        // Unknown delegation.
+        if !self.active_delegations.lock().await.contains(&delegation_id) {
+            return JsonRpcResponse::error(
+                id,
+                -32602,
+                format!("Unknown or already-collected delegation: {delegation_id}"),
+            );
+        }
+
+        // Poll with a bounded wait so we never exceed the brain's HTTP timeout.
+        let deadline = tokio::time::Instant::now() + DELEGATION_BLOCK_TIMEOUT;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            if let Some(result) = self.completed_delegations.lock().await.remove(&delegation_id) {
                 let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
-                JsonRpcResponse::success(
+                return JsonRpcResponse::success(
                     id,
                     json!({
                         "content": [{
@@ -785,12 +955,23 @@ impl McpCallbackServer {
                                 .unwrap_or_else(|_| result_json.to_string())
                         }]
                     }),
-                )
+                );
             }
-            Err(_) => JsonRpcResponse::internal_error(
-                id,
-                "Delegation cancelled or orchestrator disconnected",
-            ),
+
+            if tokio::time::Instant::now() >= deadline {
+                return JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Delegation '{delegation_id}' is still running. \
+                                 Call check_delegation_status with this delegation_id to poll again."
+                            )
+                        }]
+                    }),
+                );
+            }
         }
     }
 }
