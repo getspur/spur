@@ -3,6 +3,10 @@
 use spur_core::ReviewDecision;
 use spur_tui::components::review_card::decision_for_key;
 
+fn test_ctx_with_lineage(lineage: &spur_core::lineage::projection::ExecutorLineage) -> spur_tui::views::ViewContext<'_> {
+    spur_tui::test_support::test_view_ctx(lineage)
+}
+
 #[test]
 fn approve_key_maps_to_approve_decision() {
     let d = decision_for_key('a', None);
@@ -59,6 +63,7 @@ fn dashboard_reads_attempt_n_from_lineage_on_submit() {
     use spur_tui::action::Action;
     use spur_tui::components::detail_pane::DetailTab;
     use spur_tui::views::dashboard::DashboardView;
+    use spur_tui::views::View;
 
     // Build a lineage where the focused node has pending_review.attempt_n = 3.
     let mut lineage = ExecutorLineage::new();
@@ -103,9 +108,9 @@ fn dashboard_reads_attempt_n_from_lineage_on_submit() {
     // Simulate pressing 'a' — InputBar appends the char, then the review-key
     // intercept emits Action::SubmitReview. The attempt_n MUST be read from
     // the lineage's pending_review (3), not the unwrap_or(1) fallback.
-    let action = dashboard.handle_key_with_lineage(
+    let action = dashboard.handle_key(
         KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
-        &lineage,
+        &test_ctx_with_lineage(&lineage),
     );
 
     match action {

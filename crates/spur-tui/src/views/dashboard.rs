@@ -375,17 +375,6 @@ impl DashboardView {
 }
 
 impl DashboardView {
-    /// Handle a key event with access to the lineage projection so that the
-    /// emitted `Action::SubmitReview` can carry the correct `attempt_n`.
-    /// Called by `App` instead of the `View::handle_key` trait method.
-    pub fn handle_key_with_lineage(
-        &mut self,
-        key: KeyEvent,
-        lineage: &ExecutorLineage,
-    ) -> Option<Action> {
-        self.handle_key_inner(key, Some(lineage))
-    }
-
     fn handle_key_inner(
         &mut self,
         key: KeyEvent,
@@ -714,15 +703,11 @@ impl DashboardView {
 }
 
 impl View for DashboardView {
-    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
-        debug_assert!(
-            false,
-            "DashboardView::handle_key called via trait — use handle_key_with_lineage; attempt_n will default to 1"
-        );
-        self.handle_key_inner(key, None)
+    fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
+        self.handle_key_inner(key, Some(ctx.lineage))
     }
 
-    fn handle_spur_event(&mut self, event: &SpurEvent) {
+    fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
         match &event.body {
             SpurEventBody::BrainSpawned { agent, session: _ } => {
                 self.activity_log.push(LogEntry {
@@ -1066,13 +1051,8 @@ impl View for DashboardView {
         self.tick_and_report_flush();
     }
 
-    fn render(&self, _frame: &mut Frame, _area: Rect) {
-        // SAFETY: Dashboard always renders via `render_with_lineage`. This
-        // trait method is kept to satisfy `View` but should never be called.
-        debug_assert!(
-            false,
-            "DashboardView::render called via trait — use render_with_lineage"
-        );
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
+        self.render_with_lineage(frame, area, ctx.lineage);
     }
 }
 

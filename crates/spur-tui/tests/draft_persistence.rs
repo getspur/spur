@@ -4,6 +4,11 @@ use spur_tui::views::session_detail::SessionDetailView;
 use spur_tui::views::View;
 use std::time::Duration;
 
+fn test_ctx() -> spur_tui::views::ViewContext<'static> {
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+    spur_tui::test_support::test_view_ctx(&LINEAGE)
+}
+
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
@@ -21,7 +26,7 @@ fn tick_emits_save_draft_after_debounce() {
 
     // Type a few characters.
     for c in "hello".chars() {
-        let _ = view.handle_key(key(c));
+        let _ = view.handle_key(key(c), &test_ctx());
     }
 
     // Advance the debounce clock past 500ms via a test helper.
@@ -49,7 +54,7 @@ fn tick_does_not_emit_save_draft_within_debounce_window() {
         spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     for c in "hi".chars() {
-        let _ = view.handle_key(key(c));
+        let _ = view.handle_key(key(c), &test_ctx());
     }
     // Do NOT advance the clock — last change was ~now.
     assert!(view.draft_save_action().is_none());
@@ -66,7 +71,7 @@ fn save_draft_only_fires_once_per_change() {
         spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     for c in "abc".chars() {
-        let _ = view.handle_key(key(c));
+        let _ = view.handle_key(key(c), &test_ctx());
     }
     view.test_set_last_draft_change(std::time::Instant::now() - Duration::from_millis(600));
     assert!(view.draft_save_action().is_some());
@@ -98,7 +103,7 @@ fn force_save_draft_emits_action_without_debounce() {
         spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     for c in "foo".chars() {
-        let _ = view.handle_key(key(c));
+        let _ = view.handle_key(key(c), &test_ctx());
     }
     // Do NOT advance the clock — draft_save_action would be a no-op here.
     assert!(
@@ -130,7 +135,7 @@ fn force_save_draft_is_noop_when_unchanged() {
 
     // After a real persist, a second force-flush with no further edits is also None.
     for c in "foo".chars() {
-        let _ = view.handle_key(key(c));
+        let _ = view.handle_key(key(c), &test_ctx());
     }
     assert!(view.force_save_draft().is_some());
     assert!(
@@ -149,7 +154,7 @@ fn force_save_draft_clears_debounce_timer() {
         spur_tui::test_support::default_agent_config("claude-code-acp"),
     );
     for c in "bar".chars() {
-        let _ = view.handle_key(key(c));
+        let _ = view.handle_key(key(c), &test_ctx());
     }
     // Force-flush now, then advance the clock past the debounce window.
     assert!(view.force_save_draft().is_some());

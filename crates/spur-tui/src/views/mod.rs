@@ -78,14 +78,39 @@ fn macos_option_char(ch: char) -> Option<char> {
     }
 }
 
+/// Shared read-only context passed from App to every View method.
+/// Eliminates the `render_with_lineage` / `handle_key_with_lineage`
+/// bypass pattern — views access lineage and brain status through this
+/// struct instead of extra parameters outside the trait.
+pub struct ViewContext<'a> {
+    pub lineage: &'a spur_core::lineage::projection::ExecutorLineage,
+    pub brain_status: &'a crate::app::BrainStatus,
+}
+
+/// Test-only default context backed by empty lineage and idle status.
+#[cfg(test)]
+static TEST_BRAIN_STATUS: crate::app::BrainStatus = crate::app::BrainStatus::Idle;
+
+#[cfg(test)]
+impl ViewContext<'_> {
+    /// Cheap context for unit tests that don't exercise lineage or brain
+    /// status. Backed by a static idle status and the provided lineage ref.
+    pub fn test_ctx(lineage: &spur_core::lineage::projection::ExecutorLineage) -> ViewContext<'_> {
+        ViewContext {
+            lineage,
+            brain_status: &TEST_BRAIN_STATUS,
+        }
+    }
+}
+
 /// Trait for top-level views (Dashboard, Session Detail, etc.).
 pub trait View {
     /// Handle a keyboard event. Return an Action if the view wants the app to do something.
-    fn handle_key(&mut self, key: KeyEvent) -> Option<Action>;
+    fn handle_key(&mut self, key: KeyEvent, ctx: &ViewContext) -> Option<Action>;
     /// Process an orchestrator event, updating internal state.
-    fn handle_spur_event(&mut self, event: &SpurEvent);
+    fn handle_spur_event(&mut self, event: &SpurEvent, ctx: &ViewContext);
     /// Render the view into the given frame area.
-    fn render(&self, frame: &mut Frame, area: Rect);
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &ViewContext);
     /// Called on each tick (for spinner animations, batched text flush, etc.).
     fn tick(&mut self);
 }

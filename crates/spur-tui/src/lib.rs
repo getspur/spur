@@ -19,6 +19,19 @@ pub mod test_support {
     use crate::views::session_detail::SessionDetailView;
     use spur_acp::{SessionId, SessionNotification, SpurEvent};
 
+    /// Build a `ViewContext` backed by the given lineage and an idle brain
+    /// status. Suitable for integration tests that don't exercise brain
+    /// status rendering.
+    pub fn test_view_ctx(
+        lineage: &spur_core::lineage::projection::ExecutorLineage,
+    ) -> crate::views::ViewContext<'_> {
+        static IDLE: crate::app::BrainStatus = crate::app::BrainStatus::Idle;
+        crate::views::ViewContext {
+            lineage,
+            brain_status: &IDLE,
+        }
+    }
+
     /// Build a minimal `Arc<AgentConfig>` with all-default nested blocks,
     /// suitable for constructing `SessionDetailView` in integration tests
     /// that don't exercise any ingest/response bindings.

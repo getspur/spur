@@ -271,17 +271,21 @@ impl App {
                     }
                 }
 
+                let ctx = crate::views::ViewContext {
+                    lineage: &self.lineage,
+                    brain_status: &self.brain_status,
+                };
                 let action = match self.current_view {
-                    ViewId::Dashboard => self.dashboard.handle_key_with_lineage(key, &self.lineage),
+                    ViewId::Dashboard => self.dashboard.handle_key(key, &ctx),
                     ViewId::SessionDetail(_) => {
                         if let Some(ref mut detail) = self.session_detail {
-                            detail.handle_key(key)
+                            detail.handle_key(key, &ctx)
                         } else {
                             None
                         }
                     }
                     ViewId::SessionPicker => {
-                        self.session_picker.as_mut().and_then(|p| p.handle_key(key))
+                        self.session_picker.as_mut().and_then(|p| p.handle_key(key, &ctx))
                     }
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {
@@ -299,7 +303,7 @@ impl App {
                                     }
                                     None
                                 }
-                                _ => viewer.handle_key(key),
+                                _ => viewer.handle_key(key, &ctx),
                             }
                         } else {
                             None
@@ -621,9 +625,13 @@ impl App {
         }
 
         // Forward to views
-        self.dashboard.handle_spur_event(&event);
+        let ctx = crate::views::ViewContext {
+            lineage: &self.lineage,
+            brain_status: &self.brain_status,
+        };
+        self.dashboard.handle_spur_event(&event, &ctx);
         if let Some(ref mut detail) = self.session_detail {
-            detail.handle_spur_event(&event);
+            detail.handle_spur_event(&event, &ctx);
         }
 
         // Sync status to InputBars
@@ -1382,17 +1390,23 @@ impl App {
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
+        // Construct the shared context once per frame.
+        let ctx = crate::views::ViewContext {
+            lineage: &self.lineage,
+            brain_status: &self.brain_status,
+        };
+
         match self.current_view.clone() {
-            ViewId::Dashboard => self
-                .dashboard
-                .render_with_lineage(frame, area, &self.lineage),
+            ViewId::Dashboard => self.dashboard.render(frame, area, &ctx),
             ViewId::SessionDetail(_) => {
-                if let Some(ref detail) = self.session_detail {
-                    detail.render_with_lineage(frame, area, &self.lineage);
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.render(frame, area, &ctx);
                 }
             }
             ViewId::SessionPicker => {
-                self.session_picker.as_ref().map(|p| p.render(frame, area));
+                if let Some(ref mut p) = self.session_picker {
+                    p.render(frame, area, &ctx);
+                }
             }
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(ref session) => {

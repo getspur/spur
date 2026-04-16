@@ -101,23 +101,16 @@ impl MermaidViewerView {
 }
 
 impl View for MermaidViewerView {
-    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+    fn handle_key(&mut self, key: KeyEvent, _ctx: &super::ViewContext) -> Option<Action> {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Some(Action::NavigateBack),
-            // `[` and `]` are dispatched at the app level (which can pass
-            // in the registry entries). Returning None here lets the app
-            // layer handle the cycle.
             _ => None,
         }
     }
 
-    fn handle_spur_event(&mut self, _event: &SpurEvent) {}
+    fn handle_spur_event(&mut self, _event: &SpurEvent, _ctx: &super::ViewContext) {}
 
-    fn render(&self, _frame: &mut Frame, _area: Rect) {
-        // Intentionally empty. The real draw is in
-        // `app::render_mermaid_overlay` which has mutable access to
-        // `self.protocol`. This stub satisfies the View trait.
-    }
+    fn render(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &super::ViewContext) {}
 
     fn tick(&mut self) {}
 }
