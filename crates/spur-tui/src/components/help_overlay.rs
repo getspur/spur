@@ -81,6 +81,7 @@ impl HelpOverlay {
             Line::from(""),
             header(" Editing Shortcuts"),
             Line::from("  Ctrl-P / Ctrl-N    Previous / next input history"),
+            Line::from("  Ctrl-R / Alt-R     Fuzzy search input history"),
             Line::from("  Ctrl-U             Delete to start of line"),
             Line::from("  Ctrl-K             Delete to end of line"),
             Line::from("  Ctrl-W             Delete previous word"),

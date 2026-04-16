@@ -98,6 +98,11 @@ pub struct SessionDetailView {
     /// `AgentSessionReady` arrives; in that window, a generic fallback is
     /// rendered.
     pub(crate) cancel_mode: Option<spur_acp::CancelMode>,
+
+    /// Active fuzzy history search query (`Ctrl+R`).  `None` = inactive.
+    history_search: Option<String>,
+    /// Full history texts parallel to the popup rows during history search.
+    history_search_hits: Vec<String>,
 }
 
 impl SessionDetailView {
@@ -144,6 +149,8 @@ impl SessionDetailView {
             stream_in_flight: false,
             cancelling_in_flight: false,
             cancel_mode: None,
+            history_search: None,
+            history_search_hits: Vec::new(),
         }
     }
 
@@ -614,6 +621,45 @@ impl SessionDetailView {
         self.active_trigger.is_some() && !self.completion_popup.borrow().is_empty()
     }
 
+    /// Rebuild the completion popup with fuzzy-matched history entries.
+    fn refresh_history_popup(&mut self, query: &str) {
+        use crate::components::completion_popup::PopupRow;
+        use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+        use nucleo_matcher::{Config, Matcher, Utf32Str};
+
+        let history = self.input_bar.history();
+        let hits: Vec<&str> = if query.is_empty() {
+            history.iter().rev().take(20).map(|s| s.as_str()).collect()
+        } else {
+            let mut matcher = Matcher::new(Config::DEFAULT);
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut scored: Vec<(u32, &str)> = history
+                .iter()
+                .filter_map(|h| {
+                    let score =
+                        pattern.score(Utf32Str::new(h, &mut Vec::new()), &mut matcher)?;
+                    Some((score, h.as_str()))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.into_iter().take(20).map(|(_, h)| h).collect()
+        };
+
+        self.history_search_hits = hits.iter().map(|s| s.to_string()).collect();
+        let rows: Vec<PopupRow> = hits
+            .iter()
+            .map(|h| {
+                let display = if h.len() > 80 { &h[..80] } else { h };
+                PopupRow {
+                    label: display.replace('\n', " ↵ "),
+                    description: String::new(),
+                    source_tag: String::new(),
+                }
+            })
+            .collect();
+        self.completion_popup.borrow_mut().set_rows(rows);
+    }
+
     /// Replace the range [prefix_start..cursor] in the InputBar with `replacement`.
     /// Leaves the cursor at `prefix_start + replacement.len()`.
     fn replace_trigger_token(&mut self, prefix_start: usize, replacement: &str) {
@@ -824,6 +870,67 @@ impl SessionDetailView {
                 }
                 _ => {}
             }
+        }
+
+        // Priority 1.4: fuzzy history search (Ctrl+R / Alt+R).
+        if let Some(ref mut query) = self.history_search {
+            match key.code {
+                KeyCode::Esc
+                | KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.history_search = None;
+                    self.history_search_hits.clear();
+                    self.completion_popup.borrow_mut().set_rows(Vec::new());
+                    return None;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    if let Some(idx) = self.completion_popup.borrow().selected() {
+                        if let Some(full) = self.history_search_hits.get(idx) {
+                            let text = full.clone();
+                            let len = text.len();
+                            self.input_bar.set_text(text, len);
+                        }
+                    }
+                    self.history_search = None;
+                    self.history_search_hits.clear();
+                    self.completion_popup.borrow_mut().set_rows(Vec::new());
+                    return None;
+                }
+                KeyCode::Up => {
+                    self.completion_popup.borrow_mut().select_prev();
+                    return None;
+                }
+                KeyCode::Down => {
+                    self.completion_popup.borrow_mut().select_next();
+                    return None;
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    let q = query.clone();
+                    self.refresh_history_popup(&q);
+                    return None;
+                }
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    query.push(c);
+                    let q = query.clone();
+                    self.refresh_history_popup(&q);
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+
+        // Ctrl+R / Alt+R → open fuzzy history search.
+        if matches!(key.code, KeyCode::Char('r'))
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT))
+        {
+            self.history_search = Some(String::new());
+            self.refresh_history_popup("");
+            return None;
         }
 
         // Priority 1.5: popup is open — route navigation/accept/dismiss keys.
