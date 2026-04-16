@@ -618,7 +618,10 @@ impl SessionDetailView {
     }
 
     fn popup_open(&self) -> bool {
-        self.active_trigger.is_some() && !self.completion_popup.borrow().is_empty()
+        let popup_has_rows = !self.completion_popup.borrow().is_empty();
+        let trigger_active = self.active_trigger.is_some();
+        let history_active = self.history_search.is_some();
+        (trigger_active || history_active) && popup_has_rows
     }
 
     /// Rebuild the completion popup with fuzzy-matched history entries.
@@ -633,11 +636,13 @@ impl SessionDetailView {
         } else {
             let mut matcher = Matcher::new(Config::DEFAULT);
             let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut buf = Vec::new();
             let mut scored: Vec<(u32, &str)> = history
                 .iter()
                 .filter_map(|h| {
+                    buf.clear();
                     let score =
-                        pattern.score(Utf32Str::new(h, &mut Vec::new()), &mut matcher)?;
+                        pattern.score(Utf32Str::new(h, &mut buf), &mut matcher)?;
                     Some((score, h.as_str()))
                 })
                 .collect();
@@ -649,7 +654,16 @@ impl SessionDetailView {
         let rows: Vec<PopupRow> = hits
             .iter()
             .map(|h| {
-                let display = if h.len() > 80 { &h[..80] } else { h };
+                // Truncate at char boundary to avoid panic on multi-byte UTF-8.
+                let display = if h.len() > 80 {
+                    let mut end = 80;
+                    while !h.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    &h[..end]
+                } else {
+                    h
+                };
                 PopupRow {
                     label: display.replace('\n', " ↵ "),
                     description: String::new(),
@@ -875,8 +889,13 @@ impl SessionDetailView {
         // Priority 1.4: fuzzy history search (Ctrl+R / Alt+R).
         if let Some(ref mut query) = self.history_search {
             match key.code {
-                KeyCode::Esc
-                | KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Esc => {
+                    self.history_search = None;
+                    self.history_search_hits.clear();
+                    self.completion_popup.borrow_mut().set_rows(Vec::new());
+                    return None;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.history_search = None;
                     self.history_search_hits.clear();
                     self.completion_popup.borrow_mut().set_rows(Vec::new());
