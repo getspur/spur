@@ -125,6 +125,21 @@ impl HelpOverlay {
         )));
         out.push(Line::from(""));
 
+        out.push(header(" macOS: Alt Keybindings"));
+        out.push(Line::from(Span::styled(
+            "  Alt shortcuts work automatically for US-QWERTY layouts.",
+            Style::default().fg(Color::DarkGray),
+        )));
+        out.push(Line::from(Span::styled(
+            "  For other layouts, enable \"Use Option as Meta Key\" in your",
+            Style::default().fg(Color::DarkGray),
+        )));
+        out.push(Line::from(Span::styled(
+            "  terminal settings (iTerm2 / Terminal.app / Alacritty / Kitty).",
+            Style::default().fg(Color::DarkGray),
+        )));
+        out.push(Line::from(""));
+
         out.push(Line::from(Span::styled(
             " Press ? or Esc to close",
             Style::default().fg(Color::DarkGray),
