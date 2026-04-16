@@ -6,6 +6,11 @@ use spur_acp::{
     AvailableCommandsUpdate, CurrentModeUpdate, SessionNotification, SessionUpdate, UsageUpdate,
 };
 
+fn test_ctx() -> spur_tui::views::ViewContext<'static> {
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+    spur_tui::test_support::test_view_ctx(&LINEAGE)
+}
+
 fn nid() -> AcpSessionId {
     AcpSessionId::new("test")
 }
@@ -155,7 +160,7 @@ fn kiro_available_notification_populates_registry() {
         method: spur_acp::ext::KIRO_COMMANDS_AVAILABLE.to_string(),
         params,
     });
-    view.handle_spur_event(&ev);
+    view.handle_spur_event(&ev, &test_ctx());
 
     let entries = view.command_registry().list();
     assert!(
@@ -222,7 +227,7 @@ fn kiro_execute_response_renders_as_system_note() {
         method: "_kiro.dev/commands/execute/response".to_string(),
         params: serde_json::json!({"stdout": "ok"}),
     });
-    view.handle_spur_event(&ev);
+    view.handle_spur_event(&ev, &test_ctx());
 
     let last_trace = view.trace_snapshot_for_test();
     assert!(

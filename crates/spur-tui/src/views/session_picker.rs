@@ -766,7 +766,7 @@ impl SessionPickerView {
 }
 
 impl View for SessionPickerView {
-    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+    fn handle_key(&mut self, key: KeyEvent, _ctx: &super::ViewContext) -> Option<Action> {
         // 0. Confirm-switch intercepts all keys until y/Enter commits or anything else cancels.
         if let Some(ref target) = self.confirm_switch {
             match key.code {
@@ -1019,12 +1019,12 @@ impl View for SessionPickerView {
         action
     }
 
-    fn handle_spur_event(&mut self, _event: &SpurEvent) {
+    fn handle_spur_event(&mut self, _event: &SpurEvent, _ctx: &super::ViewContext) {
         // SessionsListed and SessionsListError are handled by App,
         // which calls set_sessions() or set_error() directly.
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, _ctx: &super::ViewContext) {
         match &self.state {
             PickerState::Loading => self.render_loading(frame, area),
             PickerState::Populated {
@@ -1060,6 +1060,11 @@ mod current_session_shortcut_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
 
+    fn test_ctx() -> crate::views::ViewContext<'static> {
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+        crate::views::ViewContext { lineage: &LINEAGE, brain_status: &crate::app::BrainStatus::Idle }
+    }
+
     fn make_session(id: &str) -> SessionInfo {
         SessionInfo::new(id.to_string(), PathBuf::from("/tmp"))
     }
@@ -1071,9 +1076,9 @@ mod current_session_shortcut_tests {
         picker.set_current_session_id(Some("A".into()));
 
         // Cursor starts at 0 ([+ New session]); move to 1 (the A row).
-        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
 
-        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
         match action {
             Some(Action::NavigateTo(ViewId::SessionDetail(sid))) => {
                 assert_eq!(sid.0, "A");
@@ -1092,10 +1097,10 @@ mod current_session_shortcut_tests {
         picker.set_current_session_id(Some("A".into()));
 
         // Move cursor to row index 2 = session B.
-        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
 
-        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
         match action {
             Some(Action::ResumeSession { session_id }) => {
                 assert_eq!(session_id, "B");

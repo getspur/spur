@@ -1112,7 +1112,7 @@ impl SessionDetailView {
 }
 
 impl View for SessionDetailView {
-    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+    fn handle_key(&mut self, key: KeyEvent, _ctx: &super::ViewContext) -> Option<Action> {
         // Any keystroke dismisses the resume banner, but the key continues
         // to flow through to the normal handler — the banner is purely
         // informational and never consumes input.
@@ -1132,7 +1132,7 @@ impl View for SessionDetailView {
         action
     }
 
-    fn handle_spur_event(&mut self, event: &SpurEvent) {
+    fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
         match &event.body {
             SpurEventBody::AgentNotification {
                 session,
@@ -1496,12 +1496,8 @@ impl View for SessionDetailView {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        debug_assert!(
-            false,
-            "SessionDetailView::render called via trait \u{2014} use render_with_lineage instead"
-        );
-        self.render_inner(frame, area, None);
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
+        self.render_inner(frame, area, Some(ctx.lineage));
     }
 }
 impl SessionDetailView {
@@ -1690,17 +1686,6 @@ impl SessionDetailView {
         }
     }
 
-    /// Render with an `ExecutorLineage` reference so inline executor
-    /// cards can splice into the conversation at Delegate entries.
-    /// Called from `app.rs` in place of the trait `render`.
-    pub fn render_with_lineage(
-        &self,
-        frame: &mut ratatui::Frame,
-        area: ratatui::layout::Rect,
-        lineage: &spur_core::lineage::projection::ExecutorLineage,
-    ) {
-        self.render_inner(frame, area, Some(lineage));
-    }
 }
 
 // ─── Formatting helpers ─────────────────────────────────────────────────
@@ -1796,6 +1781,11 @@ mod invalidate_protocols_tests {
     use image::{DynamicImage, RgbaImage};
     use std::cell::RefCell;
 
+    fn test_ctx() -> crate::views::ViewContext<'static> {
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+        crate::views::ViewContext { lineage: &LINEAGE, brain_status: &crate::app::BrainStatus::Idle }
+    }
+
     fn test_view() -> SessionDetailView {
         SessionDetailView::new(
             spur_acp::SessionId("test".to_string()),
@@ -1871,7 +1861,7 @@ mod invalidate_protocols_tests {
         view.set_render_picker(None);
 
         let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
-        let action = <SessionDetailView as crate::views::View>::handle_key(&mut view, key);
+        let action = <SessionDetailView as crate::views::View>::handle_key(&mut view, key, &test_ctx());
 
         assert!(
             !matches!(action, Some(Action::NavigateTo(ViewId::MermaidOverlay(_)))),
@@ -1889,7 +1879,7 @@ mod invalidate_protocols_tests {
         view.set_render_picker(Some(ratatui_image::picker::Picker::halfblocks()));
 
         let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
-        let action = <SessionDetailView as crate::views::View>::handle_key(&mut view, key);
+        let action = <SessionDetailView as crate::views::View>::handle_key(&mut view, key, &test_ctx());
 
         match action {
             Some(Action::NavigateTo(ViewId::MermaidOverlay(_))) => {}
@@ -1940,6 +1930,11 @@ mod static_command_seeding_tests {
 #[cfg(test)]
 mod cancel_state_tests {
     use super::*;
+
+    fn test_ctx() -> crate::views::ViewContext<'static> {
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+        crate::views::ViewContext { lineage: &LINEAGE, brain_status: &crate::app::BrainStatus::Idle }
+    }
 
     fn make_view() -> SessionDetailView {
         use spur_acp::AgentConfig;
@@ -1995,7 +1990,7 @@ mod cancel_state_tests {
     fn chunk_sets_stream_in_flight() {
         let mut v = make_view();
         let sid = v.session_id().clone();
-        v.handle_spur_event(&agent_msg_chunk_event(&sid));
+        v.handle_spur_event(&agent_msg_chunk_event(&sid), &test_ctx());
         assert!(v.stream_in_flight);
     }
 
@@ -2005,7 +2000,7 @@ mod cancel_state_tests {
         let sid = v.session_id().clone();
         v.stream_in_flight = true;
         v.cancelling_in_flight = true;
-        v.handle_spur_event(&turn_complete_event(&sid));
+        v.handle_spur_event(&turn_complete_event(&sid), &test_ctx());
         assert!(!v.stream_in_flight);
         assert!(!v.cancelling_in_flight);
     }
@@ -2017,7 +2012,7 @@ mod cancel_state_tests {
         v.handle_spur_event(&agent_session_ready_event(
             &sid,
             spur_acp::CancelMode::AcpSoft,
-        ));
+        ), &test_ctx());
         assert_eq!(v.cancel_mode, Some(spur_acp::CancelMode::AcpSoft));
     }
 
@@ -2025,7 +2020,7 @@ mod cancel_state_tests {
     fn event_for_different_session_is_ignored() {
         let mut v = make_view();
         let other = spur_acp::SessionId("other".to_string());
-        v.handle_spur_event(&agent_msg_chunk_event(&other));
+        v.handle_spur_event(&agent_msg_chunk_event(&other), &test_ctx());
         assert!(!v.stream_in_flight);
     }
 
@@ -2042,7 +2037,7 @@ mod cancel_state_tests {
         v.stream_in_flight = true;
         v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
         let action =
-            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc), &test_ctx());
         assert!(matches!(action, Some(Action::CancelStream { .. })));
         assert!(v.cancelling_in_flight);
     }
@@ -2053,7 +2048,7 @@ mod cancel_state_tests {
         v.stream_in_flight = true;
         v.cancelling_in_flight = true;
         let action =
-            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc), &test_ctx());
         assert!(matches!(action, Some(Action::NavigateBack)));
     }
 
@@ -2061,7 +2056,7 @@ mod cancel_state_tests {
     fn esc_without_stream_preserves_navigate_back() {
         let mut v = make_view();
         let action =
-            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+            <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc), &test_ctx());
         assert!(matches!(action, Some(Action::NavigateBack)));
     }
 
@@ -2070,7 +2065,7 @@ mod cancel_state_tests {
         let mut v = make_view();
         v.stream_in_flight = true;
         v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
-        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc), &test_ctx());
         let trace = v.react_trace();
         let last_text = trace.last_text().unwrap_or_default();
         assert!(
@@ -2084,7 +2079,7 @@ mod cancel_state_tests {
         let mut v = make_view();
         v.stream_in_flight = true;
         v.cancel_mode = Some(spur_acp::CancelMode::ProcessKill);
-        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc), &test_ctx());
         let trace = v.react_trace();
         let last_text = trace.last_text().unwrap_or_default();
         assert!(
@@ -2098,7 +2093,7 @@ mod cancel_state_tests {
         let mut v = make_view();
         v.stream_in_flight = true;
         v.cancel_mode = None;
-        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc));
+        let _ = <SessionDetailView as crate::views::View>::handle_key(&mut v, press(KeyCode::Esc), &test_ctx());
         let trace = v.react_trace();
         let last_text = trace.last_text().unwrap_or_default();
         assert!(

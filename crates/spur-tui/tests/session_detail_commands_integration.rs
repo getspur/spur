@@ -5,8 +5,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_tui::action::Action;
 use spur_tui::views::{session_detail::SessionDetailView, View};
 
+fn test_ctx() -> spur_tui::views::ViewContext<'static> {
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+    spur_tui::test_support::test_view_ctx(&LINEAGE)
+}
+
 fn press(v: &mut SessionDetailView, code: KeyCode) -> Option<Action> {
-    v.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+    v.handle_key(KeyEvent::new(code, KeyModifiers::NONE), &test_ctx())
 }
 
 fn type_str(v: &mut SessionDetailView, s: &str) {
