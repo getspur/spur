@@ -912,6 +912,18 @@ impl InputBar {
         self.status.is_some()
     }
 
+    /// Replace the in-memory history with persisted entries (e.g. loaded
+    /// from `session_metadata.json` at startup).
+    pub fn seed_history(&mut self, entries: Vec<String>) {
+        self.history = entries;
+        self.history_cursor = None;
+    }
+
+    /// Current history entries (for persistence).
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
     /// Navigate to previous history entry.
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {

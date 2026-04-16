@@ -223,6 +223,11 @@ impl SessionDetailView {
         self.last_persisted_draft = draft.to_string();
     }
 
+    /// Seed the InputBar with global input history (loaded from metadata).
+    pub fn seed_input_history(&mut self, entries: Vec<String>) {
+        self.input_bar.seed_history(entries);
+    }
+
     /// Current text content of the InputBar (read-only accessor for tests).
     pub fn input_bar_text(&self) -> String {
         self.input_bar.text()

@@ -471,6 +471,10 @@ impl App {
                     );
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
+                    // Seed global input history so Ctrl-P/N works across sessions.
+                    view.seed_input_history(
+                        self.metadata_store.metadata().input_history.clone(),
+                    );
                     // Restore draft from metadata, if any.
                     if let Some(entry) = self.metadata_store.entry(&session.0) {
                         view.restore_draft(&entry.draft);
@@ -692,6 +696,8 @@ impl App {
                     let _ = tx.try_send(input);
                 }
 
+                self.push_input_history(&preview);
+
                 self.sync_brain_status();
             }
 
@@ -715,8 +721,11 @@ impl App {
                 // replay into an unrelated session that happens to spawn next).
 
                 if let Some(ref tx) = self.user_input_tx {
-                    let _ = tx.try_send(UserInput::NewSessionWithMessage { blocks, interrupt });
+                    let _ = tx.try_send(UserInput::NewSessionWithMessage { blocks: blocks.clone(), interrupt });
                 }
+
+                let preview = crate::commands::submit_router::blocks_preview(&blocks);
+                self.push_input_history(&preview);
                 self.sync_brain_status();
                 self.dirty = true;
             }
@@ -1108,6 +1117,23 @@ impl App {
             if let Err(e) = self.metadata_store.save() {
                 tracing::warn!(error = %e, "failed to persist draft");
             }
+        }
+    }
+
+    /// Append a submitted message to the global input history (dedup + cap).
+    fn push_input_history(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let hist = &mut self.metadata_store.metadata_mut().input_history;
+        // Dedup: remove previous occurrence so the most recent is always last.
+        hist.retain(|e| e != text);
+        hist.push(text.to_string());
+        if hist.len() > 100 {
+            hist.remove(0);
+        }
+        if let Err(e) = self.metadata_store.save() {
+            tracing::warn!(error = %e, "failed to persist input history");
         }
     }
 
