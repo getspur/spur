@@ -67,6 +67,17 @@ pub enum UserInput {
     CancelStream {
         session: SessionId,
     },
+    /// Request the orchestrator to refresh the issue list and re-emit IssuesLoaded.
+    RefreshIssues,
+    /// Request full issue detail from the PM backend.
+    GetIssueDetail {
+        id: String,
+    },
+    /// Update an issue's status/assignee/labels via PM backend.
+    UpdateIssue {
+        id: String,
+        update: spur_pm::IssueUpdate,
+    },
 }
 
 /// Tracks the brain agent's current state for status indicators.
@@ -1146,6 +1157,16 @@ impl App {
             | Action::ScrollToBottom
             | Action::CycleFocus
             | Action::Tick => {}
+
+            // Issue actions — wired to the PM backend; IssuesPanel not yet implemented.
+            Action::RefreshIssues => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::RefreshIssues);
+                }
+            }
+            Action::Issue(_) => {
+                // Placeholder: IssuesPanel dispatch will be wired in a later task.
+            }
         }
     }
 
