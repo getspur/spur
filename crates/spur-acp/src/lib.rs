@@ -10,9 +10,9 @@ pub mod types;
 
 pub use config::{
     load_seed_template, validate_agent_config, AgentConfig, AgentReviewPolicy, AgentsConfig,
-    ArgsTemplateKind, CommandsConfig, ConfigError, DispatchKind, DisplayConfig, IngestBinding,
-    IngestParserKind, ItemSchemaKind, PermissionsConfig, ResponseBinding, ResponseRenderKind,
-    SpurConfig, StaticCommandDecl,
+    ArgsTemplateKind, BeadsPmConfig, CommandsConfig, ConfigError, DispatchKind, DisplayConfig,
+    IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig, ResponseBinding,
+    ResponseRenderKind, SpurConfig, StaticCommandDecl,
 };
 pub use connection::{
     AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter,
@@ -26,8 +26,8 @@ pub use crate::domain::events::{
     ReviewPayload, Role,
 };
 pub use domain::{
-    DelegationPlan, DelegationResult, DelegationStatus, HistoryEntry, PlanCandidate, PlanSubtask,
-    SpurEvent, SpurEventBody, TimeoutFallback,
+    DelegationPlan, DelegationResult, DelegationStatus, HistoryEntry, IssueSummaryEvent,
+    PlanCandidate, PlanSubtask, SpurEvent, SpurEventBody, TimeoutFallback,
 };
 
 // Re-export all remaining types for backward compatibility
