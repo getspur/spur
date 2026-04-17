@@ -2648,6 +2648,7 @@ impl Orchestrator {
                             None,
                             None,
                             total_cost,
+                            None,
                         ),
                         executor_id.clone(),
                     );
@@ -2664,7 +2665,7 @@ impl Orchestrator {
 
             // No review gate — commit/remove then emit DelegationCompleted.
             if !agent_config.review.review_required {
-                apply_worktree_cleanup(
+                let preserved_branch = apply_worktree_cleanup(
                     &mut worktrees,
                     &outcome.worker_session,
                     &outcome.candidate_status,
@@ -2682,6 +2683,7 @@ impl Orchestrator {
                         outcome.diff_summary,
                         outcome.summary,
                         total_cost,
+                        preserved_branch,
                     ),
                     executor_id.clone(),
                 );
@@ -2708,7 +2710,7 @@ impl Orchestrator {
                     let failed_status = DelegationStatus::Failed {
                         error: format!("review registration failed: {e}"),
                     };
-                    apply_worktree_cleanup(
+                    let preserved_branch = apply_worktree_cleanup(
                         &mut worktrees,
                         &outcome.worker_session,
                         &failed_status,
@@ -2726,6 +2728,7 @@ impl Orchestrator {
                             outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
+                            preserved_branch,
                         ),
                         executor_id.clone(),
                     );
@@ -2784,7 +2787,7 @@ impl Orchestrator {
                         reason: "review timeout".to_string(),
                     });
                     // TimedOut → preserve worktree (no commit).
-                    apply_worktree_cleanup(
+                    let preserved_branch = apply_worktree_cleanup(
                         &mut worktrees,
                         &outcome.worker_session,
                         &final_status,
@@ -2802,6 +2805,7 @@ impl Orchestrator {
                             outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
+                            preserved_branch,
                         ),
                         executor_id.clone(),
                     );
@@ -2816,7 +2820,7 @@ impl Orchestrator {
                         decision: ReviewDecision::Approve,
                     });
                     // Approve → commit + remove.
-                    apply_worktree_cleanup(
+                    let preserved_branch = apply_worktree_cleanup(
                         &mut worktrees,
                         &outcome.worker_session,
                         &final_status,
@@ -2834,6 +2838,7 @@ impl Orchestrator {
                             outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
+                            preserved_branch,
                         ),
                         executor_id.clone(),
                     );
@@ -2847,7 +2852,7 @@ impl Orchestrator {
                         decision: ReviewDecision::Reject { reason },
                     });
                     // Rejected → no commit, preserve worktree.
-                    apply_worktree_cleanup(
+                    let preserved_branch = apply_worktree_cleanup(
                         &mut worktrees,
                         &outcome.worker_session,
                         &final_status,
@@ -2865,6 +2870,7 @@ impl Orchestrator {
                             outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
+                            preserved_branch,
                         ),
                         executor_id.clone(),
                     );
@@ -2878,7 +2884,7 @@ impl Orchestrator {
                         decision: ReviewDecision::Modify { note },
                     });
                     // Modified → commit + remove (approved with reviewer note).
-                    apply_worktree_cleanup(
+                    let preserved_branch = apply_worktree_cleanup(
                         &mut worktrees,
                         &outcome.worker_session,
                         &final_status,
@@ -2896,6 +2902,7 @@ impl Orchestrator {
                             outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
+                            preserved_branch,
                         ),
                         executor_id.clone(),
                     );
@@ -2924,7 +2931,7 @@ impl Orchestrator {
                             error: format!("retry limit exceeded after {} attempts", attempt_n),
                         };
                         // Retry limit → Failed (remove, no commit).
-                        apply_worktree_cleanup(
+                        let preserved_branch = apply_worktree_cleanup(
                             &mut worktrees,
                             &outcome.worker_session,
                             &final_status,
@@ -2942,6 +2949,7 @@ impl Orchestrator {
                                 outcome.diff_summary.clone(),
                                 outcome.summary,
                                 total_cost,
+                                preserved_branch,
                             ),
                             executor_id.clone(),
                         );
@@ -3027,7 +3035,7 @@ impl Orchestrator {
                         reason: "review sender dropped".to_string(),
                     });
                     // Sender-drop TimedOut → preserve worktree (no commit).
-                    apply_worktree_cleanup(
+                    let preserved_branch = apply_worktree_cleanup(
                         &mut worktrees,
                         &outcome.worker_session,
                         &final_status,
@@ -3045,6 +3053,7 @@ impl Orchestrator {
                             outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
+                            preserved_branch,
                         ),
                         executor_id.clone(),
                     );
@@ -3143,7 +3152,7 @@ async fn apply_worktree_cleanup(
     diff: &Option<String>,
     agent: &str,
     worktree_path: &std::path::Path,
-) {
+) -> Option<String> {
     if should_commit_worker_diff(final_status) && diff.is_some() {
         if let Err(e) = worktrees
             .commit_worker_changes(worker_session, &format!("spur: worker {} output", agent))
@@ -3159,8 +3168,20 @@ async fn apply_worktree_cleanup(
             status = ?final_status,
             "preserving worktree for review inspection"
         );
+        None
+    } else if should_commit_worker_diff(final_status) {
+        // Approved work: remove worktree dir but keep branch for merge.
+        match worktrees.detach_worktree(worker_session).await {
+            Ok(branch) => Some(branch),
+            Err(e) => {
+                tracing::warn!(error = %e, "detach_worktree failed, falling back to full remove");
+                let _ = worktrees.remove_worktree(worker_session).await;
+                None
+            }
+        }
     } else {
         let _ = worktrees.remove_worktree(worker_session).await;
+        None
     }
 }
 
@@ -3216,6 +3237,7 @@ fn finalize(
     diff_summary: Option<spur_acp::DiffSummary>,
     summary: Option<String>,
     total_cost: f64,
+    worker_branch: Option<String>,
 ) -> DelegationResult {
     funnel.emit(SpurEventBody::DelegationCompleted {
         worker_session,
@@ -3227,7 +3249,7 @@ fn finalize(
         diff_summary,
         summary,
         estimated_cost_usd: total_cost,
-        worker_branch: None,
+        worker_branch,
     }
 }
 
