@@ -1518,7 +1518,7 @@ impl App {
             let mermaid_enabled = self.mermaid_picker.is_some();
             #[cfg(not(feature = "markdown"))]
             let mermaid_enabled = false;
-            HelpOverlay::render(frame, area, mermaid_enabled);
+            HelpOverlay::render(frame, area, mermaid_enabled, true);
         }
 
         if self.quit_confirm_visible {

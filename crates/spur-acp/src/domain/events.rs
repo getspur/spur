@@ -290,7 +290,8 @@ pub enum SpurEventBody {
     IssueUpdated {
         source: String,
         id: String,
-        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assignee: Option<String>,
     },

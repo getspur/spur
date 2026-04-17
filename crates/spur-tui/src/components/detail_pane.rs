@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{block::Title, Block, Borders, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Paragraph, Tabs, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -99,13 +99,11 @@ impl DetailPane {
             .title_bottom(following_indicator);
 
         if let Some(badge) = issue_badge {
-            block = block.title(
-                Title::from(format!(" {} ", badge)).alignment(Alignment::Right),
+            block = block.title_top(
+                Line::from(format!(" {} ", badge)).alignment(Alignment::Right),
             );
-            block = block.title(
-                Title::from(" [I]ssue detail ")
-                    .alignment(Alignment::Right)
-                    .position(ratatui::widgets::block::Position::Bottom),
+            block = block.title_bottom(
+                Line::from(" [I]ssue detail ").alignment(Alignment::Right),
             );
         }
 

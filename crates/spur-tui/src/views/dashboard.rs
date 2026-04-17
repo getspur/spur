@@ -89,7 +89,7 @@ fn detail_event_to_issue(e: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
 }
 
 fn format_issue_badge(issue_id: &str, issues: &[spur_pm::IssueSummary]) -> String {
-    let short_id = &issue_id[..8.min(issue_id.len())];
+    let short_id: String = issue_id.chars().take(8).collect();
     if let Some(issue) = issues.iter().find(|i| i.id == *issue_id) {
         let pri = issue.priority.map(|p| format!("P{}", p)).unwrap_or_default();
         let max_title = 25;
@@ -596,6 +596,13 @@ impl DashboardView {
                                         return Some(Action::Issue(
                                             crate::action::IssueAction::ViewDetail { id: iid.clone() },
                                         ));
+                                    } else {
+                                        self.activity_log.push(LogEntry {
+                                            timestamp: Self::now_stamp(),
+                                            prefix: "[tui]".into(),
+                                            message: "No issue linked to this executor".into(),
+                                            kind: LogEntryKind::Info,
+                                        });
                                     }
                                 }
                             }
@@ -857,7 +864,9 @@ impl DashboardView {
         if self.input_bar.is_empty() {
             match key.code {
                 KeyCode::Up => {
-                    if self.focused_node.is_some() {
+                    if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
+                        self.issue_detail_pane.scroll_up();
+                    } else if self.focused_node.is_some() {
                         self.detail_pane.scroll_up();
                     } else {
                         self.activity_log.scroll_up();
@@ -865,14 +874,16 @@ impl DashboardView {
                     return Some(Action::ScrollUp);
                 }
                 KeyCode::Down => {
-                    if self.focused_node.is_some() {
+                    if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
+                        self.issue_detail_pane.scroll_down();
+                    } else if self.focused_node.is_some() {
                         self.detail_pane.scroll_down();
                     } else {
                         self.activity_log.scroll_down(20);
                     }
                     return Some(Action::ScrollDown);
                 }
-                KeyCode::Tab => {
+                KeyCode::Tab if matches!(self.issue_focus, IssueFocus::None) => {
                     self.focused_panel = match self.focused_panel {
                         Panel::Agents => {
                             if !self.tracked_issues.is_empty() {
@@ -1136,8 +1147,8 @@ impl View for DashboardView {
 
             SpurEventBody::IssueUpdated { source, id, status, assignee } => {
                 if let Some(issue) = self.tracked_issues.iter_mut().find(|i| i.id == *id) {
-                    if !status.is_empty() {
-                        issue.status = status.clone();
+                    if let Some(ref s) = status {
+                        issue.status = s.clone();
                     }
                     if let Some(a) = assignee {
                         issue.assignee = Some(a.clone());
@@ -1145,18 +1156,21 @@ impl View for DashboardView {
                 }
                 if let IssueFocus::Loaded { id: ref focus_id, ref mut issue } = self.issue_focus {
                     if focus_id == id {
-                        if !status.is_empty() {
-                            issue.status = status.clone();
+                        if let Some(ref s) = status {
+                            issue.status = s.clone();
                         }
                         if let Some(a) = assignee {
                             issue.assignee = Some(a.clone());
                         }
                     }
                 }
+                let status_suffix = status.as_ref()
+                    .map(|s| format!(": {}", s))
+                    .unwrap_or_default();
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".to_string(),
-                    message: format!("Issue {} ({}) updated: {}", id, source, status),
+                    message: format!("Issue {} ({}) updated{}", id, source, status_suffix),
                     kind: LogEntryKind::Info,
                 });
             }
@@ -1182,6 +1196,9 @@ impl View for DashboardView {
                 self.tracked_issues.sort_by(|a, b| {
                     a.priority.unwrap_or(99).cmp(&b.priority.unwrap_or(99))
                 });
+                if !self.tracked_issues.is_empty() {
+                    self.issues_panel.select_first();
+                }
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".into(),
