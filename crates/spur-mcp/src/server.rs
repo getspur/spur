@@ -157,6 +157,8 @@ pub struct McpCallbackServer {
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     /// Active execution plans submitted via `submit_plan`.
     active_plans: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
+    /// Tracks the active plan_id per epic for idempotent `execute_epic` re-calls.
+    plan_registry: Arc<tokio::sync::Mutex<crate::plan::PlanRegistry>>,
 }
 
 impl McpCallbackServer {
@@ -181,6 +183,7 @@ impl McpCallbackServer {
             pm_service,
             event_sink,
             active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            plan_registry: Arc::new(tokio::sync::Mutex::new(crate::plan::PlanRegistry::default())),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -420,6 +423,7 @@ impl McpCallbackServer {
             "graph_alerts" => self.handle_graph_alerts(id, arguments).await,
             "graph_subgraph" => self.handle_graph_subgraph(id, arguments).await,
             "submit_plan" => self.handle_submit_plan(id, arguments).await,
+            "execute_epic" => self.handle_execute_epic(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
             "get_task_diff" => match self.handle_get_task_diff(&arguments).await {
                 Ok(text) => JsonRpcResponse::success(
@@ -1270,6 +1274,181 @@ impl McpCallbackServer {
                     )
                 }]
             }),
+        )
+    }
+
+    async fn handle_execute_epic(&self, id: Value, args: Value) -> JsonRpcResponse {
+        // 1. Extract required epic_id.
+        let epic_id = match args.get("epic_id").and_then(|v| v.as_str()) {
+            Some(e) => e.to_string(),
+            None => {
+                return JsonRpcResponse::invalid_params(id, "missing required field: epic_id")
+            }
+        };
+        let default_agent = args
+            .get("default_agent")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        // 2. Require PmService.
+        let pm = match self.pm_service.as_deref() {
+            Some(p) => p,
+            None => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    "beads (PmService) is not configured — cannot execute epic",
+                )
+            }
+        };
+
+        // 3. Idempotency: check for an existing non-terminal plan for this epic.
+        {
+            let registry = self.plan_registry.lock().await;
+            if let Some(existing_plan_id) = registry.by_epic.get(&epic_id) {
+                // Check if plan is still non-terminal.
+                let plan_arc = {
+                    let plans = self.active_plans.lock().await;
+                    plans.get(existing_plan_id).cloned()
+                };
+                if let Some(arc) = plan_arc {
+                    let state = arc.lock().await;
+                    let status_val = crate::plan::build_plan_status(existing_plan_id, &state);
+                    let overall = status_val
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let is_terminal = matches!(
+                        overall,
+                        "approved" | "failed" | "has_failures" | "has_rejections"
+                    );
+                    if !is_terminal {
+                        // Return existing plan status.
+                        let mut resp_val = status_val;
+                        if let serde_json::Value::Object(ref mut m) = resp_val {
+                            m.insert("epic_id".into(), serde_json::json!(epic_id));
+                            m.insert(
+                                "next_action".into(),
+                                serde_json::json!(
+                                    "Plan already active for this epic. \
+                                     Poll with get_plan_status(plan_id) to monitor progress."
+                                ),
+                            );
+                        }
+                        let text = serde_json::to_string_pretty(&resp_val)
+                            .unwrap_or_else(|_| resp_val.to_string());
+                        return JsonRpcResponse::success(
+                            id,
+                            json!({ "content": [{ "type": "text", "text": text }] }),
+                        );
+                    }
+                    // Terminal: fall through to start a fresh plan (registry entry
+                    // cleared below after releasing the lock).
+                }
+                // Plan not found in active_plans (evicted or never inserted) —
+                // also fall through.
+            }
+        }
+        // Clear any stale registry entry before proceeding.
+        self.plan_registry
+            .lock()
+            .await
+            .by_epic
+            .remove(&epic_id);
+
+        // 4. Derive the plan from the epic subgraph via PmService.
+        let known_agent_names: Vec<String> =
+            self.workers.iter().map(|w| w.name.clone()).collect();
+        let known_agents_refs: Vec<&str> =
+            known_agent_names.iter().map(String::as_str).collect();
+
+        let derived = match crate::plan::derive_epic_plan(
+            pm,
+            &epic_id,
+            default_agent.as_deref(),
+            &known_agents_refs,
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => return JsonRpcResponse::error(id, -32000, e),
+        };
+
+        // 5. Build PlanState and spawn the plan — mirrors handle_submit_plan exactly.
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let entries: Vec<crate::plan::PlanTaskEntry> = derived
+            .plan_tasks
+            .into_iter()
+            .map(|spec| crate::plan::PlanTaskEntry {
+                spec,
+                status: crate::plan::PlanTaskStatus::Pending,
+                result: None,
+                worker_branch: None,
+                attempt: 1,
+                history: Vec::new(),
+            })
+            .collect();
+
+        let task_count = entries.len();
+        let state = crate::plan::PlanState {
+            plan_id: plan_id.clone(),
+            tasks: entries,
+            brain_session_id: self.brain_session_id.clone(),
+        };
+        let state = Arc::new(tokio::sync::Mutex::new(state));
+
+        // Keep a clone of the Arc to build the initial status response.
+        let state_for_status = Arc::clone(&state);
+
+        self.active_plans
+            .lock()
+            .await
+            .insert(plan_id.clone(), Arc::clone(&state));
+
+        // Register the plan_id for this epic (idempotency on future calls).
+        self.plan_registry
+            .lock()
+            .await
+            .by_epic
+            .insert(epic_id.clone(), plan_id.clone());
+
+        // Spawn the plan executor.
+        let delegation_tx = self.delegation_tx.clone();
+        self.task_tracker
+            .spawn(crate::plan::run_plan(state, delegation_tx));
+
+        info!(
+            plan_id = %plan_id,
+            epic_id = %epic_id,
+            tasks = task_count,
+            "Epic plan submitted"
+        );
+
+        // 6. Build response: plan status + epic metadata.
+        let status_val = {
+            let st = state_for_status.lock().await;
+            crate::plan::build_plan_status(&plan_id, &st)
+        };
+
+        let derived_info = json!({
+            "task_count": task_count,
+            "edge_count": derived.edge_count,
+            "agents": derived.agent_counts,
+            "warnings": derived.warnings,
+        });
+
+        let mut resp_val = status_val;
+        if let serde_json::Value::Object(ref mut m) = resp_val {
+            m.insert("epic_id".into(), serde_json::json!(epic_id));
+            m.insert("derived".into(), derived_info);
+        }
+
+        let text = serde_json::to_string_pretty(&resp_val)
+            .unwrap_or_else(|_| resp_val.to_string());
+
+        JsonRpcResponse::success(
+            id,
+            json!({ "content": [{ "type": "text", "text": text }] }),
         )
     }
 

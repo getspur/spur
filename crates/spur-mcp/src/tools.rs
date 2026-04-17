@@ -730,6 +730,37 @@ pub fn review_task_def() -> ToolDefinition {
     }
 }
 
+fn execute_epic_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "execute_epic".into(),
+        description: "Execute a beads epic: hydrate a plan from the epic's \
+            children subgraph and dispatch in dependency order. Agent routing \
+            comes from the `spur.agent=<name>` label on each child issue \
+            (inherited from the epic if unset, or from default_agent). Task \
+            text comes from issue.body (override via `spur.task_text=<text>` \
+            label). Rejects nested sub-epic children. External blocked_by \
+            references must already be `done`. After dispatch, the plan runs \
+            under the normal review engine — use get_plan_status / \
+            get_task_diff / review_task. Re-calling while a plan is active \
+            for the same epic returns the existing plan_id (idempotent). \
+            After terminal state, a new call starts a fresh plan.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "epic_id": {
+                    "type": "string",
+                    "description": "The beads ID of an issue with type=epic"
+                },
+                "default_agent": {
+                    "type": "string",
+                    "description": "Fallback agent when a child has no `spur.agent=<name>` label and the epic has no inherited label"
+                }
+            },
+            "required": ["epic_id"]
+        }),
+    }
+}
+
 /// Returns all tool definitions for the MCP `tools/list` response.
 pub fn tools_list() -> Vec<ToolDefinition> {
     vec![
@@ -754,6 +785,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         graph_alerts_def(),
         graph_subgraph_def(),
         submit_plan_def(),
+        execute_epic_def(),
         get_plan_status_def(),
         get_task_diff_def(),
         review_task_def(),
