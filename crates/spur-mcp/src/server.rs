@@ -1227,6 +1227,8 @@ impl McpCallbackServer {
                 status: crate::plan::PlanTaskStatus::Pending,
                 result: None,
                 worker_branch: None,
+                attempt: 1,
+                history: Vec::new(),
             })
             .collect();
 
