@@ -1,0 +1,18 @@
+{
+  "sessionId": "sess-cc-diff-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-edit-001",
+    "title": "Edit",
+    "kind": "edit",
+    "content": [
+      {
+        "type": "diff",
+        "path": "src/foo.rs",
+        "oldText": "fn old() {}\n",
+        "newText": "fn new_name() {}\n"
+      }
+    ],
+    "_meta": { "claudeCode": { "toolName": "Edit" } }
+  }
+}
