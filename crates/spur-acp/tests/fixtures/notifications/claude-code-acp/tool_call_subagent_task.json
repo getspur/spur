@@ -1,0 +1,16 @@
+{
+  "sessionId": "sess-cc-meta-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-subagent-edit-001",
+    "title": "Edit",
+    "kind": "edit",
+    "rawInput": { "path": "src/foo.rs" },
+    "_meta": {
+      "claudeCode": {
+        "toolName": "Edit",
+        "parentToolUseId": "tc-task-parent-001"
+      }
+    }
+  }
+}

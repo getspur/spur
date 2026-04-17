@@ -1,3 +1,4 @@
+use agent_client_protocol::ToolCall;
 use serde_json::Value;
 
 use super::{BadgeColor, ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay};
@@ -164,5 +165,24 @@ pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
             color: BadgeColor::Red,
         }),
         _ => None,
+    }
+}
+
+/// Read `_meta.claudeCode.{toolName, parentToolUseId}` from a ToolCall.
+/// Absent keys produce `None`; non-string values are treated as absent.
+pub fn extract_tool_meta(tc: &ToolCall) -> super::SpurToolMeta {
+    let cc = tc
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("claudeCode"));
+    super::SpurToolMeta {
+        tool_name: cc
+            .and_then(|v| v.get("toolName"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        parent_tool_use_id: cc
+            .and_then(|v| v.get("parentToolUseId"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
     }
 }

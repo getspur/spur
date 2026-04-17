@@ -1,3 +1,4 @@
+use agent_client_protocol::ToolCall;
 use serde_json::Value;
 
 use super::{BadgeColor, ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay};
@@ -115,4 +116,12 @@ pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
         }),
         _ => None,
     }
+}
+
+/// Codex `_meta` extractor stub.
+/// TODO(vendor-onboarding): replace with real extractor when codex emits
+/// recognizable `_meta.codex.*` fields. See
+/// docs/spur/acp-meta-conventions.md.
+pub fn extract_tool_meta(_tc: &ToolCall) -> super::SpurToolMeta {
+    super::SpurToolMeta::default()
 }
