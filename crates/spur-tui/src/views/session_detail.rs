@@ -2334,12 +2334,30 @@ mod extract_tool_call_text_tests {
         let content = vec![ToolCallContent::Diff(diff)];
         let out = extract_tool_call_text(&content).expect("should return Some");
         let line_count = out.lines().count();
-        assert!(
-            line_count <= 60,
-            "expected <60 lines after truncation, got {}",
+        assert_eq!(
+            line_count, 43,
+            "expected 2 header + 40 body + 1 trailer, got {} lines",
             line_count
         );
-        assert!(out.contains("more lines"), "must indicate truncation");
+        assert!(
+            out.contains("160 more lines"),
+            "must show exact truncated count: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn extract_tool_call_text_concatenates_multiple_entries() {
+        use agent_client_protocol::{Diff, Terminal, TerminalId, ToolCallContent};
+        let diff_entry = ToolCallContent::Diff(
+            Diff::new("a.rs", "y\n").old_text("x\n".to_string()),
+        );
+        let term_entry = ToolCallContent::Terminal(Terminal::new(TerminalId::new("t-1")));
+        let out = extract_tool_call_text(&[diff_entry, term_entry])
+            .expect("should return Some");
+        assert!(out.contains("a.rs"), "diff section must render");
+        assert!(out.contains("+y"), "diff + line must render");
+        assert!(out.contains("[terminal: t-1]"), "terminal placeholder must render after diff");
     }
 
     #[test]
