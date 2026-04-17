@@ -49,6 +49,13 @@ impl SpurLocalSource {
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ToggleVimMode),
             },
+            CommandEntry {
+                name: "issues".into(),
+                description: "Refresh issue list from tracker".into(),
+                hint: None,
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::RefreshIssues),
+            },
         ]
     }
 }
