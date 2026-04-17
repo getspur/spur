@@ -92,6 +92,7 @@ pub struct PlanTaskEntry {
     pub history: Vec<AttemptRecord>,
 }
 
+#[allow(dead_code)] // used via #[serde(default = "default_attempt")] — rustc doesn't track serde attrs
 fn default_attempt() -> u32 {
     1
 }
