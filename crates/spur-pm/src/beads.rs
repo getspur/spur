@@ -311,6 +311,11 @@ impl IssueTracker for BeadsAdapter {
             args.push(assignee.clone());
         }
 
+        if let Some(since) = filter.since {
+            args.push("--since".into());
+            args.push(since.to_rfc3339());
+        }
+
         if let Some(ref text) = filter.text_search {
             args.push("--title-contains".into());
             args.push(text.clone());
