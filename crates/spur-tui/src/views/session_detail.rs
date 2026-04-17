@@ -1333,6 +1333,7 @@ impl View for SessionDetailView {
                 if session.0 == self.session_id.0 {
                     self.stream_in_flight = false;
                     self.cancelling_in_flight = false;
+                    self.tool_depth.clear();
                     #[cfg(feature = "markdown")]
                     {
                         use crate::components::markdown_stream::StateLookup;
