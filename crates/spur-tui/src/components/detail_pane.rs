@@ -102,8 +102,10 @@ impl DetailPane {
             block = block.title(
                 Title::from(format!(" {} ", badge)).alignment(Alignment::Right),
             );
-            block = block.title_bottom(
-                Title::from(" [I]ssue detail ").alignment(Alignment::Right),
+            block = block.title(
+                Title::from(" [I]ssue detail ")
+                    .alignment(Alignment::Right)
+                    .position(ratatui::widgets::block::Position::Bottom),
             );
         }
 

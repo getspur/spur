@@ -279,6 +279,7 @@ fn replay_equals_live() {
             task: "task-1".into(),
             request_id: "req-1".into(),
             delegation_plan: None,
+            issue_id: None,
         }),
         SpurEvent::now(SpurEventBody::CostUpdate {
             session: SessionId("w1".into()),

@@ -1249,6 +1249,7 @@ impl View for SessionDetailView {
                 task,
                 request_id,
                 delegation_plan: _,
+                issue_id: _,
             } => {
                 if from.0 != self.session_id.0 {
                     return;

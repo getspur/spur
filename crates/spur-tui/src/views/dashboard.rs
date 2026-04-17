@@ -957,6 +957,7 @@ impl View for DashboardView {
                 task,
                 request_id: _,
                 delegation_plan: _,
+                issue_id: _,
             } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
