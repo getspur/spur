@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess-cc-term-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-bash-term-001",
+    "title": "Bash",
+    "kind": "execute",
+    "content": [
+      { "type": "terminal", "terminalId": "term-abc-123" }
+    ],
+    "_meta": { "claudeCode": { "toolName": "Bash" } }
+  }
+}

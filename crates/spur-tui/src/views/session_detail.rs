@@ -1209,10 +1209,12 @@ impl View for SessionDetailView {
                             .as_ref()
                             .map(|v| adapter::format_input(v, kind))
                             .unwrap_or(ToolInputDisplay::Empty);
-                        let fallback_text = tc
-                            .raw_input
-                            .as_ref()
-                            .map(format_tool_args)
+                        // Prefer structured content (Diff, Terminal) over raw_input for
+                        // the fallback text, so diff bodies and terminal placeholders render.
+                        let fallback_text = extract_tool_call_text(&tc.content)
+                            .or_else(|| {
+                                tc.raw_input.as_ref().map(format_tool_args)
+                            })
                             .unwrap_or_default();
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Act {
@@ -1734,6 +1736,88 @@ fn extract_text(chunk: &spur_acp::ContentChunk) -> Option<&str> {
     }
 }
 
+/// Extract renderable text from a `ToolCallContent` slice.
+///
+/// Handles all known variants:
+/// - `Content` — returns the inner text (non-text blocks silently skipped).
+/// - `Diff`     — formats as a truncated unified-style diff (max `DIFF_MAX_LINES` body lines).
+/// - `Terminal` — returns a placeholder `[terminal: <id>]`.
+/// - Unknown future variants — silently ignored (`ToolCallContent` is `#[non_exhaustive]`).
+///
+/// Returns `None` if nothing renderable was produced.
+fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<String> {
+    use spur_acp::ToolCallContent;
+    let mut out = String::new();
+    for c in content {
+        match c {
+            ToolCallContent::Content(cb) => {
+                if let spur_acp::ContentBlock::Text(tc) = &cb.content {
+                    out.push_str(&tc.text);
+                }
+                // Non-Text ContentBlock variants (Image, Audio, Resource) silently skipped.
+            }
+            ToolCallContent::Diff(diff) => {
+                out.push_str(&format_diff_truncated(
+                    &diff.path.display().to_string(),
+                    diff.old_text.as_deref(),
+                    &diff.new_text,
+                ));
+            }
+            ToolCallContent::Terminal(term) => {
+                // TerminalId derives Display; fall back to .0 (Arc<str>) if needed.
+                out.push_str(&format!("[terminal: {}]", term.terminal_id));
+            }
+            _ => {
+                // ToolCallContent is #[non_exhaustive]; ignore unknown variants.
+            }
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+const DIFF_MAX_LINES: usize = 40;
+
+/// Format a diff as a simplified unified-diff string, capped at `DIFF_MAX_LINES` body lines.
+///
+/// Old lines are prefixed with `-`, new lines with `+`. This is NOT an LCS diff;
+/// it renders the old text as all-deletions and the new text as all-additions,
+/// matching how `ObservePayload::EditResult.diff` is rendered elsewhere in the TUI.
+fn format_diff_truncated(path: &str, old: Option<&str>, new_: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("--- a/{}\n", path));
+    out.push_str(&format!("+++ b/{}\n", path));
+
+    let mut body_lines: usize = 0;
+    let mut truncated_count: usize = 0;
+
+    if let Some(old_text) = old {
+        for line in old_text.lines() {
+            if body_lines >= DIFF_MAX_LINES {
+                truncated_count += 1;
+                continue;
+            }
+            out.push_str(&format!("-{}\n", line));
+            body_lines += 1;
+        }
+    }
+    for line in new_.lines() {
+        if body_lines >= DIFF_MAX_LINES {
+            truncated_count += 1;
+            continue;
+        }
+        out.push_str(&format!("+{}\n", line));
+        body_lines += 1;
+    }
+    if truncated_count > 0 {
+        out.push_str(&format!("... ({} more lines)\n", truncated_count));
+    }
+    out
+}
+
 /// Format tool call args for display. Extracts purpose or key args,
 /// falls back to truncated JSON.
 fn format_tool_args(input: &serde_json::Value) -> String {
@@ -2213,5 +2297,54 @@ mod tool_depth_tests {
             .map(|d| d.saturating_add(1).min(8))
             .unwrap_or(0);
         assert_eq!(depth, 8);
+    }
+}
+
+#[cfg(test)]
+mod extract_tool_call_text_tests {
+    use super::*;
+
+    #[test]
+    fn extract_tool_call_text_renders_diff_content() {
+        use agent_client_protocol::{Diff, ToolCallContent};
+        let diff = Diff::new("src/foo.rs", "fn new_name() {}\n")
+            .old_text("fn old() {}\n".to_string());
+        let content = vec![ToolCallContent::Diff(diff)];
+        let out = extract_tool_call_text(&content).expect("should return Some");
+        assert!(out.contains("src/foo.rs"), "diff must include path");
+        assert!(out.contains("-fn old"), "diff must include old-line prefix");
+        assert!(out.contains("+fn new_name"), "diff must include new-line prefix");
+    }
+
+    #[test]
+    fn extract_tool_call_text_renders_terminal_placeholder() {
+        use agent_client_protocol::{Terminal, TerminalId, ToolCallContent};
+        let term = Terminal::new(TerminalId::new("term-abc-123"));
+        let content = vec![ToolCallContent::Terminal(term)];
+        let out = extract_tool_call_text(&content).expect("should return Some");
+        assert!(out.contains("term-abc-123"), "placeholder must include id");
+        assert!(out.starts_with("[terminal:"), "placeholder must be labeled");
+    }
+
+    #[test]
+    fn extract_tool_call_text_truncates_long_diffs() {
+        use agent_client_protocol::{Diff, ToolCallContent};
+        let big_new = "line\n".repeat(200);
+        let diff = Diff::new("big.txt", big_new).old_text(String::new());
+        let content = vec![ToolCallContent::Diff(diff)];
+        let out = extract_tool_call_text(&content).expect("should return Some");
+        let line_count = out.lines().count();
+        assert!(
+            line_count <= 60,
+            "expected <60 lines after truncation, got {}",
+            line_count
+        );
+        assert!(out.contains("more lines"), "must indicate truncation");
+    }
+
+    #[test]
+    fn extract_tool_call_text_returns_none_for_empty_content() {
+        let content: Vec<spur_acp::ToolCallContent> = vec![];
+        assert!(extract_tool_call_text(&content).is_none());
     }
 }
