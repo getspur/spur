@@ -1171,9 +1171,10 @@ pub async fn review_task(
                 .last()
                 .and_then(|h| h.worker_branch.clone());
             if let (Some(pm), Some(id)) = (pm, issue_id_for_audit.as_ref()) {
+                // Comment reports the attempt just reviewed (new_attempt - 1), not the one being dispatched.
                 let comment = format_request_changes_comment(
                     fb,
-                    new_attempt,
+                    new_attempt - 1,
                     MAX_ATTEMPTS,
                     superseded_branch.as_deref(),
                 );
@@ -2177,6 +2178,22 @@ mod tests {
         assert!(c.contains("attempt 2/3"));
         assert!(c.contains("please rename `foo` to `bar`"));
         assert!(c.contains("spur/worker-bd-1mh-1"));
+    }
+
+    #[test]
+    fn format_request_changes_comment_reports_reviewed_attempt_not_new() {
+        // Scenario: task was at attempt 2, brain request_changes, new_attempt=3.
+        // The comment must reference attempt 2 (the one reviewed), not 3.
+        // Convention: callers pass `new_attempt - 1` as the attempt arg.
+        let reviewed_attempt = 3u32 - 1; // = 2
+        let c = super::format_request_changes_comment(
+            "fb",
+            reviewed_attempt,
+            super::MAX_ATTEMPTS,
+            None,
+        );
+        assert!(c.contains("attempt 2/3"), "comment should show reviewed attempt, got: {c}");
+        assert!(!c.contains("attempt 3/3"), "comment must NOT show new_attempt: {c}");
     }
 
     #[test]
