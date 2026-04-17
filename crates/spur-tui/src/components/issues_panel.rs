@@ -46,6 +46,10 @@ impl IssuesPanel {
         self.table_state.select(Some(prev));
     }
 
+    pub fn select_first(&mut self) {
+        self.table_state.select(Some(0));
+    }
+
     pub fn selected_id<'a>(&self, issues: &'a [IssueSummary]) -> Option<&'a str> {
         let idx = self.table_state.selected()?;
         issues.get(idx).map(|i| i.id.as_str())
@@ -115,7 +119,7 @@ impl IssuesPanel {
                     .title(title)
                     .border_style(border_style),
             )
-            .highlight_style(
+            .row_highlight_style(
                 Style::default()
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),

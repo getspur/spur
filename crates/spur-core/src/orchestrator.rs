@@ -154,6 +154,22 @@ pub enum InteractiveInput {
     UpdateIssue { id: String, update: spur_pm::IssueUpdate },
 }
 
+/// Convert spur_pm::IssueSummary to the spur_acp mirror type for event bus transmission.
+fn to_summary_event(
+    issue: &spur_pm::IssueSummary,
+    source: &str,
+) -> spur_acp::domain::events::IssueSummaryEvent {
+    spur_acp::domain::events::IssueSummaryEvent {
+        id: issue.id.clone(),
+        source: source.into(),
+        title: issue.title.clone(),
+        status: issue.status.clone(),
+        priority: issue.priority,
+        issue_type: issue.issue_type.clone(),
+        assignee: issue.assignee.clone(),
+    }
+}
+
 /// Convert spur_pm::Issue to the spur_acp mirror type for event bus transmission.
 fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDetailEvent {
     spur_acp::IssueDetailEvent {
@@ -351,17 +367,9 @@ impl Orchestrator {
                 ..Default::default()
             }).await {
                 Ok(issues) => {
-                    let event_issues: Vec<spur_acp::domain::events::IssueSummaryEvent> = issues.iter().map(|i| {
-                        spur_acp::domain::events::IssueSummaryEvent {
-                            id: i.id.clone(),
-                            source: pm.source_str().into(),
-                            title: i.title.clone(),
-                            status: i.status.clone(),
-                            priority: i.priority,
-                            issue_type: i.issue_type.clone(),
-                            assignee: i.assignee.clone(),
-                        }
-                    }).collect();
+                    let event_issues: Vec<_> = issues.iter()
+                        .map(|i| to_summary_event(i, pm.source_str()))
+                        .collect();
                     self.funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
                     tracing::info!(count = issues.len(), "Loaded open issues from {}", pm.source_str());
                 }
@@ -822,17 +830,9 @@ impl Orchestrator {
                             ..Default::default()
                         }).await {
                             Ok(issues) => {
-                                let event_issues: Vec<spur_acp::domain::events::IssueSummaryEvent> = issues.iter().map(|i| {
-                                    spur_acp::domain::events::IssueSummaryEvent {
-                                        id: i.id.clone(),
-                                        source: pm.source_str().into(),
-                                        title: i.title.clone(),
-                                        status: i.status.clone(),
-                                        priority: i.priority,
-                                        issue_type: i.issue_type.clone(),
-                                        assignee: i.assignee.clone(),
-                                    }
-                                }).collect();
+                                let event_issues: Vec<_> = issues.iter()
+                                    .map(|i| to_summary_event(i, pm.source_str()))
+                                    .collect();
                                 self.funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
                             }
                             Err(e) => {
@@ -883,7 +883,7 @@ impl Orchestrator {
                                 self.funnel.emit(SpurEventBody::IssueUpdated {
                                     source: pm.source_str().into(),
                                     id,
-                                    status: update.status.unwrap_or_default(),
+                                    status: update.status.clone(),
                                     assignee: update.assignee.clone(),
                                 });
                             }
@@ -2270,7 +2270,7 @@ impl Orchestrator {
                         funnel.emit(SpurEventBody::IssueUpdated {
                             source: pm.source_str().into(),
                             id: issue_id.clone(),
-                            status: "in_progress".into(),
+                            status: Some("in_progress".into()),
                             assignee: Some(worker_name),
                         });
                     }
@@ -2338,9 +2338,24 @@ impl Orchestrator {
                         funnel.emit(SpurEventBody::IssueUpdated {
                             source: pm.source_str().into(),
                             id: issue_id.clone(),
-                            status: status.into(),
+                            status: Some(status.into()),
                             assignee: None,
                         });
+                    }
+                }
+
+                // Refresh issue list after delegation completes so TUI picks up
+                // any label, body, or priority changes made by the worker (F19).
+                if let Some(ref pm) = pm_service {
+                    if let Ok(issues) = pm.list_issues(spur_pm::IssueFilter {
+                        status: Some("open".into()),
+                        limit: Some(50),
+                        ..Default::default()
+                    }).await {
+                        let event_issues: Vec<_> = issues.iter()
+                            .map(|i| to_summary_event(i, pm.source_str()))
+                            .collect();
+                        funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
                     }
                 }
 
