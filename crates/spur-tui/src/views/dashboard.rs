@@ -921,7 +921,7 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEventBody::IssueUpdated { source, id, status } => {
+            SpurEventBody::IssueUpdated { source, id, status, .. } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".to_string(),

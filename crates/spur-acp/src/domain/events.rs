@@ -136,6 +136,21 @@ pub enum LoadOutcome {
     FellBackToNew { reason: String },
 }
 
+/// Issue summary carried in SpurEvents for TUI display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueSummaryEvent {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+}
+
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpurEventBody {
@@ -247,6 +262,12 @@ pub enum SpurEventBody {
         source: String,
         id: String,
         status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignee: Option<String>,
+    },
+    /// Emitted once at session start with all tracked issues.
+    IssuesLoaded {
+        issues: Vec<IssueSummaryEvent>,
     },
     // ── Interactive loop events ──────────────────────────────────────
     TurnComplete {
