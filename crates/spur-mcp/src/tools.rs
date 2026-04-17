@@ -345,6 +345,34 @@ fn delegate_async_def() -> ToolDefinition {
                     "items": { "type": "string" },
                     "description": "Optional list of file paths to provide as context"
                 },
+                "delegation_plan": {
+                    "type": "object",
+                    "description": "Structured reasoning for this delegation. At minimum pass {chosen, rationale}. For 2+ subtasks or >3 files, include candidates and decomposition.",
+                    "properties": {
+                        "candidates": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "agent":     { "type": "string" },
+                                    "rationale": { "type": "string" }
+                                }
+                            }
+                        },
+                        "decomposition": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "subtask":             { "type": "string" },
+                                    "parallelizable_with": { "type": "array", "items": { "type": "string" } }
+                                }
+                            }
+                        },
+                        "chosen":    { "type": "string" },
+                        "rationale": { "type": "string" }
+                    }
+                },
                 "issue_id": {
                     "type": "string",
                     "description": "Optional beads issue ID to auto-track"
@@ -389,6 +417,23 @@ fn check_delegation_status_def() -> ToolDefinition {
     }
 }
 
+fn cancel_delegation_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "cancel_delegation".into(),
+        description: "Request cancellation of a running delegation. If the delegation already completed, returns its result. Otherwise forwards the cancellation to the orchestrator and returns its response.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "delegation_id": {
+                    "type": "string",
+                    "description": "The delegation_id to cancel"
+                }
+            },
+            "required": ["delegation_id"]
+        }),
+    }
+}
+
 /// Returns all tool definitions for the MCP `tools/list` response.
 pub fn tools_list() -> Vec<ToolDefinition> {
     vec![
@@ -397,6 +442,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         delegate_async_def(),
         wait_delegation_def(),
         check_delegation_status_def(),
+        cancel_delegation_def(),
         list_available_workers_def(),
         get_issue_def(),
         list_issues_def(),
