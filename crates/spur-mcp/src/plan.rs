@@ -1092,7 +1092,7 @@ pub async fn review_task(
                         if let Some(ref id) = issue_id {
                             let comment = format!(
                                 "Brain rejected (retries exhausted {}/{}): {}",
-                                MAX_ATTEMPTS, MAX_ATTEMPTS, fb
+                                attempt_at_reject, MAX_ATTEMPTS, fb
                             );
                             let update = spur_pm::IssueUpdate {
                                 comment: Some(comment),
