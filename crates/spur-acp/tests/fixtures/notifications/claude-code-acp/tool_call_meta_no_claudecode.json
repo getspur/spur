@@ -1,0 +1,11 @@
+{
+  "sessionId": "sess-cc-meta-002",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-other-001",
+    "title": "SomeTool",
+    "kind": "other",
+    "rawInput": {},
+    "_meta": { "other": { "ignored": true } }
+  }
+}

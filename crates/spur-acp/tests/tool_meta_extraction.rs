@@ -62,3 +62,21 @@ fn kiro_stub_returns_default() {
     let meta = extract_tool_meta(tc, AgentKind::Kiro);
     assert!(meta.tool_name.is_none());
 }
+
+#[test]
+fn claude_returns_default_when_claudecode_key_absent() {
+    let n = load("claude-code-acp/tool_call_meta_no_claudecode.json");
+    let SessionUpdate::ToolCall(tc) = &n.update else { panic!("expected ToolCall") };
+    let meta = extract_tool_meta(tc, AgentKind::ClaudeCodeAcp);
+    assert!(meta.tool_name.is_none(), "_meta without claudeCode key yields None");
+    assert!(meta.parent_tool_use_id.is_none());
+}
+
+#[test]
+fn claude_ignores_nonstring_values_in_meta() {
+    let n = load("claude-code-acp/tool_call_meta_nonstring_toolname.json");
+    let SessionUpdate::ToolCall(tc) = &n.update else { panic!("expected ToolCall") };
+    let meta = extract_tool_meta(tc, AgentKind::ClaudeCodeAcp);
+    assert!(meta.tool_name.is_none(), "non-string toolName must be discarded");
+    assert!(meta.parent_tool_use_id.is_none(), "null parentToolUseId must be discarded");
+}

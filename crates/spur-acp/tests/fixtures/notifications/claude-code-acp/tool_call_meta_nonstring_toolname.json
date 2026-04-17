@@ -1,0 +1,11 @@
+{
+  "sessionId": "sess-cc-meta-003",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-nonstring-001",
+    "title": "Whatever",
+    "kind": "other",
+    "rawInput": {},
+    "_meta": { "claudeCode": { "toolName": 42, "parentToolUseId": null } }
+  }
+}
