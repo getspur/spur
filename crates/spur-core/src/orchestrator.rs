@@ -146,6 +146,12 @@ pub enum InteractiveInput {
     CancelStream {
         session: SessionId,
     },
+    /// Refresh the issue list and re-emit IssuesLoaded.
+    RefreshIssues,
+    /// Fetch full issue detail and emit IssueDetailFetched.
+    GetIssueDetail { id: String },
+    /// Update an issue and emit IssueUpdated.
+    UpdateIssue { id: String, update: spur_pm::IssueUpdate },
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────
@@ -785,6 +791,111 @@ impl Orchestrator {
                         session = %session,
                         "CancelStream received outside active turn; dropping (no stream to cancel)"
                     );
+                }
+
+                // ── RefreshIssues ────────────────────────────────────────
+                InteractiveInput::RefreshIssues => {
+                    if let Some(pm) = &self.pm_service {
+                        match pm.list_issues(spur_pm::IssueFilter {
+                            status: Some("open".into()),
+                            limit: Some(50),
+                            ..Default::default()
+                        }).await {
+                            Ok(issues) => {
+                                let event_issues: Vec<spur_acp::domain::events::IssueSummaryEvent> = issues.iter().map(|i| {
+                                    spur_acp::domain::events::IssueSummaryEvent {
+                                        id: i.id.clone(),
+                                        source: pm.source_str().into(),
+                                        title: i.title.clone(),
+                                        status: i.status.clone(),
+                                        priority: i.priority,
+                                        issue_type: i.issue_type.clone(),
+                                        assignee: i.assignee.clone(),
+                                    }
+                                }).collect();
+                                self.funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
+                            }
+                            Err(e) => {
+                                self.funnel.emit(SpurEventBody::IssueCommandError {
+                                    operation: "RefreshIssues".into(),
+                                    error: e.to_string(),
+                                });
+                            }
+                        }
+                    } else {
+                        self.funnel.emit(SpurEventBody::IssueCommandError {
+                            operation: "RefreshIssues".into(),
+                            error: "No issue tracker configured".into(),
+                        });
+                    }
+                }
+
+                // ── GetIssueDetail ───────────────────────────────────────
+                InteractiveInput::GetIssueDetail { id } => {
+                    if let Some(pm) = &self.pm_service {
+                        match pm.get_issue(&id).await {
+                            Ok(issue) => {
+                                let detail_event = spur_acp::IssueDetailEvent {
+                                    id: issue.id.clone(),
+                                    source: issue.source.to_string(),
+                                    title: issue.title.clone(),
+                                    body: issue.body.clone(),
+                                    status: issue.status.clone(),
+                                    labels: issue.labels.clone(),
+                                    assignee: issue.assignee.clone(),
+                                    url: issue.url.clone(),
+                                    priority: issue.priority,
+                                    issue_type: issue.issue_type.clone(),
+                                    blocked_by: issue.blocked_by.clone(),
+                                    due_at: issue.due_at,
+                                    created_at: issue.created_at,
+                                    updated_at: issue.updated_at,
+                                };
+                                self.funnel.emit(SpurEventBody::IssueDetailFetched {
+                                    requested_id: id,
+                                    issue: detail_event,
+                                });
+                            }
+                            Err(e) => {
+                                self.funnel.emit(SpurEventBody::IssueCommandError {
+                                    operation: "GetIssueDetail".into(),
+                                    error: e.to_string(),
+                                });
+                            }
+                        }
+                    } else {
+                        self.funnel.emit(SpurEventBody::IssueCommandError {
+                            operation: "GetIssueDetail".into(),
+                            error: "No issue tracker configured".into(),
+                        });
+                    }
+                }
+
+                // ── UpdateIssue ──────────────────────────────────────────
+                InteractiveInput::UpdateIssue { id, update } => {
+                    if let Some(pm) = &self.pm_service {
+                        match pm.update_issue(&id, update.clone()).await {
+                            Ok(()) => {
+                                self.funnel.emit(SpurEventBody::IssueUpdated {
+                                    source: pm.source_str().into(),
+                                    id,
+                                    status: update.status.unwrap_or_default(),
+                                    assignee: update.assignee,
+                                });
+                            }
+                            Err(e) => {
+                                self.funnel.emit(SpurEventBody::IssueCommandError {
+                                    operation: "UpdateIssue".into(),
+                                    error: e.to_string(),
+                                });
+                            }
+                        }
+                    } else {
+                        self.funnel.emit(SpurEventBody::IssueCommandError {
+                            operation: "UpdateIssue".into(),
+                            error: "No issue tracker configured".into(),
+                        });
+                    }
                 }
 
                 // ── Message ─────────────────────────────────────────────
