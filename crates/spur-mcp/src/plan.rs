@@ -34,23 +34,32 @@ pub struct PlanTask {
 
 /// Status of an individual plan task.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state")]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum PlanTaskStatus {
     /// Waiting for dependencies to complete.
-    #[serde(rename = "pending")]
     Pending,
     /// All deps satisfied; about to be dispatched.
-    #[serde(rename = "ready")]
     Ready,
     /// Sent to a worker agent.
-    #[serde(rename = "dispatched")]
-    Dispatched { delegation_id: String },
-    /// Worker completed successfully.
-    #[serde(rename = "completed")]
-    Completed { summary: Option<String> },
+    Dispatched {
+        delegation_id: String,
+    },
+    /// Worker completed; awaiting brain review.
+    AwaitingReview {
+        summary: Option<String>,
+    },
+    /// Brain approved the work.
+    Approved {
+        summary: Option<String>,
+    },
+    /// Brain rejected the work.
+    Rejected {
+        feedback: Option<String>,
+    },
     /// Worker failed or dependency failed.
-    #[serde(rename = "failed")]
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 /// A task entry in the plan state (spec + runtime status).
@@ -60,6 +69,8 @@ pub struct PlanTaskEntry {
     pub status: PlanTaskStatus,
     /// Full delegation result, stored on completion for brain review.
     pub result: Option<DelegationResult>,
+    /// Branch the worker committed changes to (populated after AwaitingReview).
+    pub worker_branch: Option<String>,
 }
 
 /// Runtime state of a submitted plan.
@@ -168,7 +179,11 @@ pub async fn run_plan(
             let completed: HashSet<String> = p
                 .tasks
                 .iter()
-                .filter(|t| matches!(t.status, PlanTaskStatus::Completed { .. }))
+                .filter(|t| matches!(
+                    t.status,
+                    PlanTaskStatus::AwaitingReview { .. }
+                        | PlanTaskStatus::Approved { .. }
+                ))
                 .map(|t| t.spec.task_id.clone())
                 .collect();
 
@@ -243,28 +258,27 @@ pub async fn run_plan(
                             p.tasks.iter_mut().find(|t| t.spec.task_id == tid)
                         {
                             match &result.status {
-                                DelegationStatus::Success => {
-                                    info!(plan_id = %pid, task_id = %tid, "Plan task completed");
-                                    entry.status = PlanTaskStatus::Completed {
+                                DelegationStatus::Success | DelegationStatus::Modified { .. } => {
+                                    info!(plan_id = %pid, task_id = %tid, "Plan task awaiting review");
+                                    entry.status = PlanTaskStatus::AwaitingReview {
                                         summary: result.summary.clone(),
                                     };
-                                    entry.result = Some(result);
+                                    entry.worker_branch = result.worker_branch.clone();
                                 }
                                 DelegationStatus::Failed { error } => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task failed: {error}");
                                     entry.status = PlanTaskStatus::Failed {
                                         error: error.clone(),
                                     };
-                                    entry.result = Some(result);
                                 }
                                 other => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task ended: {other:?}");
                                     entry.status = PlanTaskStatus::Failed {
                                         error: format!("{other:?}"),
                                     };
-                                    entry.result = Some(result);
                                 }
                             }
+                            entry.result = Some(result);
                         }
                     }
                     Err(_) => {
@@ -329,10 +343,15 @@ pub async fn run_plan(
     }
 
     let p = plan.lock().await;
-    let completed = p
+    let awaiting_review = p
         .tasks
         .iter()
-        .filter(|t| matches!(t.status, PlanTaskStatus::Completed { .. }))
+        .filter(|t| matches!(t.status, PlanTaskStatus::AwaitingReview { .. }))
+        .count();
+    let approved = p
+        .tasks
+        .iter()
+        .filter(|t| matches!(t.status, PlanTaskStatus::Approved { .. }))
         .count();
     let failed = p
         .tasks
@@ -342,7 +361,8 @@ pub async fn run_plan(
     info!(
         plan_id = %plan_id,
         total = p.tasks.len(),
-        completed = completed,
+        awaiting_review = awaiting_review,
+        approved = approved,
         failed = failed,
         "Plan executor finished"
     );
@@ -351,34 +371,48 @@ pub async fn run_plan(
 // ─── Status rendering ────────────────────────────────────────────────
 
 /// Build a JSON-serializable status report for a plan.
-pub fn build_plan_status(state: &PlanState) -> serde_json::Value {
+pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value {
     let total = state.tasks.len();
-    let completed = state
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, PlanTaskStatus::Completed { .. }))
-        .count();
-    let failed = state
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, PlanTaskStatus::Failed { .. }))
-        .count();
-    let dispatched = state
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, PlanTaskStatus::Dispatched { .. }))
-        .count();
-    let pending = total - completed - failed - dispatched;
 
-    let overall = if completed == total {
-        "completed"
-    } else if failed > 0 && dispatched == 0 && pending == 0 {
-        if completed > 0 { "partial" } else { "failed" }
-    } else if dispatched > 0 || pending > 0 {
+    // Count tasks per state.
+    let mut n_pending = 0usize;
+    let mut n_ready = 0usize;
+    let mut n_dispatched = 0usize;
+    let mut n_awaiting_review = 0usize;
+    let mut n_approved = 0usize;
+    let mut n_rejected = 0usize;
+    let mut n_failed = 0usize;
+
+    for t in &state.tasks {
+        match &t.status {
+            PlanTaskStatus::Pending => n_pending += 1,
+            PlanTaskStatus::Ready => n_ready += 1,
+            PlanTaskStatus::Dispatched { .. } => n_dispatched += 1,
+            PlanTaskStatus::AwaitingReview { .. } => n_awaiting_review += 1,
+            PlanTaskStatus::Approved { .. } => n_approved += 1,
+            PlanTaskStatus::Rejected { .. } => n_rejected += 1,
+            PlanTaskStatus::Failed { .. } => n_failed += 1,
+        }
+    }
+
+    let all_workers_done = n_dispatched == 0 && n_pending == 0 && n_ready == 0;
+    let ready_to_merge = all_workers_done && n_awaiting_review == 0 && n_rejected == 0 && n_failed == 0 && n_approved == total;
+
+    let overall = if n_dispatched > 0 || n_pending > 0 || n_ready > 0 {
         "running"
+    } else if n_awaiting_review > 0 {
+        "awaiting_review"
+    } else if n_rejected > 0 {
+        "has_rejections"
+    } else if n_approved == total {
+        "approved"
+    } else if n_failed == total {
+        "failed"
     } else {
-        "completed"
+        "partial"
     };
+
+    let reviewed = n_approved + n_rejected;
 
     let tasks_json: Vec<serde_json::Value> = state
         .tasks
@@ -396,13 +430,14 @@ pub fn build_plan_status(state: &PlanState) -> serde_json::Value {
                         .depends_on
                         .iter()
                         .filter(|d| {
-                            !state
-                                .tasks
-                                .iter()
-                                .any(|o| {
-                                    o.spec.task_id == **d
-                                        && matches!(o.status, PlanTaskStatus::Completed { .. })
-                                })
+                            !state.tasks.iter().any(|o| {
+                                o.spec.task_id == **d
+                                    && matches!(
+                                        o.status,
+                                        PlanTaskStatus::AwaitingReview { .. }
+                                            | PlanTaskStatus::Approved { .. }
+                                    )
+                            })
                         })
                         .map(|d| d.as_str())
                         .collect();
@@ -417,18 +452,34 @@ pub fn build_plan_status(state: &PlanState) -> serde_json::Value {
                     obj["status"] = "dispatched".into();
                     obj["delegation_id"] = delegation_id.clone().into();
                 }
-                PlanTaskStatus::Completed { summary } => {
-                    obj["status"] = "completed".into();
+                PlanTaskStatus::AwaitingReview { summary } | PlanTaskStatus::Approved { summary } => {
+                    let status_str = if matches!(t.status, PlanTaskStatus::AwaitingReview { .. }) {
+                        "awaiting_review"
+                    } else {
+                        "approved"
+                    };
+                    obj["status"] = status_str.into();
                     if let Some(s) = summary {
                         obj["summary"] = s.clone().into();
                     }
-                    // Include diff_summary from stored result for brain review.
+                    if let Some(ref wb) = t.worker_branch {
+                        obj["worker_branch"] = wb.clone().into();
+                    }
                     if let Some(ref result) = t.result {
                         if let Some(ref ds) = result.diff_summary {
                             if let Ok(v) = serde_json::to_value(ds) {
                                 obj["diff_summary"] = v;
                             }
                         }
+                    }
+                }
+                PlanTaskStatus::Rejected { feedback } => {
+                    obj["status"] = "rejected".into();
+                    if let Some(f) = feedback {
+                        obj["feedback"] = f.clone().into();
+                    }
+                    if let Some(ref wb) = t.worker_branch {
+                        obj["worker_branch"] = wb.clone().into();
                     }
                 }
                 PlanTaskStatus::Failed { error } => {
@@ -441,11 +492,104 @@ pub fn build_plan_status(state: &PlanState) -> serde_json::Value {
         .collect();
 
     serde_json::json!({
-        "plan_id": state.plan_id,
+        "plan_id": plan_id,
         "status": overall,
-        "progress": format!("{completed}/{total} completed, {dispatched} running, {pending} pending, {failed} failed"),
+        "progress": format!(
+            "{reviewed}/{total} reviewed, {n_dispatched} running, {n_pending} pending, {n_failed} failed"
+        ),
+        "counts": {
+            "total": total,
+            "pending": n_pending,
+            "ready": n_ready,
+            "dispatched": n_dispatched,
+            "awaiting_review": n_awaiting_review,
+            "approved": n_approved,
+            "rejected": n_rejected,
+            "failed": n_failed,
+        },
+        "all_workers_done": all_workers_done,
+        "ready_to_merge": ready_to_merge,
         "tasks": tasks_json,
     })
+}
+
+/// Review a task in a plan: approve or reject, optionally syncing with beads.
+pub async fn review_task(
+    plan_id: &str,
+    task_id: &str,
+    decision: &str,
+    feedback: Option<&str>,
+    state: &mut PlanState,
+    pm: Option<&spur_pm::PmService>,
+) -> Result<serde_json::Value, String> {
+    let entry = state
+        .tasks
+        .iter_mut()
+        .find(|t| t.spec.task_id == task_id)
+        .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
+
+    let summary = match &entry.status {
+        PlanTaskStatus::AwaitingReview { summary } => summary.clone(),
+        other => {
+            return Err(format!(
+                "task '{task_id}' is not awaiting review (current: {other:?})"
+            ));
+        }
+    };
+
+    let mut warnings = Vec::<String>::new();
+
+    match decision {
+        "approve" => {
+            entry.status = PlanTaskStatus::Approved { summary };
+            if let Some(pm) = pm {
+                if let Some(issue_id) = entry.spec.issue_id.as_deref() {
+                    let comment = format!(
+                        "Brain approved: {}",
+                        feedback.unwrap_or("meets acceptance criteria")
+                    );
+                    let update = spur_pm::types::IssueUpdate {
+                        status: Some("done".to_string()),
+                        comment: Some(comment),
+                        ..Default::default()
+                    };
+                    if let Err(e) = pm.update_issue(issue_id, update).await {
+                        warnings.push(format!("beads update failed: {e}"));
+                    }
+                }
+            }
+        }
+        "reject" => {
+            entry.status = PlanTaskStatus::Rejected {
+                feedback: feedback.map(|s| s.to_string()),
+            };
+            if let Some(pm) = pm {
+                if let Some(issue_id) = entry.spec.issue_id.as_deref() {
+                    let comment = format!(
+                        "Brain rejected: {}",
+                        feedback.unwrap_or("does not meet requirements")
+                    );
+                    let update = spur_pm::types::IssueUpdate {
+                        status: Some("open".to_string()),
+                        comment: Some(comment),
+                        ..Default::default()
+                    };
+                    if let Err(e) = pm.update_issue(issue_id, update).await {
+                        warnings.push(format!("beads update failed: {e}"));
+                    }
+                }
+            }
+        }
+        _ => return Err(format!("invalid decision '{decision}': must be 'approve' or 'reject'")),
+    }
+
+    let mut result = build_plan_status(plan_id, state);
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("task_id".into(), serde_json::json!(task_id));
+        obj.insert("decision".into(), serde_json::json!(decision));
+        obj.insert("warnings".into(), serde_json::json!(warnings));
+    }
+    Ok(result)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
