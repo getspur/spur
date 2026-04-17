@@ -1095,6 +1095,7 @@ pub async fn review_task(
                                 attempt_at_reject, MAX_ATTEMPTS, fb
                             );
                             let update = spur_pm::IssueUpdate {
+                                status: Some("open".to_string()),
                                 comment: Some(comment),
                                 ..Default::default()
                             };
