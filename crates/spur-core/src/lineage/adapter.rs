@@ -37,6 +37,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 latest_diff_text: None,
                 last_error: None,
                 stream_buffer: std::collections::VecDeque::new(),
+                issue_id: None,
             });
         }
 
@@ -78,6 +79,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 latest_diff_text: None,
                 last_error: None,
                 stream_buffer: std::collections::VecDeque::new(),
+                issue_id: None,
             };
             match parent {
                 Some(p) => lineage.attach_child(&p, node),
@@ -91,6 +93,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             task,
             request_id: _,
             delegation_plan: _,
+            issue_id,
         } => {
             // Populate the task_spec of the most recent Executor owned by the
             // worker name, if empty.
@@ -113,6 +116,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             if let Some(id) = id {
                 if let Some(n) = lineage.node_mut_public(&id) {
                     n.task_spec = task.clone();
+                    n.issue_id = issue_id.clone();
                 }
             }
         }

@@ -240,6 +240,10 @@ pub enum SpurEventBody {
         /// delegate_* call. See design spec section C.7.
         #[serde(default)]
         delegation_plan: Option<crate::domain::DelegationPlan>,
+        /// Issue ID linked to this delegation (if any). Set when the
+        /// brain tool call carried an `issue_id` field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        issue_id: Option<String>,
     },
     /// Emitted immediately after the orchestrator spawns an executor
     /// for a brain delegation. Lets the brain-side session_detail
@@ -573,6 +577,7 @@ mod delegation_requested_tests {
             task: "do things".into(),
             request_id: "req-1".into(),
             delegation_plan: Some(plan.clone()),
+            issue_id: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains("\"delegation_plan\""));
@@ -586,6 +591,7 @@ mod delegation_requested_tests {
             task: "tiny fix".into(),
             request_id: "req-2".into(),
             delegation_plan: None,
+            issue_id: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
