@@ -668,6 +668,64 @@ fn get_plan_status_def() -> ToolDefinition {
     }
 }
 
+pub fn get_task_diff_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_task_diff".to_string(),
+        description: "Get the full unified diff for a plan task. Use after get_plan_status shows \
+            tasks in awaiting_review, approved, rejected, or failed state. Returns the complete \
+            diff, worker branch name, task description, and summary for brain code review."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id returned by submit_plan"
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "The task_id to inspect"
+                }
+            },
+            "required": ["plan_id", "task_id"]
+        }),
+    }
+}
+
+pub fn review_task_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "review_task".to_string(),
+        description: "Submit a review decision for a plan task that is awaiting review. \
+            Use get_task_diff first to read the diff, then call this to approve or reject. \
+            On approve: beads issue marked done. On reject: beads issue reopened. \
+            Returns updated plan status with counts and ready_to_merge flag."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id returned by submit_plan"
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "The task_id to review"
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": ["approve", "reject"],
+                    "description": "Review verdict"
+                },
+                "feedback": {
+                    "type": "string",
+                    "description": "Review notes (required for reject, optional for approve)"
+                }
+            },
+            "required": ["plan_id", "task_id", "decision"]
+        }),
+    }
+}
+
 /// Returns all tool definitions for the MCP `tools/list` response.
 pub fn tools_list() -> Vec<ToolDefinition> {
     vec![
@@ -693,5 +751,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         graph_subgraph_def(),
         submit_plan_def(),
         get_plan_status_def(),
+        get_task_diff_def(),
+        review_task_def(),
     ]
 }
