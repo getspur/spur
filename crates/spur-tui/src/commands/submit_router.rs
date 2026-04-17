@@ -52,6 +52,26 @@ pub fn route(
         return SubmitDecision::Empty;
     }
 
+    // /work <id> → issue WorkOn action
+    if let Some(rest) = text.strip_prefix("/work ") {
+        let id = rest.trim().to_string();
+        if !id.is_empty() {
+            return SubmitDecision::Local {
+                action: Action::Issue(crate::action::IssueAction::WorkOn { id }),
+            };
+        }
+    }
+
+    // /issue show <id> → issue ViewDetail action
+    if let Some(rest) = text.strip_prefix("/issue show ") {
+        let id = rest.trim().to_string();
+        if !id.is_empty() {
+            return SubmitDecision::Local {
+                action: Action::Issue(crate::action::IssueAction::ViewDetail { id }),
+            };
+        }
+    }
+
     if text.starts_with('/') {
         if let Some(entry) = registry.resolve(text) {
             return match entry.dispatch {

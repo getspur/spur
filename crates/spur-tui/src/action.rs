@@ -1,5 +1,13 @@
 use spur_acp::SessionId;
 
+/// Issue-related actions dispatched from IssuesPanel or slash commands.
+#[derive(Debug, Clone)]
+pub enum IssueAction {
+    ViewDetail { id: String },
+    UpdateStatus { id: String, status: String },
+    WorkOn { id: String },
+}
+
 /// Actions that flow between components and the app controller.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -111,6 +119,10 @@ pub enum Action {
     CancelStream {
         session: SessionId,
     },
+    /// Refresh the tracked issues list from the PM backend.
+    RefreshIssues,
+    /// An issue-related action from the IssuesPanel or slash commands.
+    Issue(IssueAction),
     /// Navigate to Dashboard with Agents panel focused and the
     /// highest-priority executor pre-selected (AwaitingReview > Running
     /// > most recent worker). Emitted by Alt+w in SessionDetailView.

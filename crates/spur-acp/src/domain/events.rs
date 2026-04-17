@@ -151,6 +151,31 @@ pub struct IssueSummaryEvent {
     pub assignee: Option<String>,
 }
 
+/// Full issue detail carried in the `IssueDetailFetched` event.
+/// Mirrors `spur_pm::Issue` without taking a direct dependency on spur-pm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueDetailEvent {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpurEventBody {
@@ -215,6 +240,10 @@ pub enum SpurEventBody {
         /// delegate_* call. See design spec section C.7.
         #[serde(default)]
         delegation_plan: Option<crate::domain::DelegationPlan>,
+        /// Issue ID linked to this delegation (if any). Set when the
+        /// brain tool call carried an `issue_id` field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        issue_id: Option<String>,
     },
     /// Emitted immediately after the orchestrator spawns an executor
     /// for a brain delegation. Lets the brain-side session_detail
@@ -269,6 +298,23 @@ pub enum SpurEventBody {
     IssuesLoaded {
         issues: Vec<IssueSummaryEvent>,
     },
+
+    /// Response to a TUI request for full issue detail.
+    /// Follows SessionsListed / IssuesLoaded precedent for request-response on broadcast.
+    IssueDetailFetched {
+        /// The ID that was requested — TUI checks against focused issue
+        /// to discard stale responses from navigation races.
+        requested_id: String,
+        /// Full issue data from PmService.
+        issue: IssueDetailEvent,
+    },
+
+    /// Feedback for a failed issue operation initiated from TUI.
+    IssueCommandError {
+        operation: String,
+        error: String,
+    },
+
     // ── Interactive loop events ──────────────────────────────────────
     TurnComplete {
         session: SessionId,
@@ -531,6 +577,7 @@ mod delegation_requested_tests {
             task: "do things".into(),
             request_id: "req-1".into(),
             delegation_plan: Some(plan.clone()),
+            issue_id: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains("\"delegation_plan\""));
@@ -544,6 +591,7 @@ mod delegation_requested_tests {
             task: "tiny fix".into(),
             request_id: "req-2".into(),
             delegation_plan: None,
+            issue_id: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
