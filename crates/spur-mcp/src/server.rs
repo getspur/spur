@@ -1212,6 +1212,7 @@ impl McpCallbackServer {
                 spec,
                 status: crate::plan::PlanTaskStatus::Pending,
                 result: None,
+                worker_branch: None,
             })
             .collect();
 
@@ -1275,7 +1276,7 @@ impl McpCallbackServer {
         };
 
         let state = plan_state.lock().await;
-        let status = crate::plan::build_plan_status(&state);
+        let status = crate::plan::build_plan_status(&plan_id, &state);
         let text =
             serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
 
