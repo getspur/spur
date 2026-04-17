@@ -13,6 +13,7 @@ markdown = ["dep:tui-markdown", "dep:ratatui-core", "dep:mermaid-rs-renderer", "
 [dependencies]
 spur-acp = { workspace = true }
 spur-core = { workspace = true }
+spur-pm = { workspace = true }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }

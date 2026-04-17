@@ -1,7 +1,8 @@
-use crate::adapter::PmAdapter;
+use crate::adapter::{IssueTracker, PrService};
 use crate::types::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use std::path::Path;
 use std::sync::Mutex;
 use tokio::process::Command;
 
@@ -27,6 +28,50 @@ impl GitHubAdapter {
     pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
         self
+    }
+
+    /// Authenticate and connect to GitHub, returning a ready-to-use adapter.
+    /// Runs `gh auth status` and auto-detects the repo if not provided.
+    pub async fn connect(repo: Option<String>, cwd: &Path) -> anyhow::Result<Self> {
+        let mut adapter = Self {
+            repo,
+            auto_label: String::from("spur-managed"),
+            last_poll: Mutex::new(None),
+            cwd: Some(cwd.to_path_buf()),
+        };
+
+        // 1. Verify authentication
+        adapter
+            .run_gh(&["auth", "status"])
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "GitHub CLI is not authenticated. Run `gh auth login` first.\nDetails: {e}"
+                )
+            })?;
+
+        // 2. Auto-detect repo if not set
+        if adapter.repo.is_none() {
+            let output = adapter
+                .run_gh(&["repo", "view", "--json", "nameWithOwner"])
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "No --repo specified and could not detect repository. \
+                         Either pass a repo or run from inside a git repository.\nDetails: {e}"
+                    )
+                })?;
+
+            let view: GhRepoView = serde_json::from_str(&output).map_err(|e| {
+                anyhow::anyhow!("Failed to parse repo metadata from `gh repo view`: {e}")
+            })?;
+
+            tracing::debug!(repo = %view.name_with_owner, "auto-detected repository");
+            adapter.repo = Some(view.name_with_owner);
+        }
+
+        tracing::debug!(repo = ?adapter.repo, "connected to GitHub");
+        Ok(adapter)
     }
 
     /// Run the `gh` CLI with the given arguments. Returns stdout on success,
@@ -93,6 +138,8 @@ struct GhIssueView {
     state: String,
     assignees: Vec<GhAssignee>,
     url: String,
+    created_at: Option<String>,
+    updated_at: Option<String>,
 }
 
 /// Issue list item returned by `gh issue list --json ...`.
@@ -115,6 +162,15 @@ struct GhRepoView {
     name_with_owner: String,
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────
+
+fn parse_gh_time(s: &Option<String>) -> DateTime<Utc> {
+    s.as_deref()
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now)
+}
+
 // ─── Conversions ──────────────────────────────────────────────────────
 
 impl From<GhIssueView> for Issue {
@@ -126,10 +182,14 @@ impl From<GhIssueView> for Issue {
             body: gh.body.unwrap_or_default(),
             labels: gh.labels.into_iter().map(|l| l.name).collect(),
             priority: None,
+            issue_type: None,
             assignee: gh.assignees.first().map(|a| a.login.clone()),
             status: gh.state.to_lowercase(),
-            linked_prs: Vec::new(),
+            blocked_by: Vec::new(),
+            due_at: None,
             url: gh.url,
+            created_at: parse_gh_time(&gh.created_at),
+            updated_at: parse_gh_time(&gh.updated_at),
         }
     }
 }
@@ -143,46 +203,17 @@ impl From<GhIssueListItem> for IssueSummary {
             labels: gh.labels.into_iter().map(|l| l.name).collect(),
             status: gh.state.to_lowercase(),
             url: gh.url,
+            priority: None,
+            issue_type: None,
+            assignee: None,
         }
     }
 }
 
-// ─── PmAdapter implementation ─────────────────────────────────────────
+// ─── IssueTracker implementation ──────────────────────────────────────
 
 #[async_trait]
-impl PmAdapter for GitHubAdapter {
-    async fn connect(&mut self) -> anyhow::Result<()> {
-        // 1. Verify authentication
-        self.run_gh(&["auth", "status"]).await.map_err(|e| {
-            anyhow::anyhow!(
-                "GitHub CLI is not authenticated. Run `gh auth login` first.\nDetails: {e}"
-            )
-        })?;
-
-        // 2. Auto-detect repo if not set
-        if self.repo.is_none() {
-            let output = self
-                .run_gh(&["repo", "view", "--json", "nameWithOwner"])
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "No --repo specified and could not detect repository. \
-                         Either pass a repo or run from inside a git repository.\nDetails: {e}"
-                    )
-                })?;
-
-            let view: GhRepoView = serde_json::from_str(&output).map_err(|e| {
-                anyhow::anyhow!("Failed to parse repo metadata from `gh repo view`: {e}")
-            })?;
-
-            tracing::debug!(repo = %view.name_with_owner, "auto-detected repository");
-            self.repo = Some(view.name_with_owner);
-        }
-
-        tracing::debug!(repo = ?self.repo, "connected to GitHub");
-        Ok(())
-    }
-
+impl IssueTracker for GitHubAdapter {
     async fn get_issue(&self, id: &str) -> anyhow::Result<Issue> {
         let repo = self.repo()?;
         let output = self
@@ -193,7 +224,7 @@ impl PmAdapter for GitHubAdapter {
                 "--repo",
                 repo,
                 "--json",
-                "number,title,body,labels,state,assignees,url",
+                "number,title,body,labels,state,assignees,url,createdAt,updatedAt",
             ])
             .await?;
 
@@ -206,6 +237,7 @@ impl PmAdapter for GitHubAdapter {
     async fn list_issues(&self, filter: IssueFilter) -> anyhow::Result<Vec<IssueSummary>> {
         let repo = self.repo()?;
 
+        let limit = filter.limit.unwrap_or(50).to_string();
         let mut args: Vec<String> = vec![
             "issue".into(),
             "list".into(),
@@ -214,7 +246,7 @@ impl PmAdapter for GitHubAdapter {
             "--json".into(),
             "number,title,labels,state,url,updatedAt".into(),
             "--limit".into(),
-            "50".into(),
+            limit,
         ];
 
         // Apply label filters
@@ -300,43 +332,6 @@ impl PmAdapter for GitHubAdapter {
         Ok(())
     }
 
-    async fn create_pr(&self, params: PrParams) -> anyhow::Result<String> {
-        let repo = params
-            .repo
-            .as_deref()
-            .or(self.repo.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("No repository configured for PR creation."))?;
-
-        let mut args: Vec<String> = vec![
-            "pr".into(),
-            "create".into(),
-            "--repo".into(),
-            repo.to_string(),
-            "--title".into(),
-            params.title.clone(),
-            "--body".into(),
-            params.body.clone(),
-            "--head".into(),
-            params.head_branch.clone(),
-        ];
-
-        if let Some(ref base) = params.base_branch {
-            args.push("--base".into());
-            args.push(base.clone());
-        }
-
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = self.run_gh(&arg_refs).await?;
-
-        // `gh pr create` prints the PR URL on stdout
-        let url = output.trim().to_string();
-        if url.is_empty() {
-            anyhow::bail!("gh pr create returned empty output — PR may not have been created.");
-        }
-
-        Ok(url)
-    }
-
     async fn poll(&self) -> anyhow::Result<Vec<PmEvent>> {
         let repo = self.repo()?;
 
@@ -404,5 +399,47 @@ impl PmAdapter for GitHubAdapter {
         }
 
         Ok(events)
+    }
+}
+
+// ─── PrService implementation ─────────────────────────────────────────
+
+#[async_trait]
+impl PrService for GitHubAdapter {
+    async fn create_pr(&self, params: PrParams) -> anyhow::Result<String> {
+        let repo = params
+            .repo
+            .as_deref()
+            .or(self.repo.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("No repository configured for PR creation."))?;
+
+        let mut args: Vec<String> = vec![
+            "pr".into(),
+            "create".into(),
+            "--repo".into(),
+            repo.to_string(),
+            "--title".into(),
+            params.title.clone(),
+            "--body".into(),
+            params.body.clone(),
+            "--head".into(),
+            params.head_branch.clone(),
+        ];
+
+        if let Some(ref base) = params.base_branch {
+            args.push("--base".into());
+            args.push(base.clone());
+        }
+
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = self.run_gh(&arg_refs).await?;
+
+        // `gh pr create` prints the PR URL on stdout
+        let url = output.trim().to_string();
+        if url.is_empty() {
+            anyhow::bail!("gh pr create returned empty output — PR may not have been created.");
+        }
+
+        Ok(url)
     }
 }

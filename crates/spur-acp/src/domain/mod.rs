@@ -5,4 +5,4 @@ pub use delegation::{
     DelegationPlan, DelegationResult, DelegationStatus,
     PlanCandidate, PlanSubtask, TimeoutFallback,
 };
-pub use events::{HistoryEntry, SpurEvent, SpurEventBody};
+pub use events::{HistoryEntry, IssueSummaryEvent, SpurEvent, SpurEventBody};

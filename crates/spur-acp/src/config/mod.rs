@@ -450,6 +450,8 @@ fn default_db_path() -> String {
 pub struct PmConfig {
     #[serde(default)]
     pub github: Option<GitHubPmConfig>,
+    #[serde(default)]
+    pub beads: Option<BeadsPmConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,6 +465,14 @@ pub struct GitHubPmConfig {
     /// Label to auto-add to SPUR-managed issues.
     #[serde(default = "default_auto_label")]
     pub auto_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeadsPmConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub auto_sync: bool,
 }
 
 fn default_true() -> bool {

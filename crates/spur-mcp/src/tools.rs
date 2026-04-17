@@ -28,6 +28,8 @@ pub struct DelegationRequest {
     /// for reviewer-visibility and mismatch detection. See design
     /// spec section C.
     pub delegation_plan: Option<spur_acp::DelegationPlan>,
+    /// Optional beads issue ID to auto-track for this delegation.
+    pub issue_id: Option<String>,
 }
 
 /// Channel the orchestrator holds to receive requests from the MCP server.
@@ -95,6 +97,10 @@ fn delegate_to_worker_def() -> ToolDefinition {
                         "chosen":    { "type": "string" },
                         "rationale": { "type": "string" }
                     }
+                },
+                "issue_id": {
+                    "type": "string",
+                    "description": "Optional beads issue ID to auto-track"
                 }
             },
             "required": ["agent", "task"]
@@ -130,6 +136,10 @@ fn delegate_parallel_def() -> ToolDefinition {
                         "chosen":        { "type": "string" },
                         "rationale":     { "type": "string" }
                     }
+                },
+                "issue_id": {
+                    "type": "string",
+                    "description": "Optional beads issue ID to auto-track"
                 }
             },
             "required": ["tasks"]
@@ -151,21 +161,66 @@ fn list_available_workers_def() -> ToolDefinition {
 fn get_issue_def() -> ToolDefinition {
     ToolDefinition {
         name: "get_issue".into(),
-        description: "Retrieve an issue from a project management tool (GitHub, Linear, Plane)."
+        description: "Retrieve an issue from the configured project management backend (beads, GitHub, etc.)."
             .into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "source": {
                     "type": "string",
-                    "description": "PM source: github, linear, or plane"
+                    "description": "PM source override (github, linear, plane). Defaults to configured backend if omitted."
                 },
                 "id": {
                     "type": "string",
                     "description": "Issue identifier"
                 }
             },
-            "required": ["source", "id"]
+            "required": ["id"]
+        }),
+    }
+}
+
+fn list_issues_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "list_issues".into(),
+        description: "List issues from the configured project management backend with optional filters.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: open, in_progress, blocked, closed"
+                },
+                "labels": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Filter by labels (issues must have all listed labels)"
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": "Filter by assignee username"
+                },
+                "priority_min": {
+                    "type": "integer",
+                    "description": "Minimum priority (0=critical, 4=backlog)"
+                },
+                "priority_max": {
+                    "type": "integer",
+                    "description": "Maximum priority (0=critical, 4=backlog)"
+                },
+                "issue_type": {
+                    "type": "string",
+                    "description": "Filter by issue type: task, bug, feature, epic"
+                },
+                "text_search": {
+                    "type": "string",
+                    "description": "Search issue titles by text"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 20, max 100)"
+                }
+            }
         }),
     }
 }
@@ -173,13 +228,13 @@ fn get_issue_def() -> ToolDefinition {
 fn update_issue_def() -> ToolDefinition {
     ToolDefinition {
         name: "update_issue".into(),
-        description: "Update an issue in a project management tool.".into(),
+        description: "Update an issue in the configured project management backend.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "source": {
                     "type": "string",
-                    "description": "PM source: github, linear, or plane"
+                    "description": "PM source override (github, linear, plane). Defaults to configured backend if omitted."
                 },
                 "id": {
                     "type": "string",
@@ -192,9 +247,27 @@ fn update_issue_def() -> ToolDefinition {
                 "comment": {
                     "type": "string",
                     "description": "Comment to add to the issue"
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "New priority (0=critical, 4=backlog)"
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": "Assignee username. Use empty string to unassign."
+                },
+                "add_labels": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Labels to add to the issue"
+                },
+                "remove_labels": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Labels to remove from the issue"
                 }
             },
-            "required": ["source", "id"]
+            "required": ["id"]
         }),
     }
 }
@@ -271,6 +344,10 @@ fn delegate_async_def() -> ToolDefinition {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Optional list of file paths to provide as context"
+                },
+                "issue_id": {
+                    "type": "string",
+                    "description": "Optional beads issue ID to auto-track"
                 }
             },
             "required": ["agent", "task"]
@@ -322,6 +399,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         check_delegation_status_def(),
         list_available_workers_def(),
         get_issue_def(),
+        list_issues_def(),
         update_issue_def(),
         create_pr_def(),
         report_progress_def(),

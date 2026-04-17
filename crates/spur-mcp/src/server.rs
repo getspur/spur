@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use spur_acp::*;
+use spur_pm::{IssueFilter, IssueUpdate, PmService, PrParams};
 
 use crate::tools::{self, DelegationChannel, DelegationRequest};
 
@@ -141,6 +142,8 @@ pub struct McpCallbackServer {
     /// Results that a background collector has received but the brain has
     /// not yet polled via `check_delegation_status` / `wait_delegation`.
     completed_delegations: Arc<tokio::sync::Mutex<HashMap<String, DelegationResult>>>,
+    /// Optional PM service for direct issue/PR operations.
+    pm_service: Option<Arc<PmService>>,
 }
 
 impl McpCallbackServer {
@@ -148,7 +151,7 @@ impl McpCallbackServer {
     ///
     /// Returns the server instance and a `DelegationChannel` that the
     /// orchestrator uses to receive requests and send responses.
-    pub fn new(session_id: &SessionId) -> (Self, DelegationChannel) {
+    pub fn new(session_id: &SessionId, pm_service: Option<Arc<PmService>>) -> (Self, DelegationChannel) {
         let (req_tx, req_rx) = mpsc::channel::<DelegationRequest>(32);
 
         let server = Self {
@@ -157,6 +160,7 @@ impl McpCallbackServer {
             brain_session_id: session_id.clone(),
             active_delegations: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pm_service,
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -364,6 +368,7 @@ impl McpCallbackServer {
             }
             "list_available_workers" => self.handle_list_available_workers(id).await,
             "get_issue" => self.handle_get_issue(id, arguments).await,
+            "list_issues" => self.handle_list_issues(id, arguments).await,
             "update_issue" => self.handle_update_issue(id, arguments).await,
             "create_pr" => self.handle_create_pr(id, arguments).await,
             "report_progress" => self.handle_report_progress(id, arguments).await,
@@ -390,6 +395,7 @@ impl McpCallbackServer {
         let delegation_plan: Option<spur_acp::DelegationPlan> = args
             .get("delegation_plan")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let issue_id = args.get("issue_id").and_then(|v| v.as_str()).map(String::from);
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -402,6 +408,7 @@ impl McpCallbackServer {
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
             delegation_plan,
+            issue_id,
         };
 
         info!(agent = %agent, request_id = %request_id, "Sending delegation request");
@@ -487,6 +494,7 @@ impl McpCallbackServer {
         let shared_plan: Option<spur_acp::DelegationPlan> = args
             .get("delegation_plan")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let shared_issue_id = args.get("issue_id").and_then(|v| v.as_str()).map(String::from);
 
         let mut receivers = Vec::with_capacity(tasks.len());
 
@@ -521,6 +529,7 @@ impl McpCallbackServer {
                 respond_to: tx,
                 brain_session_id: self.brain_session_id.clone(),
                 delegation_plan: shared_plan.clone(),
+                issue_id: shared_issue_id.clone(),
             };
 
             info!(agent = %agent, request_id = %request_id, "Sending parallel delegation request");
@@ -650,98 +659,106 @@ impl McpCallbackServer {
     }
 
     async fn handle_get_issue(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let source = match args.get("source").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'source'"),
+        let pm = match self.pm_service.as_ref() {
+            Some(pm) => pm,
+            None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
         };
         let issue_id = match args.get("id").and_then(|v| v.as_str()) {
             Some(i) => i.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'id'"),
         };
 
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let delegation = DelegationRequest {
-            id: request_id,
-            agent: "__pm_get_issue".into(),
-            task: json!({ "source": source, "id": issue_id }).to_string(),
-            context_files: Vec::new(),
-            respond_to: tx,
-            brain_session_id: self.brain_session_id.clone(),
-            delegation_plan: None,
-        };
-
-        if let Err(_e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, "Failed to forward request");
-        }
-
-        match rx.await {
-            Ok(result) => {
-                let text = result
-                    .summary
-                    .unwrap_or_else(|| "No issue data returned".into());
+        match pm.get_issue(&issue_id).await {
+            Ok(issue) => {
+                let text = serde_json::to_string_pretty(&issue)
+                    .unwrap_or_else(|_| format!("{issue:?}"));
                 JsonRpcResponse::success(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }] }),
                 )
             }
-            Err(_) => {
-                JsonRpcResponse::internal_error(id, "get_issue failed: orchestrator disconnected")
+            Err(e) => JsonRpcResponse::internal_error(id, format!("get_issue failed: {e}")),
+        }
+    }
+
+    async fn handle_list_issues(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let pm = match self.pm_service.as_ref() {
+            Some(pm) => pm,
+            None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
+        };
+
+        let labels: Vec<String> = args
+            .get("labels")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let filter = IssueFilter {
+            status: args.get("status").and_then(|v| v.as_str()).map(String::from),
+            assignee: args.get("assignee").and_then(|v| v.as_str()).map(String::from),
+            priority_min: args.get("priority_min").and_then(|v| v.as_i64()).map(|n| n as i32),
+            priority_max: args.get("priority_max").and_then(|v| v.as_i64()).map(|n| n as i32),
+            issue_type: args.get("issue_type").and_then(|v| v.as_str()).map(String::from),
+            text_search: args.get("text_search").and_then(|v| v.as_str()).map(String::from),
+            limit: Some(args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).min(100) as usize),
+            labels,
+            since: None,
+        };
+
+        match pm.list_issues(filter).await {
+            Ok(issues) => {
+                let text = serde_json::to_string_pretty(&issues)
+                    .unwrap_or_else(|_| format!("{issues:?}"));
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
+            Err(e) => JsonRpcResponse::internal_error(id, format!("list_issues failed: {e}")),
         }
     }
 
     async fn handle_update_issue(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let source = match args.get("source").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'source'"),
+        let pm = match self.pm_service.as_ref() {
+            Some(pm) => pm,
+            None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
         };
         let issue_id = match args.get("id").and_then(|v| v.as_str()) {
             Some(i) => i.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'id'"),
         };
-        let status = args
-            .get("status")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let comment = args
-            .get("comment")
-            .and_then(|v| v.as_str())
-            .map(String::from);
 
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let delegation = DelegationRequest {
-            id: request_id,
-            agent: "__pm_update_issue".into(),
-            task: json!({ "source": source, "id": issue_id, "status": status, "comment": comment })
-                .to_string(),
-            context_files: Vec::new(),
-            respond_to: tx,
-            brain_session_id: self.brain_session_id.clone(),
-            delegation_plan: None,
+        let add_labels: Vec<String> = args
+            .get("add_labels")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let remove_labels: Vec<String> = args
+            .get("remove_labels")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let update = IssueUpdate {
+            status: args.get("status").and_then(|v| v.as_str()).map(String::from),
+            comment: args.get("comment").and_then(|v| v.as_str()).map(String::from),
+            priority: args.get("priority").and_then(|v| v.as_i64()).map(|n| n as i32),
+            assignee: args.get("assignee").and_then(|v| v.as_str()).map(String::from),
+            add_labels,
+            remove_labels,
         };
 
-        if let Err(_e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, "Failed to forward request");
-        }
-
-        match rx.await {
-            Ok(result) => {
-                let text = result.summary.unwrap_or_else(|| "Issue updated".into());
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
-            }
-            Err(_) => JsonRpcResponse::internal_error(
+        match pm.update_issue(&issue_id, update).await {
+            Ok(()) => JsonRpcResponse::success(
                 id,
-                "update_issue failed: orchestrator disconnected",
+                json!({ "content": [{ "type": "text", "text": "Issue updated." }] }),
             ),
+            Err(e) => JsonRpcResponse::internal_error(id, format!("update_issue failed: {e}")),
         }
     }
 
     async fn handle_create_pr(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let pm = match self.pm_service.as_ref() {
+            Some(pm) => pm,
+            None => return JsonRpcResponse::internal_error(id, "No PR service configured"),
+        };
         let title = match args.get("title").and_then(|v| v.as_str()) {
             Some(t) => t.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'title'"),
@@ -750,38 +767,25 @@ impl McpCallbackServer {
             Some(b) => b.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'body'"),
         };
-        let branch = match args.get("branch").and_then(|v| v.as_str()) {
+        let head_branch = match args.get("branch").and_then(|v| v.as_str()) {
             Some(b) => b.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'branch'"),
         };
 
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let delegation = DelegationRequest {
-            id: request_id,
-            agent: "__pm_create_pr".into(),
-            task: json!({ "title": title, "body": body, "branch": branch }).to_string(),
-            context_files: Vec::new(),
-            respond_to: tx,
-            brain_session_id: self.brain_session_id.clone(),
-            delegation_plan: None,
+        let params = PrParams {
+            title,
+            body,
+            head_branch,
+            base_branch: args.get("base_branch").and_then(|v| v.as_str()).map(String::from),
+            repo: args.get("repo").and_then(|v| v.as_str()).map(String::from),
         };
 
-        if let Err(_e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, "Failed to forward request");
-        }
-
-        match rx.await {
-            Ok(result) => {
-                let text = result.summary.unwrap_or_else(|| "PR created".into());
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
-            }
-            Err(_) => {
-                JsonRpcResponse::internal_error(id, "create_pr failed: orchestrator disconnected")
-            }
+        match pm.create_pr(params).await {
+            Ok(url) => JsonRpcResponse::success(
+                id,
+                json!({ "content": [{ "type": "text", "text": format!("PR created: {url}") }] }),
+            ),
+            Err(e) => JsonRpcResponse::internal_error(id, format!("create_pr failed: {e}")),
         }
     }
 
@@ -801,6 +805,7 @@ impl McpCallbackServer {
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
             delegation_plan: None,
+            issue_id: None,
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -825,6 +830,7 @@ impl McpCallbackServer {
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
             delegation_plan: None,
+            issue_id: None,
         };
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
@@ -864,6 +870,7 @@ impl McpCallbackServer {
         let delegation_plan: Option<spur_acp::DelegationPlan> = args
             .get("delegation_plan")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let issue_id = args.get("issue_id").and_then(|v| v.as_str()).map(String::from);
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -876,6 +883,7 @@ impl McpCallbackServer {
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
             delegation_plan,
+            issue_id,
         };
 
         info!(agent = %agent, request_id = %request_id, "Sending async delegation request");
