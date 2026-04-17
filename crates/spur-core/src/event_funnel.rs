@@ -32,6 +32,13 @@ impl FunnelHandle {
     }
 }
 
+impl spur_mcp::McpEventSink for FunnelHandle {
+    fn emit(&self, event: SpurEventBody) {
+        // Delegates to the inherent `FunnelHandle::emit` method defined above.
+        FunnelHandle::emit(self, event);
+    }
+}
+
 /// Spawn the singleton funnel task. The returned `FunnelHandle` is
 /// given to every emitter inside the orchestrator.
 pub fn spawn_funnel(
