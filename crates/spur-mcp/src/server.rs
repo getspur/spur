@@ -200,6 +200,7 @@ impl McpCallbackServer {
                     diff_summary: None,
                     summary: None,
                     estimated_cost_usd: 0.0,
+                    worker_branch: None,
                 },
             };
             active.lock().await.remove(&delegation_id);

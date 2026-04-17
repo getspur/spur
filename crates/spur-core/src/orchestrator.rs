@@ -2558,6 +2558,7 @@ impl Orchestrator {
                     diff_summary: None,
                     summary: None,
                     estimated_cost_usd: 0.0,
+                    worker_branch: None,
                 },
                 None,
             );
@@ -2577,6 +2578,7 @@ impl Orchestrator {
                         diff_summary: None,
                         summary: None,
                         estimated_cost_usd: 0.0,
+                        worker_branch: None,
                     },
                     None,
                 );
@@ -3196,6 +3198,7 @@ impl Drop for DelegationGuard {
                 diff_summary: None,
                 summary: None,
                 estimated_cost_usd: 0.0,
+                worker_branch: None,
             });
         }
     }
@@ -3224,6 +3227,7 @@ fn finalize(
         diff_summary,
         summary,
         estimated_cost_usd: total_cost,
+        worker_branch: None,
     }
 }
 
