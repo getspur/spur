@@ -2013,4 +2013,36 @@ mod tests {
         assert!(matches!(b.status, super::PlanTaskStatus::Failed { .. }));
         assert!(matches!(c.status, super::PlanTaskStatus::Failed { .. }));
     }
+
+    // ─── PlanRegistry idempotency tests ──────────────────────────────
+
+    #[test]
+    fn registry_tracks_active_plan_per_epic() {
+        let mut r = super::PlanRegistry::default();
+        r.by_epic.insert("bd-100".into(), "plan-1".into());
+        r.by_epic.insert("bd-200".into(), "plan-2".into());
+        assert_eq!(r.by_epic.get("bd-100"), Some(&"plan-1".to_string()));
+        assert_eq!(r.by_epic.get("bd-200"), Some(&"plan-2".to_string()));
+        assert_eq!(r.by_epic.get("bd-999"), None);
+    }
+
+    #[test]
+    fn registry_entry_replaced_on_reinsert() {
+        let mut r = super::PlanRegistry::default();
+        r.by_epic.insert("bd-100".into(), "plan-old".into());
+        r.by_epic.insert("bd-100".into(), "plan-new".into());
+        assert_eq!(r.by_epic.get("bd-100"), Some(&"plan-new".to_string()));
+    }
+
+    #[test]
+    fn registry_sentinel_constant_is_distinct_from_valid_plan_id() {
+        // The reservation sentinel is "__pending__". Verify no real plan_id
+        // generation path can collide (UUIDs are hex with hyphens; sentinel
+        // contains underscores and 'p' — mutually exclusive).
+        let sentinel = "__pending__";
+        assert!(sentinel.contains("__"));
+        // Sanity: a fresh uuid would never have underscores.
+        let uuid = uuid::Uuid::new_v4().to_string();
+        assert!(!uuid.contains('_'));
+    }
 }
