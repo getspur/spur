@@ -445,6 +445,8 @@ async fn main() -> Result<()> {
             // Create PmService (optional — returns None if no backend available)
             let pm_service = spur_pm::PmService::try_new(
                 config.pm.github.as_ref().and_then(|g| g.repo.clone()),
+                config.pm.beads.as_ref().map_or(true, |b| b.enabled),
+                config.pm.github.as_ref().map_or(true, |g| g.enabled),
                 &repo_root,
             )
             .await

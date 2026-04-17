@@ -971,7 +971,12 @@ impl View for DashboardView {
             SpurEventBody::IssuesLoaded { issues } => {
                 self.tracked_issues = issues.iter().map(|i| spur_pm::IssueSummary {
                     id: i.id.clone(),
-                    source: spur_pm::PmSource::Beads,
+                    source: match i.source.as_str() {
+                        "github" => spur_pm::PmSource::GitHub,
+                        "linear" => spur_pm::PmSource::Linear,
+                        "plane" => spur_pm::PmSource::Plane,
+                        _ => spur_pm::PmSource::Beads,
+                    },
                     title: i.title.clone(),
                     status: i.status.clone(),
                     labels: Vec::new(),

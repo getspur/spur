@@ -20,24 +20,34 @@ pub struct PmService {
 }
 
 impl PmService {
+    /// Returns None if no PM backend available. Errors only for misconfiguration
+    /// (e.g., .beads/ exists and enabled but br binary is missing).
     pub async fn try_new(
         github_repo: Option<String>,
+        beads_enabled: bool,
+        github_enabled: bool,
         repo_root: &Path,
     ) -> anyhow::Result<Option<Self>> {
         let beads_dir = repo_root.join(".beads");
 
-        if beads_dir.is_dir() {
+        if beads_dir.is_dir() && beads_enabled {
             let beads = BeadsAdapter::connect(repo_root).await?;
-            let github = Self::try_github(github_repo, repo_root).await;
+            let github = if github_enabled {
+                Self::try_github(github_repo, repo_root).await
+            } else {
+                None
+            };
             return Ok(Some(Self {
                 inner: PmBackendInner::Beads { beads, github },
             }));
         }
 
-        if let Some(gh) = Self::try_github(github_repo, repo_root).await {
-            return Ok(Some(Self {
-                inner: PmBackendInner::GitHub { adapter: gh },
-            }));
+        if github_enabled {
+            if let Some(gh) = Self::try_github(github_repo, repo_root).await {
+                return Ok(Some(Self {
+                    inner: PmBackendInner::GitHub { adapter: gh },
+                }));
+            }
         }
 
         Ok(None)
