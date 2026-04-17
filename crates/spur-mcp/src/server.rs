@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 
 use spur_acp::*;
@@ -19,6 +20,11 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 /// async polling.  Must be well under the brain's MCP-client timeout
 /// (typically 120 s) to leave margin for HTTP round-trip overhead.
 const DELEGATION_BLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How long completed delegation results are retained before lazy eviction.
+/// Generous: the brain should poll within seconds, but we keep results
+/// around for 10 minutes to tolerate slow or distracted brains.
+const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
@@ -141,7 +147,10 @@ pub struct McpCallbackServer {
     active_delegations: Arc<tokio::sync::Mutex<HashSet<String>>>,
     /// Results that a background collector has received but the brain has
     /// not yet polled via `check_delegation_status` / `wait_delegation`.
-    completed_delegations: Arc<tokio::sync::Mutex<HashMap<String, DelegationResult>>>,
+    /// Stored with insertion timestamp for TTL-based lazy eviction.
+    completed_delegations: Arc<tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>>,
+    /// Tracks spawned result-collector tasks for graceful shutdown.
+    task_tracker: TaskTracker,
     /// Optional PM service for direct issue/PR operations.
     pm_service: Option<Arc<PmService>>,
 }
@@ -160,6 +169,7 @@ impl McpCallbackServer {
             brain_session_id: session_id.clone(),
             active_delegations: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            task_tracker: TaskTracker::new(),
             pm_service,
         };
 
@@ -170,12 +180,13 @@ impl McpCallbackServer {
     /// Spawn a background task that awaits a delegation oneshot and stores
     /// the result in `completed_delegations` for later polling.
     fn spawn_result_collector(
+        tracker: &TaskTracker,
         delegation_id: String,
         rx: tokio::sync::oneshot::Receiver<DelegationResult>,
         active: Arc<tokio::sync::Mutex<HashSet<String>>>,
-        completed: Arc<tokio::sync::Mutex<HashMap<String, DelegationResult>>>,
+        completed: Arc<tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>>,
     ) {
-        tokio::spawn(async move {
+        tracker.spawn(async move {
             let result = match rx.await {
                 Ok(r) => r,
                 Err(_) => DelegationResult {
@@ -189,13 +200,29 @@ impl McpCallbackServer {
                 },
             };
             active.lock().await.remove(&delegation_id);
-            completed.lock().await.insert(delegation_id, result);
+            completed.lock().await.insert(delegation_id, (result, tokio::time::Instant::now()));
         });
     }
 
     /// Set the list of available worker agents.
     pub fn set_workers(&mut self, workers: Vec<WorkerInfo>) {
         self.workers = workers;
+    }
+
+    /// Gracefully shut down the server: close the task tracker and wait
+    /// for all in-flight result collectors to finish.
+    pub async fn shutdown(&self) {
+        self.task_tracker.close();
+        self.task_tracker.wait().await;
+    }
+
+    /// Remove completed delegation results older than `COMPLETED_TTL`.
+    /// Called lazily from polling handlers to bound memory growth.
+    async fn evict_stale_completions(&self) {
+        self.completed_delegations
+            .lock()
+            .await
+            .retain(|_, (_, ts)| ts.elapsed() < COMPLETED_TTL);
     }
 
     /// Start listening on a random localhost port.
@@ -366,6 +393,7 @@ impl McpCallbackServer {
             "check_delegation_status" => {
                 self.handle_check_delegation_status(id, arguments).await
             }
+            "cancel_delegation" => self.handle_cancel_delegation(id, arguments).await,
             "list_available_workers" => self.handle_list_available_workers(id).await,
             "get_issue" => self.handle_get_issue(id, arguments).await,
             "list_issues" => self.handle_list_issues(id, arguments).await,
@@ -426,6 +454,7 @@ impl McpCallbackServer {
             .await
             .insert(request_id.clone());
         Self::spawn_result_collector(
+            &self.task_tracker,
             request_id.clone(),
             rx,
             Arc::clone(&self.active_delegations),
@@ -436,7 +465,7 @@ impl McpCallbackServer {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-            if let Some(result) = self.completed_delegations.lock().await.remove(&request_id) {
+            if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&request_id) {
                 let result_json = match serde_json::to_value(&result) {
                     Ok(v) => v,
                     Err(e) => {
@@ -544,6 +573,7 @@ impl McpCallbackServer {
                 .await
                 .insert(request_id.clone());
             Self::spawn_result_collector(
+                &self.task_tracker,
                 request_id.clone(),
                 rx,
                 Arc::clone(&self.active_delegations),
@@ -561,7 +591,7 @@ impl McpCallbackServer {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             let mut still_pending = Vec::new();
             for (request_id, agent) in pending {
-                if let Some(result) =
+                if let Some((result, _ts)) =
                     self.completed_delegations.lock().await.remove(&request_id)
                 {
                     results.push(serde_json::to_value(&result).unwrap_or(json!(null)));
@@ -609,8 +639,15 @@ impl McpCallbackServer {
             }
         };
 
+        self.evict_stale_completions().await;
+
         // Completed — return and remove.
-        if let Some(result) = self.completed_delegations.lock().await.remove(&delegation_id) {
+        let completed = {
+            let mut map = self.completed_delegations.lock().await;
+            map.retain(|_, (_, ts)| ts.elapsed() < COMPLETED_TTL);
+            map.remove(&delegation_id).map(|(r, _)| r)
+        };
+        if let Some(result) = completed {
             let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
             return JsonRpcResponse::success(
                 id,
@@ -635,6 +672,85 @@ impl McpCallbackServer {
                     }]
                 }),
             );
+        }
+
+        JsonRpcResponse::error(
+            id,
+            -32602,
+            format!("Unknown delegation: {delegation_id}"),
+        )
+    }
+
+    async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
+            Some(d) => d.to_string(),
+            None => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    "Missing required field 'delegation_id'",
+                )
+            }
+        };
+
+        // Already completed — return the result directly.
+        if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&delegation_id) {
+            let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
+            return JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&result_json)
+                            .unwrap_or_else(|_| result_json.to_string())
+                    }]
+                }),
+            );
+        }
+
+        // Active — send cancellation sentinel to orchestrator and await response.
+        if self.active_delegations.lock().await.contains(&delegation_id) {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let delegation = DelegationRequest {
+                id: request_id,
+                agent: "__cancel_delegation".into(),
+                task: delegation_id.clone(),
+                context_files: Vec::new(),
+                respond_to: tx,
+                brain_session_id: self.brain_session_id.clone(),
+                delegation_plan: None,
+                issue_id: None,
+            };
+
+            if let Err(_e) = self.delegation_tx.send(delegation).await {
+                return JsonRpcResponse::internal_error(id, "Failed to send cancellation request");
+            }
+
+            info!(delegation_id = %delegation_id, "Cancellation requested");
+
+            // Await the orchestrator's response. Today this returns
+            // "not yet wired"; once the orchestrator adds a handler it
+            // will return the actual cancellation result.
+            match rx.await {
+                Ok(result) => {
+                    let text = result.summary.unwrap_or_else(|| {
+                        match &result.status {
+                            DelegationStatus::Failed { error } => error.clone(),
+                            other => format!("{:?}", other),
+                        }
+                    });
+                    return JsonRpcResponse::success(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": text }] }),
+                    );
+                }
+                Err(_) => {
+                    return JsonRpcResponse::internal_error(
+                        id,
+                        "cancel_delegation failed: orchestrator disconnected",
+                    );
+                }
+            }
         }
 
         JsonRpcResponse::error(
@@ -898,6 +1014,7 @@ impl McpCallbackServer {
             .insert(request_id.clone());
 
         Self::spawn_result_collector(
+            &self.task_tracker,
             request_id.clone(),
             rx,
             Arc::clone(&self.active_delegations),
@@ -923,8 +1040,10 @@ impl McpCallbackServer {
             }
         };
 
+        self.evict_stale_completions().await;
+
         // Already completed — return immediately.
-        if let Some(result) = self.completed_delegations.lock().await.remove(&delegation_id) {
+        if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&delegation_id) {
             let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
             return JsonRpcResponse::success(
                 id,
@@ -952,7 +1071,7 @@ impl McpCallbackServer {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            if let Some(result) = self.completed_delegations.lock().await.remove(&delegation_id) {
+            if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&delegation_id) {
                 let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
                 return JsonRpcResponse::success(
                     id,
