@@ -1102,4 +1102,94 @@ mod tests {
         let err = validate_plan(&tasks).unwrap_err();
         assert!(err.contains("Cycle"));
     }
+
+    #[test]
+    fn enriched_task_includes_original_history_and_feedback() {
+        let history = vec![
+            super::AttemptRecord {
+                attempt: 1,
+                worker_branch: Some("spur/worker-x".to_string()),
+                diff_summary: None,
+                summary: Some("did thing".to_string()),
+                feedback: "add null check".to_string(),
+            },
+        ];
+        let enriched = super::build_enriched_task(
+            "Implement foo",
+            &history,
+            "now also handle empty input",
+        );
+        assert!(enriched.contains("Implement foo"));
+        assert!(enriched.contains("Attempt 1"));
+        assert!(enriched.contains("add null check"));
+        assert!(enriched.contains("now also handle empty input"));
+        assert!(enriched.contains("git show"));
+    }
+
+    #[test]
+    fn enriched_task_empty_history_still_well_formed() {
+        let enriched = super::build_enriched_task("Task X", &[], "fb");
+        assert!(enriched.contains("Task X"));
+        assert!(enriched.contains("fb"));
+        assert!(enriched.contains("## Previous Attempts"));
+    }
+
+    #[test]
+    fn max_attempts_is_three() {
+        assert_eq!(super::MAX_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn rejection_cascade_marks_descendants_failed() {
+        use spur_acp::SessionId;
+        let tasks = vec![
+            super::PlanTask {
+                task_id: "A".to_string(),
+                agent: "x".to_string(),
+                task: "a".to_string(),
+                depends_on: vec![],
+                issue_id: None,
+                context_files: vec![],
+            },
+            super::PlanTask {
+                task_id: "B".to_string(),
+                agent: "x".to_string(),
+                task: "b".to_string(),
+                depends_on: vec!["A".to_string()],
+                issue_id: None,
+                context_files: vec![],
+            },
+            super::PlanTask {
+                task_id: "C".to_string(),
+                agent: "x".to_string(),
+                task: "c".to_string(),
+                depends_on: vec!["B".to_string()],
+                issue_id: None,
+                context_files: vec![],
+            },
+        ];
+        let mut state = super::PlanState {
+            plan_id: "p".to_string(),
+            tasks: tasks
+                .into_iter()
+                .map(|t| super::PlanTaskEntry {
+                    spec: t,
+                    status: super::PlanTaskStatus::Pending,
+                    result: None,
+                    worker_branch: None,
+                    attempt: 1,
+                    history: Vec::new(),
+                })
+                .collect(),
+            brain_session_id: SessionId("brain".to_string()),
+        };
+        let mut warnings = Vec::new();
+        super::mark_descendants_failed("A", &mut state, &mut warnings);
+
+        // B and C should now be Failed; A remains Pending (caller sets it separately).
+        let b = state.tasks.iter().find(|t| t.spec.task_id == "B").unwrap();
+        let c = state.tasks.iter().find(|t| t.spec.task_id == "C").unwrap();
+        assert!(matches!(b.status, super::PlanTaskStatus::Failed { .. }));
+        assert!(matches!(c.status, super::PlanTaskStatus::Failed { .. }));
+    }
 }
