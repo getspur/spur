@@ -2249,6 +2249,7 @@ dependencies = [
  "serde_json",
  "spur-acp",
  "spur-core",
+ "spur-pm",
  "tempfile",
  "tokio",
  "tracing",

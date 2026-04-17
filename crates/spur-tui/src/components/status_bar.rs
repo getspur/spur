@@ -38,6 +38,8 @@ pub struct StatusBarProps<'a> {
     /// True when the SessionDetail view has an in-flight stream; toggles
     /// the status-bar hint between `[Esc]back` (idle) and `[Esc]stop` (live).
     pub stream_in_flight: bool,
+    /// Number of tracked issues (from IssuesLoaded); 0 means not shown.
+    pub issue_count: usize,
 }
 
 impl StatusBar {
@@ -75,7 +77,15 @@ impl StatusBar {
             Style::default().fg(Color::DarkGray)
         };
 
-        let right = Line::from(vec![
+        let mut right_spans: Vec<Span> = Vec::new();
+        if props.issue_count > 0 {
+            right_spans.push(Span::styled(
+                format!("{} issues", props.issue_count),
+                Style::default().fg(Color::Cyan),
+            ));
+            right_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        }
+        right_spans.extend([
             Span::styled(
                 format!("{} running", props.running),
                 Style::default().fg(Color::DarkGray),
@@ -103,6 +113,7 @@ impl StatusBar {
             ),
         ]);
 
+        let right = Line::from(right_spans);
         let right_width = right.width() as u16;
         let hints_line = Line::from(Span::styled(
             hints,
