@@ -367,7 +367,8 @@ impl Orchestrator {
             self.build_brain_prompt(task, issue_context.as_ref(), &session_id, &brain_name);
 
         // 4. Start MCP callback server.
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id, None);
+        let (mcp_server, delegation_channel) =
+            McpCallbackServer::new(&session_id, self.pm_service.clone());
         let mut mcp_server = mcp_server;
 
         // Populate available workers.
@@ -1256,7 +1257,8 @@ impl Orchestrator {
         }));
 
         // Start MCP callback server.
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id, None);
+        let (mcp_server, delegation_channel) =
+            McpCallbackServer::new(&session_id, self.pm_service.clone());
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
@@ -1406,7 +1408,8 @@ impl Orchestrator {
         }
 
         // Start MCP callback server.
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id, None);
+        let (mcp_server, delegation_channel) =
+            McpCallbackServer::new(&session_id, self.pm_service.clone());
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self

@@ -441,7 +441,25 @@ async fn main() -> Result<()> {
                 }
             };
             let config_arc = std::sync::Arc::new(config.clone());
+
+            // Create PmService (optional — returns None if no backend available)
+            let pm_service = spur_pm::PmService::try_new(
+                config.pm.github.as_ref().and_then(|g| g.repo.clone()),
+                &repo_root,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("PM service initialization failed: {e}");
+                None
+            });
+            let pm_arc = pm_service.map(std::sync::Arc::new);
+
             let orch = Orchestrator::new(repo_root.clone(), config)?;
+            let orch = if let Some(pm) = pm_arc {
+                orch.with_pm_service(pm)
+            } else {
+                orch
+            };
             let event_rx = orch.subscribe();
 
             // Clone the review_sink BEFORE orch is moved.
