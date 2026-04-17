@@ -242,6 +242,37 @@ impl ReactTrace {
         }
     }
 
+    /// Append a streamed user-message chunk, coalescing into the tail entry
+    /// iff that entry is `TraceKind::UserMessage`. Otherwise push a new
+    /// `TraceKind::UserMessage` entry. Symmetric to `append_message` for
+    /// agent chunks.
+    pub fn append_user_message(&mut self, text: &str, timestamp: String) {
+        let target_idx = match self.entries.last() {
+            Some(entry) => match &entry.kind {
+                TraceKind::UserMessage => Some(self.entries.len() - 1),
+                _ => None,
+            },
+            None => None,
+        };
+
+        match target_idx {
+            Some(idx) => {
+                self.entries[idx].text.push_str(text);
+                self.mark_dirty_from(idx);
+            }
+            None => {
+                self.entries.push(TraceEntry {
+                    kind: TraceKind::UserMessage,
+                    text: text.to_string(),
+                    timestamp,
+                    #[cfg(feature = "markdown")]
+                    markdown: None,
+                });
+                self.mark_dirty_from(self.entries.len() - 1);
+            }
+        }
+    }
+
     /// Push a new trace entry, evicting oldest if over capacity.
     pub fn push(&mut self, entry: TraceEntry) {
         self.entries.push(entry);
@@ -1082,5 +1113,39 @@ mod tests {
             agent_message_count, 1,
             "consecutive chunks should merge into one entry"
         );
+    }
+
+    #[test]
+    fn append_user_message_creates_new_entry_when_empty() {
+        let mut trace = ReactTrace::new();
+        trace.append_user_message("hello", "10:00:01".to_string());
+        let entries = trace.entries_for_test();
+        let user_count = entries
+            .iter()
+            .filter(|e| matches!(&e.kind, TraceKind::UserMessage))
+            .count();
+        assert_eq!(user_count, 1);
+        assert_eq!(entries.last().unwrap().text, "hello");
+    }
+
+    #[test]
+    fn append_user_message_coalesces_into_tail_user_entry() {
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::UserMessage,
+            text: "hello ".to_string(),
+            timestamp: "10:00:01".to_string(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        trace.append_user_message("world", "10:00:02".to_string());
+
+        let entries = trace.entries_for_test();
+        let user_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(&e.kind, TraceKind::UserMessage))
+            .collect();
+        assert_eq!(user_entries.len(), 1, "must coalesce, not duplicate");
+        assert_eq!(user_entries[0].text, "hello world");
     }
 }

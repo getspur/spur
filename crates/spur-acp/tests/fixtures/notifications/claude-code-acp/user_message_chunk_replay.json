@@ -1,0 +1,10 @@
+{
+  "sessionId": "sess-cc-replay-001",
+  "update": {
+    "sessionUpdate": "user_message_chunk",
+    "content": {
+      "type": "text",
+      "text": "list the files in src/"
+    }
+  }
+}
