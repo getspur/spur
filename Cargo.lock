@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "spur-acp"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "spur-cli"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "spur-core"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "spur-cost"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2198,7 +2198,7 @@ dependencies = [
 
 [[package]]
 name = "spur-mcp"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "spur-pm"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "spur-tui"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "spur-worktree"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "chrono",
