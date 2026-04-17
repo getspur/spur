@@ -285,6 +285,76 @@ pub fn derive_epic_plan_from_issues(
     })
 }
 
+/// Async PmService-fetching wrapper around `derive_epic_plan_from_issues`.
+///
+/// Fetches the epic issue, lists all issues and fetches each one, keeps only
+/// direct children (issues whose `blocked_by` contains `epic_id`), fetches
+/// external-dep statuses, then delegates to the pure derivation function.
+///
+/// `known_agents` is a slice of agent names sourced from the configured
+/// `WorkerInfo` list on `McpCallbackServer`.
+pub async fn derive_epic_plan(
+    pm: &spur_pm::PmService,
+    epic_id: &str,
+    default_agent: Option<&str>,
+    known_agents: &[&str],
+) -> Result<DerivedEpicPlan, String> {
+    // 1. Fetch the epic.
+    let epic = pm
+        .get_issue(epic_id)
+        .await
+        .map_err(|e| format!("failed to fetch epic '{epic_id}': {e}"))?;
+
+    // 2. List all issues and fetch full details for each to find children.
+    //    A child is an issue whose blocked_by list contains epic_id
+    //    (the beads parent-child dependency type is included in blocked_by).
+    let summaries = pm
+        .list_issues(spur_pm::IssueFilter {
+            limit: Some(500),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| format!("failed to list issues: {e}"))?;
+
+    let mut children: Vec<spur_pm::Issue> = Vec::new();
+    for summary in &summaries {
+        if summary.id == epic_id {
+            continue;
+        }
+        let full = pm
+            .get_issue(&summary.id)
+            .await
+            .map_err(|e| format!("failed to fetch issue '{}': {e}", summary.id))?;
+        if full.blocked_by.iter().any(|b| b == epic_id) {
+            children.push(full);
+        }
+    }
+
+    // 3. Collect external dep statuses: for each blocked_by reference in any
+    //    child that is NOT in the subgraph, fetch its status.
+    let subgraph_ids: std::collections::HashSet<&str> =
+        children.iter().map(|c| c.id.as_str()).collect();
+    let mut external_dep_statuses: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for child in &children {
+        for dep in &child.blocked_by {
+            if dep == epic_id || subgraph_ids.contains(dep.as_str()) {
+                continue;
+            }
+            if external_dep_statuses.contains_key(dep) {
+                continue;
+            }
+            let dep_issue = pm
+                .get_issue(dep)
+                .await
+                .map_err(|e| format!("failed to fetch external dep '{dep}': {e}"))?;
+            external_dep_statuses.insert(dep.clone(), dep_issue.status.clone());
+        }
+    }
+
+    // 4. Delegate to the pure derivation function.
+    derive_epic_plan_from_issues(&epic, &children, &external_dep_statuses, default_agent, known_agents)
+}
 
 /// Derive a short human-readable name from a task's full text. Takes the
 /// first non-empty line, trims, and caps at 60 chars on a UTF-8 boundary.
