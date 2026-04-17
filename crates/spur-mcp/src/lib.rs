@@ -1,3 +1,4 @@
+pub mod plan;
 pub mod server;
 pub mod tools;
 

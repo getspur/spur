@@ -434,6 +434,240 @@ fn cancel_delegation_def() -> ToolDefinition {
     }
 }
 
+// ─── Graph analysis tool definitions (bv robot protocol) ────────────
+
+fn graph_triage_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "graph_triage".into(),
+        description: "Get PageRank-weighted project triage: top recommendations, quick wins, blockers to clear, and project health metrics. Complements list_issues (CRUD) with graph-based dependency analysis. Call this FIRST for orientation before starting work. Note: triage includes alert data — only call graph_alerts separately when you need standalone alert monitoring without the full triage context. Optionally scope to a label. Requires bv (beads_viewer) to be installed.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Scope analysis to issues with this label"
+                }
+            }
+        }),
+    }
+}
+
+fn graph_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "graph_plan".into(),
+        description: "Get a dependency-aware parallel execution plan. Returns independent tracks of work that can proceed simultaneously. Use to identify what can be delegated in parallel.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Scope to issues with this label"
+                }
+            }
+        }),
+    }
+}
+
+fn graph_insights_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "graph_insights".into(),
+        description: "Get full graph metrics: PageRank (importance), betweenness (bottlenecks), HITS (hubs/authorities), critical path, cycles, articulation points. Use for deep structural analysis of the project dependency graph.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Scope to issues with this label"
+                }
+            }
+        }),
+    }
+}
+
+fn graph_alerts_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "graph_alerts".into(),
+        description: "Get active health alerts: stale issues, blocking cascades, priority mismatches, circular dependencies. Use for project health monitoring.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }
+}
+
+fn graph_subgraph_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "graph_subgraph".into(),
+        description: "Get the dependency subgraph for a specific issue. Returns nodes and edges showing what this issue depends on and what depends on it. Use format=mermaid for visual dependency diagrams.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "root_id": {
+                    "type": "string",
+                    "description": "Issue ID to center the subgraph on"
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Max traversal depth (0 = unlimited, default)"
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "dot", "mermaid"],
+                    "description": "Output format (default: json)"
+                }
+            },
+            "required": ["root_id"]
+        }),
+    }
+}
+
+// ─── Issue creation + dependency tools ────────────────────────────
+
+fn create_issue_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "create_issue".into(),
+        description: "Create a new issue in the project tracker. For task decomposition: create an epic first (type=epic), then create child tasks with parent=<epic_id>. Structure descriptions as CONTEXT / GOAL / CONSTRAINTS / ACCEPTANCE CRITERIA. Use depends_on to wire dependency edges so graph_plan can compute optimal execution ordering. After creating all tasks, call graph_plan() to get dependency-aware tracks, then submit_plan() to execute.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Issue title — concise, action-oriented"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description (markdown). Structure as CONTEXT / GOAL / CONSTRAINTS / ACCEPTANCE CRITERIA for tasks."
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["task", "bug", "feature", "epic"],
+                    "description": "Issue type. Use 'epic' for grouping, 'task' for work items."
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Priority 0-4 (0=critical, 4=backlog). Affects graph_triage ranking."
+                },
+                "labels": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Labels for categorization"
+                },
+                "parent": {
+                    "type": "string",
+                    "description": "Parent issue ID — creates parent-child dependency (e.g., epic ID for child tasks)"
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": "Assignee username"
+                },
+                "estimate": {
+                    "type": "integer",
+                    "description": "Time estimate in minutes"
+                },
+                "depends_on": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Issue IDs this new issue depends on (blocking deps). Used by graph_plan for execution ordering."
+                }
+            },
+            "required": ["title"]
+        }),
+    }
+}
+
+fn add_dependency_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "add_dependency".into(),
+        description: "Add a dependency edge between existing issues: issue_id is blocked by depends_on_id. Use after creating issues to wire the dependency graph. After wiring deps, call graph_plan() to get optimized execution ordering. Beads backend only — returns error for GitHub.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "issue_id": {
+                    "type": "string",
+                    "description": "The issue that is blocked"
+                },
+                "depends_on_id": {
+                    "type": "string",
+                    "description": "The issue that blocks it (must complete first)"
+                }
+            },
+            "required": ["issue_id", "depends_on_id"]
+        }),
+    }
+}
+
+// ─── Plan execution tool definitions ──────────────────────────────
+
+fn submit_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_plan".into(),
+        description: "Submit a structured execution plan with dependency ordering. The orchestrator dispatches tasks to workers automatically: independent tasks run in parallel, dependent tasks wait for predecessors to complete. Use graph_plan to get dependency-aware tracks, then enrich each item with agent assignment and task description. Returns a plan_id — poll with get_plan_status.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "Unique identifier for this task (use issue ID or descriptive slug)"
+                            },
+                            "agent": {
+                                "type": "string",
+                                "description": "Worker agent to execute this task"
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "Task description (CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT)"
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "task_ids that must complete before this task starts. Empty or omitted = ready immediately."
+                            },
+                            "issue_id": {
+                                "type": "string",
+                                "description": "Optional beads issue ID to auto-track"
+                            },
+                            "context_files": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Optional file paths for worker context"
+                            }
+                        },
+                        "required": ["task_id", "agent", "task"]
+                    },
+                    "description": "Tasks with dependency edges forming a DAG. Tasks with no depends_on are dispatched immediately."
+                },
+                "delegation_plan": {
+                    "type": "object",
+                    "description": "Structured reasoning for the overall plan."
+                }
+            },
+            "required": ["tasks"]
+        }),
+    }
+}
+
+fn get_plan_status_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_plan_status".into(),
+        description: "Get the current status of a submitted execution plan. Returns per-task status: pending (waiting for deps), ready, dispatched (running), completed, or failed. Non-blocking — returns immediately.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id returned by submit_plan"
+                }
+            },
+            "required": ["plan_id"]
+        }),
+    }
+}
+
 /// Returns all tool definitions for the MCP `tools/list` response.
 pub fn tools_list() -> Vec<ToolDefinition> {
     vec![
@@ -447,8 +681,17 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         get_issue_def(),
         list_issues_def(),
         update_issue_def(),
+        create_issue_def(),
+        add_dependency_def(),
         create_pr_def(),
         report_progress_def(),
         get_session_cost_def(),
+        graph_triage_def(),
+        graph_plan_def(),
+        graph_insights_def(),
+        graph_alerts_def(),
+        graph_subgraph_def(),
+        submit_plan_def(),
+        get_plan_status_def(),
     ]
 }

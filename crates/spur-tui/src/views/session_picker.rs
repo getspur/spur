@@ -412,6 +412,7 @@ impl SessionPickerView {
                 context_size: None,
                 stream_in_flight: false,
                 issue_count: 0,
+                alert_summary: None,
             },
         );
         render_footer_hint(frame, chunks[2]);
@@ -710,6 +711,7 @@ impl SessionPickerView {
                     context_size: None,
                     stream_in_flight: false,
                     issue_count: 0,
+                alert_summary: None,
                 },
             );
         }
@@ -762,6 +764,7 @@ impl SessionPickerView {
                 context_size: None,
                 stream_in_flight: false,
                 issue_count: 0,
+                alert_summary: None,
             },
         );
         render_footer_hint(frame, chunks[2]);

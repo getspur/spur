@@ -170,6 +170,127 @@ fn to_summary_event(
     }
 }
 
+/// Emit a `GraphAlertsSummary` event from a triage report's alert list.
+fn emit_alerts_from_report(
+    report: &spur_pm::graph::TriageReport,
+    funnel: &crate::event_funnel::FunnelHandle,
+) {
+    let alerts = &report.triage.alerts;
+    let critical = alerts
+        .iter()
+        .filter(|a| a.severity.as_deref() == Some("critical"))
+        .count();
+    let warning = alerts
+        .iter()
+        .filter(|a| a.severity.as_deref() == Some("warning"))
+        .count();
+    let details: Vec<String> = alerts
+        .iter()
+        .take(5)
+        .filter_map(|a| a.message.clone())
+        .collect();
+    funnel.emit(SpurEventBody::GraphAlertsSummary {
+        total: alerts.len(),
+        critical,
+        warning,
+        details,
+    });
+}
+
+/// Build a brain-prompt summary from a triage report.
+fn build_graph_prompt_summary(report: &spur_pm::graph::TriageReport) -> Option<String> {
+    let qr = &report.triage.quick_ref;
+    let health = &report.triage.project_health;
+    let mut lines = vec![
+        "## Project Graph Intelligence".to_string(),
+        String::new(),
+        format!(
+            "Project: {} open, {} actionable, {} blocked, {} in progress.",
+            qr.open_count, qr.actionable_count, qr.blocked_count, qr.in_progress_count,
+        ),
+    ];
+    if let Some(top) = qr.top_picks.first() {
+        lines.push(format!(
+            "Top recommendation: {} (score {:.2}) — \"{}\"",
+            top.id, top.score, top.title,
+        ));
+    }
+    if health.graph.has_cycles {
+        lines.push(format!(
+            "Warning: {} cycles detected in dependency graph.",
+            health.graph.cycle_count,
+        ));
+    }
+    if !report.triage.quick_wins.is_empty() {
+        let ids: Vec<_> = report
+            .triage
+            .quick_wins
+            .iter()
+            .take(3)
+            .map(|q| q.id.as_str())
+            .collect();
+        lines.push(format!("Quick wins: {}", ids.join(", ")));
+    }
+    lines.push(String::new());
+    lines.push(
+        "Use `graph_triage` for full analysis. \
+         Use `graph_plan` for parallel execution tracks."
+            .to_string(),
+    );
+    Some(lines.join("\n"))
+}
+
+/// Parallel-fetch issues + graph triage, emit `IssuesLoaded` +
+/// `GraphAlertsSummary` events via `tokio::join!`. When `for_prompt` is
+/// true, also returns a graph summary string for brain prompt enrichment.
+///
+/// Replaces the previous sequential `list_issues` → `emit_graph_alerts`
+/// pattern at all 4 call sites. Wall-time: `max(T_br, T_bv)` instead of
+/// `T_br + T_bv`.
+async fn refresh_pm_state(
+    pm: &spur_pm::PmService,
+    funnel: &crate::event_funnel::FunnelHandle,
+    limit: Option<usize>,
+    for_prompt: bool,
+) -> Option<String> {
+    let issues_fut = pm.list_issues(spur_pm::IssueFilter {
+        status: Some("open".into()),
+        limit,
+        ..Default::default()
+    });
+
+    let triage_fut = async {
+        match pm.analyzer() {
+            Some(bv) => bv.triage(None).await.ok(),
+            None => None,
+        }
+    };
+
+    let (issues_result, triage_opt) = tokio::join!(issues_fut, triage_fut);
+
+    // Emit issues.
+    match issues_result {
+        Ok(issues) => {
+            let event_issues: Vec<_> = issues
+                .iter()
+                .map(|i| to_summary_event(i, pm.source_str()))
+                .collect();
+            tracing::info!(count = issues.len(), "Loaded open issues from {}", pm.source_str());
+            funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
+        }
+        Err(e) => tracing::warn!("Failed to load issues: {e}"),
+    }
+
+    // Emit alerts + optionally build prompt summary.
+    if let Some(report) = triage_opt {
+        emit_alerts_from_report(&report, funnel);
+        if for_prompt {
+            return build_graph_prompt_summary(&report);
+        }
+    }
+    None
+}
+
 /// Convert spur_pm::Issue to the spur_acp mirror type for event bus transmission.
 fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDetailEvent {
     spur_acp::IssueDetailEvent {
@@ -360,22 +481,12 @@ impl Orchestrator {
             session: session_id.clone(),
         }));
 
-        // 1b. Load open issues for TUI display.
-        if let Some(pm) = &self.pm_service {
-            match pm.list_issues(spur_pm::IssueFilter {
-                status: Some("open".into()),
-                ..Default::default()
-            }).await {
-                Ok(issues) => {
-                    let event_issues: Vec<_> = issues.iter()
-                        .map(|i| to_summary_event(i, pm.source_str()))
-                        .collect();
-                    self.funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
-                    tracing::info!(count = issues.len(), "Loaded open issues from {}", pm.source_str());
-                }
-                Err(e) => tracing::warn!("Failed to load issues: {e}"),
-            }
-        }
+        // 1b. Parallel-fetch issues + graph intelligence for TUI + brain prompt.
+        let graph_summary = if let Some(pm) = &self.pm_service {
+            refresh_pm_state(pm, &self.funnel, None, true).await
+        } else {
+            None
+        };
 
         // 2. Optionally fetch issue context.
         let issue_context = if let Some(ref issue_ref) = opts.issue {
@@ -396,9 +507,13 @@ impl Orchestrator {
             None
         };
 
-        // 3. Build brain prompt.
+        // 3. Build brain prompt (enriched with graph intelligence).
+        let enriched_task = match &graph_summary {
+            Some(summary) => format!("{summary}\n\n{task}"),
+            None => task.to_string(),
+        };
         let prompt_text =
-            self.build_brain_prompt(task, issue_context.as_ref(), &session_id, &brain_name);
+            self.build_brain_prompt(&enriched_task, issue_context.as_ref(), &session_id, &brain_name);
 
         // 4. Start MCP callback server.
         let (mcp_server, delegation_channel) =
@@ -570,6 +685,30 @@ impl Orchestrator {
             std::collections::VecDeque::new();
         const RECONNECT_CIRCUIT_LIMIT: usize = 3;
         const RECONNECT_CIRCUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+        // Startup: parallel-fetch issues + graph alerts for TUI display.
+        if let Some(pm) = &self.pm_service {
+            refresh_pm_state(pm, &self.funnel, None, false).await;
+        }
+
+        // Startup guidance: surface actionable install hints for missing PM tools.
+        if self.pm_service.is_none() && self.repo_root.join(".beads").is_dir() {
+            self.funnel.emit(SpurEventBody::IssueCommandError {
+                operation: "startup".into(),
+                error: "br (beads) not installed — issue tracking disabled. \
+                        Install: cargo install --git https://github.com/Dicklesworthstone/beads_rust.git"
+                    .into(),
+            });
+        } else if let Some(pm) = &self.pm_service {
+            if pm.analyzer().is_none() {
+                self.funnel.emit(SpurEventBody::IssueCommandError {
+                    operation: "startup".into(),
+                    error: "bv (beads_viewer) not installed — graph analysis disabled. \
+                            Install: brew install dicklesworthstone/tap/bv"
+                        .into(),
+                });
+            }
+        }
 
         loop {
             // ── Get next input (from queue or user) ────────────────────
@@ -824,24 +963,7 @@ impl Orchestrator {
                 // ── RefreshIssues ────────────────────────────────────────
                 InteractiveInput::RefreshIssues => {
                     if let Some(pm) = &self.pm_service {
-                        match pm.list_issues(spur_pm::IssueFilter {
-                            status: Some("open".into()),
-                            limit: Some(50),
-                            ..Default::default()
-                        }).await {
-                            Ok(issues) => {
-                                let event_issues: Vec<_> = issues.iter()
-                                    .map(|i| to_summary_event(i, pm.source_str()))
-                                    .collect();
-                                self.funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
-                            }
-                            Err(e) => {
-                                self.funnel.emit(SpurEventBody::IssueCommandError {
-                                    operation: "RefreshIssues".into(),
-                                    error: e.to_string(),
-                                });
-                            }
-                        }
+                        refresh_pm_state(pm, &self.funnel, Some(50), false).await;
                     } else {
                         self.funnel.emit(SpurEventBody::IssueCommandError {
                             operation: "RefreshIssues".into(),
@@ -2213,6 +2335,11 @@ impl Orchestrator {
         pm_service: Option<Arc<PmService>>,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        // Debounce: skip post-delegation refresh if another completed <3s ago.
+        // Initial value is in the past so the first refresh always runs.
+        let last_refresh_at = Arc::new(tokio::sync::Mutex::new(
+            tokio::time::Instant::now() - std::time::Duration::from_secs(60),
+        ));
 
         while let Some(request) = channel.request_rx.recv().await {
             // Destructure the request — it is not Clone, so we move each field.
@@ -2239,6 +2366,7 @@ impl Orchestrator {
             let funnel = funnel.clone();
             let review_sink = review_sink.clone();
             let pm_service = pm_service.clone();
+            let last_refresh_at = Arc::clone(&last_refresh_at);
 
             tokio::spawn(async move {
                 let mut guard = DelegationGuard {
@@ -2344,18 +2472,18 @@ impl Orchestrator {
                     }
                 }
 
-                // Refresh issue list after delegation completes so TUI picks up
-                // any label, body, or priority changes made by the worker (F19).
+                // Refresh issue list + graph alerts after delegation completes
+                // so TUI picks up changes made by the worker (F19).
+                // Debounce: skip if another delegation refreshed <3s ago
+                // (prevents thundering herd from delegate_parallel).
                 if let Some(ref pm) = pm_service {
-                    if let Ok(issues) = pm.list_issues(spur_pm::IssueFilter {
-                        status: Some("open".into()),
-                        limit: Some(50),
-                        ..Default::default()
-                    }).await {
-                        let event_issues: Vec<_> = issues.iter()
-                            .map(|i| to_summary_event(i, pm.source_str()))
-                            .collect();
-                        funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
+                    let mut last = last_refresh_at.lock().await;
+                    if last.elapsed() >= std::time::Duration::from_secs(3) {
+                        *last = tokio::time::Instant::now();
+                        drop(last); // release lock before async work
+                        refresh_pm_state(pm, &funnel, Some(50), false).await;
+                    } else {
+                        tracing::debug!("Skipping post-delegation refresh (debounced)");
                     }
                 }
 

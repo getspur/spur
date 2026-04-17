@@ -1681,6 +1681,7 @@ impl SessionDetailView {
                 context_size: self.context_size,
                 stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
                 issue_count: 0,
+                alert_summary: None,
             },
         );
 

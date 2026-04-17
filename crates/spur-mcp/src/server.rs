@@ -153,6 +153,8 @@ pub struct McpCallbackServer {
     task_tracker: TaskTracker,
     /// Optional PM service for direct issue/PR operations.
     pm_service: Option<Arc<PmService>>,
+    /// Active execution plans submitted via `submit_plan`.
+    active_plans: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
 }
 
 impl McpCallbackServer {
@@ -171,6 +173,7 @@ impl McpCallbackServer {
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             task_tracker: TaskTracker::new(),
             pm_service,
+            active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -398,9 +401,18 @@ impl McpCallbackServer {
             "get_issue" => self.handle_get_issue(id, arguments).await,
             "list_issues" => self.handle_list_issues(id, arguments).await,
             "update_issue" => self.handle_update_issue(id, arguments).await,
+            "create_issue" => self.handle_create_issue(id, arguments).await,
+            "add_dependency" => self.handle_add_dependency(id, arguments).await,
             "create_pr" => self.handle_create_pr(id, arguments).await,
             "report_progress" => self.handle_report_progress(id, arguments).await,
             "get_session_cost" => self.handle_get_session_cost(id).await,
+            "graph_triage" => self.handle_graph_triage(id, arguments).await,
+            "graph_plan" => self.handle_graph_plan(id, arguments).await,
+            "graph_insights" => self.handle_graph_insights(id, arguments).await,
+            "graph_alerts" => self.handle_graph_alerts(id, arguments).await,
+            "graph_subgraph" => self.handle_graph_subgraph(id, arguments).await,
+            "submit_plan" => self.handle_submit_plan(id, arguments).await,
+            "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
         }
     }
@@ -870,6 +882,86 @@ impl McpCallbackServer {
         }
     }
 
+    async fn handle_create_issue(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let pm = match self.pm_service.as_ref() {
+            Some(pm) => pm,
+            None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
+        };
+        let title = match args.get("title").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'title'"),
+        };
+
+        let labels: Vec<String> = args
+            .get("labels")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let depends_on: Vec<String> = args
+            .get("depends_on")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let params = spur_pm::IssueCreate {
+            title,
+            description: args.get("description").and_then(|v| v.as_str()).map(String::from),
+            issue_type: args.get("type").and_then(|v| v.as_str()).map(String::from),
+            priority: args.get("priority").and_then(|v| v.as_i64()).map(|n| n as i32),
+            labels,
+            parent: args.get("parent").and_then(|v| v.as_str()).map(String::from),
+            assignee: args.get("assignee").and_then(|v| v.as_str()).map(String::from),
+            estimate_minutes: args.get("estimate").and_then(|v| v.as_u64()).map(|n| n as u32),
+            depends_on,
+        };
+
+        match pm.create_issue(params).await {
+            Ok(issue_id) => JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Issue created: {issue_id}")
+                    }]
+                }),
+            ),
+            Err(e) => JsonRpcResponse::internal_error(id, format!("create_issue failed: {e}")),
+        }
+    }
+
+    async fn handle_add_dependency(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let pm = match self.pm_service.as_ref() {
+            Some(pm) => pm,
+            None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
+        };
+        let issue_id = match args.get("issue_id").and_then(|v| v.as_str()) {
+            Some(i) => i.to_string(),
+            None => {
+                return JsonRpcResponse::invalid_params(id, "Missing required field 'issue_id'")
+            }
+        };
+        let depends_on_id = match args.get("depends_on_id").and_then(|v| v.as_str()) {
+            Some(d) => d.to_string(),
+            None => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    "Missing required field 'depends_on_id'",
+                )
+            }
+        };
+
+        match pm.add_dependency(&issue_id, &depends_on_id).await {
+            Ok(()) => JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Dependency added: {issue_id} depends on {depends_on_id}")
+                    }]
+                }),
+            ),
+            Err(e) => JsonRpcResponse::internal_error(id, format!("add_dependency failed: {e}")),
+        }
+    }
+
     async fn handle_create_pr(&self, id: Value, args: Value) -> JsonRpcResponse {
         let pm = match self.pm_service.as_ref() {
             Some(pm) => pm,
@@ -968,6 +1060,228 @@ impl McpCallbackServer {
                 "get_session_cost failed: orchestrator disconnected",
             ),
         }
+    }
+
+    // ─── Graph analysis handlers (bv robot protocol) ───────────────
+
+    /// Helper: get the bv analyzer or return an MCP error.
+    fn require_analyzer(&self, id: &Value) -> Result<&spur_pm::BvAdapter, JsonRpcResponse> {
+        let pm = self.pm_service.as_ref().ok_or_else(|| {
+            JsonRpcResponse::internal_error(id.clone(), "No PM service configured")
+        })?;
+        pm.analyzer().ok_or_else(|| {
+            JsonRpcResponse::internal_error(
+                id.clone(),
+                "Graph analysis not available. Install bv: brew install dicklesworthstone/tap/bv",
+            )
+        })
+    }
+
+    async fn handle_graph_triage(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let bv = match self.require_analyzer(&id) {
+            Ok(bv) => bv,
+            Err(resp) => return resp,
+        };
+        let label = args.get("label").and_then(|v| v.as_str());
+        match bv.triage(label).await {
+            Ok(report) => {
+                let text = serde_json::to_string_pretty(&report.raw)
+                    .unwrap_or_else(|_| report.raw.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(e) => JsonRpcResponse::internal_error(id, format!("graph_triage failed: {e}")),
+        }
+    }
+
+    async fn handle_graph_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let bv = match self.require_analyzer(&id) {
+            Ok(bv) => bv,
+            Err(resp) => return resp,
+        };
+        let label = args.get("label").and_then(|v| v.as_str());
+        match bv.plan(label).await {
+            Ok(plan) => {
+                let text = serde_json::to_string_pretty(&plan.raw)
+                    .unwrap_or_else(|_| plan.raw.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(e) => JsonRpcResponse::internal_error(id, format!("graph_plan failed: {e}")),
+        }
+    }
+
+    async fn handle_graph_insights(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let bv = match self.require_analyzer(&id) {
+            Ok(bv) => bv,
+            Err(resp) => return resp,
+        };
+        let label = args.get("label").and_then(|v| v.as_str());
+        match bv.insights(label).await {
+            Ok(insights) => {
+                let text = serde_json::to_string_pretty(&insights.raw)
+                    .unwrap_or_else(|_| insights.raw.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(e) => JsonRpcResponse::internal_error(id, format!("graph_insights failed: {e}")),
+        }
+    }
+
+    async fn handle_graph_alerts(&self, id: Value, _args: Value) -> JsonRpcResponse {
+        let bv = match self.require_analyzer(&id) {
+            Ok(bv) => bv,
+            Err(resp) => return resp,
+        };
+        match bv.alerts().await {
+            Ok(report) => {
+                let text = serde_json::to_string_pretty(&report.raw)
+                    .unwrap_or_else(|_| report.raw.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(e) => JsonRpcResponse::internal_error(id, format!("graph_alerts failed: {e}")),
+        }
+    }
+
+    async fn handle_graph_subgraph(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let bv = match self.require_analyzer(&id) {
+            Ok(bv) => bv,
+            Err(resp) => return resp,
+        };
+        let root_id = match args.get("root_id").and_then(|v| v.as_str()) {
+            Some(r) => r,
+            None => {
+                return JsonRpcResponse::invalid_params(id, "Missing required field 'root_id'")
+            }
+        };
+        let depth = args.get("depth").and_then(|v| v.as_u64()).map(|d| d as u32);
+        let format = args.get("format").and_then(|v| v.as_str());
+        match bv.subgraph(root_id, depth, format).await {
+            Ok(graph) => {
+                let text = serde_json::to_string_pretty(&graph.raw)
+                    .unwrap_or_else(|_| graph.raw.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(e) => JsonRpcResponse::internal_error(id, format!("graph_subgraph failed: {e}")),
+        }
+    }
+
+    // ─── Plan execution handlers ──────────────────────────────────
+
+    async fn handle_submit_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let tasks_val = match args.get("tasks").and_then(|v| v.as_array()) {
+            Some(t) => t.clone(),
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'tasks'"),
+        };
+
+        let tasks: Vec<crate::plan::PlanTask> = match tasks_val
+            .into_iter()
+            .map(|v| serde_json::from_value(v))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("Invalid task format: {e}"),
+                )
+            }
+        };
+
+        if let Err(e) = crate::plan::validate_plan(&tasks) {
+            return JsonRpcResponse::invalid_params(id, e);
+        }
+
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let entries: Vec<crate::plan::PlanTaskEntry> = tasks
+            .into_iter()
+            .map(|spec| crate::plan::PlanTaskEntry {
+                spec,
+                status: crate::plan::PlanTaskStatus::Pending,
+                result: None,
+            })
+            .collect();
+
+        let task_count = entries.len();
+        let state = crate::plan::PlanState {
+            plan_id: plan_id.clone(),
+            tasks: entries,
+            brain_session_id: self.brain_session_id.clone(),
+        };
+        let state = Arc::new(tokio::sync::Mutex::new(state));
+
+        self.active_plans
+            .lock()
+            .await
+            .insert(plan_id.clone(), Arc::clone(&state));
+
+        // Spawn the plan executor.
+        let delegation_tx = self.delegation_tx.clone();
+        self.task_tracker.spawn(crate::plan::run_plan(state, delegation_tx));
+
+        info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
+
+        JsonRpcResponse::success(
+            id,
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Plan submitted: {task_count} tasks. plan_id: {plan_id}\n\
+                         Poll with get_plan_status to monitor progress."
+                    )
+                }]
+            }),
+        )
+    }
+
+    async fn handle_get_plan_status(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => {
+                return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'")
+            }
+        };
+
+        // Clone the Arc before releasing the outer lock so we don't hold
+        // active_plans while awaiting the inner plan lock — prevents
+        // blocking concurrent submit_plan calls.
+        let plan_arc = {
+            let plans = self.active_plans.lock().await;
+            plans.get(&plan_id).cloned()
+        };
+
+        let plan_state = match plan_arc {
+            Some(s) => s,
+            None => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("Unknown plan_id: '{plan_id}'"),
+                )
+            }
+        };
+
+        let state = plan_state.lock().await;
+        let status = crate::plan::build_plan_status(&state);
+        let text =
+            serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+
+        JsonRpcResponse::success(
+            id,
+            json!({ "content": [{ "type": "text", "text": text }] }),
+        )
     }
 
     async fn handle_delegate_async(&self, id: Value, args: Value) -> JsonRpcResponse {

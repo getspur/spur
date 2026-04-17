@@ -61,6 +61,7 @@ pub struct DashboardView {
     issues_panel: IssuesPanel,
     issue_detail_pane: IssueDetailPane,
     issue_focus: IssueFocus,
+    alert_summary: Option<(usize, usize, usize)>,
 }
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
@@ -127,6 +128,7 @@ impl DashboardView {
             issues_panel: IssuesPanel::new(),
             issue_detail_pane: IssueDetailPane::new(),
             issue_focus: IssueFocus::None,
+            alert_summary: None,
         }
     }
 
@@ -388,6 +390,7 @@ impl DashboardView {
                     context_size: None,
                     stream_in_flight: false,
                     issue_count: self.tracked_issues.len(),
+                    alert_summary: self.alert_summary,
                 },
             );
             return;
@@ -474,6 +477,7 @@ impl DashboardView {
                 context_size: None,
                 stream_in_flight: false,
                 issue_count: self.tracked_issues.len(),
+                alert_summary: self.alert_summary,
             },
         );
     }
@@ -1339,6 +1343,23 @@ impl View for DashboardView {
                 });
                 if matches!(self.issue_focus, IssueFocus::Loading { .. }) {
                     self.issue_focus = IssueFocus::None;
+                }
+            }
+
+            SpurEventBody::GraphAlertsSummary {
+                total,
+                critical,
+                warning,
+                details,
+            } => {
+                self.alert_summary = Some((*total, *critical, *warning));
+                for msg in details.iter().take(5) {
+                    self.activity_log.push(LogEntry {
+                        timestamp: Self::now_stamp(),
+                        prefix: "[graph]".into(),
+                        message: msg.clone(),
+                        kind: if *critical > 0 { LogEntryKind::Error } else { LogEntryKind::Info },
+                    });
                 }
             }
 

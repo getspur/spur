@@ -685,6 +685,43 @@ async fn cmd_init(repo_root: PathBuf, force: bool) -> Result<()> {
         }
     }
 
+    // ── PM tools: detect br (beads) and bv (beads_viewer). ──
+    println!();
+    println!("[spur] Checking PM tools...");
+    println!();
+
+    const PM_TOOLS: &[(&str, &str)] = &[
+        (
+            "br",
+            "cargo install --git https://github.com/Dicklesworthstone/beads_rust.git",
+        ),
+        ("bv", "brew install dicklesworthstone/tap/bv"),
+    ];
+    let beads_dir_exists = repo_root.join(".beads").is_dir();
+    let mut br_found = false;
+
+    for &(cmd, hint) in PM_TOOLS {
+        let found = tokio::process::Command::new("which")
+            .arg(cmd)
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if cmd == "br" {
+            br_found = found;
+        }
+        if found {
+            println!("  ✓ {cmd}");
+        } else {
+            println!("  ✗ {cmd:<18}install: {hint}");
+        }
+    }
+
+    if beads_dir_exists && !br_found {
+        println!();
+        println!("  Note: .beads/ found but br is missing — issue tracking will not work.");
+    }
+
     // ── Path B: zero agents → no write. ──
     if registered.is_empty() {
         println!();
