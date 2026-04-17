@@ -245,8 +245,7 @@ pub async fn run_plan(
                 .iter()
                 .filter(|t| matches!(
                     t.status,
-                    PlanTaskStatus::AwaitingReview { .. }
-                        | PlanTaskStatus::Approved { .. }
+                    PlanTaskStatus::Approved { .. }
                 ))
                 .map(|t| t.spec.task_id.clone())
                 .collect();
@@ -500,8 +499,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                                 o.spec.task_id == **d
                                     && matches!(
                                         o.status,
-                                        PlanTaskStatus::AwaitingReview { .. }
-                                            | PlanTaskStatus::Approved { .. }
+                                        PlanTaskStatus::Approved { .. }
                                     )
                             })
                         })
