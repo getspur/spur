@@ -8,7 +8,7 @@ use ratatui::{
 use spur_pm::IssueSummary;
 
 pub struct IssuesPanel {
-    pub table_state: TableState,
+    table_state: TableState,
     focused: bool,
 }
 
