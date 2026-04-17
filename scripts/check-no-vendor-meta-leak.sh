@@ -4,9 +4,16 @@
 # normalized types. See docs/spur/acp-meta-conventions.md.
 set -euo pipefail
 
+# Pipe-separated alternations; tokens matched with grep -E.
 VENDOR_TOKENS='"_meta"|claudeCode|parentToolUseId|toolResponse|terminal_info'
 TARGET='crates/spur-tui/src/'
 ALLOWLIST_MARKER='allow-vendor-read'
+
+if [[ ! -d "$TARGET" ]]; then
+    echo "ERROR: target directory '$TARGET' not found." >&2
+    echo "This script must be run from the spur repo root." >&2
+    exit 1
+fi
 
 # Find matches, then drop lines carrying the allowlist marker.
 MATCHES=$(grep -rnE "$VENDOR_TOKENS" "$TARGET" || true)
