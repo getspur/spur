@@ -414,6 +414,20 @@ impl McpCallbackServer {
             "graph_subgraph" => self.handle_graph_subgraph(id, arguments).await,
             "submit_plan" => self.handle_submit_plan(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
+            "get_task_diff" => match self.handle_get_task_diff(&arguments).await {
+                Ok(text) => JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                ),
+                Err(e) => JsonRpcResponse::internal_error(id, e),
+            },
+            "review_task" => match self.handle_review_task(&arguments).await {
+                Ok(text) => JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                ),
+                Err(e) => JsonRpcResponse::internal_error(id, e),
+            },
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
         }
     }
@@ -1284,6 +1298,81 @@ impl McpCallbackServer {
             id,
             json!({ "content": [{ "type": "text", "text": text }] }),
         )
+    }
+
+    async fn handle_get_task_diff(&self, args: &serde_json::Value) -> Result<String, String> {
+        let plan_id = args["plan_id"].as_str().ok_or("missing plan_id")?.to_string();
+        let task_id = args["task_id"].as_str().ok_or("missing task_id")?.to_string();
+
+        let plan_arc = {
+            let plans = self.active_plans.lock().await;
+            plans.get(&plan_id).cloned()
+                .ok_or_else(|| format!("unknown plan '{plan_id}'"))?
+        };
+
+        let state = plan_arc.lock().await;
+        let entry = state.tasks.iter().find(|t| t.spec.task_id == task_id)
+            .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
+
+        match &entry.status {
+            crate::plan::PlanTaskStatus::Pending | crate::plan::PlanTaskStatus::Ready => {
+                return Err(format!("task '{task_id}' has not been dispatched yet"));
+            }
+            crate::plan::PlanTaskStatus::Dispatched { .. } => {
+                return Err(format!("task '{task_id}' is still running — diff not available yet"));
+            }
+            _ => {}
+        }
+
+        let mut resp = serde_json::Map::new();
+        resp.insert("task_id".into(), json!(task_id));
+        resp.insert("agent".into(), json!(entry.spec.agent));
+        resp.insert("task_description".into(), json!(entry.spec.task));
+
+        let status_str = match &entry.status {
+            crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
+            crate::plan::PlanTaskStatus::Approved { .. } => "approved",
+            crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
+            crate::plan::PlanTaskStatus::Failed { .. } => "failed",
+            _ => "unknown",
+        };
+        resp.insert("status".into(), json!(status_str));
+
+        if let Some(ref branch) = entry.worker_branch {
+            resp.insert("worker_branch".into(), json!(branch));
+        }
+        if let Some(ref result) = entry.result {
+            if let Some(ref diff) = result.diff {
+                resp.insert("diff".into(), json!(diff));
+            }
+            if let Some(ref ds) = result.diff_summary {
+                resp.insert("diff_summary".into(), serde_json::to_value(ds).unwrap_or_default());
+            }
+            if let Some(ref s) = result.summary {
+                resp.insert("summary".into(), json!(s));
+            }
+        }
+
+        serde_json::to_string_pretty(&serde_json::Value::Object(resp)).map_err(|e| e.to_string())
+    }
+
+    async fn handle_review_task(&self, args: &serde_json::Value) -> Result<String, String> {
+        let plan_id = args["plan_id"].as_str().ok_or("missing plan_id")?.to_string();
+        let task_id = args["task_id"].as_str().ok_or("missing task_id")?.to_string();
+        let decision = args["decision"].as_str().ok_or("missing decision")?;
+        let feedback = args["feedback"].as_str();
+
+        let plan_arc = {
+            let plans = self.active_plans.lock().await;
+            plans.get(&plan_id).cloned()
+                .ok_or_else(|| format!("unknown plan '{plan_id}'"))?
+        };
+
+        let pm = self.pm_service.as_deref();
+        let mut state = plan_arc.lock().await;
+        let result = crate::plan::review_task(&plan_id, &task_id, decision, feedback, &mut state, pm).await?;
+
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
 
     async fn handle_delegate_async(&self, id: Value, args: Value) -> JsonRpcResponse {
