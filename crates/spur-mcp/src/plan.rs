@@ -916,6 +916,21 @@ pub fn is_terminal_plan_status(overall: &str) -> bool {
     )
 }
 
+/// Format the beads comment body for a `request_changes` review decision.
+/// Pure — no I/O. Written to the PM backend after the new worker attempt
+/// has been successfully dispatched.
+pub(crate) fn format_request_changes_comment(
+    feedback: &str,
+    attempt: u32,
+    max_attempts: u32,
+    worker_branch: Option<&str>,
+) -> String {
+    let branch_line = worker_branch.unwrap_or("(no branch yet)");
+    format!(
+        "Brain requested changes (attempt {attempt}/{max_attempts}):\n{feedback}\n\nWorker branch: {branch_line}"
+    )
+}
+
 /// Review a task in a plan: approve, reject, or request_changes.
 /// Optionally syncs with beads (pm), emits events (sink), and dispatches
 /// newly-ready tasks on approval (delegation_tx / task_tracker / plan_arc).
@@ -1140,6 +1155,36 @@ pub async fn review_task(
             );
 
             new_dispatches.push((task_id.to_string(), new_attempt, delegation_id));
+
+            // Best-effort audit write to beads. Runs AFTER try_send has
+            // succeeded and state mutation is committed — if this fails the
+            // dispatch still happened, which is what the state machine
+            // already reflects. Pulls the worker_branch from
+            // entry.history.last() (the just-superseded attempt) rather
+            // than entry.worker_branch (cleared at line ~1125 above).
+            //
+            // NOTE: entry is borrowed mutably at this point from earlier in
+            // the request_changes arm. We release the borrow before the
+            // await by cloning out the fields we need.
+            let issue_id_for_audit = entry.spec.issue_id.clone();
+            let superseded_branch: Option<String> = entry.history
+                .last()
+                .and_then(|h| h.worker_branch.clone());
+            if let (Some(pm), Some(id)) = (pm, issue_id_for_audit.as_ref()) {
+                let comment = format_request_changes_comment(
+                    fb,
+                    new_attempt,
+                    MAX_ATTEMPTS,
+                    superseded_branch.as_deref(),
+                );
+                let update = spur_pm::IssueUpdate {
+                    comment: Some(comment),
+                    ..Default::default()
+                };
+                if let Err(e) = pm.update_issue(id, update).await {
+                    warnings.push(format!("beads comment failed: {e}"));
+                }
+            }
         }
         other => {
             return Err(format!(
@@ -2118,5 +2163,32 @@ mod tests {
         // Sanity: a fresh uuid would never have underscores.
         let uuid = uuid::Uuid::new_v4().to_string();
         assert!(!uuid.contains('_'));
+    }
+
+    #[test]
+    fn format_request_changes_comment_includes_attempt_feedback_branch() {
+        let c = super::format_request_changes_comment(
+            "please rename `foo` to `bar`",
+            2,
+            super::MAX_ATTEMPTS,
+            Some("spur/worker-bd-1mh-1"),
+        );
+        assert!(c.contains("Brain requested changes"));
+        assert!(c.contains("attempt 2/3"));
+        assert!(c.contains("please rename `foo` to `bar`"));
+        assert!(c.contains("spur/worker-bd-1mh-1"));
+    }
+
+    #[test]
+    fn format_request_changes_comment_no_branch() {
+        let c = super::format_request_changes_comment(
+            "add a null check",
+            1,
+            super::MAX_ATTEMPTS,
+            None,
+        );
+        assert!(c.contains("attempt 1/3"));
+        assert!(c.contains("add a null check"));
+        assert!(c.contains("(no branch yet)"));
     }
 }
