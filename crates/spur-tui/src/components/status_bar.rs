@@ -40,6 +40,8 @@ pub struct StatusBarProps<'a> {
     pub stream_in_flight: bool,
     /// Number of tracked issues (from IssuesLoaded); 0 means not shown.
     pub issue_count: usize,
+    /// Graph alert summary from bv: (total, critical, warning). None if bv unavailable.
+    pub alert_summary: Option<(usize, usize, usize)>,
 }
 
 impl StatusBar {
@@ -84,6 +86,19 @@ impl StatusBar {
                 Style::default().fg(Color::Cyan),
             ));
             right_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        }
+        if let Some((total, critical, _warning)) = props.alert_summary {
+            if total > 0 {
+                let style = if critical > 0 {
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+                right_spans.push(Span::styled(format!("{total} alerts"), style));
+                right_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+            }
         }
         right_spans.extend([
             Span::styled(

@@ -2,9 +2,13 @@ use anyhow::{anyhow, Context, Result};
 use spur_acp::SessionId;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::debug;
+
+/// Monotonic counter to guarantee unique snapshot branch names under concurrency.
+static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Manages git worktree lifecycle for concurrent agent isolation.
 pub struct WorktreeManager {
@@ -70,62 +74,56 @@ impl WorktreeManager {
 
     /// Snapshot the brain's current state (including uncommitted changes) onto a
     /// temporary branch. Returns the snapshot branch name.
+    ///
+    /// Uses git plumbing (`stash create` → `rev-parse ^{tree}` → `commit-tree`)
+    /// instead of a temp worktree, making this safe for concurrent invocation
+    /// (e.g. parallel plan dispatch).
     pub async fn snapshot_brain_state(&self) -> Result<String> {
-        // Check for uncommitted changes.
         let status = self.run_git(&["status", "--porcelain"], None).await?;
         let dirty = !status.is_empty();
 
-        // Build a unique snapshot branch name.
-        let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S%3f");
-        let branch_name = format!("spur/brain-snapshot-{timestamp}");
-
-        // Create the snapshot branch at HEAD.
-        self.run_git(&["branch", &branch_name, "HEAD"], None)
-            .await
-            .context("failed to create snapshot branch")?;
+        // Unique branch name: timestamp for humans + atomic counter for concurrency.
+        let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+        let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let branch_name = format!("spur/brain-snapshot-{timestamp}-{seq}");
 
         if dirty {
-            // Create a stash ref without touching the working directory.
             let stash_ref = self
                 .run_git(&["stash", "create"], None)
                 .await
                 .context("failed to create stash")?;
 
             if !stash_ref.is_empty() {
-                // Check out the snapshot branch in a detached manner to apply
-                // the stash without disturbing the real working tree. We use a
-                // temporary worktree for this operation.
-                let tmp_dir = self.repo_root.join(".spur/tmp-snapshot");
+                // Extract the tree from the stash commit (captures dirty state).
+                let tree_spec = format!("{stash_ref}^{{tree}}");
+                let tree = self
+                    .run_git(&["rev-parse", &tree_spec], None)
+                    .await
+                    .context("failed to extract tree from stash")?;
 
-                // Create a temp worktree on the snapshot branch.
-                self.run_git(
-                    &["worktree", "add", tmp_dir.to_str().unwrap(), &branch_name],
-                    None,
-                )
-                .await
-                .context("failed to create temp worktree for snapshot")?;
-
-                // Apply the stash in the temp worktree.
-                let apply_result = self
-                    .run_git(&["stash", "apply", &stash_ref], Some(&tmp_dir))
-                    .await;
-
-                if apply_result.is_ok() {
-                    // Stage everything and commit.
-                    self.run_git(&["add", "-A"], Some(&tmp_dir)).await?;
-                    self.run_git(&["commit", "-m", "spur: brain snapshot"], Some(&tmp_dir))
-                        .await
-                        .context("failed to commit snapshot")?;
-                }
-
-                // Clean up the temp worktree.
-                let _ = self
+                // Create a clean single-parent commit with the dirty-state tree.
+                let commit = self
                     .run_git(
-                        &["worktree", "remove", tmp_dir.to_str().unwrap(), "--force"],
+                        &["commit-tree", &tree, "-p", "HEAD", "-m", "spur: brain snapshot"],
                         None,
                     )
-                    .await;
+                    .await
+                    .context("failed to create snapshot commit")?;
+
+                // Point the snapshot branch at this commit.
+                self.run_git(&["branch", &branch_name, &commit], None)
+                    .await
+                    .context("failed to create snapshot branch")?;
+            } else {
+                // stash create returned empty despite dirty status — branch at HEAD.
+                self.run_git(&["branch", &branch_name, "HEAD"], None)
+                    .await
+                    .context("failed to create snapshot branch")?;
             }
+        } else {
+            self.run_git(&["branch", &branch_name, "HEAD"], None)
+                .await
+                .context("failed to create snapshot branch")?;
         }
 
         Ok(branch_name)
@@ -388,6 +386,31 @@ impl WorktreeManager {
                     }
                 }
             }
+        }
+
+        // Clean up stale snapshot branches not referenced by any active worktree.
+        let branches_output = self
+            .run_git(&["branch", "--list", "spur/brain-snapshot-*"], None)
+            .await
+            .unwrap_or_default();
+
+        // Collect branches that are still in use as a base for active worktrees.
+        let active_bases: Vec<&str> = self
+            .active
+            .values()
+            .map(|info| info.branch.as_str())
+            .collect();
+
+        for branch in branches_output.lines().map(|l| l.trim()) {
+            if branch.is_empty() {
+                continue;
+            }
+            // Don't delete if any active worker was branched from this snapshot.
+            if active_bases.iter().any(|b| b.contains(branch)) {
+                continue;
+            }
+            debug!(branch = %branch, "removing stale snapshot branch");
+            let _ = self.run_git(&["branch", "-D", branch], None).await;
         }
 
         Ok(removed)

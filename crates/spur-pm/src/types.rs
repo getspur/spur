@@ -74,6 +74,33 @@ pub struct IssueFilter {
     pub limit: Option<usize>,
 }
 
+/// Parameters for creating a new issue.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssueCreate {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// task, bug, feature, epic
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<String>,
+    /// 0 = critical, 4 = backlog
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Parent issue ID — creates a parent-child dependency (e.g., epic → task).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Time estimate in minutes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_minutes: Option<u32>,
+    /// Issue IDs this new issue depends on (blocking dependencies).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssueUpdate {
     pub status: Option<String>,

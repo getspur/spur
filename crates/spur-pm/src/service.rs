@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::adapter::{IssueTracker, PrService};
 use crate::beads::BeadsAdapter;
+use crate::bv::BvAdapter;
 use crate::github::GitHubAdapter;
 use crate::types::*;
 
@@ -17,6 +18,7 @@ enum PmBackendInner {
 
 pub struct PmService {
     inner: PmBackendInner,
+    bv: Option<BvAdapter>,
 }
 
 impl PmService {
@@ -32,6 +34,13 @@ impl PmService {
 
         if beads_dir.is_dir() && beads_enabled {
             let beads = BeadsAdapter::connect(repo_root).await?;
+            let bv = match BvAdapter::connect(repo_root).await {
+                Ok(bv) => Some(bv),
+                Err(e) => {
+                    tracing::info!("bv unavailable (graph analysis disabled): {e}");
+                    None
+                }
+            };
             let github = if github_enabled {
                 Self::try_github(github_repo, repo_root).await
             } else {
@@ -39,6 +48,7 @@ impl PmService {
             };
             return Ok(Some(Self {
                 inner: PmBackendInner::Beads { beads, github },
+                bv,
             }));
         }
 
@@ -46,6 +56,7 @@ impl PmService {
             if let Some(gh) = Self::try_github(github_repo, repo_root).await {
                 return Ok(Some(Self {
                     inner: PmBackendInner::GitHub { adapter: gh },
+                    bv: None,
                 }));
             }
         }
@@ -74,6 +85,20 @@ impl PmService {
         match &self.inner {
             PmBackendInner::Beads { beads, .. } => beads.list_issues(filter).await,
             PmBackendInner::GitHub { adapter } => adapter.list_issues(filter).await,
+        }
+    }
+
+    pub async fn create_issue(&self, params: crate::types::IssueCreate) -> anyhow::Result<String> {
+        match &self.inner {
+            PmBackendInner::Beads { beads, .. } => beads.create_issue(params).await,
+            PmBackendInner::GitHub { adapter } => adapter.create_issue(params).await,
+        }
+    }
+
+    pub async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        match &self.inner {
+            PmBackendInner::Beads { beads, .. } => beads.add_dependency(issue_id, depends_on_id).await,
+            PmBackendInner::GitHub { adapter } => adapter.add_dependency(issue_id, depends_on_id).await,
         }
     }
 
@@ -108,5 +133,10 @@ impl PmService {
             PmBackendInner::Beads { .. } => "beads",
             PmBackendInner::GitHub { .. } => "github",
         }
+    }
+
+    /// Returns the graph analyzer if `bv` (beads_viewer) is available.
+    pub fn analyzer(&self) -> Option<&BvAdapter> {
+        self.bv.as_ref()
     }
 }

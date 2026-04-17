@@ -7,7 +7,7 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::adapter::IssueTracker;
-use crate::types::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
+use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
 
 // ─── Private error type ───────────────────────────────────────────────
 
@@ -79,13 +79,21 @@ struct BrIssueDetails {
 
 #[derive(Deserialize)]
 struct BrDependency {
-    depends_on_id: String,
-    #[serde(rename = "type", default = "default_dep_type")]
-    dep_type: String,
-}
-
-fn default_dep_type() -> String {
-    "blocks".into()
+    /// br v1 uses `id` (the depended-on issue ID).
+    #[serde(alias = "depends_on_id")]
+    id: String,
+    #[serde(alias = "type", default)]
+    dependency_type: String,
+    // Extra fields from br show (ignored — we only need id + type).
+    #[serde(default)]
+    #[allow(dead_code)]
+    title: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    status: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    priority: Option<i32>,
 }
 
 // ─── From conversions ─────────────────────────────────────────────────
@@ -108,8 +116,8 @@ impl From<BrIssueDetails> for Issue {
             blocked_by: br
                 .dependencies
                 .iter()
-                .filter(|d| BLOCKING_TYPES.contains(&d.dep_type.as_str()))
-                .map(|d| d.depends_on_id.clone())
+                .filter(|d| BLOCKING_TYPES.contains(&d.dependency_type.as_str()))
+                .map(|d| d.id.clone())
                 .collect(),
             due_at: br.due_at,
             created_at: br.created_at,
@@ -324,6 +332,62 @@ impl IssueTracker for BeadsAdapter {
         Ok(issues.into_iter().map(IssueSummary::from).collect())
     }
 
+    async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
+        let mut args: Vec<String> = vec!["create".into(), "--silent".into()];
+
+        args.push(params.title.clone());
+
+        if let Some(ref desc) = params.description {
+            args.push("-d".into());
+            args.push(desc.clone());
+        }
+        if let Some(ref itype) = params.issue_type {
+            args.push("-t".into());
+            args.push(itype.clone());
+        }
+        if let Some(priority) = params.priority {
+            args.push("-p".into());
+            args.push(priority.to_string());
+        }
+        if !params.labels.is_empty() {
+            args.push("-l".into());
+            args.push(params.labels.join(","));
+        }
+        if let Some(ref parent) = params.parent {
+            args.push("--parent".into());
+            args.push(parent.clone());
+        }
+        if let Some(ref assignee) = params.assignee {
+            args.push("-a".into());
+            args.push(assignee.clone());
+        }
+        if let Some(est) = params.estimate_minutes {
+            args.push("-e".into());
+            args.push(est.to_string());
+        }
+
+        let output = self.run_br(args).await?;
+        let issue_id = output.trim().to_string();
+
+        if issue_id.is_empty() {
+            anyhow::bail!("br create returned empty issue ID");
+        }
+
+        // Wire additional dependencies (parent-child is handled by --parent above).
+        for dep_id in &params.depends_on {
+            self.run_br(vec![
+                "dep".into(),
+                "add".into(),
+                issue_id.clone(),
+                dep_id.clone(),
+            ])
+            .await?;
+        }
+
+        tracing::info!(id = %issue_id, title = %params.title, "Created beads issue");
+        Ok(issue_id)
+    }
+
     async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {
         // Step 1: update fields (status, priority, assignee) if any are set
         let has_field_update =
@@ -381,6 +445,18 @@ impl IssueTracker for BeadsAdapter {
             self.run_br(args).await?;
         }
 
+        Ok(())
+    }
+
+    async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        self.run_br(vec![
+            "dep".into(),
+            "add".into(),
+            issue_id.to_string(),
+            depends_on_id.to_string(),
+        ])
+        .await?;
+        tracing::info!(issue = %issue_id, depends_on = %depends_on_id, "Added dependency");
         Ok(())
     }
 

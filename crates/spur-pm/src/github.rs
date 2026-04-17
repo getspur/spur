@@ -1,5 +1,5 @@
 use crate::adapter::{IssueTracker, PrService};
-use crate::types::{Issue, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams};
+use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::Path;
@@ -292,6 +292,39 @@ impl IssueTracker for GitHubAdapter {
         Ok(summaries)
     }
 
+    async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
+        let repo = self.repo()?;
+        let mut args = vec![
+            "issue", "create", "-R", &repo, "--title", &params.title,
+        ];
+        let body = params.description.unwrap_or_default();
+        if !body.is_empty() {
+            args.push("--body");
+            args.push(&body);
+        }
+        let label_csv = params.labels.join(",");
+        if !params.labels.is_empty() {
+            args.push("--label");
+            args.push(&label_csv);
+        }
+        let assignee_ref;
+        if let Some(ref a) = params.assignee {
+            assignee_ref = a.clone();
+            args.push("--assignee");
+            args.push(&assignee_ref);
+        }
+
+        let output = self.run_gh(&args).await?;
+        // gh issue create outputs the URL, extract issue number from it
+        let url = output.trim();
+        let number = url
+            .rsplit('/')
+            .next()
+            .unwrap_or(url)
+            .to_string();
+        Ok(number)
+    }
+
     async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {
         let repo = self.repo()?;
 
@@ -330,6 +363,10 @@ impl IssueTracker for GitHubAdapter {
         }
 
         Ok(())
+    }
+
+    async fn add_dependency(&self, _issue_id: &str, _depends_on_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!("Dependencies are not supported for the GitHub backend. Use beads for dependency tracking.")
     }
 
     async fn poll(&self) -> anyhow::Result<Vec<PmEvent>> {

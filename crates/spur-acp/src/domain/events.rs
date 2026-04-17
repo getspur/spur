@@ -316,6 +316,17 @@ pub enum SpurEventBody {
         error: String,
     },
 
+    /// Graph health alert summary from bv (beads_viewer) analysis.
+    /// Emitted at startup and after each delegation completion.
+    GraphAlertsSummary {
+        total: usize,
+        critical: usize,
+        warning: usize,
+        /// Human-readable alert messages (top 5) for TUI activity log.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<String>,
+    },
+
     // ── Interactive loop events ──────────────────────────────────────
     TurnComplete {
         session: SessionId,
