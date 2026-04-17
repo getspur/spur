@@ -6,6 +6,14 @@ use crate::bv::BvAdapter;
 use crate::github::GitHubAdapter;
 use crate::types::*;
 
+/// Resolve the beads "closed" status string. Default is `"closed"` — the
+/// value the default beads config accepts. Override via the argument for
+/// projects whose beads config uses a different vocabulary (e.g., `"done"`,
+/// `"resolved"`).
+pub(crate) fn resolve_closed_status(override_value: Option<String>) -> String {
+    override_value.unwrap_or_else(|| "closed".to_string())
+}
+
 enum PmBackendInner {
     Beads {
         beads: BeadsAdapter,
@@ -19,6 +27,7 @@ enum PmBackendInner {
 pub struct PmService {
     inner: PmBackendInner,
     bv: Option<BvAdapter>,
+    closed_status: String,
 }
 
 impl PmService {
@@ -29,7 +38,9 @@ impl PmService {
         beads_enabled: bool,
         github_enabled: bool,
         repo_root: &Path,
+        closed_status: Option<String>,
     ) -> anyhow::Result<Option<Self>> {
+        let resolved_closed = resolve_closed_status(closed_status);
         let beads_dir = repo_root.join(".beads");
 
         if beads_dir.is_dir() && beads_enabled {
@@ -49,6 +60,7 @@ impl PmService {
             return Ok(Some(Self {
                 inner: PmBackendInner::Beads { beads, github },
                 bv,
+                closed_status: resolved_closed,
             }));
         }
 
@@ -57,6 +69,7 @@ impl PmService {
                 return Ok(Some(Self {
                     inner: PmBackendInner::GitHub { adapter: gh },
                     bv: None,
+                    closed_status: resolved_closed,
                 }));
             }
         }
@@ -128,6 +141,13 @@ impl PmService {
         }
     }
 
+    /// Returns the status string used to mark an issue as closed/done in the
+    /// configured PM backend. Default `"closed"` unless overridden at
+    /// construction.
+    pub fn closed_status(&self) -> &str {
+        &self.closed_status
+    }
+
     pub fn source_str(&self) -> &'static str {
         match &self.inner {
             PmBackendInner::Beads { .. } => "beads",
@@ -138,5 +158,14 @@ impl PmService {
     /// Returns the graph analyzer if `bv` (beads_viewer) is available.
     pub fn analyzer(&self) -> Option<&BvAdapter> {
         self.bv.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn closed_status_defaults_to_closed_when_none() {
+        assert_eq!(super::resolve_closed_status(None), "closed");
+        assert_eq!(super::resolve_closed_status(Some("resolved".to_string())), "resolved");
     }
 }

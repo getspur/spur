@@ -448,6 +448,7 @@ async fn main() -> Result<()> {
                 config.pm.beads.as_ref().map_or(true, |b| b.enabled),
                 config.pm.github.as_ref().map_or(true, |g| g.enabled),
                 &repo_root,
+                None,
             )
             .await
             .unwrap_or_else(|e| {
