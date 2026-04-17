@@ -308,6 +308,10 @@ pub async fn derive_epic_plan(
     // 2. List all issues and fetch full details for each to find children.
     //    A child is an issue whose blocked_by list contains epic_id
     //    (the beads parent-child dependency type is included in blocked_by).
+    // TODO(phase3): N+1 fetch — one get_issue per summary to detect children.
+    //   Mitigate by adding IssueFilter.issue_type = Some("task") scoping, or
+    //   by exposing a `parent` field on IssueSummary so children can be found
+    //   without individual fetches.
     let summaries = pm
         .list_issues(spur_pm::IssueFilter {
             limit: Some(500),
@@ -883,6 +887,17 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
     })
 }
 
+/// True iff the given overall plan status (as returned by
+/// `build_plan_status`'s `"status"` field) is a terminal state — no further
+/// task transitions will happen without brain intervention. Non-terminal
+/// plans can still receive worker results or brain reviews.
+pub fn is_terminal_plan_status(overall: &str) -> bool {
+    matches!(
+        overall,
+        "approved" | "failed" | "has_failures" | "has_rejections" | "partial"
+    )
+}
+
 /// Review a task in a plan: approve, reject, or request_changes.
 /// Optionally syncs with beads (pm), emits events (sink), and dispatches
 /// newly-ready tasks on approval (delegation_tx / task_tracker / plan_arc).
@@ -1392,6 +1407,18 @@ mod tests {
             issue_id: None,
             context_files: vec![],
         }
+    }
+
+    #[test]
+    fn is_terminal_plan_status_matches_all_terminal_states() {
+        assert!(!super::is_terminal_plan_status("running"));
+        assert!(!super::is_terminal_plan_status("awaiting_review"));
+        assert!(super::is_terminal_plan_status("approved"));
+        assert!(super::is_terminal_plan_status("failed"));
+        assert!(super::is_terminal_plan_status("has_failures"));
+        assert!(super::is_terminal_plan_status("has_rejections"));
+        assert!(super::is_terminal_plan_status("partial"));
+        assert!(!super::is_terminal_plan_status("unknown"));
     }
 
     #[test]
