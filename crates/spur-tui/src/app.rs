@@ -67,6 +67,17 @@ pub enum UserInput {
     CancelStream {
         session: SessionId,
     },
+    /// Request the orchestrator to refresh the issue list and re-emit IssuesLoaded.
+    RefreshIssues,
+    /// Request full issue detail from the PM backend.
+    GetIssueDetail {
+        id: String,
+    },
+    /// Update an issue's status/assignee/labels via PM backend.
+    UpdateIssue {
+        id: String,
+        update: spur_pm::IssueUpdate,
+    },
 }
 
 /// Tracks the brain agent's current state for status indicators.
@@ -1146,6 +1157,73 @@ impl App {
             | Action::ScrollToBottom
             | Action::CycleFocus
             | Action::Tick => {}
+
+            // Issue actions — wired to the PM backend; IssuesPanel not yet implemented.
+            Action::RefreshIssues => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::RefreshIssues);
+                }
+            }
+            Action::Issue(issue_action) => {
+                match issue_action {
+                    crate::action::IssueAction::ViewDetail { id } => {
+                        if let Some(ref tx) = self.user_input_tx {
+                            let _ = tx.try_send(UserInput::GetIssueDetail { id });
+                        }
+                    }
+                    crate::action::IssueAction::UpdateStatus { id, status } => {
+                        if let Some(ref tx) = self.user_input_tx {
+                            let _ = tx.try_send(UserInput::UpdateIssue {
+                                id,
+                                update: spur_pm::IssueUpdate {
+                                    status: Some(status),
+                                    ..Default::default()
+                                },
+                            });
+                        }
+                    }
+                    crate::action::IssueAction::WorkOn { id } => {
+                        // Construct issue prompt from cached summary
+                        let prompt = if let Some(issue) = self.dashboard.tracked_issues().iter().find(|i| i.id == id) {
+                            let pri = issue.priority.map(|p| format!("P{}", p)).unwrap_or_default();
+                            let itype = issue.issue_type.as_deref().unwrap_or("task");
+                            format!(
+                                "Work on this issue:\n\n\
+                                 Issue: {} \u{2014} {}\n\
+                                 Priority: {} | Type: {} | Status: {}\n\n\
+                                 Use `get_issue` tool to read full details if needed.\n\
+                                 Use `delegate_to_worker` with issue_id=\"{}\" for delegations.\n\
+                                 Update issue status as you progress.",
+                                id, issue.title, pri, itype, issue.status, id,
+                            )
+                        } else {
+                            format!(
+                                "Work on issue {}.\n\n\
+                                 Use `get_issue` tool to read full details.\n\
+                                 Use `delegate_to_worker` with issue_id=\"{}\" for delegations.",
+                                id, id,
+                            )
+                        };
+
+                        let blocks = vec![spur_acp::ContentBlock::Text(
+                            spur_acp::TextContent::new(prompt),
+                        )];
+
+                        if self.session_detail.is_some() {
+                            self.process_action(Action::SendMessage {
+                                session: spur_acp::SessionId(String::new()),
+                                blocks,
+                                interrupt: false,
+                            });
+                        } else {
+                            self.process_action(Action::NewSessionWithMessage {
+                                blocks,
+                                interrupt: false,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 

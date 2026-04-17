@@ -109,6 +109,7 @@ impl ExecutorLineage {
                     latest_diff_text: None,
                     last_error: None,
                     stream_buffer: VecDeque::new(),
+                    issue_id: None,
                 };
                 match parent {
                     Some(p) => {
@@ -363,6 +364,13 @@ impl ExecutorLineage {
 
     pub fn nodes(&self) -> impl Iterator<Item = &ExecutorNode> {
         self.nodes.values()
+    }
+
+    /// Return nodes linked to the given issue ID.
+    pub fn nodes_for_issue(&self, issue_id: &str) -> Vec<&ExecutorNode> {
+        self.nodes()
+            .filter(|n| n.issue_id.as_deref() == Some(issue_id))
+            .collect()
     }
 
     pub fn node(&self, id: &ExecutorId) -> Option<&ExecutorNode> {

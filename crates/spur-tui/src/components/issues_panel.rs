@@ -1,16 +1,57 @@
 use ratatui::{
     layout::{Constraint, Rect},
-    style::{Color, Style, Stylize},
-    widgets::{Block, Cell, Row, Table},
+    style::{Color, Modifier, Style, Stylize},
+    widgets::{Block, Cell, Row, Table, TableState},
     Frame,
 };
 
 use spur_pm::IssueSummary;
 
-pub struct IssuesPanel;
+pub struct IssuesPanel {
+    pub table_state: TableState,
+    focused: bool,
+}
 
 impl IssuesPanel {
-    pub fn render(issues: &[IssueSummary], frame: &mut Frame, area: Rect) {
+    pub fn new() -> Self {
+        Self {
+            table_state: TableState::default(),
+            focused: false,
+        }
+    }
+
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    pub fn select_next(&mut self, count: usize, issue_count: usize) {
+        if issue_count == 0 {
+            return;
+        }
+        let current = self.table_state.selected().unwrap_or(0);
+        let next = (current + count) % issue_count;
+        self.table_state.select(Some(next));
+    }
+
+    pub fn select_prev(&mut self, count: usize, issue_count: usize) {
+        if issue_count == 0 {
+            return;
+        }
+        let current = self.table_state.selected().unwrap_or(0);
+        let prev = (current + issue_count - (count % issue_count)) % issue_count;
+        self.table_state.select(Some(prev));
+    }
+
+    pub fn selected_id<'a>(&self, issues: &'a [IssueSummary]) -> Option<&'a str> {
+        let idx = self.table_state.selected()?;
+        issues.get(idx).map(|i| i.id.as_str())
+    }
+
+    pub fn render(&mut self, issues: &[IssueSummary], frame: &mut Frame, area: Rect) {
         if issues.is_empty() {
             return;
         }
@@ -58,15 +99,39 @@ impl IssuesPanel {
             Constraint::Min(20),
         ];
 
+        let (border_style, title) = if self.focused {
+            (
+                Style::default().fg(Color::Cyan),
+                " Issues — [j/k] select · [Enter] detail · [W]ork ",
+            )
+        } else {
+            (Style::default(), " Issues ")
+        };
+
         let table = Table::new(rows, widths)
             .header(header)
-            .block(Block::bordered().title(" Issues "));
+            .block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(border_style),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
 
-        frame.render_widget(table, area);
+        frame.render_stateful_widget(table, area, &mut self.table_state);
     }
 
     pub fn computed_height(issue_count: usize, available_height: u16) -> u16 {
         let max_panel = (available_height / 4).max(3);
         (issue_count as u16 + 3).min(max_panel)
+    }
+}
+
+impl Default for IssuesPanel {
+    fn default() -> Self {
+        Self::new()
     }
 }
