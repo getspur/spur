@@ -493,6 +493,16 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         })
         .collect();
 
+    let next_action = match overall {
+        "running" => "Workers still running. Poll get_plan_status to monitor.",
+        "awaiting_review" => "Use get_task_diff to review each awaiting task, then review_task to approve or reject.",
+        "approved" => "All tasks approved. Use create_pr with a worker_branch to create a pull request.",
+        "has_failures" => "Some tasks failed. Use get_task_diff to inspect failures.",
+        "has_rejections" => "Some tasks rejected. Revise the plan or re-submit.",
+        "failed" => "All tasks failed. Use get_task_diff to inspect errors.",
+        _ => "",
+    };
+
     serde_json::json!({
         "plan_id": plan_id,
         "status": overall,
@@ -511,6 +521,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         },
         "all_workers_done": all_workers_done,
         "ready_to_merge": ready_to_merge,
+        "next_action": next_action,
         "tasks": tasks_json,
     })
 }
@@ -533,8 +544,17 @@ pub async fn review_task(
     let summary = match &entry.status {
         PlanTaskStatus::AwaitingReview { summary } => summary.clone(),
         other => {
+            let status_name = match other {
+                PlanTaskStatus::Pending => "pending",
+                PlanTaskStatus::Ready => "ready",
+                PlanTaskStatus::Dispatched { .. } => "dispatched",
+                PlanTaskStatus::Approved { .. } => "approved",
+                PlanTaskStatus::Rejected { .. } => "rejected",
+                PlanTaskStatus::Failed { .. } => "failed",
+                _ => "unknown",
+            };
             return Err(format!(
-                "task '{task_id}' is not awaiting review (current: {other:?})"
+                "task '{task_id}' is not awaiting review (current status: {status_name})"
             ));
         }
     };

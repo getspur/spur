@@ -1328,6 +1328,9 @@ impl McpCallbackServer {
         resp.insert("task_id".into(), json!(task_id));
         resp.insert("agent".into(), json!(entry.spec.agent));
         resp.insert("task_description".into(), json!(entry.spec.task));
+        if let Some(ref issue_id) = entry.spec.issue_id {
+            resp.insert("issue_id".into(), json!(issue_id));
+        }
 
         let status_str = match &entry.status {
             crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
