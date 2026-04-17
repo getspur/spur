@@ -45,3 +45,4 @@ pub use agent_client_protocol::{
     ToolCall as AcpToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
     ToolCallUpdate as AcpToolCallUpdate, ToolKind, UnstructuredCommandInput, UsageUpdate,
 };
+pub use adapter::{extract_tool_meta, SpurToolMeta};

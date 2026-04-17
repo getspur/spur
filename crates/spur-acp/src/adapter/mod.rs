@@ -166,3 +166,32 @@ pub fn mode_badge(mode_id: &str, kind: AgentKind) -> Option<ModeBadge> {
         AgentKind::Generic => None,
     }
 }
+
+/// Normalized view of vendor-specific `_meta` extensions on a ToolCall.
+///
+/// Fields are added ONLY when a concept is genuinely cross-vendor and NOT
+/// already expressed by an ACP spec field. Adding a field is a design
+/// change — see `docs/spur/acp-meta-conventions.md`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SpurToolMeta {
+    /// Vendor-specific tool identity (e.g. "Bash", "Edit", "/spec-init").
+    /// Prefer this over `tc.title` for identity-sensitive rendering.
+    pub tool_name: Option<String>,
+
+    /// ID of the parent ToolCall when this call was spawned by a
+    /// subagent / Task mechanism. Used for render indentation.
+    pub parent_tool_use_id: Option<String>,
+}
+
+/// Extract a `SpurToolMeta` from a `ToolCall` using the vendor's
+/// `_meta.<vendor>.*` convention. Returns default for unknown/absent meta.
+pub fn extract_tool_meta(tc: &ToolCall, kind: AgentKind) -> SpurToolMeta {
+    match kind {
+        AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => {
+            claude::extract_tool_meta(tc)
+        }
+        AgentKind::CodexAcp => codex::extract_tool_meta(tc),
+        AgentKind::Kiro => kiro::extract_tool_meta(tc),
+        AgentKind::Generic => SpurToolMeta::default(),
+    }
+}

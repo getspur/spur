@@ -1,0 +1,15 @@
+{
+  "sessionId": "sess-cc-meta-001",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "tc-bash-meta-001",
+    "title": "Bash",
+    "kind": "execute",
+    "rawInput": { "command": "ls" },
+    "_meta": {
+      "claudeCode": {
+        "toolName": "Bash"
+      }
+    }
+  }
+}

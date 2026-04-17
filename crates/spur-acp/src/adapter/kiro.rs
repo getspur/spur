@@ -1,3 +1,4 @@
+use agent_client_protocol::ToolCall;
 use serde_json::Value;
 
 use super::{ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay};
@@ -29,4 +30,12 @@ pub fn try_extract_observe(_raw: &Value) -> Option<ObservePayload> {
 /// Kiro uses `--trust-all-tools`; no mode-badge concept applies.
 pub fn mode_badge(_mode_id: &str) -> Option<ModeBadge> {
     None
+}
+
+/// Kiro `_meta` extractor stub.
+/// TODO(vendor-onboarding): replace with real extractor when kiro emits
+/// recognizable `_meta.kiro.*` fields. See
+/// docs/spur/acp-meta-conventions.md.
+pub fn extract_tool_meta(_tc: &ToolCall) -> super::SpurToolMeta {
+    super::SpurToolMeta::default()
 }
