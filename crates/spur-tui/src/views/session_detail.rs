@@ -1179,7 +1179,12 @@ impl View for SessionDetailView {
                             self.react_trace
                                 .append_user_message(&tc.text, Self::now_stamp());
                         }
-                        self.stream_in_flight = true;
+                        // Do NOT set stream_in_flight = true here.
+                        // UserMessageChunk is a replay-only variant (emitted
+                        // during loadSession history replay, not live streaming).
+                        // Setting the flag would light a spurious streaming
+                        // indicator that never clears if the replayed history
+                        // has no corresponding TurnComplete.
                     }
                     spur_acp::SessionUpdate::ToolCall(tc) => {
                         use spur_acp::adapter::{self, ToolInputDisplay};

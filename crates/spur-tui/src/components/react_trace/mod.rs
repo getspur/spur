@@ -257,8 +257,18 @@ impl ReactTrace {
 
         match target_idx {
             Some(idx) => {
+                // Idempotency guard: if the tail already ends with this chunk,
+                // the content was previously seeded (e.g. by push_user_message
+                // from the HistoryEntry replay path). Skip the append to avoid
+                // doubling.
+                if self.entries[idx].text.ends_with(text) {
+                    return;
+                }
                 self.entries[idx].text.push_str(text);
                 self.mark_dirty_from(idx);
+                if self.is_following {
+                    self.scroll_to_bottom();
+                }
             }
             None => {
                 self.entries.push(TraceEntry {
@@ -269,6 +279,9 @@ impl ReactTrace {
                     markdown: None,
                 });
                 self.mark_dirty_from(self.entries.len() - 1);
+                if self.is_following {
+                    self.scroll_to_bottom();
+                }
             }
         }
     }
@@ -1147,5 +1160,32 @@ mod tests {
             .collect();
         assert_eq!(user_entries.len(), 1, "must coalesce, not duplicate");
         assert_eq!(user_entries[0].text, "hello world");
+    }
+
+    #[test]
+    fn append_user_message_idempotent_when_text_already_seeded() {
+        let mut trace = ReactTrace::new();
+        // Simulate HistoryEntry path seeding the full turn.
+        trace.push(TraceEntry {
+            kind: TraceKind::UserMessage,
+            text: "list the files in src/".to_string(),
+            timestamp: "10:00:01".to_string(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        // ACP protocol later replays the same text as a chunk.
+        trace.append_user_message("list the files in src/", "10:00:02".to_string());
+
+        let entries = trace.entries_for_test();
+        let user: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(&e.kind, TraceKind::UserMessage))
+            .collect();
+        assert_eq!(user.len(), 1);
+        assert_eq!(
+            user[0].text,
+            "list the files in src/",
+            "must not double the seeded text"
+        );
     }
 }
