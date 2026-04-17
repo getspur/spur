@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs, Wrap},
+    widgets::{block::Title, Block, Borders, Paragraph, Tabs, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -86,17 +86,26 @@ impl DetailPane {
         self.is_following = true;
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, node: &ExecutorNode) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, node: &ExecutorNode, issue_badge: Option<&str>) {
         let following_indicator = if self.is_following {
             " ▼ following "
         } else {
             ""
         };
 
-        let block = Block::default()
+        let mut block = Block::default()
+            .borders(Borders::ALL)
             .title(format!(" {} ", node.agent))
-            .title_bottom(following_indicator)
-            .borders(Borders::ALL);
+            .title_bottom(following_indicator);
+
+        if let Some(badge) = issue_badge {
+            block = block.title(
+                Title::from(format!(" {} ", badge)).alignment(Alignment::Right),
+            );
+            block = block.title_bottom(
+                Title::from(" [I]ssue detail ").alignment(Alignment::Right),
+            );
+        }
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
