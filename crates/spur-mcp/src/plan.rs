@@ -62,15 +62,38 @@ pub enum PlanTaskStatus {
     },
 }
 
+/// Record of a single attempt at a plan task. Stored in `PlanTaskEntry.history`
+/// for attempts 1..attempt-1. The current (latest) attempt lives in the entry's
+/// top-level `result` and `worker_branch` fields.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttemptRecord {
+    pub attempt: u32,
+    pub worker_branch: Option<String>,
+    pub diff_summary: Option<spur_acp::DiffSummary>,
+    pub summary: Option<String>,
+    /// Brain's `request_changes` feedback that caused this attempt to be superseded.
+    pub feedback: String,
+}
+
 /// A task entry in the plan state (spec + runtime status).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlanTaskEntry {
     pub spec: PlanTask,
     pub status: PlanTaskStatus,
-    /// Full delegation result, stored on completion for brain review.
+    /// Latest attempt's full delegation result. None while Dispatched.
     pub result: Option<DelegationResult>,
-    /// Branch the worker committed changes to (populated after AwaitingReview).
+    /// Latest attempt's worker branch (preserved in git when set).
     pub worker_branch: Option<String>,
+    /// Current attempt number — starts at 1 on initial dispatch.
+    #[serde(default = "default_attempt")]
+    pub attempt: u32,
+    /// Prior attempts (1..attempt-1). Empty for first-iteration tasks.
+    #[serde(default)]
+    pub history: Vec<AttemptRecord>,
+}
+
+fn default_attempt() -> u32 {
+    1
 }
 
 /// Runtime state of a submitted plan.
