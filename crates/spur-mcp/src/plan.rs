@@ -329,6 +329,13 @@ pub async fn derive_epic_plan(
             .get_issue(&summary.id)
             .await
             .map_err(|e| format!("failed to fetch issue '{}': {e}", summary.id))?;
+        // Child detection uses blocked_by rather than a `parent` field because
+        // `spur_pm::Issue` has no `parent`: the beads adapter flattens the
+        // `parent-child` edge (see beads.rs BLOCKING_TYPES) into `blocked_by`.
+        // Contract: `br create-issue --parent=<epic>` unconditionally inserts
+        // the epic's id into the child's blocked_by. If that changes, this
+        // filter silently returns zero children and execute_epic errors with
+        // "epic has no children".
         if full.blocked_by.iter().any(|b| b == epic_id) {
             children.push(full);
         }

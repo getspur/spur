@@ -1296,6 +1296,9 @@ impl McpCallbackServer {
             .map(String::from);
 
         // 2. Require PmService.
+        // Unit-tested via integration-level fixtures only; the PmService gate is
+        // the first check in handle_execute_epic and its error message matches
+        // this literal: "beads (PmService) is not configured — cannot execute epic".
         let pm = match self.pm_service.as_deref() {
             Some(p) => p,
             None => {
@@ -1452,6 +1455,27 @@ impl McpCallbackServer {
             .insert(epic_id.clone(), plan_id.clone());
 
         // Spawn the plan executor.
+        // tokio_util 0.7 TaskTracker::spawn returns JoinHandle directly (not
+        // Option), but it will panic if the underlying Tokio runtime has shut
+        // down. Guard with is_closed() so a shutting-down orchestrator rolls
+        // back instead of leaving a zombie plan in active_plans + registry.
+        if self.task_tracker.is_closed() {
+            // Roll back: remove the active_plans entry we just inserted.
+            {
+                let mut plans = self.active_plans.lock().await;
+                plans.remove(&plan_id);
+            }
+            // Roll back: remove the registry entry (real plan_id, not sentinel).
+            {
+                let mut reg = self.plan_registry.lock().await;
+                reg.by_epic.remove(&epic_id);
+            }
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                "orchestrator shutting down — execute_epic aborted",
+            );
+        }
         let delegation_tx = self.delegation_tx.clone();
         self.task_tracker
             .spawn(crate::plan::run_plan(state, delegation_tx));
