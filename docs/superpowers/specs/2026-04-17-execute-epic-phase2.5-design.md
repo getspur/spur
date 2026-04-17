@@ -251,6 +251,7 @@ These are **risks** to track, **not** work to commit. Revisit only when observed
 - **Mid-plan beads mutations.** Brain calling `add_dependency` on a task whose plan is running has no effect on the running plan. If this becomes observed pain, design continuous projection or write-through.
 - **Attempt-history carry-over.** Re-executing a rejected epic starts at attempt=1. If teams want historical carry-over, store attempt metadata in beads comments and read on re-execution.
 - **Horizontal scale.** Single-orchestrator today. If multi-orchestrator becomes needed, design daemon mode with optimistic beads claims.
+- **`execute_epic` idempotency + `awaiting_review` interaction.** A plan that reaches `awaiting_review` and whose brain session dies will hold its registry entry until the orchestrator restarts. `execute_epic(epic_id)` will correctly return the existing plan's status (showing `awaiting_review`), but there is no automatic recovery path. This is the same category as the general restart-loss non-goal; noted here because the `execute_epic` idempotency guard makes it observable.
 
 Each of these is a **future spec** if justified by usage, not a Phase 2.5 deliverable.
 
