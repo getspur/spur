@@ -1174,6 +1174,13 @@ impl View for SessionDetailView {
                             }
                         }
                     }
+                    spur_acp::SessionUpdate::UserMessageChunk(chunk) => {
+                        if let spur_acp::ContentBlock::Text(tc) = &chunk.content {
+                            self.react_trace
+                                .append_user_message(&tc.text, Self::now_stamp());
+                        }
+                        self.stream_in_flight = true;
+                    }
                     spur_acp::SessionUpdate::ToolCall(tc) => {
                         use spur_acp::adapter::{self, ToolInputDisplay};
                         let kind = self.agent_kind();
