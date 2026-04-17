@@ -111,6 +111,9 @@ pub struct ExecutorNode {
     /// on `ExecutorRetryStarted`. Capped at `STREAM_BUFFER_CAP`.
     #[serde(default)]
     pub stream_buffer: VecDeque<WorkerStreamEntry>,
+    /// Issue ID linked to this executor via delegation (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
 }
 
 impl ExecutorNode {
