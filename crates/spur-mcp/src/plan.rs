@@ -110,6 +110,185 @@ pub struct PlanState {
 /// reject, or leave the task as-is.
 pub const MAX_ATTEMPTS: u32 = 3;
 
+/// Tracks the active plan for each epic so re-calling `execute_epic(epic_id)`
+/// while a plan is running returns the existing plan_id. Lazy cleanup — a
+/// registry entry is cleared on the next `execute_epic` call for the same
+/// epic if its plan has reached a terminal overall status.
+#[derive(Debug, Default)]
+pub struct PlanRegistry {
+    /// epic_id → plan_id (for the currently-active plan, if any).
+    pub by_epic: std::collections::HashMap<String, String>,
+}
+
+/// Extract the portion of a label after a given prefix, trimmed of whitespace.
+/// Returns `None` if no label starts with `prefix`.
+fn label_value<'a>(labels: &'a [String], prefix: &str) -> Option<&'a str> {
+    labels
+        .iter()
+        .filter_map(|l| l.strip_prefix(prefix).map(str::trim))
+        .next()
+}
+
+/// Return a copy of `labels` with all entries that start with `"spur."` removed.
+fn strip_spur_labels(labels: &[String]) -> Vec<String> {
+    labels
+        .iter()
+        .filter(|l| !l.starts_with("spur."))
+        .cloned()
+        .collect()
+}
+
+/// Result of deriving a plan from a beads epic subgraph.
+#[derive(Debug)]
+pub struct DerivedEpicPlan {
+    pub plan_tasks: Vec<PlanTask>,
+    pub warnings: Vec<String>,
+    pub agent_counts: std::collections::HashMap<String, usize>,
+    pub edge_count: usize,
+}
+
+/// Pure derivation function: given a fetched epic issue, its direct children,
+/// external-dependency statuses, an optional default agent, and the set of
+/// configured agent names, produce a `DerivedEpicPlan` ready to hand off to
+/// the existing `submit_plan` / `run_plan` engine.
+///
+/// Errors are returned as human-readable strings with actionable guidance.
+pub fn derive_epic_plan_from_issues(
+    epic: &spur_pm::Issue,
+    children: &[spur_pm::Issue],
+    external_dep_statuses: &std::collections::HashMap<String, String>,
+    default_agent: Option<&str>,
+    known_agents: &[&str],
+) -> Result<DerivedEpicPlan, String> {
+    // 1. Verify the root issue is actually an epic.
+    if epic.issue_type.as_deref() != Some("epic") {
+        let t = epic.issue_type.as_deref().unwrap_or("none");
+        return Err(format!(
+            "issue '{}' is not an epic (type={t}); use create_issue(type='epic') or change its type",
+            epic.id
+        ));
+    }
+
+    // 2. Reject empty subgraph.
+    if children.is_empty() {
+        return Err(format!(
+            "epic '{}' has no children; create at least one child task first",
+            epic.id
+        ));
+    }
+
+    // 3. Build subgraph id set.
+    let subgraph_ids: HashSet<&str> = children.iter().map(|c| c.id.as_str()).collect();
+
+    let mut plan_tasks: Vec<PlanTask> = Vec::with_capacity(children.len());
+    let mut warnings: Vec<String> = Vec::new();
+
+    for child in children {
+        // 4a. Reject nested epics.
+        if child.issue_type.as_deref() == Some("epic") {
+            return Err(format!(
+                "nested epic child '{}' not supported; flatten to direct tasks",
+                child.id
+            ));
+        }
+
+        // 4b. Resolve agent.
+        let agent = if let Some(name) = label_value(&child.labels, "spur.agent=") {
+            name.to_string()
+        } else if let Some(name) = label_value(&epic.labels, "spur.agent=") {
+            name.to_string()
+        } else if let Some(name) = default_agent {
+            warnings.push(format!(
+                "'{}' has no spur.agent label — used default_agent",
+                child.id
+            ));
+            name.to_string()
+        } else {
+            let known = known_agents.join(", ");
+            return Err(format!(
+                "no agent for task '{}'; set `spur.agent=<name>` label or pass default_agent. Known agents: [{}]",
+                child.id, known
+            ));
+        };
+
+        // 4c. Validate agent is configured.
+        if !known_agents.contains(&agent.as_str()) {
+            let known = known_agents.join(", ");
+            return Err(format!(
+                "agent '{agent}' on task '{}' not configured. Known agents: [{}]",
+                child.id, known
+            ));
+        }
+
+        // 4d. Resolve task text.
+        let task_text = if let Some(text) = label_value(&child.labels, "spur.task_text=") {
+            text.to_string()
+        } else {
+            child.body.clone()
+        };
+
+        // 4e. Map blocked_by: keep intra-subgraph deps; validate/warn external.
+        let mut depends_on: Vec<String> = Vec::new();
+        for b in &child.blocked_by {
+            if subgraph_ids.contains(b.as_str()) {
+                depends_on.push(b.clone());
+            } else {
+                // External dep — must already be done.
+                let status = external_dep_statuses
+                    .get(b.as_str())
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                if status == "done" {
+                    warnings.push(format!(
+                        "external dependency '{}' is done — omitted from depends_on",
+                        b
+                    ));
+                    // Do NOT add to depends_on; engine will treat this as Ready.
+                } else {
+                    return Err(format!(
+                        "external dependency '{}' not done (status={status}); satisfy it or remove the edge",
+                        b
+                    ));
+                }
+            }
+        }
+
+        plan_tasks.push(PlanTask {
+            task_id: child.id.clone(),
+            agent,
+            task: task_text,
+            depends_on,
+            issue_id: Some(child.id.clone()),
+            context_files: vec![],
+        });
+    }
+
+    // 5. Validate with existing engine (cycle detection, dangling deps, duplicates).
+    validate_plan(&plan_tasks).map_err(|e| e)?;
+
+    // 6. Compute metrics.
+    let mut agent_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut edge_count = 0usize;
+    for t in &plan_tasks {
+        *agent_counts.entry(t.agent.clone()).or_insert(0) += 1;
+        edge_count += t.depends_on.len();
+    }
+
+    Ok(DerivedEpicPlan {
+        plan_tasks,
+        warnings,
+        agent_counts,
+        edge_count,
+    })
+}
+
+/// Silence the `strip_spur_labels` "unused" lint — it is exercised by tests
+/// and will be called from the MCP handler in Task 2.
+#[allow(dead_code)]
+fn _use_strip_spur_labels(l: &[String]) -> Vec<String> {
+    strip_spur_labels(l)
+}
+
 /// Derive a short human-readable name from a task's full text. Takes the
 /// first non-empty line, trims, and caps at 60 chars on a UTF-8 boundary.
 /// Used for TUI log entries and plan-status payloads so brain/user don't
@@ -1289,6 +1468,346 @@ mod tests {
         let got = super::display_name(&s);
         assert!(got.ends_with('…'));
         assert!(std::str::from_utf8(got.as_bytes()).is_ok());
+    }
+
+    // ─── label helper tests ───────────────────────────────────────────
+
+    #[test]
+    fn label_value_finds_prefix() {
+        let labels = vec![
+            "spur.agent=codex".to_string(),
+            "priority=high".to_string(),
+            "spur.task_text=custom".to_string(),
+        ];
+        assert_eq!(super::label_value(&labels, "spur.agent="), Some("codex"));
+        assert_eq!(super::label_value(&labels, "spur.task_text="), Some("custom"));
+        assert_eq!(super::label_value(&labels, "missing="), None);
+    }
+
+    #[test]
+    fn strip_spur_labels_drops_machine_prefix() {
+        let labels = vec![
+            "spur.agent=codex".to_string(),
+            "area:auth".to_string(),
+            "spur.task_text=x".to_string(),
+            "bug".to_string(),
+        ];
+        let kept = super::strip_spur_labels(&labels);
+        assert_eq!(kept, vec!["area:auth".to_string(), "bug".to_string()]);
+    }
+
+    // ─── PlanRegistry tests ───────────────────────────────────────────
+
+    #[test]
+    fn plan_registry_empty_has_no_entries() {
+        let r = super::PlanRegistry::default();
+        assert!(r.by_epic.is_empty());
+    }
+
+    #[test]
+    fn plan_registry_insert_and_lookup() {
+        let mut r = super::PlanRegistry::default();
+        r.by_epic.insert("bd-100".into(), "plan-abc".into());
+        assert_eq!(r.by_epic.get("bd-100"), Some(&"plan-abc".to_string()));
+    }
+
+    // ─── derive_epic_plan_from_issues tests ───────────────────────────
+
+    fn make_issue(
+        id: &str,
+        issue_type: Option<&str>,
+        labels: Vec<String>,
+        body: &str,
+        blocked_by: Vec<String>,
+    ) -> spur_pm::Issue {
+        use chrono::Utc;
+        spur_pm::Issue {
+            id: id.to_string(),
+            source: spur_pm::PmSource::Beads,
+            title: format!("Issue {id}"),
+            body: body.to_string(),
+            status: "open".to_string(),
+            labels,
+            assignee: None,
+            url: format!("http://beads/issues/{id}"),
+            priority: None,
+            issue_type: issue_type.map(String::from),
+            blocked_by,
+            due_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn derive_epic_plan_resolves_agents_and_deps() {
+        let epic = make_issue(
+            "bd-100",
+            Some("epic"),
+            vec!["spur.agent=codex".to_string()],
+            "Epic body",
+            vec![],
+        );
+        let child_a = make_issue("bd-101", Some("task"), vec![], "Task A body", vec![]);
+        let child_b = make_issue(
+            "bd-102",
+            Some("task"),
+            vec![],
+            "Task B body",
+            vec!["bd-101".to_string()],
+        );
+        let empty_ext = std::collections::HashMap::new();
+
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child_a, child_b],
+            &empty_ext,
+            None,
+            &["codex", "claude-code"],
+        )
+        .unwrap();
+
+        assert_eq!(derived.plan_tasks.len(), 2);
+        let a = derived
+            .plan_tasks
+            .iter()
+            .find(|t| t.task_id == "bd-101")
+            .unwrap();
+        let b = derived
+            .plan_tasks
+            .iter()
+            .find(|t| t.task_id == "bd-102")
+            .unwrap();
+        assert!(a.depends_on.is_empty());
+        assert_eq!(b.depends_on, vec!["bd-101".to_string()]);
+        assert_eq!(a.agent, "codex");
+        assert_eq!(b.agent, "codex");
+        assert_eq!(derived.edge_count, 1);
+    }
+
+    #[test]
+    fn derive_rejects_non_epic_issue() {
+        let epic = make_issue("bd-200", Some("task"), vec![], "body", vec![]);
+        let err = super::derive_epic_plan_from_issues(
+            &epic,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap_err();
+        assert!(err.contains("not an epic"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_rejects_empty_children() {
+        let epic = make_issue("bd-201", Some("epic"), vec![], "body", vec![]);
+        let err = super::derive_epic_plan_from_issues(
+            &epic,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap_err();
+        assert!(err.contains("no children"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_rejects_nested_epic_child() {
+        let epic = make_issue("bd-202", Some("epic"), vec![], "body", vec![]);
+        let child = make_issue("bd-203", Some("epic"), vec!["spur.agent=codex".to_string()], "sub-epic", vec![]);
+        let err = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap_err();
+        assert!(err.contains("nested epic child"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_rejects_unsatisfied_external_dep() {
+        let epic = make_issue("bd-204", Some("epic"), vec!["spur.agent=codex".to_string()], "body", vec![]);
+        let child = make_issue(
+            "bd-205",
+            Some("task"),
+            vec![],
+            "task body",
+            vec!["bd-999".to_string()], // external dep
+        );
+        let mut ext = std::collections::HashMap::new();
+        ext.insert("bd-999".to_string(), "open".to_string());
+        let err = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &ext,
+            None,
+            &["codex"],
+        )
+        .unwrap_err();
+        assert!(err.contains("external dependency"), "got: {err}");
+        assert!(err.contains("not done"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_allows_done_external_dep() {
+        let epic = make_issue("bd-206", Some("epic"), vec!["spur.agent=codex".to_string()], "body", vec![]);
+        let child = make_issue(
+            "bd-207",
+            Some("task"),
+            vec![],
+            "task body",
+            vec!["bd-999".to_string()], // external dep already done
+        );
+        let mut ext = std::collections::HashMap::new();
+        ext.insert("bd-999".to_string(), "done".to_string());
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &ext,
+            None,
+            &["codex"],
+        )
+        .unwrap();
+        assert_eq!(derived.plan_tasks.len(), 1);
+        assert!(derived.plan_tasks[0].depends_on.is_empty());
+        assert!(derived.warnings.iter().any(|w| w.contains("bd-999")));
+    }
+
+    #[test]
+    fn derive_inherits_agent_from_epic_label() {
+        let epic = make_issue(
+            "bd-208",
+            Some("epic"),
+            vec!["spur.agent=claude-code".to_string()],
+            "body",
+            vec![],
+        );
+        // child has NO spur.agent label
+        let child = make_issue("bd-209", Some("task"), vec![], "task body", vec![]);
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex", "claude-code"],
+        )
+        .unwrap();
+        assert_eq!(derived.plan_tasks[0].agent, "claude-code");
+        // should NOT produce a warning (inherited from epic label, not default_agent)
+        assert!(derived.warnings.is_empty());
+    }
+
+    #[test]
+    fn derive_falls_back_to_default_agent() {
+        let epic = make_issue("bd-210", Some("epic"), vec![], "body", vec![]);
+        let child = make_issue("bd-211", Some("task"), vec![], "task body", vec![]);
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &std::collections::HashMap::new(),
+            Some("codex"),
+            &["codex", "claude-code"],
+        )
+        .unwrap();
+        assert_eq!(derived.plan_tasks[0].agent, "codex");
+        // a warning must be emitted when falling back to default_agent
+        assert!(
+            derived.warnings.iter().any(|w| w.contains("default_agent")),
+            "expected default_agent warning, got: {:?}",
+            derived.warnings
+        );
+    }
+
+    #[test]
+    fn derive_rejects_missing_agent() {
+        let epic = make_issue("bd-212", Some("epic"), vec![], "body", vec![]);
+        let child = make_issue("bd-213", Some("task"), vec![], "task body", vec![]);
+        let err = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex", "claude-code"],
+        )
+        .unwrap_err();
+        assert!(err.contains("no agent"), "got: {err}");
+        assert!(err.contains("Known agents"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_rejects_unknown_agent() {
+        let epic = make_issue("bd-214", Some("epic"), vec![], "body", vec![]);
+        let child = make_issue(
+            "bd-215",
+            Some("task"),
+            vec!["spur.agent=kiro".to_string()],
+            "task body",
+            vec![],
+        );
+        let err = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex", "claude-code"],
+        )
+        .unwrap_err();
+        assert!(err.contains("not configured"), "got: {err}");
+        assert!(err.contains("kiro"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_uses_spur_task_text_override() {
+        let epic = make_issue("bd-216", Some("epic"), vec!["spur.agent=codex".to_string()], "body", vec![]);
+        let child = make_issue(
+            "bd-217",
+            Some("task"),
+            vec!["spur.task_text=custom task text".to_string()],
+            "issue body (should be ignored)",
+            vec![],
+        );
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap();
+        assert_eq!(derived.plan_tasks[0].task, "custom task text");
+    }
+
+    #[test]
+    fn derive_cycle_rejected() {
+        let epic = make_issue("bd-218", Some("epic"), vec!["spur.agent=codex".to_string()], "body", vec![]);
+        // A depends on B and B depends on A → cycle
+        let child_a = make_issue(
+            "bd-219",
+            Some("task"),
+            vec![],
+            "task A",
+            vec!["bd-220".to_string()],
+        );
+        let child_b = make_issue(
+            "bd-220",
+            Some("task"),
+            vec![],
+            "task B",
+            vec!["bd-219".to_string()],
+        );
+        let err = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child_a, child_b],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap_err();
+        assert!(err.contains("Cycle"), "got: {err}");
     }
 
     #[test]
