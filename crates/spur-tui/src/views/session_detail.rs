@@ -105,6 +105,10 @@ pub struct SessionDetailView {
     history_search_hits: Vec<String>,
     /// Whether the inline workers panel is collapsed. Toggled by Alt+D.
     workers_panel_collapsed: bool,
+    /// Maps ToolCall id -> render depth for subagent nesting.
+    /// Populated on each ToolCall; read on subsequent ToolCalls to resolve
+    /// the parent's depth. Capped at 8 to prevent runaway indentation.
+    tool_depth: std::collections::HashMap<String, u8>,
 }
 
 impl SessionDetailView {
@@ -154,6 +158,7 @@ impl SessionDetailView {
             history_search: None,
             history_search_hits: Vec::new(),
             workers_panel_collapsed: false,
+            tool_depth: std::collections::HashMap::new(),
         }
     }
 
@@ -1172,6 +1177,20 @@ impl View for SessionDetailView {
                     spur_acp::SessionUpdate::ToolCall(tc) => {
                         use spur_acp::adapter::{self, ToolInputDisplay};
                         let kind = self.agent_kind();
+                        let meta = spur_acp::adapter::extract_tool_meta(tc, kind);
+                        let display_name = meta
+                            .tool_name
+                            .as_deref()
+                            .unwrap_or(tc.title.as_str());
+                        let depth = meta
+                            .parent_tool_use_id
+                            .as_ref()
+                            .and_then(|pid| self.tool_depth.get(pid).copied())
+                            .map(|d| d.saturating_add(1).min(8))
+                            .unwrap_or(0);
+                        self.tool_depth.insert(tc.tool_call_id.0.to_string(), depth);
+                        let indent = "  ".repeat(depth as usize);
+                        let tool = format!("{}{}", indent, display_name);
                         let family = adapter::classify_tool(tc, kind);
                         let input = tc
                             .raw_input
@@ -1185,7 +1204,7 @@ impl View for SessionDetailView {
                             .unwrap_or_default();
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Act {
-                                tool: tc.title.clone(),
+                                tool,
                                 family,
                                 input,
                             },
@@ -2135,5 +2154,51 @@ mod cancel_state_tests {
             last_text.contains("Cancellation requested"),
             "expected generic fallback; got {last_text:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_depth_tests {
+    #[test]
+    fn tool_depth_nested_two_levels() {
+        use std::collections::HashMap;
+        let mut tool_depth: HashMap<String, u8> = HashMap::new();
+        tool_depth.insert("tc-root".into(), 0);
+
+        let depth_1 = Some("tc-root")
+            .and_then(|pid| tool_depth.get(pid).copied())
+            .map(|d| d.saturating_add(1).min(8))
+            .unwrap_or(0);
+        tool_depth.insert("tc-child".into(), depth_1);
+        assert_eq!(depth_1, 1);
+
+        let depth_2 = Some("tc-child")
+            .and_then(|pid| tool_depth.get(pid).copied())
+            .map(|d| d.saturating_add(1).min(8))
+            .unwrap_or(0);
+        assert_eq!(depth_2, 2);
+    }
+
+    #[test]
+    fn tool_depth_unknown_parent_defaults_zero() {
+        use std::collections::HashMap;
+        let tool_depth: HashMap<String, u8> = HashMap::new();
+        let depth = Some("tc-ghost")
+            .and_then(|pid| tool_depth.get(pid).copied())
+            .map(|d| d.saturating_add(1).min(8))
+            .unwrap_or(0);
+        assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn tool_depth_caps_at_eight() {
+        use std::collections::HashMap;
+        let mut tool_depth: HashMap<String, u8> = HashMap::new();
+        tool_depth.insert("tc-deep".into(), 8);
+        let depth = Some("tc-deep")
+            .and_then(|pid| tool_depth.get(pid).copied())
+            .map(|d| d.saturating_add(1).min(8))
+            .unwrap_or(0);
+        assert_eq!(depth, 8);
     }
 }
