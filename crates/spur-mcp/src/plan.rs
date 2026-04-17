@@ -130,6 +130,8 @@ fn label_value<'a>(labels: &'a [String], prefix: &str) -> Option<&'a str> {
 }
 
 /// Return a copy of `labels` with all entries that start with `"spur."` removed.
+// Task 2 MCP handler will consume this; tested via strip_spur_labels_drops_machine_prefix.
+#[allow(dead_code)]
 fn strip_spur_labels(labels: &[String]) -> Vec<String> {
     labels
         .iter()
@@ -143,7 +145,7 @@ fn strip_spur_labels(labels: &[String]) -> Vec<String> {
 pub struct DerivedEpicPlan {
     pub plan_tasks: Vec<PlanTask>,
     pub warnings: Vec<String>,
-    pub agent_counts: std::collections::HashMap<String, usize>,
+    pub agent_counts: std::collections::BTreeMap<String, usize>,
     pub edge_count: usize,
 }
 
@@ -253,21 +255,22 @@ pub fn derive_epic_plan_from_issues(
             }
         }
 
+        let id = child.id.clone();
         plan_tasks.push(PlanTask {
-            task_id: child.id.clone(),
+            task_id: id.clone(),
             agent,
             task: task_text,
             depends_on,
-            issue_id: Some(child.id.clone()),
+            issue_id: Some(id),
             context_files: vec![],
         });
     }
 
     // 5. Validate with existing engine (cycle detection, dangling deps, duplicates).
-    validate_plan(&plan_tasks).map_err(|e| e)?;
+    validate_plan(&plan_tasks)?;
 
     // 6. Compute metrics.
-    let mut agent_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut agent_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut edge_count = 0usize;
     for t in &plan_tasks {
         *agent_counts.entry(t.agent.clone()).or_insert(0) += 1;
@@ -282,12 +285,6 @@ pub fn derive_epic_plan_from_issues(
     })
 }
 
-/// Silence the `strip_spur_labels` "unused" lint — it is exercised by tests
-/// and will be called from the MCP handler in Task 2.
-#[allow(dead_code)]
-fn _use_strip_spur_labels(l: &[String]) -> Vec<String> {
-    strip_spur_labels(l)
-}
 
 /// Derive a short human-readable name from a task's full text. Takes the
 /// first non-empty line, trims, and caps at 60 chars on a UTF-8 boundary.
@@ -609,6 +606,7 @@ pub async fn run_plan(
             .collect();
 
         for entry in &mut p.tasks {
+            #[allow(clippy::collapsible_if)]
             if matches!(entry.status, PlanTaskStatus::Pending) {
                 if entry
                     .spec
@@ -818,6 +816,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
 /// Review a task in a plan: approve, reject, or request_changes.
 /// Optionally syncs with beads (pm), emits events (sink), and dispatches
 /// newly-ready tasks on approval (delegation_tx / task_tracker / plan_arc).
+#[allow(clippy::too_many_arguments)]
 pub async fn review_task(
     plan_id: &str,
     task_id: &str,
@@ -1153,6 +1152,7 @@ fn mark_descendants_failed(
 }
 
 /// Scan for Pending tasks whose deps are all Approved; dispatch each.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_newly_ready(
     plan_id: &str,
     state: &mut PlanState,
@@ -1779,6 +1779,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(derived.plan_tasks[0].task, "custom task text");
+    }
+
+    #[test]
+    fn derive_rejects_empty_agent_label() {
+        // A `spur.agent=` label with empty value resolves to ""; must fail
+        // the known_agents check with an actionable error.
+        let epic = make_issue("bd-230", Some("epic"), vec![], "body", vec![]);
+        let child = make_issue(
+            "bd-231",
+            Some("task"),
+            vec!["spur.agent=".to_string()],
+            "task body",
+            vec![],
+        );
+        let err = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex", "claude-code"],
+        )
+        .unwrap_err();
+        assert!(err.contains("not configured"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_accepts_empty_spur_task_text_override() {
+        // Document the current behavior: `spur.task_text=` (empty value)
+        // yields an empty PlanTask.task (override beats body). This is the
+        // intended contract — an empty value is still an explicit override.
+        let epic = make_issue(
+            "bd-232",
+            Some("epic"),
+            vec!["spur.agent=codex".to_string()],
+            "body",
+            vec![],
+        );
+        let child = make_issue(
+            "bd-233",
+            Some("task"),
+            vec!["spur.task_text=".to_string()],
+            "issue body (should be ignored)",
+            vec![],
+        );
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap();
+        assert_eq!(derived.plan_tasks[0].task, "", "empty override should beat body");
     }
 
     #[test]
