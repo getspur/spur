@@ -104,6 +104,47 @@ pub struct PlanState {
     pub brain_session_id: SessionId,
 }
 
+/// Maximum number of iterations per plan task. After this many attempts,
+/// `review_task(request_changes)` returns an error — the brain must approve,
+/// reject, or leave the task as-is.
+pub const MAX_ATTEMPTS: u32 = 3;
+
+/// Build the enriched task description used when re-dispatching a task for
+/// iteration. Concatenates the original task, prior attempt summaries, and
+/// the brain's feedback. No bloat cap — the 3-attempt limit bounds size.
+fn build_enriched_task(
+    original_task: &str,
+    history: &[AttemptRecord],
+    current_feedback: &str,
+) -> String {
+    let mut out = String::with_capacity(
+        original_task.len() + current_feedback.len() + history.len() * 512,
+    );
+    out.push_str("## Original Task\n");
+    out.push_str(original_task);
+    out.push_str("\n\n## Previous Attempts\n");
+    for rec in history {
+        out.push_str(&format!(
+            "\nAttempt {attempt} (branch {branch}):\n  Summary: {summary}\n  Diff: {diff}\n  Brain feedback: {feedback}\n",
+            attempt = rec.attempt,
+            branch = rec.worker_branch.as_deref().unwrap_or("—"),
+            summary = rec.summary.as_deref().unwrap_or("—"),
+            diff = rec
+                .diff_summary
+                .as_ref()
+                .map(|d| format!("+{}/-{} across {} files", d.insertions, d.deletions, d.files_changed))
+                .unwrap_or_else(|| "—".to_string()),
+            feedback = rec.feedback,
+        ));
+    }
+    out.push_str("\n## Current Request\n");
+    out.push_str(current_feedback);
+    out.push_str(
+        "\n\nApply the feedback above. You can inspect prior attempts with `git show <branch>` if helpful.\n",
+    );
+    out
+}
+
 // ─── Validation ──────────────────────────────────────────────────────
 
 /// Validate a plan: check for duplicate IDs, dangling deps, and cycles.
