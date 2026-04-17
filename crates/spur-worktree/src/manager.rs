@@ -79,8 +79,10 @@ impl WorktreeManager {
     /// instead of a temp worktree, making this safe for concurrent invocation
     /// (e.g. parallel plan dispatch).
     pub async fn snapshot_brain_state(&self) -> Result<String> {
+        // Only tracked modifications count as dirty — untracked files (??) are
+        // ignored because `git stash create` doesn't capture them anyway.
         let status = self.run_git(&["status", "--porcelain"], None).await?;
-        let dirty = !status.is_empty();
+        let dirty = status.lines().any(|l| !l.starts_with("??"));
 
         // Unique branch name: timestamp for humans + atomic counter for concurrency.
         let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
@@ -88,10 +90,22 @@ impl WorktreeManager {
         let branch_name = format!("spur/brain-snapshot-{timestamp}-{seq}");
 
         if dirty {
-            let stash_ref = self
-                .run_git(&["stash", "create"], None)
-                .await
-                .context("failed to create stash")?;
+            // Retry stash create up to 3 times — concurrent calls can hit
+            // index.lock contention when multiple plan tasks snapshot in parallel.
+            let mut stash_ref = String::new();
+            for attempt in 0..3 {
+                match self.run_git(&["stash", "create"], None).await {
+                    Ok(r) => {
+                        stash_ref = r;
+                        break;
+                    }
+                    Err(e) if attempt < 2 => {
+                        debug!(attempt, error = %e, "stash create contention, retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1))).await;
+                    }
+                    Err(e) => return Err(e).context("failed to create stash after retries"),
+                }
+            }
 
             if !stash_ref.is_empty() {
                 // Extract the tree from the stash commit (captures dirty state).
