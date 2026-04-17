@@ -400,9 +400,8 @@ async fn main() -> Result<()> {
         Commands::Connect { service } => {
             match service.as_str() {
                 "github" => {
-                    let mut adapter = spur_pm::GitHubAdapter::new(None);
-                    use spur_pm::PmAdapter;
-                    adapter.connect().await?;
+                    let cwd = std::env::current_dir()?;
+                    let adapter = spur_pm::GitHubAdapter::connect(None, &cwd).await?;
                     println!(
                         "[spur] Connected to GitHub: {}",
                         adapter.repo.unwrap_or_default()
@@ -442,7 +441,27 @@ async fn main() -> Result<()> {
                 }
             };
             let config_arc = std::sync::Arc::new(config.clone());
+
+            // Create PmService (optional — returns None if no backend available)
+            let pm_service = spur_pm::PmService::try_new(
+                config.pm.github.as_ref().and_then(|g| g.repo.clone()),
+                config.pm.beads.as_ref().map_or(true, |b| b.enabled),
+                config.pm.github.as_ref().map_or(true, |g| g.enabled),
+                &repo_root,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("PM service initialization failed: {e}");
+                None
+            });
+            let pm_arc = pm_service.map(std::sync::Arc::new);
+
             let orch = Orchestrator::new(repo_root.clone(), config)?;
+            let orch = if let Some(pm) = pm_arc {
+                orch.with_pm_service(pm)
+            } else {
+                orch
+            };
             let event_rx = orch.subscribe();
 
             // Clone the review_sink BEFORE orch is moved.

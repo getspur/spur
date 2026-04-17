@@ -47,6 +47,7 @@ pub struct DashboardView {
     verbose: bool,
     text_batch: HashMap<String, (String, Instant)>,
     start_time: Instant,
+    tracked_issues: Vec<spur_pm::IssueSummary>,
 }
 
 impl DashboardView {
@@ -64,6 +65,7 @@ impl DashboardView {
             verbose: false,
             text_batch: HashMap::new(),
             start_time: Instant::now(),
+            tracked_issues: Vec::new(),
         }
     }
 
@@ -320,6 +322,7 @@ impl DashboardView {
                     context_used: None,
                     context_size: None,
                     stream_in_flight: false,
+                    issue_count: self.tracked_issues.len(),
                 },
             );
             return;
@@ -331,33 +334,61 @@ impl DashboardView {
 
         let input_height = self.input_bar.required_height(area.width);
 
-        let chunks = Layout::vertical([
+        let issues_height = if self.tracked_issues.is_empty() {
+            0
+        } else {
+            crate::components::issues_panel::IssuesPanel::computed_height(
+                self.tracked_issues.len(),
+                area.height,
+            )
+        };
+
+        let mut constraints = vec![
             Constraint::Length(agents_height), // lineage tree
-            Constraint::Min(4),                // activity log (fills)
-            Constraint::Length(input_height),  // input bar
-            Constraint::Length(1),             // status bar
-        ])
-        .split(area);
+        ];
+        if issues_height > 0 {
+            constraints.push(Constraint::Length(issues_height)); // issues panel
+        }
+        constraints.push(Constraint::Min(4));               // activity log (fills)
+        constraints.push(Constraint::Length(input_height)); // input bar
+        constraints.push(Constraint::Length(1));            // status bar
+
+        let chunks = Layout::vertical(constraints).split(area);
+
+        // Chunk indices depend on whether issues panel is present
+        let issues_chunk = if issues_height > 0 { Some(1usize) } else { None };
+        let log_chunk = if issues_height > 0 { 2 } else { 1 };
+        let input_chunk = log_chunk + 1;
+        let status_chunk = input_chunk + 1;
 
         self.agents_tree.render(frame, chunks[0], lineage);
+
+        if let Some(ic) = issues_chunk {
+            crate::components::issues_panel::IssuesPanel::render(
+                &self.tracked_issues,
+                frame,
+                chunks[ic],
+            );
+        }
+
         match &self.focused_node {
             Some(id) => {
                 if let Some(node) = lineage.node(id) {
-                    self.detail_pane.render(frame, chunks[1], node);
+                    self.detail_pane.render(frame, chunks[log_chunk], node);
                 } else {
-                    self.activity_log.render(frame, chunks[1]);
+                    self.activity_log.render(frame, chunks[log_chunk]);
                 }
             }
             None => {
-                self.activity_log.render(frame, chunks[1]);
+                self.activity_log.render(frame, chunks[log_chunk]);
             }
         }
-        let input_bar_area = chunks[2];
+        let input_bar_area = chunks[input_chunk];
         self.render_input_hint(frame, area, input_bar_area);
         self.input_bar.render(frame, input_bar_area);
         StatusBar::render(
             frame,
-            chunks[3],
+            chunks[status_chunk],
             StatusBarProps {
                 view: &ViewId::Dashboard,
                 running,
@@ -368,6 +399,7 @@ impl DashboardView {
                 context_used: None,
                 context_size: None,
                 stream_in_flight: false,
+                issue_count: self.tracked_issues.len(),
             },
         );
     }
@@ -921,11 +953,46 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEventBody::IssueUpdated { source, id, status } => {
+            SpurEventBody::IssueUpdated { source, id, status, assignee } => {
+                if let Some(issue) = self.tracked_issues.iter_mut().find(|i| i.id == *id) {
+                    issue.status = status.clone();
+                    if let Some(a) = assignee {
+                        issue.assignee = Some(a.clone());
+                    }
+                }
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".to_string(),
                     message: format!("Issue {} ({}) updated: {}", id, source, status),
+                    kind: LogEntryKind::Info,
+                });
+            }
+
+            SpurEventBody::IssuesLoaded { issues } => {
+                self.tracked_issues = issues.iter().map(|i| spur_pm::IssueSummary {
+                    id: i.id.clone(),
+                    source: match i.source.as_str() {
+                        "github" => spur_pm::PmSource::GitHub,
+                        "linear" => spur_pm::PmSource::Linear,
+                        "plane" => spur_pm::PmSource::Plane,
+                        _ => spur_pm::PmSource::Beads,
+                    },
+                    title: i.title.clone(),
+                    status: i.status.clone(),
+                    labels: Vec::new(),
+                    url: String::new(),
+                    priority: i.priority,
+                    issue_type: i.issue_type.clone(),
+                    assignee: i.assignee.clone(),
+                }).collect();
+                // Sort by priority ascending (critical first)
+                self.tracked_issues.sort_by(|a, b| {
+                    a.priority.unwrap_or(99).cmp(&b.priority.unwrap_or(99))
+                });
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: "[pm]".into(),
+                    message: format!("{} issues loaded", self.tracked_issues.len()),
                     kind: LogEntryKind::Info,
                 });
             }

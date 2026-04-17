@@ -30,8 +30,7 @@ use spur_cost::CostTracker;
 use spur_mcp::{
     build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
 };
-use spur_pm::adapter::PmAdapter;
-use spur_pm::GitHubAdapter;
+use spur_pm::PmService;
 use spur_worktree::WorktreeManager;
 
 use crate::lineage::ExecutorId;
@@ -170,6 +169,7 @@ pub struct Orchestrator {
     funnel: crate::event_funnel::FunnelHandle,
     pub review_sink: ReviewSink, // Clone type, shares inner Arc<Mutex>
     repo_root: PathBuf,
+    pub pm_service: Option<Arc<PmService>>,
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -257,7 +257,14 @@ impl Orchestrator {
             funnel,
             review_sink,
             repo_root,
+            pm_service: None,
         })
+    }
+
+    /// Attach a PM service. Must be called before `run_adhoc` or `run_interactive`.
+    pub fn with_pm_service(mut self, pm: Arc<PmService>) -> Self {
+        self.pm_service = Some(pm);
+        self
     }
 
     /// Subscribe to orchestrator events (for TUI, logging, etc.).
@@ -311,6 +318,31 @@ impl Orchestrator {
             session: session_id.clone(),
         }));
 
+        // 1b. Load open issues for TUI display.
+        if let Some(pm) = &self.pm_service {
+            match pm.list_issues(spur_pm::IssueFilter {
+                status: Some("open".into()),
+                ..Default::default()
+            }).await {
+                Ok(issues) => {
+                    let event_issues: Vec<spur_acp::domain::events::IssueSummaryEvent> = issues.iter().map(|i| {
+                        spur_acp::domain::events::IssueSummaryEvent {
+                            id: i.id.clone(),
+                            source: pm.source_str().into(),
+                            title: i.title.clone(),
+                            status: i.status.clone(),
+                            priority: i.priority,
+                            issue_type: i.issue_type.clone(),
+                            assignee: i.assignee.clone(),
+                        }
+                    }).collect();
+                    self.funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
+                    tracing::info!(count = issues.len(), "Loaded open issues from {}", pm.source_str());
+                }
+                Err(e) => tracing::warn!("Failed to load issues: {e}"),
+            }
+        }
+
         // 2. Optionally fetch issue context.
         let issue_context = if let Some(ref issue_ref) = opts.issue {
             match self.fetch_issue_context(issue_ref).await {
@@ -335,7 +367,8 @@ impl Orchestrator {
             self.build_brain_prompt(task, issue_context.as_ref(), &session_id, &brain_name);
 
         // 4. Start MCP callback server.
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
+        let (mcp_server, delegation_channel) =
+            McpCallbackServer::new(&session_id, self.pm_service.clone());
         let mut mcp_server = mcp_server;
 
         // Populate available workers.
@@ -413,6 +446,7 @@ impl Orchestrator {
             max_concurrent,
             self.funnel.clone(),
             self.review_sink.clone(),
+            self.pm_service.clone(),
         ));
 
         // Stream brain output. For native (ACP-transport) agents prompt()
@@ -1223,7 +1257,8 @@ impl Orchestrator {
         }));
 
         // Start MCP callback server.
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
+        let (mcp_server, delegation_channel) =
+            McpCallbackServer::new(&session_id, self.pm_service.clone());
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
@@ -1289,6 +1324,7 @@ impl Orchestrator {
             max_concurrent,
             self.funnel.clone(),
             self.review_sink.clone(),
+            self.pm_service.clone(),
         ));
 
         // Spawn the vendor-extension notification pump (if the transport
@@ -1372,7 +1408,8 @@ impl Orchestrator {
         }
 
         // Start MCP callback server.
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(&session_id);
+        let (mcp_server, delegation_channel) =
+            McpCallbackServer::new(&session_id, self.pm_service.clone());
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
@@ -1493,6 +1530,7 @@ impl Orchestrator {
             max_concurrent,
             self.funnel.clone(),
             self.review_sink.clone(),
+            self.pm_service.clone(),
         ));
 
         // Pump vendor-extension notifications onto the event stream.
@@ -2021,17 +2059,19 @@ impl Orchestrator {
     }
 
     async fn fetch_issue_context(&self, issue_ref: &str) -> Result<Issue> {
-        // Parse "github:owner/repo#42" format.
-        if let Some(rest) = issue_ref.strip_prefix("github:") {
-            if let Some((repo, id)) = rest.rsplit_once('#') {
-                let adapter = GitHubAdapter::new(Some(repo.to_string()));
-                return adapter.get_issue(id).await;
-            }
-        }
-        Err(anyhow!(
-            "Unsupported issue reference format: '{}'. Expected: github:owner/repo#42",
+        let pm = self.pm_service.as_ref()
+            .ok_or_else(|| anyhow!("No issue tracker configured"))?;
+
+        // Strip prefix if present (e.g., "github:owner/repo#42" → "42")
+        let id = if let Some(rest) = issue_ref.strip_prefix("github:") {
+            rest.rsplit_once('#').map(|(_, id)| id).unwrap_or(rest)
+        } else if let Some(rest) = issue_ref.strip_prefix("beads:") {
+            rest
+        } else {
             issue_ref
-        ))
+        };
+
+        pm.get_issue(id).await
     }
 
     /// Emit an event through the S2 funnel. The funnel stamps `seq` +
@@ -2055,6 +2095,7 @@ impl Orchestrator {
         max_concurrent: usize,
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
+        pm_service: Option<Arc<PmService>>,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
@@ -2068,6 +2109,7 @@ impl Orchestrator {
                 respond_to,
                 brain_session_id,
                 delegation_plan,
+                issue_id,
             } = request;
 
             debug!(
@@ -2081,6 +2123,7 @@ impl Orchestrator {
             let semaphore = Arc::clone(&semaphore);
             let funnel = funnel.clone();
             let review_sink = review_sink.clone();
+            let pm_service = pm_service.clone();
 
             tokio::spawn(async move {
                 let mut guard = DelegationGuard {
@@ -2099,6 +2142,25 @@ impl Orchestrator {
                     }
                 };
 
+                // Claim issue on delegation start (10f).
+                if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
+                    let worker_name = format!("spur-worker-{}", request_id);
+                    if let Err(e) = pm.update_issue(issue_id, spur_pm::IssueUpdate {
+                        status: Some("in_progress".into()),
+                        assignee: Some(worker_name.clone()),
+                        ..Default::default()
+                    }).await {
+                        tracing::warn!(issue = %issue_id, "Failed to claim issue: {e}");
+                    } else {
+                        funnel.emit(SpurEventBody::IssueUpdated {
+                            source: pm.source_str().into(),
+                            id: issue_id.clone(),
+                            status: "in_progress".into(),
+                            assignee: Some(worker_name),
+                        });
+                    }
+                }
+
                 // No outer timeout: the review gate's own `review_timeout`
                 // bounds review waits (default 30 min, configurable per
                 // agent). A previous hardcoded 300s outer timeout always
@@ -2116,7 +2178,7 @@ impl Orchestrator {
                     agent,
                     task,
                     context_files,
-                    request_id,
+                    request_id.clone(),
                     brain_session_id,
                     delegation_plan,
                     repo_root,
@@ -2125,6 +2187,46 @@ impl Orchestrator {
                     review_sink.clone(),
                 )
                 .await;
+
+                // Comment on / revert issue on completion (10g).
+                if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
+                    let (new_status, comment) = match &result.status {
+                        // Success — DON'T close, just comment. Brain decides when to close.
+                        DelegationStatus::Success => (
+                            None,
+                            format!("Completed by SPUR delegation {}", request_id),
+                        ),
+                        DelegationStatus::Rejected { .. } => (
+                            Some("open"),
+                            format!("Delegation {} rejected", request_id),
+                        ),
+                        DelegationStatus::Failed { error } => (
+                            Some("open"),
+                            format!("Delegation {} failed: {}", request_id, error),
+                        ),
+                        _ => (
+                            Some("open"),
+                            format!("Delegation {} ended", request_id),
+                        ),
+                    };
+
+                    let update = spur_pm::IssueUpdate {
+                        status: new_status.map(String::from),
+                        comment: Some(comment),
+                        ..Default::default()
+                    };
+
+                    if let Err(e) = pm.update_issue(issue_id, update).await {
+                        tracing::warn!(issue = %issue_id, "Failed to transition issue: {e}");
+                    } else if let Some(status) = new_status {
+                        funnel.emit(SpurEventBody::IssueUpdated {
+                            source: pm.source_str().into(),
+                            id: issue_id.clone(),
+                            status: status.into(),
+                            assignee: None,
+                        });
+                    }
+                }
 
                 // Normal path: disarm the guard and send result manually.
                 guard.disarmed = true;
@@ -2185,12 +2287,7 @@ impl Orchestrator {
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
     ) -> (DelegationResult, Option<ExecutorId>) {
-        // PM operations — handled directly, no worker spawn needed.
-        if agent.starts_with("__pm_") {
-            let result = handle_pm_operation(&agent, &original_task, &repo_root).await;
-            return (result, None);
-        }
-        // Other internal operations (progress, cost) — still stubbed.
+        // Internal operations (progress, cost) — still stubbed.
         if agent.starts_with("__") {
             return (
                 DelegationResult {
@@ -3410,99 +3507,6 @@ fn truncate_summary(text: &str, cap: usize) -> String {
         omitted,
         &text[tail_start..]
     )
-}
-
-/// Reads `SPUR_SUMMARY_MAX_BYTES` (default 4000) and applies `truncate_summary`.
-async fn handle_pm_operation(
-    agent: &str,
-    task_json: &str,
-    repo_root: &std::path::Path,
-) -> DelegationResult {
-    let args: serde_json::Value = match serde_json::from_str(task_json) {
-        Ok(v) => v,
-        Err(e) => {
-            return DelegationResult {
-                status: DelegationStatus::Failed {
-                    error: format!("Invalid PM task JSON: {e}"),
-                },
-                diff: None,
-                diff_summary: None,
-                summary: None,
-                estimated_cost_usd: 0.0,
-            };
-        }
-    };
-
-    let mut adapter = spur_pm::GitHubAdapter::new(None).with_cwd(repo_root);
-    if let Err(e) = adapter.connect().await {
-        return DelegationResult {
-            status: DelegationStatus::Failed {
-                error: e.to_string(),
-            },
-            diff: None,
-            diff_summary: None,
-            summary: None,
-            estimated_cost_usd: 0.0,
-        };
-    }
-
-    let result: anyhow::Result<String> = match agent {
-        "__pm_get_issue" => {
-            let id = args["id"].as_str().unwrap_or("");
-            adapter
-                .get_issue(id)
-                .await
-                .map(|issue| serde_json::to_string_pretty(&issue).unwrap_or_default())
-        }
-        "__pm_update_issue" => {
-            let id = args["id"].as_str().unwrap_or("");
-            let update = spur_pm::IssueUpdate {
-                status: args
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                comment: args
-                    .get("comment")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                ..Default::default()
-            };
-            adapter
-                .update_issue(id, update)
-                .await
-                .map(|_| "Issue updated".into())
-        }
-        "__pm_create_pr" => {
-            let params = spur_pm::PrParams {
-                title: args["title"].as_str().unwrap_or("").into(),
-                body: args["body"].as_str().unwrap_or("").into(),
-                head_branch: args["branch"].as_str().unwrap_or("").into(),
-                base_branch: None,
-                repo: None,
-            };
-            adapter.create_pr(params).await
-        }
-        other => Err(anyhow::anyhow!("Unknown PM operation: {other}")),
-    };
-
-    match result {
-        Ok(summary) => DelegationResult {
-            status: DelegationStatus::Success,
-            diff: None,
-            diff_summary: None,
-            summary: Some(summary),
-            estimated_cost_usd: 0.0,
-        },
-        Err(e) => DelegationResult {
-            status: DelegationStatus::Failed {
-                error: e.to_string(),
-            },
-            diff: None,
-            diff_summary: None,
-            summary: None,
-            estimated_cost_usd: 0.0,
-        },
-    }
 }
 
 fn truncate_summary_env_default(text: &str) -> String {

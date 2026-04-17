@@ -7,6 +7,7 @@ pub mod diff_viewer;
 pub mod help_overlay;
 pub mod inline_executor_card;
 pub mod input_bar;
+pub mod issues_panel;
 pub mod line_wrap;
 #[cfg(feature = "markdown")]
 pub mod markdown_stream;
