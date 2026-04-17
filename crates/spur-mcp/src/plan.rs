@@ -982,7 +982,7 @@ pub async fn review_task(
                         feedback.unwrap_or("meets acceptance criteria")
                     );
                     let update = spur_pm::IssueUpdate {
-                        status: Some("done".to_string()),
+                        status: Some(pm.closed_status().to_string()),
                         comment: Some(comment),
                         ..Default::default()
                     };
