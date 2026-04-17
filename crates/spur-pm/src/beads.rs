@@ -44,6 +44,7 @@ struct BrListPage {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct BrIssueWithCounts {
     id: String,
     title: String,
