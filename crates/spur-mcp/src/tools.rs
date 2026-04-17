@@ -718,11 +718,11 @@ pub fn review_task_def() -> ToolDefinition {
                 "decision": {
                     "type": "string",
                     "enum": ["approve", "reject", "request_changes"],
-                    "description": "Review verdict"
+                    "description": "Review verdict. 'approve' → task marked done, dependents auto-dispatched. 'reject' → task terminal, pending/ready dependents cascaded to failed (dispatched/awaiting_review dependents flagged in warnings). 'request_changes' → worker re-dispatched with feedback, bounded by max_attempts (3); response carries remaining_attempts."
                 },
                 "feedback": {
                     "type": "string",
-                    "description": "Review notes. Required for request_changes, optional for approve/reject."
+                    "description": "Review notes. REQUIRED when decision='request_changes' (passed verbatim to the re-dispatched worker as the current request). Optional for approve/reject (stored as rationale)."
                 }
             },
             "required": ["plan_id", "task_id", "decision"]

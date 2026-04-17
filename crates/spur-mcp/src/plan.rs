@@ -110,39 +110,78 @@ pub struct PlanState {
 /// reject, or leave the task as-is.
 pub const MAX_ATTEMPTS: u32 = 3;
 
+/// Derive a short human-readable name from a task's full text. Takes the
+/// first non-empty line, trims, and caps at 60 chars on a UTF-8 boundary.
+/// Used for TUI log entries and plan-status payloads so brain/user don't
+/// read raw UUIDs.
+pub fn display_name(spec_task: &str) -> String {
+    let first = spec_task
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.len() <= 60 {
+        return first.to_string();
+    }
+    let mut end = 60;
+    while end > 0 && !first.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut s = first[..end].trim_end().to_string();
+    s.push('…');
+    s
+}
+
 /// Build the enriched task description used when re-dispatching a task for
-/// iteration. Concatenates the original task, prior attempt summaries, and
-/// the brain's feedback. No bloat cap — the 3-attempt limit bounds size.
+/// iteration. `history` must contain every superseded attempt INCLUDING the
+/// one just rejected by the current `request_changes` call — callers are
+/// responsible for appending the current attempt's record before invoking
+/// this function so the worker sees its most-recent predecessor's context.
+///
+/// `new_attempt` / `max_attempts` surface the retry budget to the worker so
+/// it can self-calibrate urgency on the final attempt. No bloat cap — the
+/// 3-attempt limit bounds size.
 fn build_enriched_task(
     original_task: &str,
     history: &[AttemptRecord],
     current_feedback: &str,
+    new_attempt: u32,
+    max_attempts: u32,
 ) -> String {
     let mut out = String::with_capacity(
         original_task.len() + current_feedback.len() + history.len() * 512,
     );
     out.push_str("## Original Task\n");
     out.push_str(original_task);
-    out.push_str("\n\n## Previous Attempts\n");
-    for rec in history {
-        out.push_str(&format!(
-            "\nAttempt {attempt} (branch {branch}):\n  Summary: {summary}\n  Diff: {diff}\n  Brain feedback: {feedback}\n",
-            attempt = rec.attempt,
-            branch = rec.worker_branch.as_deref().unwrap_or("—"),
-            summary = rec.summary.as_deref().unwrap_or("—"),
-            diff = rec
-                .diff_summary
-                .as_ref()
-                .map(|d| format!("+{}/-{} across {} files", d.insertions, d.deletions, d.files_changed))
-                .unwrap_or_else(|| "—".to_string()),
-            feedback = rec.feedback,
-        ));
+    let any_branch = history.iter().any(|r| r.worker_branch.is_some());
+    if !history.is_empty() {
+        out.push_str("\n\n## Previous Attempts\n");
+        for rec in history {
+            out.push_str(&format!(
+                "\nAttempt {attempt} (branch {branch}):\n  Summary: {summary}\n  Diff: {diff}\n  Brain feedback: {feedback}\n",
+                attempt = rec.attempt,
+                branch = rec.worker_branch.as_deref().unwrap_or("—"),
+                summary = rec.summary.as_deref().unwrap_or("—"),
+                diff = rec
+                    .diff_summary
+                    .as_ref()
+                    .map(|d| format!("+{}/-{} across {} files", d.insertions, d.deletions, d.files_changed))
+                    .unwrap_or_else(|| "—".to_string()),
+                feedback = rec.feedback,
+            ));
+        }
     }
-    out.push_str("\n## Current Request\n");
+    out.push_str(&format!(
+        "\n## Current Request (Attempt {new_attempt} of {max_attempts})\n"
+    ));
     out.push_str(current_feedback);
-    out.push_str(
-        "\n\nApply the feedback above. You can inspect prior attempts with `git show <branch>` if helpful.\n",
-    );
+    out.push_str("\n\nApply the feedback above.");
+    if any_branch {
+        out.push_str(
+            " You can inspect prior attempts with `git show <branch>` using the branch names listed above.",
+        );
+    }
+    out.push('\n');
     out
 }
 
@@ -486,7 +525,11 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         .map(|t| {
             let mut obj = serde_json::json!({
                 "task_id": t.spec.task_id,
+                "task_name": display_name(&t.spec.task),
                 "agent": t.spec.agent,
+                "attempt": t.attempt,
+                "max_attempts": MAX_ATTEMPTS,
+                "history_count": t.history.len(),
             });
             match &t.status {
                 PlanTaskStatus::Pending => {
@@ -524,6 +567,10 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                         "approved"
                     };
                     obj["status"] = status_str.into();
+                    if matches!(t.status, PlanTaskStatus::AwaitingReview { .. }) {
+                        obj["remaining_attempts"] =
+                            MAX_ATTEMPTS.saturating_sub(t.attempt).into();
+                    }
                     if let Some(s) = summary {
                         obj["summary"] = s.clone().into();
                     }
@@ -738,10 +785,39 @@ pub async fn review_task(
                 }
             };
 
-            // Build enriched task BEFORE mutating state (reads history + spec).
-            let enriched = build_enriched_task(&entry.spec.task, &entry.history, fb);
+            // Capture the attempt being superseded so it appears in the
+            // enriched task (the worker must see its most-recent predecessor's
+            // branch/summary/diff, not just older history). Cloned for the
+            // pre-send snapshot; the real record is pushed on commit below.
+            let current_record = AttemptRecord {
+                attempt: entry.attempt,
+                worker_branch: entry.worker_branch.clone(),
+                diff_summary: entry
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.diff_summary.clone()),
+                summary: entry
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.summary.clone()),
+                feedback: fb.to_string(),
+            };
 
             let new_attempt = entry.attempt + 1;
+
+            // Build enriched task with full history INCLUDING the attempt
+            // just superseded. Read-only snapshot — if try_send fails below,
+            // entry state is unchanged and the brain can retry review_task.
+            let mut history_snapshot = entry.history.clone();
+            history_snapshot.push(current_record.clone());
+            let enriched = build_enriched_task(
+                &entry.spec.task,
+                &history_snapshot,
+                fb,
+                new_attempt,
+                MAX_ATTEMPTS,
+            );
+
             let delegation_id = uuid::Uuid::new_v4().to_string();
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<DelegationResult>();
 
@@ -761,21 +837,12 @@ pub async fn review_task(
                 return Err(format!("orchestrator channel error: {e}"));
             }
 
-            // Mutate state AFTER successful send.
-            let prev_record = AttemptRecord {
-                attempt: entry.attempt,
-                worker_branch: entry.worker_branch.take(),
-                diff_summary: entry
-                    .result
-                    .as_ref()
-                    .and_then(|r| r.diff_summary.clone()),
-                summary: entry
-                    .result
-                    .as_ref()
-                    .and_then(|r| r.summary.clone()),
-                feedback: fb.to_string(),
-            };
-            entry.history.push(prev_record);
+            // Mutate state AFTER successful send. Clear the superseded
+            // attempt's latest-slot fields (worker_branch was only cloned
+            // above; take it now so the invariant "worker_branch is latest
+            // only" holds after the push).
+            entry.worker_branch = None;
+            entry.history.push(current_record);
             entry.result = None;
             entry.attempt = new_attempt;
             entry.status = PlanTaskStatus::Dispatched {
@@ -800,16 +867,30 @@ pub async fn review_task(
         }
     }
 
+    // Look up display name for this task (used in both response + events).
+    let task_name = state
+        .tasks
+        .iter()
+        .find(|t| t.spec.task_id == task_id)
+        .map(|t| display_name(&t.spec.task))
+        .unwrap_or_default();
+
     // Build response (uses updated state).
     let mut resp = build_plan_status(plan_id, state);
     if let serde_json::Value::Object(ref mut m) = resp {
         m.insert("task_id".into(), serde_json::json!(task_id));
+        m.insert("task_name".into(), serde_json::json!(task_name));
         m.insert("decision".into(), serde_json::json!(decision));
         m.insert("warnings".into(), serde_json::json!(warnings));
         if decision == "request_changes" {
             if let Some((_, new_att, did)) = new_dispatches.iter().find(|(tid, _, _)| tid == task_id) {
                 m.insert("new_attempt".into(), serde_json::json!(new_att));
                 m.insert("new_delegation_id".into(), serde_json::json!(did));
+                m.insert("max_attempts".into(), serde_json::json!(MAX_ATTEMPTS));
+                m.insert(
+                    "remaining_attempts".into(),
+                    serde_json::json!(MAX_ATTEMPTS.saturating_sub(*new_att)),
+                );
             }
         }
     }
@@ -819,16 +900,20 @@ pub async fn review_task(
         sink.emit(spur_acp::SpurEventBody::PlanTaskReviewed {
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
+            task_name: Some(task_name.clone()),
             decision: decision.to_string(),
             feedback: feedback.map(String::from),
             attempt: current_attempt,
+            max_attempts: MAX_ATTEMPTS,
         });
         for (tid, attempt, did) in &new_dispatches {
             if tid == task_id && decision == "request_changes" {
                 sink.emit(spur_acp::SpurEventBody::PlanTaskIterating {
                     plan_id: plan_id.to_string(),
                     task_id: tid.clone(),
+                    task_name: Some(task_name.clone()),
                     attempt: *attempt,
+                    max_attempts: MAX_ATTEMPTS,
                     delegation_id: did.clone(),
                 });
             }
@@ -1136,25 +1221,74 @@ mod tests {
             "Implement foo",
             &history,
             "now also handle empty input",
+            2,
+            super::MAX_ATTEMPTS,
         );
         assert!(enriched.contains("Implement foo"));
         assert!(enriched.contains("Attempt 1"));
         assert!(enriched.contains("add null check"));
         assert!(enriched.contains("now also handle empty input"));
         assert!(enriched.contains("git show"));
+        // Retry-budget marker visible to the worker.
+        assert!(enriched.contains("Attempt 2 of 3"));
     }
 
     #[test]
-    fn enriched_task_empty_history_still_well_formed() {
-        let enriched = super::build_enriched_task("Task X", &[], "fb");
+    fn enriched_task_empty_history_omits_previous_attempts_section() {
+        // Regression for C5: with an empty history (which is what a caller
+        // that forgot to snapshot the current attempt passes), we no longer
+        // emit a stray "## Previous Attempts" header. The worker should see
+        // only Original + Current Request.
+        let enriched = super::build_enriched_task("Task X", &[], "fb", 1, super::MAX_ATTEMPTS);
         assert!(enriched.contains("Task X"));
         assert!(enriched.contains("fb"));
-        assert!(enriched.contains("## Previous Attempts"));
+        assert!(!enriched.contains("## Previous Attempts"));
+        assert!(enriched.contains("Attempt 1 of 3"));
+    }
+
+    #[test]
+    fn enriched_task_omits_git_show_hint_when_no_branches() {
+        let history = vec![super::AttemptRecord {
+            attempt: 1,
+            worker_branch: None,
+            diff_summary: None,
+            summary: Some("s".into()),
+            feedback: "fb1".into(),
+        }];
+        let enriched = super::build_enriched_task(
+            "Task",
+            &history,
+            "more",
+            2,
+            super::MAX_ATTEMPTS,
+        );
+        assert!(!enriched.contains("git show"));
     }
 
     #[test]
     fn max_attempts_is_three() {
         assert_eq!(super::MAX_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn display_name_trims_and_caps() {
+        assert_eq!(super::display_name(""), "");
+        assert_eq!(super::display_name("   hello   "), "hello");
+        assert_eq!(super::display_name("first line\nsecond"), "first line");
+        let long = "x".repeat(100);
+        let got = super::display_name(&long);
+        assert!(got.ends_with('…'));
+        assert!(got.chars().count() <= 61);
+    }
+
+    #[test]
+    fn display_name_utf8_safe() {
+        // Three-byte chars near the boundary — must not panic and must
+        // produce valid UTF-8.
+        let s = "タスク".repeat(30); // 3 bytes per char × ~90 chars
+        let got = super::display_name(&s);
+        assert!(got.ends_with('…'));
+        assert!(std::str::from_utf8(got.as_bytes()).is_ok());
     }
 
     #[test]
