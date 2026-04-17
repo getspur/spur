@@ -151,6 +151,31 @@ pub struct IssueSummaryEvent {
     pub assignee: Option<String>,
 }
 
+/// Full issue detail carried in the `IssueDetailFetched` event.
+/// Mirrors `spur_pm::Issue` without taking a direct dependency on spur-pm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueDetailEvent {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpurEventBody {
@@ -269,6 +294,23 @@ pub enum SpurEventBody {
     IssuesLoaded {
         issues: Vec<IssueSummaryEvent>,
     },
+
+    /// Response to a TUI request for full issue detail.
+    /// Follows SessionsListed / IssuesLoaded precedent for request-response on broadcast.
+    IssueDetailFetched {
+        /// The ID that was requested — TUI checks against focused issue
+        /// to discard stale responses from navigation races.
+        requested_id: String,
+        /// Full issue data from PmService.
+        issue: IssueDetailEvent,
+    },
+
+    /// Feedback for a failed issue operation initiated from TUI.
+    IssueCommandError {
+        operation: String,
+        error: String,
+    },
+
     // ── Interactive loop events ──────────────────────────────────────
     TurnComplete {
         session: SessionId,
