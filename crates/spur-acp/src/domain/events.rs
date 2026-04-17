@@ -474,18 +474,32 @@ pub enum SpurEventBody {
     PlanTaskReviewed {
         plan_id: String,
         task_id: String,
+        /// Human-readable task name derived from task text (first line, 60
+        /// chars). `None` on replay of pre-Phase-2 events.
+        #[serde(default)]
+        task_name: Option<String>,
         /// "approve" | "reject" | "request_changes"
         decision: String,
         feedback: Option<String>,
         attempt: u32,
+        /// Attempt budget. Carried in the event so renderers don't need a
+        /// cross-crate const import. Defaults to 0 on pre-Phase-2 replay.
+        #[serde(default)]
+        max_attempts: u32,
     },
 
     /// A plan task was re-dispatched for iteration (attempt > 1).
     PlanTaskIterating {
         plan_id: String,
         task_id: String,
+        /// Human-readable task name. `None` on replay of pre-Phase-2 events.
+        #[serde(default)]
+        task_name: Option<String>,
         /// New attempt number (the attempt that just started, i.e., old_attempt + 1).
         attempt: u32,
+        /// Attempt budget. Defaults to 0 on pre-Phase-2 replay.
+        #[serde(default)]
+        max_attempts: u32,
         delegation_id: String,
     },
 }

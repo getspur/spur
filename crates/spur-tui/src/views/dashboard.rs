@@ -65,6 +65,22 @@ pub struct DashboardView {
 }
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
+/// Truncate a string to a maximum display length on a UTF-8 boundary,
+/// appending `…` if truncation occurred. Used for brain review feedback
+/// and other free-form text that could otherwise overflow the TUI log.
+fn truncate_display(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = s[..end].trim_end().to_string();
+    out.push('…');
+    out
+}
+
 fn detail_event_to_issue(e: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
     spur_pm::Issue {
         id: e.id.clone(),
@@ -1366,40 +1382,80 @@ impl View for DashboardView {
             SpurEventBody::PlanTaskReviewed {
                 plan_id: _,
                 task_id,
+                task_name,
                 decision,
                 feedback,
                 attempt,
+                max_attempts,
             } => {
-                let (icon, kind) = match decision.as_str() {
-                    "approve" => ("✓", LogEntryKind::Complete),
-                    "reject" => ("✗", LogEntryKind::Error),
-                    "request_changes" => ("↻", LogEntryKind::Info),
-                    _ => ("?", LogEntryKind::Info),
+                let (icon, label, kind) = match decision.as_str() {
+                    "approve" => ("✓", "approved", LogEntryKind::Complete),
+                    "reject" => ("✗", "rejected", LogEntryKind::Error),
+                    "request_changes" => {
+                        ("↻", "requested changes on", LogEntryKind::Act)
+                    }
+                    _ => ("?", "reviewed", LogEntryKind::Info),
+                };
+                let display = task_name
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(task_id);
+                let attempts_suffix = if *max_attempts > 0 {
+                    format!(" (attempt {attempt}/{max_attempts})")
+                } else {
+                    format!(" (attempt {attempt})")
                 };
                 let fb_suffix = feedback
                     .as_ref()
-                    .map(|f| format!(": \"{f}\""))
+                    .map(|f| format!(": \"{}\"", truncate_display(f, 60)))
                     .unwrap_or_default();
+                // Distinct entry when attempt budget is exhausted by a reject.
+                let exhausted = decision == "reject"
+                    && *max_attempts > 0
+                    && *attempt >= *max_attempts;
+                let message = if exhausted {
+                    format!(
+                        "✗ Task \"{display}\" failed — max attempts ({max_attempts}) reached{fb_suffix}"
+                    )
+                } else {
+                    format!("{icon} Brain {label} \"{display}\"{attempts_suffix}{fb_suffix}")
+                };
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[plan]".to_string(),
-                    message: format!(
-                        "{icon} Brain {decision} task {task_id} (attempt {attempt}){fb_suffix}"
-                    ),
+                    message,
                     kind,
                 });
             }
             SpurEventBody::PlanTaskIterating {
                 plan_id: _,
                 task_id,
+                task_name,
                 attempt,
+                max_attempts,
                 delegation_id: _,
             } => {
+                let display = task_name
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(task_id);
+                let attempts_suffix = if *max_attempts > 0 {
+                    format!("{attempt}/{max_attempts}")
+                } else {
+                    format!("{attempt}")
+                };
+                let final_hint = if *max_attempts > 0 && *attempt >= *max_attempts {
+                    " — final"
+                } else {
+                    ""
+                };
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[plan]".to_string(),
-                    message: format!("↻ Task {task_id} iterating (attempt {attempt})"),
-                    kind: LogEntryKind::Delegate,
+                    message: format!(
+                        "↻ Re-dispatched \"{display}\" (attempt {attempts_suffix}{final_hint})"
+                    ),
+                    kind: LogEntryKind::Act,
                 });
             }
 
