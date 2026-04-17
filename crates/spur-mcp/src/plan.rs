@@ -1059,17 +1059,81 @@ pub async fn review_task(
                 "request_changes requires feedback".to_string()
             })?;
 
-            // Validate attempt < MAX_ATTEMPTS.
-            let entry = state
-                .tasks
-                .iter_mut()
-                .find(|t| t.spec.task_id == task_id)
-                .unwrap();
-            if entry.attempt >= MAX_ATTEMPTS {
-                return Err(format!(
-                    "task is at max attempts ({MAX_ATTEMPTS}); approve, reject, or leave as-is"
-                ));
+            // At MAX_ATTEMPTS, auto-transition to Rejected instead of erroring
+            // and leaving the task in AwaitingReview limbo. Reuses the existing
+            // rejection cascade and PlanTaskReviewed event. Downstream consumers
+            // (is_terminal_plan_status, TUI, retry_plan_task sentinel) all
+            // already handle Rejected correctly.
+            {
+                let entry = state
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.spec.task_id == task_id)
+                    .unwrap();
+                if entry.attempt >= MAX_ATTEMPTS {
+                    let exhausted_fb = format!(
+                        "retries exhausted ({}/{}): {}",
+                        entry.attempt, MAX_ATTEMPTS, fb
+                    );
+                    let issue_id = entry.spec.issue_id.clone();
+                    let attempt_at_reject = entry.attempt;
+                    entry.status = PlanTaskStatus::Rejected {
+                        feedback: Some(exhausted_fb.clone()),
+                    };
+                    warnings.push(format!(
+                        "auto-rejected: MAX_ATTEMPTS ({MAX_ATTEMPTS}) reached"
+                    ));
+
+                    // Rejection cascade.
+                    mark_descendants_failed(task_id, state, &mut warnings);
+
+                    // Best-effort beads comment.
+                    if let Some(pm) = pm {
+                        if let Some(ref id) = issue_id {
+                            let comment = format!(
+                                "Brain rejected (retries exhausted {}/{}): {}",
+                                MAX_ATTEMPTS, MAX_ATTEMPTS, fb
+                            );
+                            let update = spur_pm::IssueUpdate {
+                                comment: Some(comment),
+                                ..Default::default()
+                            };
+                            if let Err(e) = pm.update_issue(id, update).await {
+                                warnings.push(format!("beads comment failed: {e}"));
+                            }
+                        }
+                    }
+
+                    // Build response and early-return with decision=reject.
+                    let task_name = state
+                        .tasks
+                        .iter()
+                        .find(|t| t.spec.task_id == task_id)
+                        .map(|t| display_name(&t.spec.task))
+                        .unwrap_or_default();
+                    let mut resp = build_plan_status(plan_id, state);
+                    if let serde_json::Value::Object(ref mut m) = resp {
+                        m.insert("task_id".into(), serde_json::json!(task_id));
+                        m.insert("task_name".into(), serde_json::json!(task_name));
+                        m.insert("decision".into(), serde_json::json!("reject"));
+                        m.insert("warnings".into(), serde_json::json!(warnings));
+                    }
+                    if let Some(sink) = sink {
+                        sink.emit(spur_acp::SpurEventBody::PlanTaskReviewed {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.to_string(),
+                            task_name: Some(task_name),
+                            decision: "reject".to_string(),
+                            feedback: Some(exhausted_fb),
+                            attempt: attempt_at_reject,
+                            max_attempts: MAX_ATTEMPTS,
+                        });
+                    }
+                    return Ok(resp);
+                }
             }
+
+            // --- normal request_changes path (unchanged) ---
 
             let (tx, tracker, arc) = match (delegation_tx, task_tracker, plan_arc.clone()) {
                 (Some(a), Some(b), Some(c)) => (a, b, c),
@@ -1080,6 +1144,14 @@ pub async fn review_task(
                     );
                 }
             };
+
+            // Re-bind entry mutably for the normal path (the MAX_ATTEMPTS
+            // check above used a scoped borrow that has been dropped).
+            let entry = state
+                .tasks
+                .iter_mut()
+                .find(|t| t.spec.task_id == task_id)
+                .unwrap();
 
             // Capture the attempt being superseded so it appears in the
             // enriched task (the worker must see its most-recent predecessor's
@@ -2207,5 +2279,76 @@ mod tests {
         assert!(c.contains("attempt 1/3"));
         assert!(c.contains("add a null check"));
         assert!(c.contains("(no branch yet)"));
+    }
+
+    #[tokio::test]
+    async fn request_changes_at_max_attempts_auto_rejects() {
+        use super::*;
+        let task_spec = task("T1", &[]);
+        let entry = PlanTaskEntry {
+            spec: task_spec,
+            status: PlanTaskStatus::AwaitingReview { summary: Some("wip".into()) },
+            result: None,
+            worker_branch: None,
+            attempt: MAX_ATTEMPTS,
+            history: vec![
+                AttemptRecord {
+                    attempt: 1,
+                    worker_branch: Some("spur/worker-1".into()),
+                    diff_summary: None,
+                    summary: None,
+                    feedback: "fix this".into(),
+                },
+                AttemptRecord {
+                    attempt: 2,
+                    worker_branch: Some("spur/worker-2".into()),
+                    diff_summary: None,
+                    summary: None,
+                    feedback: "fix that".into(),
+                },
+            ],
+        };
+        let mut state = PlanState {
+            plan_id: "p1".into(),
+            tasks: vec![entry],
+            brain_session_id: spur_acp::SessionId::new(),
+        };
+
+        let resp = review_task(
+            "p1", "T1", "request_changes",
+            Some("please try the other approach"),
+            &mut state,
+            None, None, None, None, None,
+        )
+        .await
+        .expect("should Ok — MAX reached means auto-reject, not Err");
+
+        let entry = &state.tasks[0];
+        assert!(
+            matches!(entry.status, PlanTaskStatus::Rejected { .. }),
+            "expected Rejected at MAX_ATTEMPTS, got {:?}",
+            entry.status
+        );
+        if let PlanTaskStatus::Rejected { feedback: Some(ref fb) } = entry.status {
+            assert!(fb.contains("retries exhausted"), "feedback={fb}");
+            assert!(fb.contains("3/3"), "feedback={fb}");
+            assert!(fb.contains("please try the other approach"), "feedback={fb}");
+        } else {
+            panic!("expected Rejected with feedback");
+        }
+
+        let obj = resp.as_object().expect("resp is object");
+        assert_eq!(obj.get("decision").and_then(|v| v.as_str()), Some("reject"));
+        let warnings = obj.get("warnings").and_then(|v| v.as_array()).expect("warnings array");
+        assert!(
+            warnings.iter().any(|w| w.as_str().map_or(false, |s| s.contains("auto-rejected") && s.contains("MAX_ATTEMPTS"))),
+            "expected auto-reject warning, got {warnings:?}"
+        );
+
+        let overall = obj.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            is_terminal_plan_status(overall),
+            "expected terminal overall status, got {overall:?}"
+        );
     }
 }
