@@ -22,7 +22,9 @@ impl IssueDetailPane {
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
+        // Capped at a reasonable max; render() silently shows empty lines past body end.
+        // A tighter cap would require knowing body line count + visible height at scroll time.
+        self.scroll_offset = self.scroll_offset.saturating_add(1).min(500);
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -172,10 +174,20 @@ impl IssueDetailPane {
         );
 
         // ── Action hints ─────────────────────────────────────────────────────────
-        let hints = Line::from(Span::styled(
-            "[o]pen [w]ip [b]locked [d]one  [W]ork on this  [Esc] back",
-            Style::default().fg(Color::DarkGray),
-        ));
+        let hints = Line::from(vec![
+            Span::styled("[o]", Style::default().fg(Color::Green)),
+            Span::styled("pen ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[w]", Style::default().fg(Color::Cyan)),
+            Span::styled("ip ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[b]", Style::default().fg(Color::Red)),
+            Span::styled("locked ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[d]", Style::default().fg(Color::DarkGray)),
+            Span::styled("one  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[W]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("ork  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
+            Span::styled(" back", Style::default().fg(Color::DarkGray)),
+        ]);
         frame.render_widget(Paragraph::new(hints), chunks[7]);
     }
 

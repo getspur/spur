@@ -63,6 +63,31 @@ pub struct DashboardView {
     issue_focus: IssueFocus,
 }
 
+/// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
+fn detail_event_to_issue(e: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
+    spur_pm::Issue {
+        id: e.id.clone(),
+        source: match e.source.as_str() {
+            "github" => spur_pm::PmSource::GitHub,
+            "linear" => spur_pm::PmSource::Linear,
+            "plane" => spur_pm::PmSource::Plane,
+            _ => spur_pm::PmSource::Beads,
+        },
+        title: e.title.clone(),
+        body: e.body.clone(),
+        status: e.status.clone(),
+        labels: e.labels.clone(),
+        assignee: e.assignee.clone(),
+        url: e.url.clone(),
+        priority: e.priority,
+        issue_type: e.issue_type.clone(),
+        blocked_by: e.blocked_by.clone(),
+        due_at: e.due_at,
+        created_at: e.created_at,
+        updated_at: e.updated_at,
+    }
+}
+
 fn format_issue_badge(issue_id: &str, issues: &[spur_pm::IssueSummary]) -> String {
     let short_id = &issue_id[..8.min(issue_id.len())];
     if let Some(issue) = issues.iter().find(|i| i.id == *issue_id) {
@@ -537,7 +562,7 @@ impl DashboardView {
                             }
                             return None;
                         }
-                        'w' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) && self.focused_panel != Panel::Issues => {
+                        'w' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
                             if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
                                 return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
                                     id: id.clone(), status: "in_progress".into(),
@@ -575,6 +600,15 @@ impl DashboardView {
                                 }
                             }
                             return None;
+                        }
+                        // j/k scroll issue detail body when loaded
+                        'j' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
+                            self.issue_detail_pane.scroll_down();
+                            Some(Action::ScrollDown)
+                        }
+                        'k' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
+                            self.issue_detail_pane.scroll_up();
+                            Some(Action::ScrollUp)
                         }
                         'j' if self.focused_panel == Panel::Issues => {
                             self.issues_panel.select_next(1, self.tracked_issues.len());
@@ -1102,14 +1136,18 @@ impl View for DashboardView {
 
             SpurEventBody::IssueUpdated { source, id, status, assignee } => {
                 if let Some(issue) = self.tracked_issues.iter_mut().find(|i| i.id == *id) {
-                    issue.status = status.clone();
+                    if !status.is_empty() {
+                        issue.status = status.clone();
+                    }
                     if let Some(a) = assignee {
                         issue.assignee = Some(a.clone());
                     }
                 }
                 if let IssueFocus::Loaded { id: ref focus_id, ref mut issue } = self.issue_focus {
                     if focus_id == id {
-                        issue.status = status.clone();
+                        if !status.is_empty() {
+                            issue.status = status.clone();
+                        }
                         if let Some(a) = assignee {
                             issue.assignee = Some(a.clone());
                         }
@@ -1266,27 +1304,7 @@ impl View for DashboardView {
             SpurEventBody::IssueDetailFetched { requested_id, issue } => {
                 if let IssueFocus::Loading { id } = &self.issue_focus {
                     if id == requested_id {
-                        let pm_issue = spur_pm::Issue {
-                            id: issue.id.clone(),
-                            source: match issue.source.as_str() {
-                                "github" => spur_pm::PmSource::GitHub,
-                                "linear" => spur_pm::PmSource::Linear,
-                                "plane" => spur_pm::PmSource::Plane,
-                                _ => spur_pm::PmSource::Beads,
-                            },
-                            title: issue.title.clone(),
-                            body: issue.body.clone(),
-                            status: issue.status.clone(),
-                            labels: issue.labels.clone(),
-                            assignee: issue.assignee.clone(),
-                            url: issue.url.clone(),
-                            priority: issue.priority,
-                            issue_type: issue.issue_type.clone(),
-                            blocked_by: issue.blocked_by.clone(),
-                            due_at: issue.due_at,
-                            created_at: issue.created_at,
-                            updated_at: issue.updated_at,
-                        };
+                        let pm_issue = detail_event_to_issue(issue);
                         self.issue_focus = IssueFocus::Loaded {
                             id: requested_id.clone(),
                             issue: Box::new(pm_issue),

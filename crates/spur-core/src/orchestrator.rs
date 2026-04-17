@@ -154,6 +154,26 @@ pub enum InteractiveInput {
     UpdateIssue { id: String, update: spur_pm::IssueUpdate },
 }
 
+/// Convert spur_pm::Issue to the spur_acp mirror type for event bus transmission.
+fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDetailEvent {
+    spur_acp::IssueDetailEvent {
+        id: issue.id.clone(),
+        source: issue.source.to_string(),
+        title: issue.title.clone(),
+        body: issue.body.clone(),
+        status: issue.status.clone(),
+        labels: issue.labels.clone(),
+        assignee: issue.assignee.clone(),
+        url: issue.url.clone(),
+        priority: issue.priority,
+        issue_type: issue.issue_type.clone(),
+        blocked_by: issue.blocked_by.clone(),
+        due_at: issue.due_at,
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
+    }
+}
+
 // ─── Orchestrator ────────────────────────────────────────────────────
 
 /// The central orchestrator that drives the brain-worker pipeline.
@@ -835,25 +855,9 @@ impl Orchestrator {
                     if let Some(pm) = &self.pm_service {
                         match pm.get_issue(&id).await {
                             Ok(issue) => {
-                                let detail_event = spur_acp::IssueDetailEvent {
-                                    id: issue.id.clone(),
-                                    source: issue.source.to_string(),
-                                    title: issue.title.clone(),
-                                    body: issue.body.clone(),
-                                    status: issue.status.clone(),
-                                    labels: issue.labels.clone(),
-                                    assignee: issue.assignee.clone(),
-                                    url: issue.url.clone(),
-                                    priority: issue.priority,
-                                    issue_type: issue.issue_type.clone(),
-                                    blocked_by: issue.blocked_by.clone(),
-                                    due_at: issue.due_at,
-                                    created_at: issue.created_at,
-                                    updated_at: issue.updated_at,
-                                };
                                 self.funnel.emit(SpurEventBody::IssueDetailFetched {
                                     requested_id: id,
-                                    issue: detail_event,
+                                    issue: issue_to_detail_event(&issue),
                                 });
                             }
                             Err(e) => {
@@ -880,7 +884,7 @@ impl Orchestrator {
                                     source: pm.source_str().into(),
                                     id,
                                     status: update.status.unwrap_or_default(),
-                                    assignee: update.assignee,
+                                    assignee: update.assignee.clone(),
                                 });
                             }
                             Err(e) => {
