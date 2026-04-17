@@ -469,6 +469,25 @@ pub enum SpurEventBody {
         path: std::path::PathBuf,
         kind: FileTouchKind,
     },
+
+    /// Brain submitted a review verdict on a plan task.
+    PlanTaskReviewed {
+        plan_id: String,
+        task_id: String,
+        /// "approve" | "reject" | "request_changes"
+        decision: String,
+        feedback: Option<String>,
+        attempt: u32,
+    },
+
+    /// A plan task was re-dispatched for iteration (attempt > 1).
+    PlanTaskIterating {
+        plan_id: String,
+        task_id: String,
+        /// New attempt number (the attempt that just started, i.e., old_attempt + 1).
+        attempt: u32,
+        delegation_id: String,
+    },
 }
 
 /// A single entry in a replayed conversation history.
