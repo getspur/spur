@@ -402,12 +402,14 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         "running"
     } else if n_awaiting_review > 0 {
         "awaiting_review"
+    } else if n_approved == total && total > 0 {
+        "approved"
+    } else if n_failed == total && total > 0 {
+        "failed"
+    } else if n_failed > 0 {
+        "has_failures"
     } else if n_rejected > 0 {
         "has_rejections"
-    } else if n_approved == total {
-        "approved"
-    } else if n_failed == total {
-        "failed"
     } else {
         "partial"
     };
