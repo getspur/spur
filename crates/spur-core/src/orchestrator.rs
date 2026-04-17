@@ -30,7 +30,7 @@ use spur_cost::CostTracker;
 use spur_mcp::{
     build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
 };
-use spur_pm::adapter::PmAdapter;
+use spur_pm::adapter::{IssueTracker, PrService};
 use spur_pm::GitHubAdapter;
 use spur_worktree::WorktreeManager;
 
@@ -3433,18 +3433,20 @@ async fn handle_pm_operation(
         }
     };
 
-    let mut adapter = spur_pm::GitHubAdapter::new(None).with_cwd(repo_root);
-    if let Err(e) = adapter.connect().await {
-        return DelegationResult {
-            status: DelegationStatus::Failed {
-                error: e.to_string(),
-            },
-            diff: None,
-            diff_summary: None,
-            summary: None,
-            estimated_cost_usd: 0.0,
-        };
-    }
+    let adapter = match GitHubAdapter::connect(None, repo_root).await {
+        Ok(a) => a,
+        Err(e) => {
+            return DelegationResult {
+                status: DelegationStatus::Failed {
+                    error: e.to_string(),
+                },
+                diff: None,
+                diff_summary: None,
+                summary: None,
+                estimated_cost_usd: 0.0,
+            };
+        }
+    };
 
     let result: anyhow::Result<String> = match agent {
         "__pm_get_issue" => {

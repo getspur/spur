@@ -400,9 +400,8 @@ async fn main() -> Result<()> {
         Commands::Connect { service } => {
             match service.as_str() {
                 "github" => {
-                    let mut adapter = spur_pm::GitHubAdapter::new(None);
-                    use spur_pm::PmAdapter;
-                    adapter.connect().await?;
+                    let cwd = std::env::current_dir()?;
+                    let adapter = spur_pm::GitHubAdapter::connect(None, &cwd).await?;
                     println!(
                         "[spur] Connected to GitHub: {}",
                         adapter.repo.unwrap_or_default()
