@@ -18,6 +18,8 @@ use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
 use crate::components::detail_pane::{DetailPane, DetailTab};
 use crate::components::input_bar::{EditMode, InputBar};
+use crate::components::issue_detail_pane::IssueDetailPane;
+use crate::components::issues_panel::IssuesPanel;
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 use crate::components::{LogEntry, LogEntryKind};
 
@@ -27,7 +29,15 @@ use super::View;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     Agents,
+    Issues,
     Log,
+}
+
+/// State machine for issue detail focus. Invalid states are unrepresentable.
+pub enum IssueFocus {
+    None,
+    Loading { id: String },
+    Loaded { id: String, issue: Box<spur_pm::Issue> },
 }
 
 /// The main dashboard view composing AgentsTree + ActivityLog + StatusBar.
@@ -48,6 +58,9 @@ pub struct DashboardView {
     text_batch: HashMap<String, (String, Instant)>,
     start_time: Instant,
     tracked_issues: Vec<spur_pm::IssueSummary>,
+    issues_panel: IssuesPanel,
+    issue_detail_pane: IssueDetailPane,
+    issue_focus: IssueFocus,
 }
 
 impl DashboardView {
@@ -66,7 +79,14 @@ impl DashboardView {
             text_batch: HashMap::new(),
             start_time: Instant::now(),
             tracked_issues: Vec::new(),
+            issues_panel: IssuesPanel::new(),
+            issue_detail_pane: IssueDetailPane::new(),
+            issue_focus: IssueFocus::None,
         }
+    }
+
+    pub fn tracked_issues(&self) -> &[spur_pm::IssueSummary] {
+        &self.tracked_issues
     }
 
     /// Current local time formatted as HH:MM:SS.
@@ -364,23 +384,29 @@ impl DashboardView {
         self.agents_tree.render(frame, chunks[0], lineage);
 
         if let Some(ic) = issues_chunk {
-            crate::components::issues_panel::IssuesPanel::render(
-                &self.tracked_issues,
-                frame,
-                chunks[ic],
-            );
+            self.issues_panel.render(&self.tracked_issues, frame, chunks[ic]);
         }
 
-        match &self.focused_node {
-            Some(id) => {
-                if let Some(node) = lineage.node(id) {
-                    self.detail_pane.render(frame, chunks[log_chunk], node);
-                } else {
-                    self.activity_log.render(frame, chunks[log_chunk]);
-                }
+        match &self.issue_focus {
+            IssueFocus::Loading { id } => {
+                IssueDetailPane::render_loading(id, frame, chunks[log_chunk]);
             }
-            None => {
-                self.activity_log.render(frame, chunks[log_chunk]);
+            IssueFocus::Loaded { issue, .. } => {
+                self.issue_detail_pane.render(issue, frame, chunks[log_chunk]);
+            }
+            IssueFocus::None => {
+                match &self.focused_node {
+                    Some(id) => {
+                        if let Some(node) = lineage.node(id) {
+                            self.detail_pane.render(frame, chunks[log_chunk], node);
+                        } else {
+                            self.activity_log.render(frame, chunks[log_chunk]);
+                        }
+                    }
+                    None => {
+                        self.activity_log.render(frame, chunks[log_chunk]);
+                    }
+                }
             }
         }
         let input_bar_area = chunks[input_chunk];
@@ -479,6 +505,14 @@ impl DashboardView {
                         }
                     }
                     let action = match ch {
+                        'j' if self.focused_panel == Panel::Issues => {
+                            self.issues_panel.select_next(1, self.tracked_issues.len());
+                            Some(Action::SelectNext)
+                        }
+                        'k' if self.focused_panel == Panel::Issues => {
+                            self.issues_panel.select_prev(1, self.tracked_issues.len());
+                            Some(Action::SelectPrev)
+                        }
                         'j' if self.focused_panel == Panel::Agents => Some(Action::SelectNext),
                         'j' => {
                             if self.focused_node.is_some() {
@@ -496,6 +530,16 @@ impl DashboardView {
                                 self.activity_log.scroll_up();
                             }
                             Some(Action::ScrollUp)
+                        }
+                        'W' if self.focused_panel == Panel::Issues || matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
+                            let id = match &self.issue_focus {
+                                IssueFocus::Loaded { id, .. } => Some(id.clone()),
+                                _ => self.issues_panel.selected_id(&self.tracked_issues).map(String::from),
+                            };
+                            if let Some(id) = id {
+                                return Some(Action::Issue(crate::action::IssueAction::WorkOn { id }));
+                            }
+                            return None;
                         }
                         'r' => Some(Action::JumpToReview),
                         'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
@@ -602,6 +646,16 @@ impl DashboardView {
             if self.input_bar.text().len() == 1 {
                 let ch = self.input_bar.text().chars().next().unwrap();
                 match ch {
+                    'j' if self.focused_panel == Panel::Issues => {
+                        self.input_bar.clear();
+                        self.issues_panel.select_next(1, self.tracked_issues.len());
+                        return Some(Action::SelectNext);
+                    }
+                    'k' if self.focused_panel == Panel::Issues => {
+                        self.input_bar.clear();
+                        self.issues_panel.select_prev(1, self.tracked_issues.len());
+                        return Some(Action::SelectPrev);
+                    }
                     'j' if self.focused_panel == Panel::Agents => {
                         self.input_bar.clear();
                         return Some(Action::SelectNext);
@@ -677,6 +731,14 @@ impl DashboardView {
 
             // Enter on empty InputBar: FocusNode if agents panel is focused, else no-op
             if key.code == KeyCode::Enter && self.input_bar.is_empty() {
+                if self.focused_panel == Panel::Issues {
+                    if let Some(id) = self.issues_panel.selected_id(&self.tracked_issues) {
+                        self.issue_focus = IssueFocus::Loading { id: id.to_string() };
+                        self.issue_detail_pane.reset();
+                        return Some(Action::Issue(crate::action::IssueAction::ViewDetail { id: id.to_string() }));
+                    }
+                    return None;
+                }
                 if self.focused_panel == Panel::Agents {
                     return Some(Action::FocusNode);
                 }
@@ -707,14 +769,27 @@ impl DashboardView {
                 }
                 KeyCode::Tab => {
                     self.focused_panel = match self.focused_panel {
-                        Panel::Agents => Panel::Log,
+                        Panel::Agents => {
+                            if !self.tracked_issues.is_empty() {
+                                Panel::Issues
+                            } else {
+                                Panel::Log
+                            }
+                        }
+                        Panel::Issues => Panel::Log,
                         Panel::Log => Panel::Agents,
                     };
                     self.agents_tree
                         .set_focused(self.focused_panel == Panel::Agents);
+                    self.issues_panel
+                        .set_focused(self.focused_panel == Panel::Issues);
                     self.activity_log
                         .set_focused(self.focused_panel == Panel::Log);
                     return Some(Action::CycleFocus);
+                }
+                KeyCode::Esc if !matches!(self.issue_focus, IssueFocus::None) => {
+                    self.issue_focus = IssueFocus::None;
+                    return Some(Action::UnfocusNode);
                 }
                 KeyCode::Esc if self.focused_node.is_some() => {
                     return Some(Action::UnfocusNode);
@@ -960,6 +1035,14 @@ impl View for DashboardView {
                         issue.assignee = Some(a.clone());
                     }
                 }
+                if let IssueFocus::Loaded { id: ref focus_id, ref mut issue } = self.issue_focus {
+                    if focus_id == id {
+                        issue.status = status.clone();
+                        if let Some(a) = assignee {
+                            issue.assignee = Some(a.clone());
+                        }
+                    }
+                }
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".to_string(),
@@ -1106,6 +1189,50 @@ impl View for DashboardView {
                     message: format!("{} {}", verb, path.display()),
                     kind: LogEntryKind::Act,
                 });
+            }
+
+            SpurEventBody::IssueDetailFetched { requested_id, issue } => {
+                if let IssueFocus::Loading { id } = &self.issue_focus {
+                    if id == requested_id {
+                        let pm_issue = spur_pm::Issue {
+                            id: issue.id.clone(),
+                            source: match issue.source.as_str() {
+                                "github" => spur_pm::PmSource::GitHub,
+                                "linear" => spur_pm::PmSource::Linear,
+                                "plane" => spur_pm::PmSource::Plane,
+                                _ => spur_pm::PmSource::Beads,
+                            },
+                            title: issue.title.clone(),
+                            body: issue.body.clone(),
+                            status: issue.status.clone(),
+                            labels: issue.labels.clone(),
+                            assignee: issue.assignee.clone(),
+                            url: issue.url.clone(),
+                            priority: issue.priority,
+                            issue_type: issue.issue_type.clone(),
+                            blocked_by: issue.blocked_by.clone(),
+                            due_at: issue.due_at,
+                            created_at: issue.created_at,
+                            updated_at: issue.updated_at,
+                        };
+                        self.issue_focus = IssueFocus::Loaded {
+                            id: requested_id.clone(),
+                            issue: Box::new(pm_issue),
+                        };
+                    }
+                }
+            }
+
+            SpurEventBody::IssueCommandError { operation, error } => {
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: "[pm]".into(),
+                    message: format!("{} failed: {}", operation, error),
+                    kind: LogEntryKind::Error,
+                });
+                if matches!(self.issue_focus, IssueFocus::Loading { .. }) {
+                    self.issue_focus = IssueFocus::None;
+                }
             }
 
             _ => {}
