@@ -1312,6 +1312,7 @@ impl McpCallbackServer {
     async fn handle_get_task_diff(&self, args: &serde_json::Value) -> Result<String, String> {
         let plan_id = args["plan_id"].as_str().ok_or("missing plan_id")?.to_string();
         let task_id = args["task_id"].as_str().ok_or("missing task_id")?.to_string();
+        let attempt = args["attempt"].as_u64().map(|n| n as u32);
 
         let plan_arc = {
             let plans = self.active_plans.lock().await;
@@ -1331,6 +1332,44 @@ impl McpCallbackServer {
                 return Err(format!("task '{task_id}' is still running — diff not available yet"));
             }
             _ => {}
+        }
+
+        // If attempt specified and differs from current, look up historical attempt.
+        if let Some(want_attempt) = attempt {
+            if want_attempt != entry.attempt {
+                let Some(rec) = entry.history.iter().find(|r| r.attempt == want_attempt) else {
+                    return Err(format!(
+                        "task '{task_id}' has no attempt {want_attempt} (current: {}, history: {} entries)",
+                        entry.attempt,
+                        entry.history.len()
+                    ));
+                };
+                let mut resp = serde_json::Map::new();
+                resp.insert("task_id".into(), json!(task_id));
+                resp.insert("agent".into(), json!(entry.spec.agent));
+                resp.insert("attempt".into(), json!(want_attempt));
+                resp.insert("status".into(), json!("historical"));
+                resp.insert("task_description".into(), json!(entry.spec.task));
+                if let Some(ref id) = entry.spec.issue_id {
+                    resp.insert("issue_id".into(), json!(id));
+                }
+                if let Some(ref b) = rec.worker_branch {
+                    resp.insert("worker_branch".into(), json!(b));
+                }
+                if let Some(ref s) = rec.summary {
+                    resp.insert("summary".into(), json!(s));
+                }
+                if let Some(ref d) = rec.diff_summary {
+                    resp.insert("diff_summary".into(), serde_json::to_value(d).unwrap_or_default());
+                }
+                resp.insert("feedback".into(), json!(rec.feedback));
+                resp.insert(
+                    "note".into(),
+                    json!("Historical attempt — full diff text not stored. Inspect git: `git show <worker_branch>`."),
+                );
+                return serde_json::to_string_pretty(&serde_json::Value::Object(resp))
+                    .map_err(|e| e.to_string());
+            }
         }
 
         let mut resp = serde_json::Map::new();

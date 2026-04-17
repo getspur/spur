@@ -671,20 +671,20 @@ fn get_plan_status_def() -> ToolDefinition {
 pub fn get_task_diff_def() -> ToolDefinition {
     ToolDefinition {
         name: "get_task_diff".to_string(),
-        description: "Get the full unified diff for a plan task. Use after get_plan_status shows \
-            tasks in awaiting_review, approved, rejected, or failed state. Returns the complete \
-            diff, worker branch name, task description, and summary for brain code review."
+        description: "Get the full unified diff for a plan task. Use after \
+            get_plan_status shows tasks in awaiting_review, approved, rejected, or \
+            failed state. Returns the complete diff, worker branch name, task \
+            description, and summary for brain code review. Pass `attempt` to inspect \
+            prior iteration attempts (see entry.history)."
             .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
-                "plan_id": {
-                    "type": "string",
-                    "description": "The plan_id returned by submit_plan"
-                },
-                "task_id": {
-                    "type": "string",
-                    "description": "The task_id to inspect"
+                "plan_id": { "type": "string", "description": "The plan_id returned by submit_plan" },
+                "task_id": { "type": "string", "description": "The task_id to inspect" },
+                "attempt": {
+                    "type": "integer",
+                    "description": "Optional: inspect a prior attempt (1..current-1). Omit for the latest attempt."
                 }
             },
             "required": ["plan_id", "task_id"]
@@ -695,10 +695,14 @@ pub fn get_task_diff_def() -> ToolDefinition {
 pub fn review_task_def() -> ToolDefinition {
     ToolDefinition {
         name: "review_task".to_string(),
-        description: "Submit a review decision for a plan task that is awaiting review. \
-            Use get_task_diff first to read the diff, then call this to approve or reject. \
-            On approve: beads issue marked done. On reject: beads issue reopened. \
-            Returns updated plan status with counts and ready_to_merge flag."
+        description: "Submit a review decision for a plan task awaiting review. \
+            Three decisions: 'approve' (task done, beads→done), 'reject' (task \
+            dead, beads→open, dependent tasks auto-failed), or 'request_changes' \
+            (re-dispatch worker with feedback — max 3 attempts per task, requires \
+            `feedback`). After approve, dependent tasks whose deps are now all \
+            Approved are auto-dispatched. Returns updated plan status with counts, \
+            ready_to_merge flag, and (for request_changes) new_attempt + \
+            new_delegation_id fields."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -713,12 +717,12 @@ pub fn review_task_def() -> ToolDefinition {
                 },
                 "decision": {
                     "type": "string",
-                    "enum": ["approve", "reject"],
+                    "enum": ["approve", "reject", "request_changes"],
                     "description": "Review verdict"
                 },
                 "feedback": {
                     "type": "string",
-                    "description": "Review notes (required for reject, optional for approve)"
+                    "description": "Review notes. Required for request_changes, optional for approve/reject."
                 }
             },
             "required": ["plan_id", "task_id", "decision"]

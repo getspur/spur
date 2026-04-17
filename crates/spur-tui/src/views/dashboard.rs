@@ -1363,6 +1363,46 @@ impl View for DashboardView {
                 }
             }
 
+            SpurEventBody::PlanTaskReviewed {
+                plan_id: _,
+                task_id,
+                decision,
+                feedback,
+                attempt,
+            } => {
+                let (icon, kind) = match decision.as_str() {
+                    "approve" => ("✓", LogEntryKind::Complete),
+                    "reject" => ("✗", LogEntryKind::Error),
+                    "request_changes" => ("↻", LogEntryKind::Info),
+                    _ => ("?", LogEntryKind::Info),
+                };
+                let fb_suffix = feedback
+                    .as_ref()
+                    .map(|f| format!(": \"{f}\""))
+                    .unwrap_or_default();
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: "[plan]".to_string(),
+                    message: format!(
+                        "{icon} Brain {decision} task {task_id} (attempt {attempt}){fb_suffix}"
+                    ),
+                    kind,
+                });
+            }
+            SpurEventBody::PlanTaskIterating {
+                plan_id: _,
+                task_id,
+                attempt,
+                delegation_id: _,
+            } => {
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: "[plan]".to_string(),
+                    message: format!("↻ Task {task_id} iterating (attempt {attempt})"),
+                    kind: LogEntryKind::Delegate,
+                });
+            }
+
             _ => {}
         }
     }
