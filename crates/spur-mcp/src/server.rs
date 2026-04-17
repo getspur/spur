@@ -157,7 +157,11 @@ pub struct McpCallbackServer {
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     /// Active execution plans submitted via `submit_plan`.
     active_plans: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
-    /// Tracks the active plan_id per epic for idempotent `execute_epic` re-calls.
+    /// Phase 2.5 idempotency guard: maps `epic_id → plan_id` for the
+    /// currently-active plan (if any). A sentinel `"__pending__"` value is
+    /// used briefly during the PmService fetch to prevent concurrent
+    /// `execute_epic` calls from racing into double-dispatch. Terminal plans
+    /// are cleared lazily on the next `execute_epic` call for the same epic.
     plan_registry: Arc<tokio::sync::Mutex<crate::plan::PlanRegistry>>,
 }
 
@@ -1288,6 +1292,7 @@ impl McpCallbackServer {
         let default_agent = args
             .get("default_agent")
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .map(String::from);
 
         // 2. Require PmService.
@@ -1302,59 +1307,86 @@ impl McpCallbackServer {
             }
         };
 
-        // 3. Idempotency: check for an existing non-terminal plan for this epic.
+        // Sentinel value used to reserve a registry slot while the PmService
+        // fetch is in flight. Concurrent callers that see this value return an
+        // "already in progress" error instead of racing into double-dispatch.
+        const PENDING_SENTINEL: &str = "__pending__";
+
+        // 3. Idempotency + reservation: under a single lock acquisition,
+        //    either return the existing non-terminal plan, reserve the slot
+        //    with a sentinel (and fall through to the fetch), or clear a
+        //    stale/terminal entry and reserve.
         {
-            let registry = self.plan_registry.lock().await;
-            if let Some(existing_plan_id) = registry.by_epic.get(&epic_id) {
-                // Check if plan is still non-terminal.
-                let plan_arc = {
-                    let plans = self.active_plans.lock().await;
-                    plans.get(existing_plan_id).cloned()
-                };
-                if let Some(arc) = plan_arc {
-                    let state = arc.lock().await;
-                    let status_val = crate::plan::build_plan_status(existing_plan_id, &state);
-                    let overall = status_val
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let is_terminal = matches!(
-                        overall,
-                        "approved" | "failed" | "has_failures" | "has_rejections"
+            let mut registry = self.plan_registry.lock().await;
+            match registry.by_epic.get(&epic_id).cloned() {
+                Some(ref existing) if existing == PENDING_SENTINEL => {
+                    // A concurrent call is already in the fetch/derive phase.
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!(
+                            "execute_epic for epic '{epic_id}' is already in progress — \
+                             wait for it to complete and call get_plan_status"
+                        ),
                     );
-                    if !is_terminal {
-                        // Return existing plan status.
-                        let mut resp_val = status_val;
-                        if let serde_json::Value::Object(ref mut m) = resp_val {
-                            m.insert("epic_id".into(), serde_json::json!(epic_id));
-                            m.insert(
-                                "next_action".into(),
-                                serde_json::json!(
-                                    "Plan already active for this epic. \
-                                     Poll with get_plan_status(plan_id) to monitor progress."
-                                ),
+                }
+                Some(existing_plan_id) => {
+                    // Check if the existing plan is still non-terminal.
+                    // Release the registry lock before acquiring active_plans
+                    // to maintain consistent lock ordering (active_plans is
+                    // never acquired while holding plan_registry).
+                    drop(registry);
+                    let plan_arc = {
+                        let plans = self.active_plans.lock().await;
+                        plans.get(&existing_plan_id).cloned()
+                    };
+                    if let Some(arc) = plan_arc {
+                        let state = arc.lock().await;
+                        let status_val =
+                            crate::plan::build_plan_status(&existing_plan_id, &state);
+                        let overall = status_val
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        if !crate::plan::is_terminal_plan_status(overall) {
+                            // Return existing plan status.
+                            let mut resp_val = status_val;
+                            if let serde_json::Value::Object(ref mut m) = resp_val {
+                                m.insert("epic_id".into(), serde_json::json!(epic_id));
+                                m.insert(
+                                    "next_action".into(),
+                                    serde_json::json!(
+                                        "Plan already active for this epic. \
+                                         Poll with get_plan_status(plan_id) to monitor progress."
+                                    ),
+                                );
+                            }
+                            let text = serde_json::to_string_pretty(&resp_val)
+                                .unwrap_or_else(|_| resp_val.to_string());
+                            return JsonRpcResponse::success(
+                                id,
+                                json!({ "content": [{ "type": "text", "text": text }] }),
                             );
                         }
-                        let text = serde_json::to_string_pretty(&resp_val)
-                            .unwrap_or_else(|_| resp_val.to_string());
-                        return JsonRpcResponse::success(
-                            id,
-                            json!({ "content": [{ "type": "text", "text": text }] }),
-                        );
+                        // Terminal plan — fall through to start a fresh one.
+                        // Re-acquire the registry lock to insert the sentinel.
                     }
-                    // Terminal: fall through to start a fresh plan (registry entry
-                    // cleared below after releasing the lock).
+                    // Plan not found in active_plans (evicted or never inserted)
+                    // or was terminal — reserve the slot now.
+                    self.plan_registry
+                        .lock()
+                        .await
+                        .by_epic
+                        .insert(epic_id.clone(), PENDING_SENTINEL.into());
                 }
-                // Plan not found in active_plans (evicted or never inserted) —
-                // also fall through.
+                None => {
+                    // No entry at all — reserve the slot.
+                    registry
+                        .by_epic
+                        .insert(epic_id.clone(), PENDING_SENTINEL.into());
+                }
             }
         }
-        // Clear any stale registry entry before proceeding.
-        self.plan_registry
-            .lock()
-            .await
-            .by_epic
-            .remove(&epic_id);
 
         // 4. Derive the plan from the epic subgraph via PmService.
         let known_agent_names: Vec<String> =
@@ -1371,7 +1403,11 @@ impl McpCallbackServer {
         .await
         {
             Ok(d) => d,
-            Err(e) => return JsonRpcResponse::error(id, -32000, e),
+            Err(e) => {
+                // Clear the sentinel so callers can retry after fixing the issue.
+                self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                return JsonRpcResponse::error(id, -32000, e);
+            }
         };
 
         // 5. Build PlanState and spawn the plan — mirrors handle_submit_plan exactly.
@@ -1400,12 +1436,15 @@ impl McpCallbackServer {
         // Keep a clone of the Arc to build the initial status response.
         let state_for_status = Arc::clone(&state);
 
+        // Insert into active_plans first (no registry lock held here).
         self.active_plans
             .lock()
             .await
             .insert(plan_id.clone(), Arc::clone(&state));
 
-        // Register the plan_id for this epic (idempotency on future calls).
+        // Replace the sentinel with the real plan_id now that dispatch is
+        // committed. active_plans lock is already released above, so these
+        // two locks are never held simultaneously.
         self.plan_registry
             .lock()
             .await
