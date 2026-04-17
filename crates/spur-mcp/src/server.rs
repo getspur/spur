@@ -1087,6 +1087,7 @@ impl McpCallbackServer {
     // ─── Graph analysis handlers (bv robot protocol) ───────────────
 
     /// Helper: get the bv analyzer or return an MCP error.
+    #[allow(clippy::result_large_err)]
     fn require_analyzer(&self, id: &Value) -> Result<&spur_pm::BvAdapter, JsonRpcResponse> {
         let pm = self.pm_service.as_ref().ok_or_else(|| {
             JsonRpcResponse::internal_error(id.clone(), "No PM service configured")
@@ -1210,7 +1211,7 @@ impl McpCallbackServer {
 
         let tasks: Vec<crate::plan::PlanTask> = match tasks_val
             .into_iter()
-            .map(|v| serde_json::from_value(v))
+            .map(serde_json::from_value)
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(t) => t,
