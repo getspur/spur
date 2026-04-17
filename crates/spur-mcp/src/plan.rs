@@ -980,14 +980,20 @@ fn spawn_completion_future(
         let Ok(result) = rx.await else {
             // Oneshot sender dropped — orchestrator died or task cancelled.
             let mut state = plan_arc.lock().await;
+            let mut should_cascade = false;
             if let Some(entry) = state.tasks.iter_mut().find(|t| t.spec.task_id == task_id) {
                 if let PlanTaskStatus::Dispatched { ref delegation_id } = entry.status {
                     if delegation_id == &expected_delegation_id {
                         entry.status = PlanTaskStatus::Failed {
                             error: "orchestrator channel dropped".to_string(),
                         };
+                        should_cascade = true;
                     }
                 }
+            }
+            if should_cascade {
+                let mut warnings = Vec::new();
+                mark_descendants_failed(&task_id, &mut state, &mut warnings);
             }
             return;
         };
@@ -1006,6 +1012,7 @@ fn spawn_completion_future(
             return;
         }
 
+        let mut transitioned_to_failed = false;
         match &result.status {
             DelegationStatus::Success | DelegationStatus::Modified { .. } => {
                 entry.status = PlanTaskStatus::AwaitingReview {
@@ -1015,14 +1022,24 @@ fn spawn_completion_future(
             }
             DelegationStatus::Failed { error } => {
                 entry.status = PlanTaskStatus::Failed { error: error.clone() };
+                transitioned_to_failed = true;
             }
             other => {
                 entry.status = PlanTaskStatus::Failed {
                     error: format!("{other:?}"),
                 };
+                transitioned_to_failed = true;
             }
         }
         entry.result = Some(result);
+
+        // Cascade organic failures through the dep graph — downstream tasks
+        // waiting on this task for Approval will never get it, so mark them
+        // Failed too (same as rejection cascade, different trigger).
+        if transitioned_to_failed {
+            let mut warnings = Vec::new();
+            mark_descendants_failed(&task_id, &mut state, &mut warnings);
+        }
     });
 }
 
