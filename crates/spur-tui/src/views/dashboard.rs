@@ -63,6 +63,26 @@ pub struct DashboardView {
     issue_focus: IssueFocus,
 }
 
+fn format_issue_badge(issue_id: &str, issues: &[spur_pm::IssueSummary]) -> String {
+    let short_id = &issue_id[..8.min(issue_id.len())];
+    if let Some(issue) = issues.iter().find(|i| i.id == *issue_id) {
+        let pri = issue.priority.map(|p| format!("P{}", p)).unwrap_or_default();
+        let max_title = 25;
+        let title = if issue.title.len() > max_title {
+            let mut end = max_title;
+            while end < issue.title.len() && !issue.title.is_char_boundary(end) {
+                end += 1;
+            }
+            format!("{}...", &issue.title[..end])
+        } else {
+            issue.title.clone()
+        };
+        format!("\u{25c6} {} {} {}", short_id, pri, title)
+    } else {
+        format!("\u{25c6} {}", short_id)
+    }
+}
+
 impl DashboardView {
     pub fn new() -> Self {
         let mut activity_log = ActivityLog::new("Activity");
@@ -398,7 +418,10 @@ impl DashboardView {
                 match &self.focused_node {
                     Some(id) => {
                         if let Some(node) = lineage.node(id) {
-                            self.detail_pane.render(frame, chunks[log_chunk], node);
+                            let badge = node.issue_id.as_ref().map(|iid| {
+                                format_issue_badge(iid, &self.tracked_issues)
+                            });
+                            self.detail_pane.render(frame, chunks[log_chunk], node, badge.as_deref());
                         } else {
                             self.activity_log.render(frame, chunks[log_chunk]);
                         }
@@ -505,6 +528,54 @@ impl DashboardView {
                         }
                     }
                     let action = match ch {
+                        // Quick status keys when issue detail is loaded
+                        'o' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
+                            if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
+                                return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
+                                    id: id.clone(), status: "open".into(),
+                                }));
+                            }
+                            return None;
+                        }
+                        'w' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) && self.focused_panel != Panel::Issues => {
+                            if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
+                                return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
+                                    id: id.clone(), status: "in_progress".into(),
+                                }));
+                            }
+                            return None;
+                        }
+                        'b' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
+                            if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
+                                return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
+                                    id: id.clone(), status: "blocked".into(),
+                                }));
+                            }
+                            return None;
+                        }
+                        'd' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
+                            if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
+                                return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
+                                    id: id.clone(), status: "closed".into(),
+                                }));
+                            }
+                            return None;
+                        }
+                        // I hotkey: open issue detail for focused executor
+                        'I' if self.focused_node.is_some() => {
+                            if let Some(ref exec_id) = self.focused_node {
+                                if let Some(node) = lineage.and_then(|l| l.node(exec_id)) {
+                                    if let Some(ref iid) = node.issue_id {
+                                        self.issue_focus = IssueFocus::Loading { id: iid.clone() };
+                                        self.issue_detail_pane.reset();
+                                        return Some(Action::Issue(
+                                            crate::action::IssueAction::ViewDetail { id: iid.clone() },
+                                        ));
+                                    }
+                                }
+                            }
+                            return None;
+                        }
                         'j' if self.focused_panel == Panel::Issues => {
                             self.issues_panel.select_next(1, self.tracked_issues.len());
                             Some(Action::SelectNext)
