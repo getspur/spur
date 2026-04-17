@@ -230,8 +230,19 @@ pub fn derive_epic_plan_from_issues(
         };
 
         // 4e. Map blocked_by: keep intra-subgraph deps; validate/warn external.
+        //
+        // The epic's own id appears in every child's blocked_by because beads
+        // flattens the `parent-child` edge into blocked_by (see
+        // BLOCKING_TYPES in spur-pm/src/beads.rs). That edge is structural
+        // containment, NOT an execution dependency — skip it so the pure
+        // function doesn't mistakenly treat the epic as a missing external
+        // dep. (The async wrapper applies the same skip when collecting
+        // external_dep_statuses; both must agree.)
         let mut depends_on: Vec<String> = Vec::new();
         for b in &child.blocked_by {
+            if b == &epic.id {
+                continue;
+            }
             if subgraph_ids.contains(b.as_str()) {
                 depends_on.push(b.clone());
             } else {
@@ -1779,6 +1790,62 @@ mod tests {
         assert_eq!(derived.plan_tasks.len(), 1);
         assert!(derived.plan_tasks[0].depends_on.is_empty());
         assert!(derived.warnings.iter().any(|w| w.contains("bd-999")));
+    }
+
+    #[test]
+    fn derive_skips_parent_child_edge_in_blocked_by() {
+        // Regression for the real-world bug triggered on bd-1mh: beads
+        // flattens the parent-child relationship into the child's
+        // blocked_by. The pure function must treat `epic.id` in a child's
+        // blocked_by as structural (ignore it), NOT as a missing external
+        // dependency. Before this fix, execute_epic on any epic would
+        // error with "external dependency '<epic_id>' not done (status=
+        // unknown)" because the epic is naturally excluded from the
+        // subgraph and naturally absent from external_dep_statuses.
+        let epic = make_issue(
+            "bd-ep1",
+            Some("epic"),
+            vec!["spur.agent=codex".to_string()],
+            "body",
+            vec![],
+        );
+        let child_a = make_issue(
+            "bd-c1",
+            Some("task"),
+            vec![],
+            "task A",
+            vec!["bd-ep1".to_string()], // parent-child edge ONLY
+        );
+        let child_b = make_issue(
+            "bd-c2",
+            Some("task"),
+            vec![],
+            "task B",
+            // parent-child edge + an intra-subgraph dep on A
+            vec!["bd-ep1".to_string(), "bd-c1".to_string()],
+        );
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child_a, child_b],
+            &std::collections::HashMap::new(), // no external deps needed
+            None,
+            &["codex"],
+        )
+        .unwrap();
+        assert_eq!(derived.plan_tasks.len(), 2);
+        let a = derived.plan_tasks.iter().find(|t| t.task_id == "bd-c1").unwrap();
+        let b = derived.plan_tasks.iter().find(|t| t.task_id == "bd-c2").unwrap();
+        assert!(
+            a.depends_on.is_empty(),
+            "child A must have no execution deps (parent edge is structural); got {:?}",
+            a.depends_on
+        );
+        assert_eq!(
+            b.depends_on,
+            vec!["bd-c1".to_string()],
+            "child B must depend only on A, not on the epic"
+        );
+        assert_eq!(derived.edge_count, 1);
     }
 
     #[test]
