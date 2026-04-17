@@ -37,13 +37,6 @@ struct BrErrorInner {
 }
 
 #[derive(Deserialize)]
-struct BrListPage {
-    issues: Vec<BrIssueWithCounts>,
-    #[allow(dead_code)]
-    total: usize,
-}
-
-#[derive(Deserialize)]
 #[allow(dead_code)]
 struct BrIssueWithCounts {
     id: String,
@@ -156,7 +149,7 @@ impl BeadsAdapter {
             last_poll: Mutex::new(None),
         };
 
-        // Verify binary is installed by running `br version --format json`
+        // Verify binary is installed by running `br version --json`
         let version_output = adapter
             .run_br(vec!["version".into()])
             .await
@@ -189,8 +182,7 @@ impl BeadsAdapter {
     async fn run_br_once(&self, args: &[String]) -> Result<String, BrCallError> {
         let mut cmd = Command::new("br");
         cmd.args(args)
-            .arg("--format")
-            .arg("json")
+            .arg("--json")
             .current_dir(&self.cwd)
             .env("RUST_LOG", "error");
 
@@ -273,8 +265,10 @@ impl BeadsAdapter {
 impl IssueTracker for BeadsAdapter {
     async fn get_issue(&self, id: &str) -> anyhow::Result<Issue> {
         let output = self.run_br(vec!["show".into(), id.to_string()]).await?;
-        let details: BrIssueDetails = serde_json::from_str(&output)
+        let mut items: Vec<BrIssueDetails> = serde_json::from_str(&output)
             .map_err(|e| anyhow::anyhow!("Failed to parse `br show` output: {e}\nRaw: {output}"))?;
+        let details = items.pop()
+            .ok_or_else(|| anyhow::anyhow!("`br show {id}` returned empty result"))?;
         Ok(Issue::from(details))
     }
 
@@ -311,10 +305,8 @@ impl IssueTracker for BeadsAdapter {
             args.push(assignee.clone());
         }
 
-        if let Some(since) = filter.since {
-            args.push("--since".into());
-            args.push(since.to_rfc3339());
-        }
+        // Note: br list has no --since flag; since-based filtering is done
+        // client-side in poll() via updated_at comparison.
 
         if let Some(ref text) = filter.text_search {
             args.push("--title-contains".into());
@@ -326,10 +318,10 @@ impl IssueTracker for BeadsAdapter {
         args.push(limit.to_string());
 
         let output = self.run_br(args).await?;
-        let page: BrListPage = serde_json::from_str(&output)
+        let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output)
             .map_err(|e| anyhow::anyhow!("Failed to parse `br list` output: {e}\nRaw: {output}"))?;
 
-        Ok(page.issues.into_iter().map(IssueSummary::from).collect())
+        Ok(issues.into_iter().map(IssueSummary::from).collect())
     }
 
     async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {
@@ -369,28 +361,24 @@ impl IssueTracker for BeadsAdapter {
             .await?;
         }
 
-        // Step 3: add labels if non-empty
+        // Step 3: add labels if non-empty (br label add <id> -l <label> ...)
         if !update.add_labels.is_empty() {
-            let labels_csv = update.add_labels.join(",");
-            self.run_br(vec![
-                "label".into(),
-                "add".into(),
-                id.to_string(),
-                labels_csv,
-            ])
-            .await?;
+            let mut args = vec!["label".into(), "add".into(), id.to_string()];
+            for label in &update.add_labels {
+                args.push("-l".into());
+                args.push(label.clone());
+            }
+            self.run_br(args).await?;
         }
 
-        // Step 4: remove labels if non-empty
+        // Step 4: remove labels if non-empty (br label remove <id> -l <label> ...)
         if !update.remove_labels.is_empty() {
-            let labels_csv = update.remove_labels.join(",");
-            self.run_br(vec![
-                "label".into(),
-                "remove".into(),
-                id.to_string(),
-                labels_csv,
-            ])
-            .await?;
+            let mut args = vec!["label".into(), "remove".into(), id.to_string()];
+            for label in &update.remove_labels {
+                args.push("-l".into());
+                args.push(label.clone());
+            }
+            self.run_br(args).await?;
         }
 
         Ok(())
@@ -407,7 +395,7 @@ impl IssueTracker for BeadsAdapter {
             ])
             .await?;
 
-        let page: BrListPage = serde_json::from_str(&output).map_err(|e| {
+        let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output).map_err(|e| {
             anyhow::anyhow!("Failed to parse `br list` poll output: {e}\nRaw: {output}")
         })?;
 
@@ -420,8 +408,7 @@ impl IssueTracker for BeadsAdapter {
             *guard
         };
 
-        let events: Vec<PmEvent> = page
-            .issues
+        let events: Vec<PmEvent> = issues
             .into_iter()
             .filter(|item| {
                 if let Some(last) = last_poll {
