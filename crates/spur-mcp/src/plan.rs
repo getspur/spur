@@ -588,7 +588,9 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
     })
 }
 
-/// Review a task in a plan: approve or reject, optionally syncing with beads.
+/// Review a task in a plan: approve, reject, or request_changes.
+/// Optionally syncs with beads (pm), emits events (sink), and dispatches
+/// newly-ready tasks on approval (delegation_tx / task_tracker / plan_arc).
 pub async fn review_task(
     plan_id: &str,
     task_id: &str,
@@ -596,84 +598,431 @@ pub async fn review_task(
     feedback: Option<&str>,
     state: &mut PlanState,
     pm: Option<&spur_pm::PmService>,
+    sink: Option<&dyn crate::events::McpEventSink>,
+    delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>>,
+    task_tracker: Option<&tokio_util::task::TaskTracker>,
+    plan_arc: Option<std::sync::Arc<tokio::sync::Mutex<PlanState>>>,
 ) -> Result<serde_json::Value, String> {
-    let entry = state
-        .tasks
-        .iter_mut()
-        .find(|t| t.spec.task_id == task_id)
-        .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
+    let mut warnings: Vec<String> = Vec::new();
 
-    let summary = match &entry.status {
-        PlanTaskStatus::AwaitingReview { summary } => summary.clone(),
-        other => {
-            let status_name = match other {
-                PlanTaskStatus::Pending => "pending",
-                PlanTaskStatus::Ready => "ready",
-                PlanTaskStatus::Dispatched { .. } => "dispatched",
-                PlanTaskStatus::Approved { .. } => "approved",
-                PlanTaskStatus::Rejected { .. } => "rejected",
-                PlanTaskStatus::Failed { .. } => "failed",
-                _ => "unknown",
-            };
-            return Err(format!(
-                "task '{task_id}' is not awaiting review (current status: {status_name})"
-            ));
+    // Validate the task exists and is in AwaitingReview.
+    let (summary, current_attempt) = {
+        let entry = state
+            .tasks
+            .iter()
+            .find(|t| t.spec.task_id == task_id)
+            .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
+        match &entry.status {
+            PlanTaskStatus::AwaitingReview { summary } => (summary.clone(), entry.attempt),
+            other => {
+                let name = match other {
+                    PlanTaskStatus::Pending => "pending",
+                    PlanTaskStatus::Ready => "ready",
+                    PlanTaskStatus::Dispatched { .. } => "dispatched",
+                    PlanTaskStatus::Approved { .. } => "approved",
+                    PlanTaskStatus::Rejected { .. } => "rejected",
+                    PlanTaskStatus::Failed { .. } => "failed",
+                    _ => "unknown",
+                };
+                return Err(format!(
+                    "task '{task_id}' is not awaiting review (current status: {name})"
+                ));
+            }
         }
     };
 
-    let mut warnings = Vec::<String>::new();
+    // new_dispatches: (task_id, attempt, delegation_id) for each task newly dispatched.
+    let mut new_dispatches: Vec<(String, u32, String)> = Vec::new();
 
     match decision {
         "approve" => {
-            entry.status = PlanTaskStatus::Approved { summary };
+            // Mark Approved.
+            let entry = state
+                .tasks
+                .iter_mut()
+                .find(|t| t.spec.task_id == task_id)
+                .unwrap();
+            entry.status = PlanTaskStatus::Approved { summary: summary.clone() };
+            let issue_id = entry.spec.issue_id.clone();
+
+            // Beads sync (non-blocking).
             if let Some(pm) = pm {
-                if let Some(issue_id) = entry.spec.issue_id.as_deref() {
+                if let Some(ref id) = issue_id {
                     let comment = format!(
                         "Brain approved: {}",
                         feedback.unwrap_or("meets acceptance criteria")
                     );
-                    let update = spur_pm::types::IssueUpdate {
+                    let update = spur_pm::IssueUpdate {
                         status: Some("done".to_string()),
                         comment: Some(comment),
                         ..Default::default()
                     };
-                    if let Err(e) = pm.update_issue(issue_id, update).await {
+                    if let Err(e) = pm.update_issue(id, update).await {
                         warnings.push(format!("beads update failed: {e}"));
                     }
                 }
             }
+
+            // Approval cascade: dispatch any Pending tasks whose deps are now all Approved.
+            if let (Some(tx), Some(tracker), Some(arc)) =
+                (delegation_tx, task_tracker, plan_arc.clone())
+            {
+                dispatch_newly_ready(
+                    plan_id,
+                    state,
+                    tx,
+                    tracker,
+                    arc,
+                    sink,
+                    &mut warnings,
+                    &mut new_dispatches,
+                );
+            }
         }
         "reject" => {
+            let entry = state
+                .tasks
+                .iter_mut()
+                .find(|t| t.spec.task_id == task_id)
+                .unwrap();
             entry.status = PlanTaskStatus::Rejected {
-                feedback: feedback.map(|s| s.to_string()),
+                feedback: feedback.map(String::from),
             };
+            let issue_id = entry.spec.issue_id.clone();
+
             if let Some(pm) = pm {
-                if let Some(issue_id) = entry.spec.issue_id.as_deref() {
+                if let Some(ref id) = issue_id {
                     let comment = format!(
                         "Brain rejected: {}",
                         feedback.unwrap_or("does not meet requirements")
                     );
-                    let update = spur_pm::types::IssueUpdate {
+                    let update = spur_pm::IssueUpdate {
                         status: Some("open".to_string()),
                         comment: Some(comment),
                         ..Default::default()
                     };
-                    if let Err(e) = pm.update_issue(issue_id, update).await {
+                    if let Err(e) = pm.update_issue(id, update).await {
                         warnings.push(format!("beads update failed: {e}"));
                     }
                 }
             }
+
+            // Rejection cascade: mark all transitively-dependent tasks as Failed.
+            mark_descendants_failed(task_id, state, &mut warnings);
         }
-        _ => return Err(format!("invalid decision '{decision}': must be 'approve' or 'reject'")),
+        "request_changes" => {
+            let fb = feedback.ok_or_else(|| {
+                "request_changes requires feedback".to_string()
+            })?;
+
+            // Validate attempt < MAX_ATTEMPTS.
+            let entry = state
+                .tasks
+                .iter_mut()
+                .find(|t| t.spec.task_id == task_id)
+                .unwrap();
+            if entry.attempt >= MAX_ATTEMPTS {
+                return Err(format!(
+                    "task is at max attempts ({MAX_ATTEMPTS}); approve, reject, or leave as-is"
+                ));
+            }
+
+            let (tx, tracker, arc) = match (delegation_tx, task_tracker, plan_arc.clone()) {
+                (Some(a), Some(b), Some(c)) => (a, b, c),
+                _ => {
+                    return Err(
+                        "request_changes requires orchestrator channel (internal error)"
+                            .to_string(),
+                    );
+                }
+            };
+
+            // Build enriched task BEFORE mutating state (reads history + spec).
+            let enriched = build_enriched_task(&entry.spec.task, &entry.history, fb);
+
+            let new_attempt = entry.attempt + 1;
+            let delegation_id = uuid::Uuid::new_v4().to_string();
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<DelegationResult>();
+
+            let req = crate::tools::DelegationRequest {
+                id: delegation_id.clone(),
+                agent: entry.spec.agent.clone(),
+                task: enriched,
+                delegation_plan: None,
+                issue_id: entry.spec.issue_id.clone(),
+                context_files: entry.spec.context_files.clone(),
+                respond_to: resp_tx,
+                brain_session_id: state.brain_session_id.clone(),
+            };
+
+            // try_send — atomic. Fail fast if channel full/closed.
+            if let Err(e) = tx.try_send(req) {
+                return Err(format!("orchestrator channel error: {e}"));
+            }
+
+            // Mutate state AFTER successful send.
+            let prev_record = AttemptRecord {
+                attempt: entry.attempt,
+                worker_branch: entry.worker_branch.take(),
+                diff_summary: entry
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.diff_summary.clone()),
+                summary: entry
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.summary.clone()),
+                feedback: fb.to_string(),
+            };
+            entry.history.push(prev_record);
+            entry.result = None;
+            entry.attempt = new_attempt;
+            entry.status = PlanTaskStatus::Dispatched {
+                delegation_id: delegation_id.clone(),
+            };
+
+            // Spawn completion future.
+            spawn_completion_future(
+                task_id.to_string(),
+                delegation_id.clone(),
+                resp_rx,
+                arc,
+                tracker,
+            );
+
+            new_dispatches.push((task_id.to_string(), new_attempt, delegation_id));
+        }
+        other => {
+            return Err(format!(
+                "invalid decision '{other}': must be 'approve', 'reject', or 'request_changes'"
+            ));
+        }
     }
 
-    let mut result = build_plan_status(plan_id, state);
-    if let Some(obj) = result.as_object_mut() {
-        obj.insert("task_id".into(), serde_json::json!(task_id));
-        obj.insert("decision".into(), serde_json::json!(decision));
-        obj.insert("warnings".into(), serde_json::json!(warnings));
+    // Build response (uses updated state).
+    let mut resp = build_plan_status(plan_id, state);
+    if let serde_json::Value::Object(ref mut m) = resp {
+        m.insert("task_id".into(), serde_json::json!(task_id));
+        m.insert("decision".into(), serde_json::json!(decision));
+        m.insert("warnings".into(), serde_json::json!(warnings));
+        if decision == "request_changes" {
+            if let Some((_, new_att, did)) = new_dispatches.iter().find(|(tid, _, _)| tid == task_id) {
+                m.insert("new_attempt".into(), serde_json::json!(new_att));
+                m.insert("new_delegation_id".into(), serde_json::json!(did));
+            }
+        }
     }
-    Ok(result)
+
+    // Emit events.
+    if let Some(sink) = sink {
+        sink.emit(spur_acp::SpurEventBody::PlanTaskReviewed {
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            decision: decision.to_string(),
+            feedback: feedback.map(String::from),
+            attempt: current_attempt,
+        });
+        for (tid, attempt, did) in &new_dispatches {
+            if tid == task_id && decision == "request_changes" {
+                sink.emit(spur_acp::SpurEventBody::PlanTaskIterating {
+                    plan_id: plan_id.to_string(),
+                    task_id: tid.clone(),
+                    attempt: *attempt,
+                    delegation_id: did.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(resp)
+}
+
+/// BFS from the rejected task through the dependency graph; mark each
+/// transitively-dependent task as Failed. Called on reject decisions.
+fn mark_descendants_failed(
+    rejected_task_id: &str,
+    state: &mut PlanState,
+    warnings: &mut Vec<String>,
+) {
+    use std::collections::VecDeque;
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(rejected_task_id.to_string());
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(rejected_task_id.to_string());
+
+    while let Some(parent) = queue.pop_front() {
+        // Find all tasks that depend on `parent`.
+        let dependents: Vec<String> = state
+            .tasks
+            .iter()
+            .filter(|t| t.spec.depends_on.iter().any(|d| d == &parent))
+            .map(|t| t.spec.task_id.clone())
+            .collect();
+
+        for dep_id in dependents {
+            if !visited.insert(dep_id.clone()) {
+                continue;
+            }
+            let entry = state
+                .tasks
+                .iter_mut()
+                .find(|t| t.spec.task_id == dep_id)
+                .unwrap();
+            // Only cascade through tasks that haven't already reached a terminal state.
+            let should_fail = matches!(
+                entry.status,
+                PlanTaskStatus::Pending | PlanTaskStatus::Ready
+            );
+            if should_fail {
+                entry.status = PlanTaskStatus::Failed {
+                    error: format!("upstream '{parent}' rejected"),
+                };
+                queue.push_back(dep_id);
+            } else {
+                warnings.push(format!(
+                    "descendant '{dep_id}' not cascaded (already in terminal state)"
+                ));
+            }
+        }
+    }
+}
+
+/// Scan for Pending tasks whose deps are all Approved; dispatch each.
+fn dispatch_newly_ready(
+    plan_id: &str,
+    state: &mut PlanState,
+    delegation_tx: &tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>,
+    task_tracker: &tokio_util::task::TaskTracker,
+    plan_arc: std::sync::Arc<tokio::sync::Mutex<PlanState>>,
+    sink: Option<&dyn crate::events::McpEventSink>,
+    warnings: &mut Vec<String>,
+    new_dispatches: &mut Vec<(String, u32, String)>,
+) {
+    let ready_ids: Vec<String> = state
+        .tasks
+        .iter()
+        .filter(|t| matches!(t.status, PlanTaskStatus::Pending))
+        .filter(|t| {
+            t.spec.depends_on.iter().all(|dep| {
+                state.tasks.iter().any(|o| {
+                    o.spec.task_id == *dep
+                        && matches!(o.status, PlanTaskStatus::Approved { .. })
+                })
+            })
+        })
+        .map(|t| t.spec.task_id.clone())
+        .collect();
+
+    for task_id in ready_ids {
+        let (agent, task, issue_id, context_files, brain_session_id) = {
+            let e = state.tasks.iter().find(|t| t.spec.task_id == task_id).unwrap();
+            (
+                e.spec.agent.clone(),
+                e.spec.task.clone(),
+                e.spec.issue_id.clone(),
+                e.spec.context_files.clone(),
+                state.brain_session_id.clone(),
+            )
+        };
+        let delegation_id = uuid::Uuid::new_v4().to_string();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<DelegationResult>();
+
+        let req = crate::tools::DelegationRequest {
+            id: delegation_id.clone(),
+            agent,
+            task,
+            delegation_plan: None,
+            issue_id,
+            context_files,
+            respond_to: resp_tx,
+            brain_session_id,
+        };
+
+        match delegation_tx.try_send(req) {
+            Ok(()) => {
+                let entry = state.tasks.iter_mut().find(|t| t.spec.task_id == task_id).unwrap();
+                entry.status = PlanTaskStatus::Dispatched {
+                    delegation_id: delegation_id.clone(),
+                };
+                spawn_completion_future(
+                    task_id.clone(),
+                    delegation_id.clone(),
+                    resp_rx,
+                    plan_arc.clone(),
+                    task_tracker,
+                );
+                new_dispatches.push((task_id.clone(), 1, delegation_id));
+            }
+            Err(e) => {
+                let entry = state.tasks.iter_mut().find(|t| t.spec.task_id == task_id).unwrap();
+                entry.status = PlanTaskStatus::Failed {
+                    error: format!("failed to dispatch: {e}"),
+                };
+                warnings.push(format!("dispatch failed for '{task_id}': {e}"));
+            }
+        }
+    }
+    let _ = (plan_id, sink); // reserved for future event emission on cascade dispatch
+}
+
+/// Spawn a future that awaits a DelegationResult and writes it back to PlanState.
+/// Guards against stale completions (if the task was iterated again before this
+/// resolved, the delegation_id no longer matches — result is discarded).
+fn spawn_completion_future(
+    task_id: String,
+    expected_delegation_id: String,
+    rx: tokio::sync::oneshot::Receiver<DelegationResult>,
+    plan_arc: std::sync::Arc<tokio::sync::Mutex<PlanState>>,
+    task_tracker: &tokio_util::task::TaskTracker,
+) {
+    task_tracker.spawn(async move {
+        let Ok(result) = rx.await else {
+            // Oneshot sender dropped — orchestrator died or task cancelled.
+            let mut state = plan_arc.lock().await;
+            if let Some(entry) = state.tasks.iter_mut().find(|t| t.spec.task_id == task_id) {
+                if let PlanTaskStatus::Dispatched { ref delegation_id } = entry.status {
+                    if delegation_id == &expected_delegation_id {
+                        entry.status = PlanTaskStatus::Failed {
+                            error: "orchestrator channel dropped".to_string(),
+                        };
+                    }
+                }
+            }
+            return;
+        };
+
+        let mut state = plan_arc.lock().await;
+        let Some(entry) = state.tasks.iter_mut().find(|t| t.spec.task_id == task_id) else {
+            return;
+        };
+
+        // Stale-completion guard: only apply if we're still the expected attempt.
+        let still_ours = matches!(
+            &entry.status,
+            PlanTaskStatus::Dispatched { delegation_id } if delegation_id == &expected_delegation_id
+        );
+        if !still_ours {
+            return;
+        }
+
+        match &result.status {
+            DelegationStatus::Success | DelegationStatus::Modified { .. } => {
+                entry.status = PlanTaskStatus::AwaitingReview {
+                    summary: result.summary.clone(),
+                };
+                entry.worker_branch = result.worker_branch.clone();
+            }
+            DelegationStatus::Failed { error } => {
+                entry.status = PlanTaskStatus::Failed { error: error.clone() };
+            }
+            other => {
+                entry.status = PlanTaskStatus::Failed {
+                    error: format!("{other:?}"),
+                };
+            }
+        }
+        entry.result = Some(result);
+    });
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
