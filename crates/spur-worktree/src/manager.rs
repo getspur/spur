@@ -308,6 +308,30 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Remove the worktree directory but keep the branch alive for future merge.
+    /// Returns the preserved branch name.
+    pub async fn detach_worktree(&mut self, session_id: &SessionId) -> Result<String> {
+        let session_str = session_id.to_string();
+        let info = self
+            .active
+            .remove(&session_str)
+            .ok_or_else(|| anyhow!("no active worktree for session {session_str}"))?;
+
+        let path_str = info
+            .path
+            .to_str()
+            .ok_or_else(|| anyhow!("worktree path is not valid UTF-8"))?
+            .to_string();
+
+        self.run_git(&["worktree", "remove", &path_str, "--force"], None)
+            .await
+            .with_context(|| format!("failed to detach worktree at {path_str}"))?;
+
+        // Branch intentionally NOT deleted — preserved for brain review + merge.
+        debug!(branch = %info.branch, "detached worktree, branch preserved");
+        Ok(info.branch)
+    }
+
     /// Remove worktrees that have been active longer than `max_age`.
     /// Returns the number of worktrees cleaned up.
     pub async fn cleanup_stale(&mut self, max_age: Duration) -> Result<usize> {
