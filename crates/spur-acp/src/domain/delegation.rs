@@ -71,6 +71,8 @@ pub struct DelegationResult {
     pub diff_summary: Option<DiffSummary>,
     pub summary: Option<String>,
     pub estimated_cost_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_branch: Option<String>,
 }
 
 /// Structured reasoning trace the brain passes alongside each
@@ -175,6 +177,7 @@ mod delegation_result_tests {
             }),
             summary: Some("did the thing".into()),
             estimated_cost_usd: 0.42,
+            worker_branch: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         let back: DelegationResult = serde_json::from_str(&json).unwrap();
