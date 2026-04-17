@@ -1,0 +1,15 @@
+name: vendor-leak-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: No vendor tokens in spur-tui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run guardrail
+        run: ./scripts/check-no-vendor-meta-leak.sh
