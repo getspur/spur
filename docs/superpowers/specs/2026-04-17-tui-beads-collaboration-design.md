@@ -67,11 +67,12 @@ Quick-key [d] ─────────────► status → closed      
 | Issue detail view (async fetch + render) | 1 |
 | `W` key = "Work on this issue" (prompt → brain) | 1 |
 | `/issues` refresh command | 1 |
+| Issue badge in DetailPane header (`◆ id P1 title`) | 2 |
 | Issue↔Executor linkage in ExecutorLineage | 2 |
-| Quick status keys (o/w/b/d) | 2 |
+| Quick status keys (o/w/b/d) + `I` hotkey | 2 |
 | `create_issue` trait method + MCP tool | 3 |
 | Brain context injection at session start | 4 |
-| Sub-issue hierarchy visualization | 4 |
+| Sub-issue hierarchy + optional Issues tab in DetailPane | 4 |
 
 ---
 
@@ -264,6 +265,41 @@ When agents exist AND issues exist AND issue is focused:
 
 When no issue focused: ActivityLog/DetailPane renders in the middle area (existing behavior).
 
+### 4.6 Issue Badge in DetailPane Header (Phase 2)
+
+When an executor is focused and has `issue_id`, a right-aligned badge appears in the
+DetailPane border title. Zero extra vertical space, always visible regardless of active tab.
+
+```rust
+// In DashboardView, before calling detail_pane.render():
+let issue_badge = self.focused_node.as_ref()
+    .and_then(|id| lineage.node(id))
+    .and_then(|n| n.issue_id.as_ref())
+    .map(|iid| format_issue_badge(iid, &self.tracked_issues));
+
+self.detail_pane.render(frame, area, node, issue_badge.as_deref());
+```
+
+DetailPane renders it as a right-aligned `Title` on the `Block`:
+
+```rust
+let mut block = Block::bordered();
+block = block.title(Title::from(tab_labels).alignment(Alignment::Left));
+if let Some(badge) = issue_badge {
+    block = block.title(Title::from(format!(" {} ", badge)).alignment(Alignment::Right));
+}
+```
+
+Badge format: `◆ bd-abc1 P1 Fix auth timeout...` — ID truncated to 8 chars, title
+truncated to fit available width.
+
+When user presses `I` while DetailPane is focused, it opens the linked issue in
+IssueDetailPane (same as Enter on the issue in IssuesPanel).
+
+**Why badge over a tab:** "What issue is this worker working on?" is a glance question.
+A tab forces a switch; the badge answers instantly. A dedicated Issues tab is deferred
+to Phase 4 when sub-issue hierarchy data justifies a tree view.
+
 ---
 
 ## 5. Key Bindings (Issues Panel Focused)
@@ -279,6 +315,7 @@ When no issue focused: ActivityLog/DetailPane renders in the middle area (existi
 | `b` | Set status: blocked | IssueFocus::Loaded |
 | `d` | Set status: closed | IssueFocus::Loaded |
 | `W` | Work on this issue (send to brain) | Issue selected (panel or detail) |
+| `I` | Open linked issue detail from executor | DetailPane focused, executor has issue_id |
 | `Tab` | Cycle to Log panel | Any |
 
 ---
@@ -512,9 +549,9 @@ if let Some(since) = filter.since {
 
 Estimated: ~500 lines
 
-### Phase 2: Linkage + Quick Actions
+### Phase 2: Badge + Linkage + Quick Actions
 
-**Value:** Visual connection between issues and executors. Quick status updates from TUI.
+**Value:** Issue badge in DetailPane header for instant context. Visual issue-executor linkage. Quick status updates from TUI.
 
 | Component | Changes |
 |---|---|
@@ -522,7 +559,8 @@ Estimated: ~500 lines
 | ExecutorNode | `issue_id: Option<String>` field |
 | ExecutorLineage | `executors_for_issue()` method |
 | `issues_panel.rs` | ◆ linked indicator, lineage-aware rendering |
-| `dashboard.rs` | Quick-key routing (o/w/b/d), IssueUpdated handling |
+| `detail_pane.rs` | `issue_badge: Option<&str>` param, right-aligned Title |
+| `dashboard.rs` | Badge formatting, quick-key routing (o/w/b/d), `I` hotkey, IssueUpdated handling |
 | `app.rs` | UserInput::UpdateIssue |
 | `orchestrator.rs` | Handle UpdateIssue, propagate issue_id in events |
 
@@ -546,18 +584,19 @@ Estimated: ~350 lines
 
 Estimated: ~400 lines
 
-### Phase 4: Brain Context + Sub-Issue Hierarchy
+### Phase 4: Brain Context + Sub-Issue Hierarchy + Issues Tab
 
-**Value:** Brain is proactive about issues. Sub-issue tree mirrors delegation tree.
+**Value:** Brain is proactive about issues. Sub-issue tree mirrors delegation tree. Issues tab in DetailPane shows hierarchy with progress.
 
 | Component | Changes |
 |---|---|
 | `orchestrator.rs` | Issue context injection at brain session start |
 | `config/mod.rs` | `[pm.brain_context]` config section |
 | `issues_panel.rs` | Indented sub-issue rendering |
+| `detail_pane.rs` | Optional Issues tab (hierarchy tree view) |
 | `beads.rs` | Parent-child dependency creation in create_issue |
 
-Estimated: ~300 lines
+Estimated: ~350 lines
 
 ---
 
@@ -609,7 +648,346 @@ crates/spur-tui/src/
   components/
     issues_panel.rs  Phase 1: refactor stateful; Phase 2: ◆ linkage; Phase 4: indent
     issue_detail_pane.rs  Phase 1: NEW
+    detail_pane.rs   Phase 2: +issue_badge param, right-aligned Title; Phase 4: +Issues tab
   views/
     dashboard.rs     Phase 1: Panel::Issues, IssueFocus, key routing
-                     Phase 2: quick-keys, IssueUpdated handling
+                     Phase 2: badge formatting, quick-keys, I hotkey, IssueUpdated handling
+```
+
+---
+
+## 15. ASCII Wireframes
+
+### 15.1 Dashboard — Issues Panel Visible, No Focus
+
+Default state when issues are loaded. IssuesPanel is read-only until Tab-focused.
+`◆` next to an issue ID means an active executor is linked to that issue.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (streaming ▸▸▸)                                             │
+│    ├─ worker-1 (running)     auth-handler        ◆ bd-abc1           │
+│    ├─ worker-2 (done ✓)      api-tests                               │
+│    └─ worker-3 (reviewing)   db-migration        ◆ bd-def4           │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issues (3) ─────────────────────────────────────────────────────────┐
+│  ID        P  Type    Sts   Assignee   Title                         │
+│  bd-abc1   P1 bug     wip   worker-1   Fix authentication timeout  ◆ │
+│  bd-def4   P0 bug     wip   worker-3   DB migration deadlock       ◆ │
+│  bd-ghi7   P2 task    open  --         Update API documentation      │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Activity ───────────────────────────────────────────────────────────┐
+│  14:32:01 [brain]     Delegating to worker-1: Fix auth timeout       │
+│  14:32:03 [worker-1]  Tool: Read src/auth/handler.rs                 │
+│  14:32:15 [worker-1]  Tool: Edit src/auth/handler.rs                 │
+│  14:33:01 [pm]        Issue bd-abc1 (beads) updated: in_progress     │
+│                                                                       │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+ [/] command · [@] mention · [!] interrupt · [Alt+I] vim · ? for help
+ 2 running · 1 review · $0.42 · 3m 21s · 3 issues ·               ? help
+```
+
+### 15.2 Issues Panel Focused (Tab → Panel::Issues)
+
+Border turns cyan. Hint bar shows available keys. Selected row has `▌` gutter marker.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (streaming ▸▸▸)                                             │
+│    ├─ worker-1 (running)     auth-handler        ◆ bd-abc1           │
+│    ├─ worker-2 (done ✓)      api-tests                               │
+│    └─ worker-3 (reviewing)   db-migration        ◆ bd-def4           │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issues (3) ─── [Tab] cycle · [j/k] select · [Enter] detail ────────┐
+│  ID        P  Type    Sts   Assignee   Title                     ◆   │
+│▌ bd-abc1   P1 bug     wip   worker-1   Fix authentication timeout  ◆ │ ◄── selected (bg highlight)
+│  bd-def4   P0 bug     wip   worker-3   DB migration deadlock       ◆ │
+│  bd-ghi7   P2 task    open  --         Update API documentation      │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Activity ───────────────────────────────────────────────────────────┐
+│  14:32:01 [brain]     Delegating to worker-1: Fix auth timeout       │
+│  14:32:03 [worker-1]  Tool: Read src/auth/handler.rs                 │
+│  14:32:15 [worker-1]  Tool: Edit src/auth/handler.rs                 │
+│  14:33:01 [pm]        Issue bd-abc1 (beads) updated: in_progress     │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+
+ 2 running · 1 review · $0.42 · 3m 21s · 3 issues ·               ? help
+```
+
+### 15.3 Issue Detail Open (Enter on Selected Issue)
+
+IssueDetailPane replaces ActivityLog area. Shows full issue body, metadata, and
+action hint footer. Body area is scrollable with j/k.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (streaming ▸▸▸)                                             │
+│    ├─ worker-1 (running)     auth-handler        ◆ bd-abc1           │
+│    └─ worker-3 (reviewing)   db-migration        ◆ bd-def4           │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issues (3) ─────────────────────────────────────────────────────────┐
+│▌ bd-abc1   P1 bug     wip   worker-1   Fix authentication timeout  ◆ │
+│  bd-def4   P0 bug     wip   worker-3   DB migration deadlock       ◆ │
+│  bd-ghi7   P2 task    open  --         Update API documentation      │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issue: bd-abc123 ───────────────────────────────────────────────────┐
+│                                                                       │
+│  Fix authentication timeout                                           │
+│                                                                       │
+│  Status: in_progress    Priority: P1       Type: bug                  │
+│  Assignee: worker-1     Due: 2026-04-20                               │
+│  Blocked by: bd-def456                                                │
+│  Labels: backend, auth                                                │
+│ ───────────────────────────────────────────────────────────────────── │
+│  The auth service times out after 30 seconds when the token           │
+│  refresh endpoint is unreachable. This causes the entire login        │
+│  flow to hang until the TCP socket timeout fires.                     │
+│                                                                       │
+│  Acceptance criteria:                                                 │
+│  - Timeout reduced to 5s with graceful fallback                       │
+│  - Retry with exponential backoff (max 3 attempts)                    │
+│  - Unit tests for timeout + retry paths                               │
+│                                                                       │
+│ ───────────────────────────────────────────────────────────────────── │
+│  [o]pen [w]ip [b]locked [d]one     [W]ork on this     [Esc] back     │
+└──────────────────────────────────────────────────────────────────────┘
+
+ 2 running · 1 review · $0.42 · 3m 21s · 3 issues ·               ? help
+```
+
+### 15.4 Issue Loading State (Enter → Waiting for Fetch)
+
+Transient state while orchestrator fetches full Issue from PmService.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (streaming ▸▸▸)                                             │
+│    ├─ worker-1 (running)     auth-handler        ◆ bd-abc1           │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issues (3) ─────────────────────────────────────────────────────────┐
+│▌ bd-abc1   P1 bug     wip   worker-1   Fix authentication timeout  ◆ │
+│  bd-def4   P0 bug     wip   worker-3   DB migration deadlock       ◆ │
+│  bd-ghi7   P2 task    open  --         Update API documentation      │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issue: bd-abc123 ───────────────────────────────────────────────────┐
+│                                                                       │
+│                                                                       │
+│                                                                       │
+│                  Loading issue bd-abc123...                            │
+│                                                                       │
+│                                                                       │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+
+ 2 running · 1 review · $0.42 · 3m 21s · 3 issues ·               ? help
+```
+
+### 15.5 Executor Focused — Issue Badge in DetailPane Header (Phase 2)
+
+When a focused executor has `issue_id`, the badge appears right-aligned in the
+DetailPane border. No tab switch needed — always visible alongside Stream content.
+Press `I` to open full issue detail.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (streaming ▸▸▸)                                             │
+│    ├─►worker-1 (running)     auth-handler        ◆ bd-abc1  ◄─ focused
+│    ├─ worker-2 (done ✓)      api-tests                               │
+│    └─ worker-3 (reviewing)   db-migration        ◆ bd-def4           │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issues (3) ─────────────────────────────────────────────────────────┐
+│  bd-abc1   P1 bug     wip   worker-1   Fix authentication timeout  ◆ │
+│  bd-def4   P0 bug     wip   worker-3   DB migration deadlock       ◆ │
+│  bd-ghi7   P2 task    open  --         Update API documentation      │
+└──────────────────────────────────────────────────────────────────────┘
+┌─[Stream] Artifacts  Task  Review ────── ◆ bd-abc1 P1 Fix auth...─┐
+│                                                                    │
+│  > Thinking...                                                     │
+│    Looking at the auth handler in src/auth/handler.rs. The         │
+│    timeout is hardcoded at 30s on line 142. I'll change it         │
+│    to use the configurable timeout from AuthConfig.                │
+│                                                                    │
+│  ! Act: Edit src/auth/handler.rs                                   │
+│    - Line 142: timeout: Duration::from_secs(30)                    │
+│    + Line 142: timeout: config.auth_timeout                        │
+│                                                                    │
+│  ! Act: Edit src/auth/config.rs                                    │
+│    + pub auth_timeout: Duration,  // default: 5s                   │
+│                                                                    │
+│  > Thinking...                                                     │
+│    Now I need to add the retry logic with exponential backoff...   │
+│                                                                    │
+│                                                     [I]ssue detail │
+└────────────────────────────────────────────────────────────────────┘
+
+ 2 running · 1 review · $0.42 · 3m 21s · 3 issues ·             ? help
+```
+
+### 15.6 Executor Focused — No Linked Issue (Badge Absent)
+
+When executor has no `issue_id`, DetailPane renders exactly as today.
+No badge, no hint — zero visual noise.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (streaming ▸▸▸)                                             │
+│    ├─ worker-1 (running)     auth-handler        ◆ bd-abc1           │
+│    ├─►worker-2 (done ✓)      api-tests                    ◄─ focused │
+│    └─ worker-3 (reviewing)   db-migration        ◆ bd-def4           │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issues (3) ─────────────────────────────────────────────────────────┐
+│  bd-abc1   P1 bug     wip   worker-1   Fix authentication timeout  ◆ │
+│  bd-def4   P0 bug     wip   worker-3   DB migration deadlock       ◆ │
+│  bd-ghi7   P2 task    open  --         Update API documentation      │
+└──────────────────────────────────────────────────────────────────────┘
+┌─[Stream] Artifacts  Task  Review ────────────────────────────────────┐
+│                                                                       │
+│  > Thinking...                                                        │
+│    Running the test suite for the new API endpoints.                  │
+│                                                                       │
+│  ! Act: Bash cargo test --package spur-api                            │
+│    running 12 tests                                                   │
+│    test api::auth::test_login ... ok                                  │
+│    test api::auth::test_refresh ... ok                                │
+│    test api::users::test_create ... ok                                │
+│    ...                                                                │
+│    test result: ok. 12 passed; 0 failed                               │
+│                                                                       │
+│  > Session completed successfully                                     │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+
+ 1 running · 1 review · $0.42 · 3m 21s · 3 issues ·             ? help
+```
+
+### 15.7 "W" Key — Work On Issue (Prompt Sent to Brain)
+
+User presses `W` on selected issue. TUI constructs a prompt from the IssueSummary
+and sends it to the brain. The prompt appears in the activity log.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (thinking ···)                                              │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issues (3) ─────────────────────────────────────────────────────────┐
+│  bd-abc1   P1 bug     wip   worker-1   Fix authentication timeout  ◆ │
+│  bd-def4   P0 bug     wip   worker-3   DB migration deadlock       ◆ │
+│▌ bd-ghi7   P2 task    open  --         Update API documentation      │ ◄── user pressed W
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Activity ───────────────────────────────────────────────────────────┐
+│  14:35:12 [you]       Work on this issue:                            │
+│                       Issue: bd-ghi7 -- Update API documentation     │
+│                       Priority: P2 | Type: task | Status: open       │
+│                                                                       │
+│                       Use `get_issue` tool to read full details.      │
+│                       Use `delegate_to_worker` with                   │
+│                       issue_id="bd-ghi7" for delegations.            │
+│                                                                       │
+│  14:35:13 [brain]     ···  (thinking)                                │
+│                                                                       │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+ [brain: ···]
+ 1 running · 0 review · $0.42 · 5m 12s · 3 issues ·               ? help
+```
+
+### 15.8 Empty State — No Issues Loaded
+
+When `.beads/` has no issues or PM is not configured. IssuesPanel is hidden entirely
+(zero height). Tab cycle skips Panel::Issues. Dashboard looks identical to pre-beads TUI.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (ready)                                                     │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Activity ───────────────────────────────────────────────────────────┐
+│  14:30:00 [brain]     Brain agent spawned                            │
+│  14:30:01 [pm]        0 issues loaded                                │
+│                                                                       │
+│                                                                       │
+│                                                                       │
+│                                                                       │
+│                                                                       │
+│                                                                       │
+│                                                                       │
+│                                                                       │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+ [/] command · [@] mention · [!] interrupt · [Alt+I] vim · ? for help
+ 0 running · 0 review · $0.00 · 0m 01s ·                          ? help
+```
+
+### 15.9 Phase 4 Vision — Sub-Issue Hierarchy + Issues Tab
+
+When sub-issues exist (Phase 4), the IssuesPanel shows indented children and progress
+counts. A dedicated Issues tab appears in DetailPane showing the full hierarchy tree
+with executor linkage and progress bar.
+
+```
+┌─ Agents ─────────────────────────────────────────────────────────────┐
+│  ▾ brain (idle)                                                      │
+│    ├─►worker-1 (running)     auth-handler        ◆ bd-001            │
+│    ├─ worker-2 (done ✓)      auth-tests          ◆ bd-002            │
+│    └─ worker-3 (running)     auth-docs           ◆ bd-003            │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Issues (6) ─────────────────────────────────────────────────────────┐
+│  bd-000   P1 task    wip   --         Refactor auth system     2/5 ◆ │
+│  bd-abc1  P1 bug     done  --         Fix authentication timeout     │
+│  bd-def4  P0 bug     done  --         DB migration deadlock          │
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Stream  Artifacts  Task  Review  [Issues] ── ◆ bd-001 P2 handler─┐
+│                                                                     │
+│  Parent: bd-000 "Refactor auth system" (wip, 2/5 done)             │
+│  ┌──────────────────────────────────────────────────────────┐      │
+│  │  ok bd-001  P2  Fix handler        done    > worker-1    │      │
+│  │  ok bd-002  P2  Add tests          done    > worker-2    │      │
+│  │  >> bd-003  P3  Update docs        wip     > worker-3    │      │
+│  │     bd-004  P2  Migration script   pending               │      │
+│  │     bd-005  P3  Cleanup old code   pending               │      │
+│  └──────────────────────────────────────────────────────────┘      │
+│                                                                     │
+│  Progress: ================------------- 40% (2/5)                  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+
+ 2 running · 0 review · $1.23 · 12m 45s · 6 issues ·             ? help
+```
+
+### 15.10 Phase Progression Summary
+
+Visual evolution across phases. Each phase adds capability without removing
+existing UI. Phase 1 is the foundation; each subsequent phase layers on top.
+
+```
+Phase 1 (MVP)                    Phase 2 (Badge+Linkage)
+-------------------------------  ---------------------------------
++-- Agents ---------------+      +-- Agents ---------------+
+| workers                 |      | workers            * id |    * = linked indicator
++-------------------------+      +-------------------------+
++-- Issues ---------------+      +-- Issues ---------------+
+| j/k/Enter/W             |      | j/k + o/w/b/d          |
+| |selected row           |      | |selected          *   |
++-------------------------+      +-------------------------+
++-- IssueDetail ----------+      +--[Stream]-----* badge--+     badge = right-aligned
+| body/meta               |      | stream content         |     in border title
+| [o][w][b][d]            | (or) |                        |
+| [W]ork [Esc]            |      |           [I] detail   |
++-------------------------+      +-------------------------+
+
+Phase 3 (Create)                 Phase 4 (Hierarchy)
+-------------------------------  ---------------------------------
++-- Agents ---------------+      +-- Agents ---------------+
+| workers            * id |      | workers            * id |
++-------------------------+      +-------------------------+
++-- Issues ---------------+      +-- Issues ---------------+
+| /issue create <title>    |      | + indent tree           |
+| |new issue appears       |      | |parent         2/5 *  |
++-------------------------+      +-------------------------+
++--[Stream]-----* badge--+      +-- Stream [Issues] * ---+     Issues tab = tree
+| stream content         |      | sub-issue tree         |     with progress bar
+|                        |      | progress bar           |
+|           [I] detail   |      |                        |
++-------------------------+      +-------------------------+
 ```
