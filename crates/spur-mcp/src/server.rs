@@ -153,6 +153,8 @@ pub struct McpCallbackServer {
     task_tracker: TaskTracker,
     /// Optional PM service for direct issue/PR operations.
     pm_service: Option<Arc<PmService>>,
+    /// Optional event sink for emitting MCP lifecycle events.
+    event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     /// Active execution plans submitted via `submit_plan`.
     active_plans: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
 }
@@ -162,7 +164,11 @@ impl McpCallbackServer {
     ///
     /// Returns the server instance and a `DelegationChannel` that the
     /// orchestrator uses to receive requests and send responses.
-    pub fn new(session_id: &SessionId, pm_service: Option<Arc<PmService>>) -> (Self, DelegationChannel) {
+    pub fn new(
+        session_id: &SessionId,
+        pm_service: Option<Arc<PmService>>,
+        event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+    ) -> (Self, DelegationChannel) {
         let (req_tx, req_rx) = mpsc::channel::<DelegationRequest>(32);
 
         let server = Self {
@@ -173,6 +179,7 @@ impl McpCallbackServer {
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             task_tracker: TaskTracker::new(),
             pm_service,
+            event_sink,
             active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
 
@@ -1374,8 +1381,23 @@ impl McpCallbackServer {
         };
 
         let pm = self.pm_service.as_deref();
+        let sink: Option<&dyn crate::events::McpEventSink> = self.event_sink.as_deref();
+
         let mut state = plan_arc.lock().await;
-        let result = crate::plan::review_task(&plan_id, &task_id, decision, feedback, &mut state, pm).await?;
+        let result = crate::plan::review_task(
+            &plan_id,
+            &task_id,
+            decision,
+            feedback,
+            &mut state,
+            pm,
+            sink,
+            Some(&self.delegation_tx),
+            Some(&self.task_tracker),
+            Some(plan_arc.clone()),
+        )
+        .await?;
+        drop(state);
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
