@@ -2607,13 +2607,20 @@ impl Orchestrator {
         // so retry loops at orchestrator.rs:3013 reuse the formatted
         // base. No-op when context_files is empty.
         let original_task = format_worker_task(&original_task, &context_files);
-        // Internal operations (progress, cost) — still stubbed.
+        // Internal operation: __cancel_delegation. Still stubbed until a
+        // real orchestrator-side cancellation handler lands. Any other
+        // `__`-prefixed agent name is an error (no longer reachable from
+        // the MCP server — report_progress and get_session_cost were
+        // removed in T1).
         if agent.starts_with("__") {
+            let error = if agent == "__cancel_delegation" {
+                "Internal operation not yet wired: __cancel_delegation".to_string()
+            } else {
+                format!("Unsupported internal operation: {agent}")
+            };
             return (
                 DelegationResult {
-                    status: DelegationStatus::Failed {
-                        error: format!("Internal operation not yet wired: {}", agent),
-                    },
+                    status: DelegationStatus::Failed { error },
                     diff: None,
                     diff_summary: None,
                     summary: None,
