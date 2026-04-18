@@ -1081,6 +1081,21 @@ impl InputBar {
             let vr = &layout.rows[vi];
             let logical = &lines[vr.logical_row];
 
+            // Hoisted once per visual row: flat byte offset where this
+            // logical row starts, and where the next logical row starts.
+            // line_cache[row] is the flat byte offset of the '\n'-joined
+            // buffer at which logical row `row` begins.
+            let row_start_flat = self
+                .line_cache
+                .get(vr.logical_row)
+                .copied()
+                .unwrap_or(0);
+            let next_row_start = self
+                .line_cache
+                .get(vr.logical_row + 1)
+                .copied()
+                .unwrap_or(usize::MAX);
+
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(vr.graphemes.len());
             for g in &vr.graphemes {
                 let piece_slice = &logical[g.byte_start..g.byte_end];
@@ -1093,13 +1108,18 @@ impl InputBar {
 
                 let mut style = Style::default();
 
-                // Atom styling: light-blue + underline for graphemes inside
-                // any protected range that lives on this logical line.
+                // Atom styling: LightBlue + underline for graphemes inside
+                // any protected range on the current logical line. Atoms
+                // store flat byte offsets (into the \n-joined buffer), so
+                // translate to per-line coordinates via line_cache.
                 for atom in &self.protected_ranges {
-                    if vr.logical_row == 0
-                        && g.byte_start >= atom.start
-                        && g.byte_end <= atom.end
-                    {
+                    // Skip atoms that belong to a different logical row.
+                    if atom.start < row_start_flat || atom.start >= next_row_start {
+                        continue;
+                    }
+                    let atom_start_in_row = atom.start - row_start_flat;
+                    let atom_end_in_row = atom.end - row_start_flat;
+                    if g.byte_start >= atom_start_in_row && g.byte_end <= atom_end_in_row {
                         style = style
                             .fg(Color::LightBlue)
                             .add_modifier(Modifier::UNDERLINED);
