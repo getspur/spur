@@ -345,8 +345,8 @@ impl ReactTrace {
         let offset = if self.is_following() {
             max_offset
         } else {
-            // Non-markdown path: anchor is always Following or Byte{0,0}.
-            // Byte anchors don't have byte_ranges here, so clamp to max.
+            // Non-markdown path: only Following is meaningful here (Row anchors
+            // are markdown-only). Resolve to viewport bottom unconditionally.
             max_offset
         };
 
