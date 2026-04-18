@@ -445,8 +445,6 @@ impl ReactTrace {
         >,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) -> (Vec<VirtualRow>, Vec<usize>) {
-        use crate::components::markdown_stream::StreamItem;
-
         let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
         let collapsed = self.observe_collapsed;
 
@@ -577,66 +575,37 @@ impl ReactTrace {
                         ]),
                     );
 
-                    let items_rendered = entry
-                        .markdown
-                        .as_ref()
-                        .filter(|stream| !stream.items().is_empty())
-                        .map(|stream| {
-                            for item in stream.items() {
-                                match item {
-                                    StreamItem::Text(text_lines) => {
-                                        for line in text_lines {
-                                            let mut spans = vec![Span::raw("   ")];
-                                            spans.extend(line.spans.iter().cloned());
-                                            let mut new_line = Line::from(spans);
-                                            new_line.style = line.style;
-                                            new_line.alignment = line.alignment;
-                                            push_wrapped(&mut rows, new_line);
-                                        }
-                                    }
-                                    StreamItem::Fence(id) => {
-                                        use crate::components::mermaid::FenceRender;
-                                        match states.get(id).copied() {
-                                            Some(FenceRender::Ready(h)) if h > 0 => {
-                                                for r in 0..h {
-                                                    rows.push(VirtualRow::ImageRow {
-                                                        id: *id,
-                                                        row_within: r,
-                                                        total_rows: h,
-                                                    });
-                                                }
-                                            }
-                                            other => {
-                                                let render = match other {
-                                                    Some(FenceRender::Error) => FenceRender::Error,
-                                                    _ => FenceRender::Pending,
-                                                };
-                                                let placeholder =
-                                                    crate::components::mermaid::fence_placeholder_line(
-                                                        *id, render,
-                                                    );
-                                                let mut spans = vec![Span::raw("   ")];
-                                                spans.extend(placeholder.spans.iter().cloned());
-                                                let mut line = Line::from(spans);
-                                                line.style = placeholder.style;
-                                                line.alignment = placeholder.alignment;
-                                                push_wrapped(&mut rows, line);
-                                            }
-                                        }
+                    if let Some(stream) = entry.markdown.as_ref() {
+                        // Collect body output into a staging area to avoid
+                        // simultaneous mutable borrows of `rows` across the
+                        // two emit closures required by render_agent_message_body.
+                        enum BodyRow {
+                            Line(Line<'static>),
+                            Image { id: MermaidId, h: u16 },
+                        }
+                        let staged = std::cell::RefCell::new(Vec::<BodyRow>::new());
+                        render_agent_message_body(
+                            stream,
+                            states,
+                            |line| staged.borrow_mut().push(BodyRow::Line(line)),
+                            |id, h| staged.borrow_mut().push(BodyRow::Image { id, h }),
+                        );
+                        for item in staged.into_inner() {
+                            match item {
+                                BodyRow::Line(line) => push_wrapped(&mut rows, line),
+                                BodyRow::Image { id, h } => {
+                                    for r in 0..h {
+                                        rows.push(VirtualRow::ImageRow {
+                                            id,
+                                            row_within: r,
+                                            total_rows: h,
+                                        });
                                     }
                                 }
                             }
-                            true
-                        })
-                        .unwrap_or(false);
-
-                    if !items_rendered {
-                        let source: &str = entry
-                            .markdown
-                            .as_ref()
-                            .map(|s| s.raw_text())
-                            .unwrap_or(entry.text.as_str());
-                        for text_line in source.lines() {
+                        }
+                    } else {
+                        for text_line in entry.text.lines() {
                             push_wrapped(
                                 &mut rows,
                                 Line::from(vec![
