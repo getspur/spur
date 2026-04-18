@@ -2593,7 +2593,7 @@ impl Orchestrator {
     async fn execute_delegation(
         agent: String,
         original_task: String,
-        _context_files: Vec<String>,
+        context_files: Vec<String>,
         request_id: String,
         brain_session_id: SessionId,
         delegation_plan: Option<spur_acp::domain::DelegationPlan>,
@@ -2603,6 +2603,10 @@ impl Orchestrator {
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
     ) -> (DelegationResult, Option<ExecutorId>) {
+        // Shadow `original_task` with the Relevant Files-prepended form
+        // so retry loops at orchestrator.rs:3013 reuse the formatted
+        // base. No-op when context_files is empty.
+        let original_task = format_worker_task(&original_task, &context_files);
         // Internal operations (progress, cost) — still stubbed.
         if agent.starts_with("__") {
             return (
@@ -4935,5 +4939,19 @@ mod format_worker_task_tests {
         let out = format_worker_task("   ", &["x.rs".into()]);
         assert!(out.starts_with("## Relevant Files\n\n"));
         assert!(out.ends_with("   "));
+    }
+}
+
+#[cfg(test)]
+mod context_files_wiring_tests {
+    use super::format_worker_task;
+
+    /// Regression guard: the helper is imported where execute_delegation
+    /// lives. If a refactor moves or renames it, the import here breaks
+    /// before the wiring silently regresses.
+    #[test]
+    fn format_worker_task_is_available_in_orchestrator_module() {
+        let out = format_worker_task("t", &["x".into()]);
+        assert!(out.contains("## Relevant Files"));
     }
 }
