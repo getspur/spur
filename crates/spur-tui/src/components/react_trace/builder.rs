@@ -8,7 +8,7 @@ use crate::components::trace_format::{
     observe_payload_lines, observe_verb, outcome_glyph,
 };
 
-use super::types::TraceKind;
+use super::types::{ActStatus, TraceKind};
 use super::ReactTrace;
 use super::SPINNER_FRAMES;
 
@@ -39,6 +39,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
                     ..
                 } = &entry.kind
                 {
@@ -52,29 +53,49 @@ impl ReactTrace {
                         ),
                         Span::raw("  "),
                     ];
-                    let consumed = if let Some(TraceKind::Observe { payload: Some(p) }) =
-                        self.entries.get(i + 1).map(|e| &e.kind)
-                    {
-                        let (obs_glyph, obs_color, stats) = observe_compact(p);
-                        spans.push(Span::styled(
-                            obs_glyph.to_string(),
-                            Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
-                        ));
-                        if !stats.is_empty() {
-                            spans.push(Span::raw(" "));
-                            spans.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+                    match status {
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {
+                            spans.push(Span::styled(
+                                spinner_frame.to_string(),
+                                Style::default().fg(Color::Yellow),
+                            ));
                         }
-                        2
-                    } else {
-                        spans.push(Span::styled(
-                            spinner_frame.to_string(),
-                            Style::default().fg(Color::Yellow),
-                        ));
-                        1
-                    };
+                        ActStatus::Completed(Some(p)) => {
+                            let (obs_glyph, obs_color, stats) = observe_compact(p);
+                            spans.push(Span::styled(
+                                obs_glyph.to_string(),
+                                Style::default()
+                                    .fg(obs_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                            if !stats.is_empty() {
+                                spans.push(Span::raw(" "));
+                                spans.push(Span::styled(
+                                    stats,
+                                    Style::default().fg(Color::DarkGray),
+                                ));
+                            }
+                        }
+                        ActStatus::Completed(None) => {
+                            spans.push(Span::styled(
+                                "✓".to_string(),
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                        ActStatus::Failed(_) => {
+                            spans.push(Span::styled(
+                                "✗".to_string(),
+                                Style::default()
+                                    .fg(Color::Red)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                    }
                     lines.push(Line::from(spans));
                     lines.push(Line::from(""));
-                    i += consumed;
+                    i += 1;
                     continue;
                 }
             }

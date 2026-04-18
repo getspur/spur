@@ -1570,3 +1570,41 @@ fn phase3_counter_eviction_renumbers_row_anchor() {
         );
     }
 }
+
+#[cfg(feature = "markdown")]
+#[test]
+fn build_display_lines_completed_shows_outcome_glyph() {
+    use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+    let mut trace = super::ReactTrace::new();
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Act {
+            tool: "shell".into(),
+            family: ToolFamily::Execute,
+            input: ToolInputDisplay::Command {
+                cmd: "echo".into(),
+                cwd: None,
+            },
+            tool_call_id: None,
+            status: super::ActStatus::Completed(Some(ObservePayload::CommandOutput {
+                exit_code: Some(0),
+                stdout: "hi".into(),
+                stderr: String::new(),
+            })),
+        },
+        text: String::new(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    let lines = trace.build_display_lines_for_tests(super::SPINNER_FRAMES[0], None);
+    let joined: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+        .collect();
+    assert!(joined.contains("✓"), "expected success glyph: {joined}");
+    for f in super::SPINNER_FRAMES {
+        assert!(
+            !joined.contains(f),
+            "must not render spinner frame {f} for completed Act: {joined}"
+        );
+    }
+}
