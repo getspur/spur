@@ -7,21 +7,31 @@ fallback = ["claude-code-acp", "kiro"]
 [brain.prompt]
 
 # Gemini CLI via native ACP mode. Requires `gemini` on PATH.
-# The --acp flag starts Gemini CLI in ACP mode: JSON-RPC 2.0 over stdio.
-# Supports initialize, prompt, cancel, setSessionMode, and MCP passthrough.
-# Note: Gemini's internal slash commands (/mcp, /compact, etc.) are not
-# exposed via ACP — they're REPL-only.
+# As of gemini-cli 0.35.3, `--acp` is the current flag and
+# `--experimental-acp` is a deprecated alias.
+# Current ACP surface includes initialize/authenticate/newSession/
+# loadSession/prompt/cancel/setSessionMode/unstable_setSessionModel,
+# `available_commands_update`, prompt image/audio/embedded-context
+# capabilities, and MCP HTTP/SSE passthrough.
 [[agents.entries]]
 name = "gemini"
 command = "gemini"
 args = ["--acp"]
 transport = "acp"
+kind = "generic"
 role = "both"
 capabilities = []
 cost_tier = "low"
 
+[agents.entries.display]
+handle = "gemini"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
 [agents.entries.permissions]
 skip = true
+session_mode = "yolo"
 
 # DEPRECATED: prefer the `claude-code-acp` profile below. This stream-json
 # transport is feature-capped (no plan mode, no slash-command discovery,
