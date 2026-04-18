@@ -41,3 +41,8 @@ pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 [dev-dependencies]
 agent-client-protocol = { workspace = true }
 tempfile = "3"
+divan = "0.1.21"
+
+[[bench]]
+name = "react_trace"
+harness = false
