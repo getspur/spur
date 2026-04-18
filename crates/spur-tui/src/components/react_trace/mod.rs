@@ -316,7 +316,7 @@ impl ReactTrace {
     fn current_row_count(&self) -> usize {
         let width_hint = self.last_render_width.unwrap_or(80);
         let states = std::collections::HashMap::new();
-        let (rows, _) = self.build_virtual_rows(0, width_hint, &states, None);
+        let (rows, _, _) = self.build_virtual_rows(0, width_hint, &states, None);
         rows.len()
     }
 
@@ -816,7 +816,7 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
-    ) -> (Vec<VirtualRow>, Vec<usize>) {
+    ) -> (Vec<VirtualRow>, Vec<usize>, Vec<Option<std::ops::Range<usize>>>) {
         self.build_virtual_rows(from, width, states, lineage)
     }
 
@@ -947,7 +947,7 @@ mod virtual_row_tests {
 
         let total = trace
             .build_virtual_rows(0, 60, &std::collections::HashMap::new(), None)
-            .0
+            .0  // rows
             .len();
         // Header (1) + 3 body lines + blank separator (1) = 5
         assert_eq!(total, 5, "unexpected virtual row count: {total}");
@@ -973,7 +973,7 @@ mod virtual_row_tests {
             FenceRender::Ready(12),
         );
 
-        let (rows, _starts) = trace.build_virtual_rows(0, 60, &states, None);
+        let (rows, _starts, _byte_ranges) = trace.build_virtual_rows(0, 60, &states, None);
 
         let image_rows: Vec<_> = rows
             .iter()
@@ -1010,7 +1010,7 @@ mod virtual_row_tests {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
         let empty = std::collections::HashMap::new();
-        let (rows, _starts) = trace.build_virtual_rows(0, 60, &empty, None);
+        let (rows, _starts, _byte_ranges) = trace.build_virtual_rows(0, 60, &empty, None);
 
         let image_rows = rows
             .iter()
@@ -1131,7 +1131,7 @@ mod virtual_row_tests {
         trace.append_message("first line", "claude", "10:01".to_string());
         let _ = trace.force_flush_all(&StateLookup::empty());
 
-        let (_rows, starts) =
+        let (_rows, starts, _byte_ranges) =
             trace.build_virtual_rows(0, 80, &std::collections::HashMap::new(), None);
 
         assert_eq!(
