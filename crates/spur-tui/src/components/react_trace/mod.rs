@@ -73,6 +73,21 @@ fn row_to_byte_anchor(
     (entry_idx, byte_offset)
 }
 
+/// Inverse of `resolve_anchor` for the Row variant: given a row index,
+/// find which entry it belongs to and the row-within-entry offset.
+#[cfg(feature = "markdown")]
+fn row_to_anchor(row: usize, entry_row_starts: &[usize]) -> (usize, usize) {
+    if entry_row_starts.is_empty() {
+        return (0, 0);
+    }
+    let entry_idx = match entry_row_starts.binary_search(&row) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+    let within = row - entry_row_starts[entry_idx];
+    (entry_idx, within)
+}
+
 impl ReactTrace {
     pub fn new() -> Self {
         Self {
@@ -1353,6 +1368,17 @@ mod streaming_tests;
 mod tests {
     use super::*;
     use spur_acp::adapter::ToolFamily;
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn row_to_anchor_walks_entry_row_starts() {
+        let starts = vec![0, 5, 12];
+        assert_eq!(super::row_to_anchor(0, &starts), (0, 0));
+        assert_eq!(super::row_to_anchor(4, &starts), (0, 4));
+        assert_eq!(super::row_to_anchor(5, &starts), (1, 0));
+        assert_eq!(super::row_to_anchor(11, &starts), (1, 6));
+        assert_eq!(super::row_to_anchor(12, &starts), (2, 0));
+    }
 
     /// Post-tool text must appear as a SEPARATE AgentMessage entry, not
     /// merged into the pre-tool block.
