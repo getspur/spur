@@ -167,6 +167,49 @@ pub struct McpCallbackServer {
     plan_registry: Arc<tokio::sync::Mutex<crate::plan::PlanRegistry>>,
 }
 
+/// Parse the `tasks` array from a `delegate_parallel` args payload into
+/// a list of partially-populated `DelegationRequest` skeletons. Public
+/// (crate-level) so integration tests can exercise the parse logic
+/// without a live MCP session.
+///
+/// The returned requests have dummy oneshot senders — do not dispatch
+/// them; they are for field-value assertions only.
+pub fn parse_parallel_tasks(args: &Value) -> Result<Vec<DelegationRequest>, String> {
+    let tasks = args
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Missing 'tasks' array".to_string())?;
+    let mut out = Vec::with_capacity(tasks.len());
+    for task_obj in tasks {
+        let agent = task_obj
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "task.agent missing".to_string())?
+            .to_string();
+        let task = task_obj
+            .get("task")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "task.task missing".to_string())?
+            .to_string();
+        let context_files: Vec<String> = task_obj
+            .get("context_files")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        out.push(DelegationRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent,
+            task,
+            context_files,
+            respond_to: tx,
+            brain_session_id: SessionId::new(),
+            delegation_plan: None,
+            issue_id: None,
+        });
+    }
+    Ok(out)
+}
+
 impl McpCallbackServer {
     /// Create a new MCP callback server for the given session.
     ///
@@ -560,15 +603,6 @@ impl McpCallbackServer {
     }
 
     async fn handle_delegate_parallel(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let tasks = match args.get("tasks").and_then(|v| v.as_array()) {
-            Some(t) => t.clone(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'tasks'"),
-        };
-
-        if tasks.is_empty() {
-            return JsonRpcResponse::invalid_params(id, "'tasks' array must not be empty");
-        }
-
         let shared_plan: Option<spur_acp::DelegationPlan> = args
             .get("delegation_plan")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
@@ -577,45 +611,25 @@ impl McpCallbackServer {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let mut receivers = Vec::with_capacity(tasks.len());
+        let skeletons = match parse_parallel_tasks(&args) {
+            Ok(s) => s,
+            Err(e) => return JsonRpcResponse::invalid_params(id, e),
+        };
 
-        for task_obj in &tasks {
-            let agent = match task_obj.get("agent").and_then(|v| v.as_str()) {
-                Some(a) => a.to_string(),
-                None => {
-                    return JsonRpcResponse::invalid_params(
-                        id,
-                        "Each task must have an 'agent' field",
-                    )
-                }
-            };
-            let task = match task_obj.get("task").and_then(|v| v.as_str()) {
-                Some(t) => t.to_string(),
-                None => {
-                    return JsonRpcResponse::invalid_params(
-                        id,
-                        "Each task must have a 'task' field",
-                    )
-                }
-            };
+        let mut receivers = Vec::with_capacity(skeletons.len());
 
-            let request_id = uuid::Uuid::new_v4().to_string();
+        for mut skeleton in skeletons {
+            let request_id = skeleton.id.clone();
+            let agent = skeleton.agent.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
-
-            let delegation = DelegationRequest {
-                id: request_id.clone(),
-                agent: agent.clone(),
-                task,
-                context_files: Vec::new(),
-                respond_to: tx,
-                brain_session_id: self.brain_session_id.clone(),
-                delegation_plan: shared_plan.clone(),
-                issue_id: shared_issue_id.clone(),
-            };
+            skeleton.respond_to = tx;
+            skeleton.brain_session_id = self.brain_session_id.clone();
+            skeleton.delegation_plan = shared_plan.clone();
+            skeleton.issue_id = shared_issue_id.clone();
 
             info!(agent = %agent, request_id = %request_id, "Sending parallel delegation request");
 
-            if let Err(_e) = self.delegation_tx.send(delegation).await {
+            if let Err(_e) = self.delegation_tx.send(skeleton).await {
                 error!("Failed to send parallel delegation request");
                 return JsonRpcResponse::internal_error(id, "Failed to send delegation request");
             }
@@ -737,6 +751,7 @@ impl McpCallbackServer {
     /// implemented") carrying the orchestrator's error message. Any other
     /// status is surfaced as success; the body is `result.summary` when
     /// present, else a debug-rendered status.
+    #[allow(private_interfaces)]
     pub(crate) fn cancel_result_to_response(id: Value, result: DelegationResult) -> JsonRpcResponse {
         if let DelegationStatus::Failed { ref error } = result.status {
             return JsonRpcResponse::error(
