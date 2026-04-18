@@ -60,3 +60,41 @@ fn per_task_issue_id_and_delegation_plan_survive_unshared() {
     );
     assert!(p1.chosen.as_deref() != Some("batch-top-level"));
 }
+
+#[test]
+fn duplicate_non_none_issue_id_is_rejected() {
+    let args = json!({
+        "tasks": [
+            { "agent": "x", "task": "A", "issue_id": "bd-1" },
+            { "agent": "x", "task": "B", "issue_id": "bd-1" }
+        ]
+    });
+    let err = spur_mcp::validate_parallel_args(&args)
+        .expect_err("duplicate issue_id must be rejected");
+    assert!(
+        err.contains("issue_id"),
+        "error should mention issue_id: {err}",
+    );
+}
+
+#[test]
+fn duplicate_none_issue_id_across_tasks_is_allowed() {
+    let args = json!({
+        "tasks": [
+            { "agent": "x", "task": "A" },
+            { "agent": "x", "task": "B" }
+        ]
+    });
+    spur_mcp::validate_parallel_args(&args).expect("None-id twice is fine");
+}
+
+#[test]
+fn distinct_issue_ids_pass() {
+    let args = json!({
+        "tasks": [
+            { "agent": "x", "task": "A", "issue_id": "bd-1" },
+            { "agent": "x", "task": "B", "issue_id": "bd-2" }
+        ]
+    });
+    spur_mcp::validate_parallel_args(&args).expect("distinct ids pass");
+}

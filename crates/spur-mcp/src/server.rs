@@ -167,6 +167,28 @@ pub struct McpCallbackServer {
     plan_registry: Arc<tokio::sync::Mutex<crate::plan::PlanRegistry>>,
 }
 
+/// Validate args for `delegate_parallel` beyond what the schema shape
+/// enforces. Currently: per-task `issue_id` values must be pairwise
+/// unique across the batch when non-null. Public (crate-level) for
+/// integration test access.
+pub fn validate_parallel_args(args: &Value) -> Result<(), String> {
+    let tasks = args
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Missing 'tasks' array".to_string())?;
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (idx, task) in tasks.iter().enumerate() {
+        if let Some(id) = task.get("issue_id").and_then(|v| v.as_str()) {
+            if !seen.insert(id) {
+                return Err(format!(
+                    "delegate_parallel: issue_id values must be unique across tasks (duplicate '{id}' at index {idx})",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse the `tasks` array from a `delegate_parallel` args payload into
 /// a list of partially-populated `DelegationRequest` skeletons. Public
 /// (crate-level) so integration tests can exercise the parse logic
@@ -615,6 +637,10 @@ impl McpCallbackServer {
                 batch_plan = %batch_plan,
                 "delegate_parallel received batch-level delegation_plan (not propagated into per-task requests)",
             );
+        }
+
+        if let Err(e) = validate_parallel_args(&args) {
+            return JsonRpcResponse::invalid_params(id, e);
         }
 
         let skeletons = match parse_parallel_tasks(&args) {
