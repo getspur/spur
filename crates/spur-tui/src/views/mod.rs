@@ -33,10 +33,7 @@ use crate::action::Action;
 pub(crate) fn normalize_macos_option(key: KeyEvent) -> KeyEvent {
     if let KeyCode::Char(ch) = key.code {
         if let Some(ascii) = macos_option_char(ch) {
-            return KeyEvent::new(
-                KeyCode::Char(ascii),
-                key.modifiers | KeyModifiers::ALT,
-            );
+            return KeyEvent::new(KeyCode::Char(ascii), key.modifiers | KeyModifiers::ALT);
         }
     }
     key

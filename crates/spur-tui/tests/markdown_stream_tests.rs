@@ -243,7 +243,8 @@ fn fence_placeholder_for_unknown_id_returns_none() {
 #[test]
 fn scan_authoritative_empty_input() {
     use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
-    let (end, fences) = scan_authoritative_for_tests("", /*mermaid*/ true, /*permit_eof*/ false);
+    let (end, fences) =
+        scan_authoritative_for_tests("", /*mermaid*/ true, /*permit_eof*/ false);
     assert_eq!(end, 0);
     assert!(fences.is_empty());
 }
@@ -260,8 +261,12 @@ fn scan_authoritative_paragraph_with_content_after_advances() {
     use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
     let input = "Hello\n\nworld";
     let (end, _) = scan_authoritative_for_tests(input, true, false);
-    assert!(end > 0 && end < input.len(),
-        "end={} len={}", end, input.len());
+    assert!(
+        end > 0 && end < input.len(),
+        "end={} len={}",
+        end,
+        input.len()
+    );
 }
 
 #[test]
@@ -304,8 +309,12 @@ fn rebuild_advances_cursor_past_authoritative_events() {
     s.append("# Title\n\nBody paragraph\n\nMore");
     s.flush_now(&StateLookup::empty());
     let flushed = s.flushed_byte_len_for_tests();
-    assert!(flushed > 0 && flushed < s.raw_text().len(),
-        "flushed={} raw_len={}", flushed, s.raw_text().len());
+    assert!(
+        flushed > 0 && flushed < s.raw_text().len(),
+        "flushed={} raw_len={}",
+        flushed,
+        s.raw_text().len()
+    );
 }
 
 #[test]
@@ -313,8 +322,11 @@ fn rebuild_does_not_advance_past_open_list() {
     let mut s = MarkdownStream::new();
     s.append("- item1\n- item2\n");
     s.flush_now(&StateLookup::empty());
-    assert_eq!(s.flushed_byte_len_for_tests(), 0,
-        "open list at EOF must not advance cursor");
+    assert_eq!(
+        s.flushed_byte_len_for_tests(),
+        0,
+        "open list at EOF must not advance cursor"
+    );
 }
 
 #[test]
@@ -334,8 +346,11 @@ fn flush_final_commits_trailing_paragraph() {
     let mut s = MarkdownStream::new();
     s.append("# Title\n\nFinal paragraph");
     s.flush_final(&StateLookup::empty());
-    assert_eq!(s.flushed_byte_len_for_tests(), s.raw_text().len(),
-        "flush_final must commit all bytes including EOF");
+    assert_eq!(
+        s.flushed_byte_len_for_tests(),
+        s.raw_text().len(),
+        "flush_final must commit all bytes including EOF"
+    );
     assert!(s.is_finalized());
 }
 
@@ -362,13 +377,17 @@ fn heuristic_declines_double_newline_at_eof() {
 #[test]
 fn heuristic_fires_on_fence_close_with_content() {
     use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
-    assert!(has_authoritative_closure_pattern_for_tests("```\ncode\n```\nmore"));
+    assert!(has_authoritative_closure_pattern_for_tests(
+        "```\ncode\n```\nmore"
+    ));
 }
 
 #[test]
 fn heuristic_declines_fence_close_at_eof() {
     use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
-    assert!(!has_authoritative_closure_pattern_for_tests("```\ncode\n```\n"));
+    assert!(!has_authoritative_closure_pattern_for_tests(
+        "```\ncode\n```\n"
+    ));
 }
 
 #[test]
@@ -397,9 +416,12 @@ fn maybe_flush_fast_path_fires_on_boundary_pattern() {
     let before = s.flushed_byte_len_for_tests();
     s.maybe_flush(&StateLookup::empty());
     let after = s.flushed_byte_len_for_tests();
-    assert!(after > before,
+    assert!(
+        after > before,
         "fast path should have flushed immediately; before={} after={}",
-        before, after);
+        before,
+        after
+    );
 }
 
 #[test]
@@ -424,8 +446,10 @@ fn maybe_flush_safety_cap_suppresses_rebuild() {
     let out = s.maybe_flush(&StateLookup::empty());
     assert!(out.is_empty());
     // Safety valve clears dirty_since so we don't re-enter on next tick.
-    assert!(!s.is_dirty(),
-        "safety valve must clear dirty_since to prevent tight looping");
+    assert!(
+        !s.is_dirty(),
+        "safety valve must clear dirty_since to prevent tight looping"
+    );
 }
 
 #[test]
@@ -456,12 +480,16 @@ fn setext_promotion_retroactively_restyles_at_boundary() {
 
     s.append("===\n\nbody");
     s.flush_now(&StateLookup::empty());
-    assert!(s.flushed_byte_len_for_tests() > 0,
-        "setext + trailing content should advance cursor");
+    assert!(
+        s.flushed_byte_len_for_tests() > 0,
+        "setext + trailing content should advance cursor"
+    );
 
     let rendered = s.cached_lines_debug().join("\n");
-    assert!(rendered.to_lowercase().contains("hello"),
-        "committed prefix should contain the heading text");
+    assert!(
+        rendered.to_lowercase().contains("hello"),
+        "committed prefix should contain the heading text"
+    );
 }
 
 #[test]
@@ -480,7 +508,10 @@ fn list_promotes_on_close() {
     s.append("- item1\n- item2\n\nafter");
     s.flush_now(&StateLookup::empty());
     let (items, _) = s.items_and_tail();
-    assert!(!items.is_empty(), "closed list should produce committed items");
+    assert!(
+        !items.is_empty(),
+        "closed list should produce committed items"
+    );
 }
 
 #[test]
@@ -489,8 +520,11 @@ fn unicode_content_cursor_advances_on_char_boundary() {
     s.append("# 漢字 🎉\n\nmore content");
     s.flush_now(&StateLookup::empty());
     let flushed = s.flushed_byte_len_for_tests();
-    assert!(s.raw_text().is_char_boundary(flushed),
-        "flushed_byte_len {} must be on UTF-8 char boundary", flushed);
+    assert!(
+        s.raw_text().is_char_boundary(flushed),
+        "flushed_byte_len {} must be on UTF-8 char boundary",
+        flushed
+    );
 }
 
 #[test]
@@ -505,9 +539,12 @@ fn tail_above_safety_cap_with_boundary_still_flushes() {
     let before = s.flushed_byte_len_for_tests();
     s.maybe_flush(&StateLookup::empty());
     let after = s.flushed_byte_len_for_tests();
-    assert!(after > before,
+    assert!(
+        after > before,
         "safety cap must NOT suppress when closure pattern is present; before={} after={}",
-        before, after);
+        before,
+        after
+    );
 }
 
 #[test]
@@ -519,7 +556,11 @@ fn no_fence_registered_with_range_end_at_eof() {
 
     s.append("\n\ntrailing");
     let fences2 = s.flush_now(&StateLookup::empty());
-    assert_eq!(fences2.len(), 1, "once trailing content arrives, fence registers");
+    assert_eq!(
+        fences2.len(),
+        1,
+        "once trailing content arrives, fence registers"
+    );
 }
 
 /// preview_items must be pure: two consecutive calls with the same input
@@ -535,10 +576,15 @@ fn preview_items_is_pure() {
     let items_b = s.preview_items(&StateLookup::empty());
     let flushed_after = s.flushed_byte_len_for_tests();
 
-    assert_eq!(flushed_before, flushed_after,
-        "preview_items must not mutate flushed_byte_len");
-    assert_eq!(items_a.len(), items_b.len(),
-        "preview_items must be deterministic across calls");
+    assert_eq!(
+        flushed_before, flushed_after,
+        "preview_items must not mutate flushed_byte_len"
+    );
+    assert_eq!(
+        items_a.len(),
+        items_b.len(),
+        "preview_items must be deterministic across calls"
+    );
 }
 
 /// preview_items output must match cached_items after flush_final for the
@@ -558,6 +604,9 @@ fn preview_items_matches_post_final_flush() {
     flushed_stream.flush_final(&StateLookup::empty());
     let after = flushed_stream.items().to_vec();
 
-    assert_eq!(preview.len(), after.len(),
-        "preview_items must produce same StreamItem count as post-flush_final");
+    assert_eq!(
+        preview.len(),
+        after.len(),
+        "preview_items must produce same StreamItem count as post-flush_final"
+    );
 }

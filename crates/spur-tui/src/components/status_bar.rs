@@ -90,9 +90,7 @@ impl StatusBar {
         if let Some((total, critical, _warning)) = props.alert_summary {
             if total > 0 {
                 let style = if critical > 0 {
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Yellow)
                 };

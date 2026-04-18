@@ -171,10 +171,7 @@ pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
 /// Read `_meta.claudeCode.{toolName, parentToolUseId}` from a ToolCall.
 /// Absent keys produce `None`; non-string values are treated as absent.
 pub fn extract_tool_meta(tc: &ToolCall) -> super::SpurToolMeta {
-    let cc = tc
-        .meta
-        .as_ref()
-        .and_then(|m| m.get("claudeCode"));
+    let cc = tc.meta.as_ref().and_then(|m| m.get("claudeCode"));
     super::SpurToolMeta {
         tool_name: cc
             .and_then(|v| v.get("toolName"))

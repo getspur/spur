@@ -41,25 +41,15 @@ pub enum PlanTaskStatus {
     /// All deps satisfied; about to be dispatched.
     Ready,
     /// Sent to a worker agent.
-    Dispatched {
-        delegation_id: String,
-    },
+    Dispatched { delegation_id: String },
     /// Worker completed; awaiting brain review.
-    AwaitingReview {
-        summary: Option<String>,
-    },
+    AwaitingReview { summary: Option<String> },
     /// Brain approved the work.
-    Approved {
-        summary: Option<String>,
-    },
+    Approved { summary: Option<String> },
     /// Brain rejected the work.
-    Rejected {
-        feedback: Option<String>,
-    },
+    Rejected { feedback: Option<String> },
     /// Worker failed or dependency failed.
-    Failed {
-        error: String,
-    },
+    Failed { error: String },
 }
 
 /// Record of a single attempt at a plan task. Stored in `PlanTaskEntry.history`
@@ -281,7 +271,8 @@ pub fn derive_epic_plan_from_issues(
     validate_plan(&plan_tasks)?;
 
     // 6. Compute metrics.
-    let mut agent_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut agent_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut edge_count = 0usize;
     for t in &plan_tasks {
         *agent_counts.entry(t.agent.clone()).or_insert(0) += 1;
@@ -375,7 +366,13 @@ pub async fn derive_epic_plan(
     }
 
     // 4. Delegate to the pure derivation function.
-    derive_epic_plan_from_issues(&epic, &children, &external_dep_statuses, default_agent, known_agents)
+    derive_epic_plan_from_issues(
+        &epic,
+        &children,
+        &external_dep_statuses,
+        default_agent,
+        known_agents,
+    )
 }
 
 /// Derive a short human-readable name from a task's full text. Takes the
@@ -416,9 +413,8 @@ fn build_enriched_task(
     new_attempt: u32,
     max_attempts: u32,
 ) -> String {
-    let mut out = String::with_capacity(
-        original_task.len() + current_feedback.len() + history.len() * 512,
-    );
+    let mut out =
+        String::with_capacity(original_task.len() + current_feedback.len() + history.len() * 512);
     out.push_str("## Original Task\n");
     out.push_str(original_task);
     let any_branch = history.iter().any(|r| r.worker_branch.is_some());
@@ -533,10 +529,7 @@ fn has_cycle(tasks: &[PlanTask]) -> bool {
 ///
 /// Spawned as a tokio task by `handle_submit_plan`. The plan state is
 /// updated in-place; `get_plan_status` reads it concurrently.
-pub async fn run_plan(
-    plan: Arc<Mutex<PlanState>>,
-    delegation_tx: mpsc::Sender<DelegationRequest>,
-) {
+pub async fn run_plan(plan: Arc<Mutex<PlanState>>, delegation_tx: mpsc::Sender<DelegationRequest>) {
     let plan_id = plan.lock().await.plan_id.clone();
     info!(plan_id = %plan_id, "Plan executor started");
 
@@ -551,10 +544,7 @@ pub async fn run_plan(
             let completed: HashSet<String> = p
                 .tasks
                 .iter()
-                .filter(|t| matches!(
-                    t.status,
-                    PlanTaskStatus::Approved { .. }
-                ))
+                .filter(|t| matches!(t.status, PlanTaskStatus::Approved { .. }))
                 .map(|t| t.spec.task_id.clone())
                 .collect();
 
@@ -700,12 +690,7 @@ pub async fn run_plan(
         for entry in &mut p.tasks {
             #[allow(clippy::collapsible_if)]
             if matches!(entry.status, PlanTaskStatus::Pending) {
-                if entry
-                    .spec
-                    .depends_on
-                    .iter()
-                    .any(|d| failed_ids.contains(d))
-                {
+                if entry.spec.depends_on.iter().any(|d| failed_ids.contains(d)) {
                     entry.status = PlanTaskStatus::Failed {
                         error: "Blocked by failed dependency".into(),
                     };
@@ -768,7 +753,11 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
     }
 
     let all_workers_done = n_dispatched == 0 && n_pending == 0 && n_ready == 0;
-    let ready_to_merge = all_workers_done && n_awaiting_review == 0 && n_rejected == 0 && n_failed == 0 && n_approved == total;
+    let ready_to_merge = all_workers_done
+        && n_awaiting_review == 0
+        && n_rejected == 0
+        && n_failed == 0
+        && n_approved == total;
 
     let overall = if n_dispatched > 0 || n_pending > 0 || n_ready > 0 {
         "running"
@@ -810,10 +799,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                         .filter(|d| {
                             !state.tasks.iter().any(|o| {
                                 o.spec.task_id == **d
-                                    && matches!(
-                                        o.status,
-                                        PlanTaskStatus::Approved { .. }
-                                    )
+                                    && matches!(o.status, PlanTaskStatus::Approved { .. })
                             })
                         })
                         .map(|d| d.as_str())
@@ -829,7 +815,8 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                     obj["status"] = "dispatched".into();
                     obj["delegation_id"] = delegation_id.clone().into();
                 }
-                PlanTaskStatus::AwaitingReview { summary } | PlanTaskStatus::Approved { summary } => {
+                PlanTaskStatus::AwaitingReview { summary }
+                | PlanTaskStatus::Approved { summary } => {
                     let status_str = if matches!(t.status, PlanTaskStatus::AwaitingReview { .. }) {
                         "awaiting_review"
                     } else {
@@ -837,8 +824,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                     };
                     obj["status"] = status_str.into();
                     if matches!(t.status, PlanTaskStatus::AwaitingReview { .. }) {
-                        obj["remaining_attempts"] =
-                            MAX_ATTEMPTS.saturating_sub(t.attempt).into();
+                        obj["remaining_attempts"] = MAX_ATTEMPTS.saturating_sub(t.attempt).into();
                     }
                     if let Some(s) = summary {
                         obj["summary"] = s.clone().into();
@@ -874,8 +860,12 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
 
     let next_action = match overall {
         "running" => "Workers still running. Poll get_plan_status to monitor.",
-        "awaiting_review" => "Use get_task_diff to review each awaiting task, then review_task to approve or reject.",
-        "approved" => "All tasks approved. Use create_pr with a worker_branch to create a pull request.",
+        "awaiting_review" => {
+            "Use get_task_diff to review each awaiting task, then review_task to approve or reject."
+        }
+        "approved" => {
+            "All tasks approved. Use create_pr with a worker_branch to create a pull request."
+        }
         "has_failures" => "Some tasks failed. Use get_task_diff to inspect failures.",
         "has_rejections" => "Some tasks rejected. Revise the plan or re-submit.",
         "failed" => "All tasks failed. Use get_task_diff to inspect errors.",
@@ -953,7 +943,10 @@ pub(crate) fn build_task_diff_fields(
         }
     }
     if let Some(ref ds) = result.diff_summary {
-        out.push(("diff_summary".into(), serde_json::to_value(ds).unwrap_or_default()));
+        out.push((
+            "diff_summary".into(),
+            serde_json::to_value(ds).unwrap_or_default(),
+        ));
     }
     if let Some(ref s) = result.summary {
         out.push(("summary".into(), json!(s)));
@@ -1016,7 +1009,9 @@ pub async fn review_task(
                 .iter_mut()
                 .find(|t| t.spec.task_id == task_id)
                 .unwrap();
-            entry.status = PlanTaskStatus::Approved { summary: summary.clone() };
+            entry.status = PlanTaskStatus::Approved {
+                summary: summary.clone(),
+            };
             let issue_id = entry.spec.issue_id.clone();
 
             // Beads sync (non-blocking).
@@ -1085,9 +1080,7 @@ pub async fn review_task(
             mark_descendants_failed(task_id, state, &mut warnings);
         }
         "request_changes" => {
-            let fb = feedback.ok_or_else(|| {
-                "request_changes requires feedback".to_string()
-            })?;
+            let fb = feedback.ok_or_else(|| "request_changes requires feedback".to_string())?;
 
             // At MAX_ATTEMPTS, auto-transition to Rejected instead of erroring
             // and leaving the task in AwaitingReview limbo. Reuses the existing
@@ -1191,14 +1184,8 @@ pub async fn review_task(
             let current_record = AttemptRecord {
                 attempt: entry.attempt,
                 worker_branch: entry.worker_branch.clone(),
-                diff_summary: entry
-                    .result
-                    .as_ref()
-                    .and_then(|r| r.diff_summary.clone()),
-                summary: entry
-                    .result
-                    .as_ref()
-                    .and_then(|r| r.summary.clone()),
+                diff_summary: entry.result.as_ref().and_then(|r| r.diff_summary.clone()),
+                summary: entry.result.as_ref().and_then(|r| r.summary.clone()),
                 feedback: fb.to_string(),
             };
 
@@ -1270,9 +1257,8 @@ pub async fn review_task(
             // the request_changes arm. We release the borrow before the
             // await by cloning out the fields we need.
             let issue_id_for_audit = entry.spec.issue_id.clone();
-            let superseded_branch: Option<String> = entry.history
-                .last()
-                .and_then(|h| h.worker_branch.clone());
+            let superseded_branch: Option<String> =
+                entry.history.last().and_then(|h| h.worker_branch.clone());
             if let (Some(pm), Some(id)) = (pm, issue_id_for_audit.as_ref()) {
                 // Comment reports the attempt just reviewed (new_attempt - 1), not the one being dispatched.
                 let comment = format_request_changes_comment(
@@ -1313,7 +1299,9 @@ pub async fn review_task(
         m.insert("decision".into(), serde_json::json!(decision));
         m.insert("warnings".into(), serde_json::json!(warnings));
         if decision == "request_changes" {
-            if let Some((_, new_att, did)) = new_dispatches.iter().find(|(tid, _, _)| tid == task_id) {
+            if let Some((_, new_att, did)) =
+                new_dispatches.iter().find(|(tid, _, _)| tid == task_id)
+            {
                 m.insert("new_attempt".into(), serde_json::json!(new_att));
                 m.insert("new_delegation_id".into(), serde_json::json!(did));
                 m.insert("max_attempts".into(), serde_json::json!(MAX_ATTEMPTS));
@@ -1422,8 +1410,7 @@ fn dispatch_newly_ready(
         .filter(|t| {
             t.spec.depends_on.iter().all(|dep| {
                 state.tasks.iter().any(|o| {
-                    o.spec.task_id == *dep
-                        && matches!(o.status, PlanTaskStatus::Approved { .. })
+                    o.spec.task_id == *dep && matches!(o.status, PlanTaskStatus::Approved { .. })
                 })
             })
         })
@@ -1432,7 +1419,11 @@ fn dispatch_newly_ready(
 
     for task_id in ready_ids {
         let (agent, task, issue_id, context_files, brain_session_id) = {
-            let e = state.tasks.iter().find(|t| t.spec.task_id == task_id).unwrap();
+            let e = state
+                .tasks
+                .iter()
+                .find(|t| t.spec.task_id == task_id)
+                .unwrap();
             (
                 e.spec.agent.clone(),
                 e.spec.task.clone(),
@@ -1457,7 +1448,11 @@ fn dispatch_newly_ready(
 
         match delegation_tx.try_send(req) {
             Ok(()) => {
-                let entry = state.tasks.iter_mut().find(|t| t.spec.task_id == task_id).unwrap();
+                let entry = state
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.spec.task_id == task_id)
+                    .unwrap();
                 entry.status = PlanTaskStatus::Dispatched {
                     delegation_id: delegation_id.clone(),
                 };
@@ -1471,7 +1466,11 @@ fn dispatch_newly_ready(
                 new_dispatches.push((task_id.clone(), 1, delegation_id));
             }
             Err(e) => {
-                let entry = state.tasks.iter_mut().find(|t| t.spec.task_id == task_id).unwrap();
+                let entry = state
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.spec.task_id == task_id)
+                    .unwrap();
                 entry.status = PlanTaskStatus::Failed {
                     error: format!("failed to dispatch: {e}"),
                 };
@@ -1537,7 +1536,9 @@ fn spawn_completion_future(
                 entry.worker_branch = result.worker_branch.clone();
             }
             DelegationStatus::Failed { error } => {
-                entry.status = PlanTaskStatus::Failed { error: error.clone() };
+                entry.status = PlanTaskStatus::Failed {
+                    error: error.clone(),
+                };
                 transitioned_to_failed = true;
             }
             other => {
@@ -1640,26 +1641,20 @@ mod tests {
 
     #[test]
     fn three_node_cycle_rejected() {
-        let tasks = vec![
-            task("A", &["C"]),
-            task("B", &["A"]),
-            task("C", &["B"]),
-        ];
+        let tasks = vec![task("A", &["C"]), task("B", &["A"]), task("C", &["B"])];
         let err = validate_plan(&tasks).unwrap_err();
         assert!(err.contains("Cycle"));
     }
 
     #[test]
     fn enriched_task_includes_original_history_and_feedback() {
-        let history = vec![
-            super::AttemptRecord {
-                attempt: 1,
-                worker_branch: Some("spur/worker-x".to_string()),
-                diff_summary: None,
-                summary: Some("did thing".to_string()),
-                feedback: "add null check".to_string(),
-            },
-        ];
+        let history = vec![super::AttemptRecord {
+            attempt: 1,
+            worker_branch: Some("spur/worker-x".to_string()),
+            diff_summary: None,
+            summary: Some("did thing".to_string()),
+            feedback: "add null check".to_string(),
+        }];
         let enriched = super::build_enriched_task(
             "Implement foo",
             &history,
@@ -1698,13 +1693,7 @@ mod tests {
             summary: Some("s".into()),
             feedback: "fb1".into(),
         }];
-        let enriched = super::build_enriched_task(
-            "Task",
-            &history,
-            "more",
-            2,
-            super::MAX_ATTEMPTS,
-        );
+        let enriched = super::build_enriched_task("Task", &history, "more", 2, super::MAX_ATTEMPTS);
         assert!(!enriched.contains("git show"));
     }
 
@@ -1744,7 +1733,10 @@ mod tests {
             "spur.task_text=custom".to_string(),
         ];
         assert_eq!(super::label_value(&labels, "spur.agent="), Some("codex"));
-        assert_eq!(super::label_value(&labels, "spur.task_text="), Some("custom"));
+        assert_eq!(
+            super::label_value(&labels, "spur.task_text="),
+            Some("custom")
+        );
         assert_eq!(super::label_value(&labels, "missing="), None);
     }
 
@@ -1880,7 +1872,13 @@ mod tests {
     #[test]
     fn derive_rejects_nested_epic_child() {
         let epic = make_issue("bd-202", Some("epic"), vec![], "body", vec![]);
-        let child = make_issue("bd-203", Some("epic"), vec!["spur.agent=codex".to_string()], "sub-epic", vec![]);
+        let child = make_issue(
+            "bd-203",
+            Some("epic"),
+            vec!["spur.agent=codex".to_string()],
+            "sub-epic",
+            vec![],
+        );
         let err = super::derive_epic_plan_from_issues(
             &epic,
             &[child],
@@ -1894,7 +1892,13 @@ mod tests {
 
     #[test]
     fn derive_rejects_unsatisfied_external_dep() {
-        let epic = make_issue("bd-204", Some("epic"), vec!["spur.agent=codex".to_string()], "body", vec![]);
+        let epic = make_issue(
+            "bd-204",
+            Some("epic"),
+            vec!["spur.agent=codex".to_string()],
+            "body",
+            vec![],
+        );
         let child = make_issue(
             "bd-205",
             Some("task"),
@@ -1904,21 +1908,21 @@ mod tests {
         );
         let mut ext = std::collections::HashMap::new();
         ext.insert("bd-999".to_string(), "open".to_string());
-        let err = super::derive_epic_plan_from_issues(
-            &epic,
-            &[child],
-            &ext,
-            None,
-            &["codex"],
-        )
-        .unwrap_err();
+        let err = super::derive_epic_plan_from_issues(&epic, &[child], &ext, None, &["codex"])
+            .unwrap_err();
         assert!(err.contains("external dependency"), "got: {err}");
         assert!(err.contains("not done"), "got: {err}");
     }
 
     #[test]
     fn derive_allows_done_external_dep() {
-        let epic = make_issue("bd-206", Some("epic"), vec!["spur.agent=codex".to_string()], "body", vec![]);
+        let epic = make_issue(
+            "bd-206",
+            Some("epic"),
+            vec!["spur.agent=codex".to_string()],
+            "body",
+            vec![],
+        );
         let child = make_issue(
             "bd-207",
             Some("task"),
@@ -1928,14 +1932,8 @@ mod tests {
         );
         let mut ext = std::collections::HashMap::new();
         ext.insert("bd-999".to_string(), "done".to_string());
-        let derived = super::derive_epic_plan_from_issues(
-            &epic,
-            &[child],
-            &ext,
-            None,
-            &["codex"],
-        )
-        .unwrap();
+        let derived =
+            super::derive_epic_plan_from_issues(&epic, &[child], &ext, None, &["codex"]).unwrap();
         assert_eq!(derived.plan_tasks.len(), 1);
         assert!(derived.plan_tasks[0].depends_on.is_empty());
         assert!(derived.warnings.iter().any(|w| w.contains("bd-999")));
@@ -1982,8 +1980,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(derived.plan_tasks.len(), 2);
-        let a = derived.plan_tasks.iter().find(|t| t.task_id == "bd-c1").unwrap();
-        let b = derived.plan_tasks.iter().find(|t| t.task_id == "bd-c2").unwrap();
+        let a = derived
+            .plan_tasks
+            .iter()
+            .find(|t| t.task_id == "bd-c1")
+            .unwrap();
+        let b = derived
+            .plan_tasks
+            .iter()
+            .find(|t| t.task_id == "bd-c2")
+            .unwrap();
         assert!(
             a.depends_on.is_empty(),
             "child A must have no execution deps (parent edge is structural); got {:?}",
@@ -2082,7 +2088,13 @@ mod tests {
 
     #[test]
     fn derive_uses_spur_task_text_override() {
-        let epic = make_issue("bd-216", Some("epic"), vec!["spur.agent=codex".to_string()], "body", vec![]);
+        let epic = make_issue(
+            "bd-216",
+            Some("epic"),
+            vec!["spur.agent=codex".to_string()],
+            "body",
+            vec![],
+        );
         let child = make_issue(
             "bd-217",
             Some("task"),
@@ -2151,12 +2163,21 @@ mod tests {
             &["codex"],
         )
         .unwrap();
-        assert_eq!(derived.plan_tasks[0].task, "", "empty override should beat body");
+        assert_eq!(
+            derived.plan_tasks[0].task, "",
+            "empty override should beat body"
+        );
     }
 
     #[test]
     fn derive_cycle_rejected() {
-        let epic = make_issue("bd-218", Some("epic"), vec!["spur.agent=codex".to_string()], "body", vec![]);
+        let epic = make_issue(
+            "bd-218",
+            Some("epic"),
+            vec!["spur.agent=codex".to_string()],
+            "body",
+            vec![],
+        );
         // A depends on B and B depends on A → cycle
         let child_a = make_issue(
             "bd-219",
@@ -2295,18 +2316,20 @@ mod tests {
             super::MAX_ATTEMPTS,
             None,
         );
-        assert!(c.contains("attempt 2/3"), "comment should show reviewed attempt, got: {c}");
-        assert!(!c.contains("attempt 3/3"), "comment must NOT show new_attempt: {c}");
+        assert!(
+            c.contains("attempt 2/3"),
+            "comment should show reviewed attempt, got: {c}"
+        );
+        assert!(
+            !c.contains("attempt 3/3"),
+            "comment must NOT show new_attempt: {c}"
+        );
     }
 
     #[test]
     fn format_request_changes_comment_no_branch() {
-        let c = super::format_request_changes_comment(
-            "add a null check",
-            1,
-            super::MAX_ATTEMPTS,
-            None,
-        );
+        let c =
+            super::format_request_changes_comment("add a null check", 1, super::MAX_ATTEMPTS, None);
         assert!(c.contains("attempt 1/3"));
         assert!(c.contains("add a null check"));
         assert!(c.contains("(no branch yet)"));
@@ -2318,7 +2341,9 @@ mod tests {
         let task_spec = task("T1", &[]);
         let entry = PlanTaskEntry {
             spec: task_spec,
-            status: PlanTaskStatus::AwaitingReview { summary: Some("wip".into()) },
+            status: PlanTaskStatus::AwaitingReview {
+                summary: Some("wip".into()),
+            },
             result: None,
             worker_branch: None,
             attempt: MAX_ATTEMPTS,
@@ -2346,10 +2371,16 @@ mod tests {
         };
 
         let resp = review_task(
-            "p1", "T1", "request_changes",
+            "p1",
+            "T1",
+            "request_changes",
             Some("please try the other approach"),
             &mut state,
-            None, None, None, None, None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .expect("should Ok — MAX reached means auto-reject, not Err");
@@ -2360,19 +2391,31 @@ mod tests {
             "expected Rejected at MAX_ATTEMPTS, got {:?}",
             entry.status
         );
-        if let PlanTaskStatus::Rejected { feedback: Some(ref fb) } = entry.status {
+        if let PlanTaskStatus::Rejected {
+            feedback: Some(ref fb),
+        } = entry.status
+        {
             assert!(fb.contains("retries exhausted"), "feedback={fb}");
             assert!(fb.contains("3/3"), "feedback={fb}");
-            assert!(fb.contains("please try the other approach"), "feedback={fb}");
+            assert!(
+                fb.contains("please try the other approach"),
+                "feedback={fb}"
+            );
         } else {
             panic!("expected Rejected with feedback");
         }
 
         let obj = resp.as_object().expect("resp is object");
         assert_eq!(obj.get("decision").and_then(|v| v.as_str()), Some("reject"));
-        let warnings = obj.get("warnings").and_then(|v| v.as_array()).expect("warnings array");
+        let warnings = obj
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .expect("warnings array");
         assert!(
-            warnings.iter().any(|w| w.as_str().map_or(false, |s| s.contains("auto-rejected") && s.contains("MAX_ATTEMPTS"))),
+            warnings
+                .iter()
+                .any(|w| w.as_str().map_or(false, |s| s.contains("auto-rejected")
+                    && s.contains("MAX_ATTEMPTS"))),
             "expected auto-reject warning, got {warnings:?}"
         );
 
@@ -2394,13 +2437,22 @@ mod tests {
             worker_branch: None,
         };
         let fields = super::build_task_diff_fields(&result);
-        let m: std::collections::HashMap<String, serde_json::Value> =
-            fields.into_iter().collect();
+        let m: std::collections::HashMap<String, serde_json::Value> = fields.into_iter().collect();
 
         assert!(m.contains_key("diff"), "diff key must always be present");
-        assert!(m["diff"].is_null(), "diff value should be null, got {:?}", m["diff"]);
-        assert_eq!(m.get("diff_status").and_then(|v| v.as_str()), Some("no_changes_detected"));
-        assert_eq!(m.get("diff_basis").and_then(|v| v.as_str()), Some("base_commit..HEAD"));
+        assert!(
+            m["diff"].is_null(),
+            "diff value should be null, got {:?}",
+            m["diff"]
+        );
+        assert_eq!(
+            m.get("diff_status").and_then(|v| v.as_str()),
+            Some("no_changes_detected")
+        );
+        assert_eq!(
+            m.get("diff_basis").and_then(|v| v.as_str()),
+            Some("base_commit..HEAD")
+        );
         assert_eq!(m.get("summary").and_then(|v| v.as_str()), Some("did work"));
     }
 
@@ -2415,10 +2467,12 @@ mod tests {
             worker_branch: None,
         };
         let fields = super::build_task_diff_fields(&result);
-        let m: std::collections::HashMap<String, serde_json::Value> =
-            fields.into_iter().collect();
+        let m: std::collections::HashMap<String, serde_json::Value> = fields.into_iter().collect();
 
-        assert_eq!(m.get("diff").and_then(|v| v.as_str()), Some("diff --git a/x b/x\n..."));
+        assert_eq!(
+            m.get("diff").and_then(|v| v.as_str()),
+            Some("diff --git a/x b/x\n...")
+        );
         assert!(!m.contains_key("diff_status"));
         assert!(!m.contains_key("diff_basis"));
     }

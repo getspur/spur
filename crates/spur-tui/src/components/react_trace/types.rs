@@ -94,7 +94,10 @@ pub(crate) enum Segment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollAnchor {
     Following,
-    Byte { entry_idx: usize, byte_offset: usize },
+    Byte {
+        entry_idx: usize,
+        byte_offset: usize,
+    },
 }
 
 impl Default for ScrollAnchor {

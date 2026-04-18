@@ -539,12 +539,15 @@ async fn main() -> Result<()> {
                         spur_tui::UserInput::CancelStream { session } => {
                             spur_core::InteractiveInput::CancelStream { session }
                         }
-                        spur_tui::UserInput::RefreshIssues
-                            => spur_core::InteractiveInput::RefreshIssues,
-                        spur_tui::UserInput::GetIssueDetail { id }
-                            => spur_core::InteractiveInput::GetIssueDetail { id },
-                        spur_tui::UserInput::UpdateIssue { id, update }
-                            => spur_core::InteractiveInput::UpdateIssue { id, update },
+                        spur_tui::UserInput::RefreshIssues => {
+                            spur_core::InteractiveInput::RefreshIssues
+                        }
+                        spur_tui::UserInput::GetIssueDetail { id } => {
+                            spur_core::InteractiveInput::GetIssueDetail { id }
+                        }
+                        spur_tui::UserInput::UpdateIssue { id, update } => {
+                            spur_core::InteractiveInput::UpdateIssue { id, update }
+                        }
                     };
 
                     // SubmitReview → dispatch_tx; everything else → user_tx.

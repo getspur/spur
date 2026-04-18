@@ -20,7 +20,8 @@ fn banner_dismisses_on_any_key_without_consuming() {
     use spur_tui::views::View;
 
     fn test_ctx() -> spur_tui::views::ViewContext<'static> {
-        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+            std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
         spur_tui::test_support::test_view_ctx(&LINEAGE)
     }
 
@@ -33,6 +34,9 @@ fn banner_dismisses_on_any_key_without_consuming() {
     );
     view.show_resume_banner("t".into(), "1m".into());
     assert!(view.banner_is_visible());
-    let _ = view.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &test_ctx());
+    let _ = view.handle_key(
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        &test_ctx(),
+    );
     assert!(!view.banner_is_visible());
 }

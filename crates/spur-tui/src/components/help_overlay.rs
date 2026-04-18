@@ -67,7 +67,9 @@ impl HelpOverlay {
             out.push(Line::from("  j / k          Navigate issue list"));
             out.push(Line::from("  Enter          View issue detail"));
             out.push(Line::from("  W              Work on issue (assign brain)"));
-            out.push(Line::from("  I              Issue detail (on focused executor)"));
+            out.push(Line::from(
+                "  I              Issue detail (on focused executor)",
+            ));
             out.push(Line::from("  /issues        Refresh issues"));
             out.push(Line::from("  /work <id>     Work on issue by ID"));
             out.push(Line::from(""));

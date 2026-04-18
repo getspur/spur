@@ -79,10 +79,16 @@ fn claim_1_paragraph_at_eof_has_range_end_equal_to_len() {
         "paragraph at EOF must have range.end == input.len(); got {}",
         range.end
     );
-    assert_eq!(authoritative_end(input, false), 0,
-        "no authoritative end under non-permissive rule");
-    assert_eq!(authoritative_end(input, true), input.len(),
-        "EOF-permissive mode admits the EOF end");
+    assert_eq!(
+        authoritative_end(input, false),
+        0,
+        "no authoritative end under non-permissive rule"
+    );
+    assert_eq!(
+        authoritative_end(input, true),
+        input.len(),
+        "EOF-permissive mode admits the EOF end"
+    );
 }
 
 #[test]
@@ -103,7 +109,9 @@ fn claim_2_paragraph_with_content_after_is_authoritative() {
     assert!(
         saw_first_paragraph_end_before_eof,
         "expected paragraph End with range.end < input.len(); events: {:?}",
-        evs.iter().map(|(e, r)| (format!("{:?}", e), r.clone())).collect::<Vec<_>>()
+        evs.iter()
+            .map(|(e, r)| (format!("{:?}", e), r.clone()))
+            .collect::<Vec<_>>()
     );
     let auth = authoritative_end(input, false);
     assert!(
@@ -129,10 +137,21 @@ fn claim_3_setext_promotion_emits_heading_not_paragraph() {
         .collect();
     // pulldown must emit a heading End for "Hello\n===" and the following
     // paragraph End for "body".
-    assert_eq!(heading_ends.len(), 1, "expected one heading End, got {:?}",
-        heading_ends.iter().map(|(e, r)| (format!("{:?}", e), r.clone())).collect::<Vec<_>>());
+    assert_eq!(
+        heading_ends.len(),
+        1,
+        "expected one heading End, got {:?}",
+        heading_ends
+            .iter()
+            .map(|(e, r)| (format!("{:?}", e), r.clone()))
+            .collect::<Vec<_>>()
+    );
     // There will be ONE paragraph End for "body" (which is at EOF).
-    assert_eq!(paragraph_ends.len(), 1, "expected one paragraph End for trailing 'body'");
+    assert_eq!(
+        paragraph_ends.len(),
+        1,
+        "expected one paragraph End for trailing 'body'"
+    );
     let (_, heading_range) = heading_ends[0];
     assert!(
         heading_range.end < input.len(),
@@ -197,7 +216,10 @@ fn claim_6_closed_fence_with_content_after_is_authoritative() {
     // behind the cursor.
     let body_end_pos = input.find("```").expect("closing ``` exists");
     // Find the SECOND ``` (the closing one).
-    let closing_pos = input[body_end_pos + 3..].find("```").map(|i| body_end_pos + 3 + i).unwrap();
+    let closing_pos = input[body_end_pos + 3..]
+        .find("```")
+        .map(|i| body_end_pos + 3 + i)
+        .unwrap();
     assert!(
         auth >= closing_pos,
         "cursor {} must be at or past closing backticks at {}",
@@ -223,8 +245,11 @@ fn claim_7_open_list_at_eof_not_authoritative() {
         input.len(),
         "list at EOF must have range.end == len"
     );
-    assert_eq!(authoritative_end(input, false), 0,
-        "no cursor advance while list is open at EOF");
+    assert_eq!(
+        authoritative_end(input, false),
+        0,
+        "no cursor advance while list is open at EOF"
+    );
 }
 
 #[test]
@@ -289,7 +314,14 @@ fn claim_10_setext_retroactive_does_not_corrupt_prior_commitment() {
     //
     // Verify: at no intermediate append does an authoritative End exist that
     // would later be contradicted.
-    let steps = ["Hello", "Hello\n", "Hello\n=", "Hello\n==", "Hello\n===", "Hello\n===\n"];
+    let steps = [
+        "Hello",
+        "Hello\n",
+        "Hello\n=",
+        "Hello\n==",
+        "Hello\n===",
+        "Hello\n===\n",
+    ];
     for input in &steps {
         let auth = authoritative_end(input, false);
         assert_eq!(
@@ -301,7 +333,10 @@ fn claim_10_setext_retroactive_does_not_corrupt_prior_commitment() {
     // After a trailing paragraph, the setext is closed and cursor may advance.
     let finalized = "Hello\n===\n\nbody";
     let auth = authoritative_end(finalized, false);
-    assert!(auth > 0, "once setext is followed by content, cursor advances");
+    assert!(
+        auth > 0,
+        "once setext is followed by content, cursor advances"
+    );
     assert!(auth <= finalized.find("body").unwrap());
 }
 
@@ -319,14 +354,18 @@ fn claim_11_fast_path_heuristic_fires_on_blank_line_inside_open_fence() {
         .rfind("\n\n")
         .map(|i| i + 2 < input.len())
         .unwrap_or(false);
-    assert!(has_nn_with_content,
-        "heuristic `\\n\\n with content after` fires on this input");
+    assert!(
+        has_nn_with_content,
+        "heuristic `\\n\\n with content after` fires on this input"
+    );
 
     // Cursor does NOT advance (confirms the bug):
     let auth = authoritative_end(input, false);
-    assert_eq!(auth, 0,
+    assert_eq!(
+        auth, 0,
         "cursor cannot advance: open fence with body at EOF has no authoritative End. \
-         This is the pattern that would cause busy-loop without the dirty_since guard.");
+         This is the pattern that would cause busy-loop without the dirty_since guard."
+    );
 }
 
 // ────────────── UTF-8 char-boundary invariant ──────────────
@@ -352,7 +391,7 @@ fn claim_12_range_ends_are_utf8_char_boundaries() {
     }
     // Slicing at the authoritative end must produce valid UTF-8.
     let auth = authoritative_end(input, false);
-    let _prefix = &input[..auth];   // would panic if not on boundary
+    let _prefix = &input[..auth]; // would panic if not on boundary
     let _tail = &input[auth..];
 }
 
@@ -389,8 +428,10 @@ fn claim_14_double_newline_at_eof_heuristic_declines() {
         .rfind("\n\n")
         .map(|i| i + 2 < input.len())
         .unwrap_or(false);
-    assert!(!has_nn_with_content,
-        "heuristic must decline when \\n\\n is at EOF");
+    assert!(
+        !has_nn_with_content,
+        "heuristic must decline when \\n\\n is at EOF"
+    );
 }
 
 #[test]
@@ -434,7 +475,7 @@ fn claim_18_depth_gate_blocks_paragraph_inside_blockquote() {
     // The cursor advance must be at or past the blockquote's End
     // (which closes depth 1→0). It should NOT equal the position of an
     // inner End(Paragraph).
-    let bq_content_end = input.find("\n\n").unwrap();  // blank line separator
+    let bq_content_end = input.find("\n\n").unwrap(); // blank line separator
     assert!(
         auth >= bq_content_end,
         "cursor {} must be at or past blockquote outer close at {}",
@@ -449,19 +490,17 @@ fn claim_15_fence_close_heuristic_requires_trailing_content() {
     // fast path.
     let at_eof = "```\ncode\n```\n";
     let after = at_eof.find("\n```").map(|i| i + 4).unwrap();
-    let fires_at_eof = at_eof.as_bytes().get(after) == Some(&b'\n')
-        && after + 1 < at_eof.len();
+    let fires_at_eof = at_eof.as_bytes().get(after) == Some(&b'\n') && after + 1 < at_eof.len();
     assert!(
         !fires_at_eof,
         "fence-close heuristic must decline at EOF; input={:?}, after={}",
-        at_eof,
-        after
+        at_eof, after
     );
 
     let with_content = "```\ncode\n```\nmore";
     let after2 = with_content.find("\n```").map(|i| i + 4).unwrap();
-    let fires_with_content = with_content.as_bytes().get(after2) == Some(&b'\n')
-        && after2 + 1 < with_content.len();
+    let fires_with_content =
+        with_content.as_bytes().get(after2) == Some(&b'\n') && after2 + 1 < with_content.len();
     assert!(
         fires_with_content,
         "fence-close heuristic must fire with trailing content"

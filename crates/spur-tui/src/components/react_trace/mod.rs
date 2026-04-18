@@ -342,7 +342,10 @@ impl ReactTrace {
 
     /// Returns true when the viewport is pinned to the tail of the trace.
     pub fn is_following(&self) -> bool {
-        matches!(self.anchor, crate::components::react_trace::types::ScrollAnchor::Following)
+        matches!(
+            self.anchor,
+            crate::components::react_trace::types::ScrollAnchor::Following
+        )
     }
 
     /// Move viewport up by one row by re-anchoring to the byte position
@@ -401,7 +404,12 @@ impl ReactTrace {
         let visible_h = self.last_visible_height.max(1);
 
         let current_row = crate::components::react_trace::render::resolve_anchor(
-            &self.anchor, &byte_ranges, &entry_row_starts, total, visible_h);
+            &self.anchor,
+            &byte_ranges,
+            &entry_row_starts,
+            total,
+            visible_h,
+        );
 
         let target = (current_row as isize + delta)
             .max(0)
@@ -413,9 +421,11 @@ impl ReactTrace {
         }
 
         // Convert target row back to a byte anchor.
-        let (entry_idx, byte_offset) = row_to_byte_anchor(
-            target, &byte_ranges, &entry_row_starts);
-        self.anchor = ScrollAnchor::Byte { entry_idx, byte_offset };
+        let (entry_idx, byte_offset) = row_to_byte_anchor(target, &byte_ranges, &entry_row_starts);
+        self.anchor = ScrollAnchor::Byte {
+            entry_idx,
+            byte_offset,
+        };
     }
 
     #[cfg(not(feature = "markdown"))]
@@ -694,7 +704,10 @@ impl ReactTrace {
                                     let placeholder = stream
                                         .fence_placeholder_for(*id)
                                         .map(|l| {
-                                            l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                                            l.spans
+                                                .iter()
+                                                .map(|s| s.content.as_ref())
+                                                .collect::<String>()
                                         })
                                         .unwrap_or_else(|| {
                                             format!("[📊 mermaid #{} · press Alt-v to view]", id.0)
@@ -849,7 +862,11 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
-    ) -> (Vec<VirtualRow>, Vec<usize>, Vec<Option<std::ops::Range<usize>>>) {
+    ) -> (
+        Vec<VirtualRow>,
+        Vec<usize>,
+        Vec<Option<std::ops::Range<usize>>>,
+    ) {
         self.build_virtual_rows(from, width, states, lineage)
     }
 
@@ -898,7 +915,11 @@ mod markdown_integration_tests {
         // Two paragraphs separated by \n\n with trailing content after the
         // second paragraph so its End event has range.end < raw_text.len(),
         // making it authoritative under flush_now (permit_eof_closure=false).
-        trace.append_message("# Heading\n\nBody text\n\nmore", "claude", "10:00:00".to_string());
+        trace.append_message(
+            "# Heading\n\nBody text\n\nmore",
+            "claude",
+            "10:00:00".to_string(),
+        );
 
         let states = StateLookup::empty();
         let _ = trace.force_flush_all(&states);
@@ -980,7 +1001,7 @@ mod virtual_row_tests {
 
         let total = trace
             .build_virtual_rows(0, 60, &std::collections::HashMap::new(), None)
-            .0  // rows
+            .0 // rows
             .len();
         // Header (1) + 3 body lines + blank separator (1) = 5
         assert_eq!(total, 5, "unexpected virtual row count: {total}");
@@ -1217,13 +1238,15 @@ mod virtual_row_tests {
         let mut registry_pending: HashMap<MermaidId, MermaidState> = HashMap::new();
         registry_pending.insert(
             fence_id,
-            MermaidState::Pending { code: mermaid_code.clone() },
+            MermaidState::Pending {
+                code: mermaid_code.clone(),
+            },
         );
 
         // Build a minimal 100×60 RGBA image for the Ready state.
-        let img = std::sync::Arc::new(image::DynamicImage::ImageRgba8(
-            image::RgbaImage::new(100, 60),
-        ));
+        let img = std::sync::Arc::new(image::DynamicImage::ImageRgba8(image::RgbaImage::new(
+            100, 60,
+        )));
         let mut registry_ready: HashMap<MermaidId, MermaidState> = HashMap::new();
         registry_ready.insert(
             fence_id,
@@ -1235,7 +1258,7 @@ mod virtual_row_tests {
 
         // ── Step 3: assert fence_state_hash changes on state transition. ──
         let hash_pending = fence_state_hash(&registry_pending);
-        let hash_ready   = fence_state_hash(&registry_ready);
+        let hash_ready = fence_state_hash(&registry_ready);
         assert_ne!(
             hash_pending, hash_ready,
             "F2: Pending→Ready must change fence_state_hash so the cache detects staleness"
@@ -1246,8 +1269,7 @@ mod virtual_row_tests {
         //   Pending → FenceRender::Pending → 1 placeholder text row per fence.
         let pending_states: HashMap<MermaidId, FenceRender> =
             [(fence_id, FenceRender::Pending)].into_iter().collect();
-        let (rows_pending, _, _) =
-            trace.build_virtual_rows_for_tests(0, 80, &pending_states, None);
+        let (rows_pending, _, _) = trace.build_virtual_rows_for_tests(0, 80, &pending_states, None);
         let count_pending = rows_pending.len();
 
         // Confirm fence rendered as a Text placeholder (no ImageRows).
@@ -1257,7 +1279,8 @@ mod virtual_row_tests {
             .count();
         assert_eq!(
             image_rows_pending, 0,
-            "F2: Pending state must produce 0 ImageRows (got {})", image_rows_pending
+            "F2: Pending state must produce 0 ImageRows (got {})",
+            image_rows_pending
         );
 
         // ── Step 5: render with Ready registry → capture row count. ──
@@ -1265,9 +1288,10 @@ mod virtual_row_tests {
         // We use Ready(6) as the minimum guaranteed height.
         let inline_h: u16 = 6; // clamped minimum from compute_inline_height_rows
         let ready_states: HashMap<MermaidId, FenceRender> =
-            [(fence_id, FenceRender::Ready(inline_h))].into_iter().collect();
-        let (rows_ready, _, _) =
-            trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
+            [(fence_id, FenceRender::Ready(inline_h))]
+                .into_iter()
+                .collect();
+        let (rows_ready, _, _) = trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
         let count_ready = rows_ready.len();
 
         // Confirm fence rendered as ImageRows.
@@ -1292,7 +1316,8 @@ mod virtual_row_tests {
             count_ready > count_pending,
             "F2: Ready state must produce MORE rows than Pending \
              because ImageRows expand the fence. pending={}, ready={}",
-            count_pending, count_ready
+            count_pending,
+            count_ready
         );
 
         // ── Step 7: verify the cache's fence_gen field tracks state changes. ──
@@ -1448,8 +1473,7 @@ mod tests {
             .collect();
         assert_eq!(user.len(), 1);
         assert_eq!(
-            user[0].text,
-            "list the files in src/",
+            user[0].text, "list the files in src/",
             "must not double the seeded text"
         );
     }

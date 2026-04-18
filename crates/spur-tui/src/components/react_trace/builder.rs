@@ -122,9 +122,7 @@ impl ReactTrace {
                                 stream,
                                 &empty_state,
                                 |line| lines.push(line),
-                                |_id, _h| {
-                                    unreachable!("secondary path passes empty fence_state")
-                                },
+                                |_id, _h| unreachable!("secondary path passes empty fence_state"),
                             );
                         } else {
                             for text_line in entry.text.lines() {
@@ -143,10 +141,7 @@ impl ReactTrace {
                     for text_line in entry.text.lines() {
                         lines.push(Line::from(vec![
                             Span::raw("   "),
-                            Span::styled(
-                                text_line.to_string(),
-                                Style::default().fg(Color::White),
-                            ),
+                            Span::styled(text_line.to_string(), Style::default().fg(Color::White)),
                         ]));
                     }
                 }
@@ -350,7 +345,7 @@ use super::types::VirtualRow;
 use crate::components::markdown_stream::{MarkdownStream, StreamItem};
 
 #[cfg(feature = "markdown")]
-use crate::components::mermaid::{FenceRender, MermaidId, fence_placeholder_line};
+use crate::components::mermaid::{fence_placeholder_line, FenceRender, MermaidId};
 
 /// Render an AgentMessage body via [`MarkdownStream::preview_items`].
 ///
@@ -378,8 +373,12 @@ fn render_agent_message_body(
     let mut pending: HashSet<crate::components::mermaid::MermaidId> = HashSet::new();
     for (id, render) in fence_state {
         match render {
-            crate::components::mermaid::FenceRender::Error => { errors.insert(*id); }
-            crate::components::mermaid::FenceRender::Pending => { pending.insert(*id); }
+            crate::components::mermaid::FenceRender::Error => {
+                errors.insert(*id);
+            }
+            crate::components::mermaid::FenceRender::Pending => {
+                pending.insert(*id);
+            }
             crate::components::mermaid::FenceRender::Ready(_) => {}
         }
     }
@@ -443,7 +442,11 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
-    ) -> (Vec<VirtualRow>, Vec<usize>, Vec<Option<std::ops::Range<usize>>>) {
+    ) -> (
+        Vec<VirtualRow>,
+        Vec<usize>,
+        Vec<Option<std::ops::Range<usize>>>,
+    ) {
         let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
         let collapsed = self.observe_collapsed;
 
@@ -475,8 +478,14 @@ impl ReactTrace {
         // When starting mid-trace in collapsed mode, skip an Observe that
         // was consumed by the preceding Act.
         if collapsed && i > 0 {
-            if matches!(&self.entries.get(i).map(|e| &e.kind), Some(TraceKind::Observe { payload: Some(_) })) {
-                if matches!(&self.entries.get(i - 1).map(|e| &e.kind), Some(TraceKind::Act { .. })) {
+            if matches!(
+                &self.entries.get(i).map(|e| &e.kind),
+                Some(TraceKind::Observe { payload: Some(_) })
+            ) {
+                if matches!(
+                    &self.entries.get(i - 1).map(|e| &e.kind),
+                    Some(TraceKind::Act { .. })
+                ) {
                     i += 1;
                 }
             }
@@ -527,7 +536,12 @@ impl ReactTrace {
                         ));
                         1
                     };
-                    push_wrapped(&mut rows, &mut byte_ranges, Some(0..entry.text.len()), Line::from(spans));
+                    push_wrapped(
+                        &mut rows,
+                        &mut byte_ranges,
+                        Some(0..entry.text.len()),
+                        Line::from(spans),
+                    );
                     push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
                     if consumed == 2 && i + 1 >= from {
                         entry_row_starts[i + 1 - from] = rows.len();
@@ -613,7 +627,12 @@ impl ReactTrace {
                         );
                         for item in staged.into_inner() {
                             match item {
-                                BodyRow::Line(line) => push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line),
+                                BodyRow::Line(line) => push_wrapped(
+                                    &mut rows,
+                                    &mut byte_ranges,
+                                    content_range.clone(),
+                                    line,
+                                ),
                                 BodyRow::Image { id, h } => {
                                     for r in 0..h {
                                         rows.push(VirtualRow::ImageRow {

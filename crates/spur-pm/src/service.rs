@@ -110,8 +110,12 @@ impl PmService {
 
     pub async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         match &self.inner {
-            PmBackendInner::Beads { beads, .. } => beads.add_dependency(issue_id, depends_on_id).await,
-            PmBackendInner::GitHub { adapter } => adapter.add_dependency(issue_id, depends_on_id).await,
+            PmBackendInner::Beads { beads, .. } => {
+                beads.add_dependency(issue_id, depends_on_id).await
+            }
+            PmBackendInner::GitHub { adapter } => {
+                adapter.add_dependency(issue_id, depends_on_id).await
+            }
         }
     }
 
@@ -166,6 +170,9 @@ mod tests {
     #[test]
     fn closed_status_defaults_to_closed_when_none() {
         assert_eq!(super::resolve_closed_status(None), "closed");
-        assert_eq!(super::resolve_closed_status(Some("resolved".to_string())), "resolved");
+        assert_eq!(
+            super::resolve_closed_status(Some("resolved".to_string())),
+            "resolved"
+        );
     }
 }

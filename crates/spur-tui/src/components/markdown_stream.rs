@@ -274,8 +274,12 @@ impl MarkdownStream {
     /// 5. DEBOUNCE elapsed → flush.
     /// 6. Otherwise → no-op.
     pub fn maybe_flush(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
-        let Some(dirty_at) = self.dirty_since else { return Vec::new(); };
-        if self.raw_text.is_empty() { return Vec::new(); }
+        let Some(dirty_at) = self.dirty_since else {
+            return Vec::new();
+        };
+        if self.raw_text.is_empty() {
+            return Vec::new();
+        }
 
         let tail = &self.raw_text[self.flushed_byte_len..];
         let tail_len = tail.len();
@@ -444,7 +448,11 @@ impl MarkdownStream {
                 None => {
                     let id = MermaidId(self.next_fence_id);
                     self.next_fence_id += 1;
-                    let f = FenceRef { id, byte_range: range, code };
+                    let f = FenceRef {
+                        id,
+                        byte_range: range,
+                        code,
+                    };
                     new_fences.push(f.clone());
                     refreshed.push(f);
                 }
@@ -471,7 +479,12 @@ impl MarkdownStream {
         let transformed = inject_hard_breaks_in_tables(&transformed);
 
         if transformed.is_empty() {
-            return (Vec::new(), std::collections::HashMap::new(), new_fences, refreshed);
+            return (
+                Vec::new(),
+                std::collections::HashMap::new(),
+                new_fences,
+                refreshed,
+            );
         }
 
         let text = tui_markdown::from_str(&transformed);
@@ -539,11 +552,7 @@ impl MarkdownStream {
     /// known_fences happen before flushed_byte_len is assigned. If any
     /// stage panics, flushed_byte_len retains its prior value; the next
     /// successful rebuild restores consistency (C1).
-    fn rebuild(
-        &mut self,
-        states: &StateLookup<'_>,
-        permit_eof_closure: bool,
-    ) -> Vec<FenceRef> {
+    fn rebuild(&mut self, states: &StateLookup<'_>, permit_eof_closure: bool) -> Vec<FenceRef> {
         self.rebuild_count.set(self.rebuild_count.get() + 1);
 
         // Stage 0: pulldown scan.
@@ -621,8 +630,8 @@ pub(crate) fn scan_authoritative(
                 // whose End range is before EOF (or permitted at finalize).
                 if matches!(tag_end, TagEnd::CodeBlock) {
                     if let Some(start) = open_fence_start.take() {
-                        let slice_trimmed = raw_text[..range.end]
-                            .trim_end_matches(['\n', '\r', ' ', '\t']);
+                        let slice_trimmed =
+                            raw_text[..range.end].trim_end_matches(['\n', '\r', ' ', '\t']);
                         let closed_by_fence = slice_trimmed.ends_with("```");
                         let fence_permitted = if permit_eof_closure {
                             range.end <= raw_text.len()

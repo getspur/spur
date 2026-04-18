@@ -133,10 +133,7 @@ fn pending_act_collapsed_renders_spinner_one_liner() {
 
     let actual = render_to_string(&trace);
     // Must be a single 1-line summary with the pending indicator "…".
-    let non_empty_lines = actual
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count();
+    let non_empty_lines = actual.lines().filter(|l| !l.trim().is_empty()).count();
     assert_eq!(
         non_empty_lines, 1,
         "pending Act must render as 1 line in collapsed mode, got:\n{actual}"

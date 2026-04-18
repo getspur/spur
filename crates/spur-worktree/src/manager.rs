@@ -101,7 +101,10 @@ impl WorktreeManager {
                     }
                     Err(e) if attempt < 2 => {
                         debug!(attempt, error = %e, "stash create contention, retrying");
-                        tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1))).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            50 * (attempt as u64 + 1),
+                        ))
+                        .await;
                     }
                     Err(e) => return Err(e).context("failed to create stash after retries"),
                 }
@@ -118,7 +121,14 @@ impl WorktreeManager {
                 // Create a clean single-parent commit with the dirty-state tree.
                 let commit = self
                     .run_git(
-                        &["commit-tree", &tree, "-p", "HEAD", "-m", "spur: brain snapshot"],
+                        &[
+                            "commit-tree",
+                            &tree,
+                            "-p",
+                            "HEAD",
+                            "-m",
+                            "spur: brain snapshot",
+                        ],
                         None,
                     )
                     .await
@@ -422,7 +432,11 @@ impl WorktreeManager {
                 if branch.contains("spur/") {
                     if let Some(path) = wt_path {
                         // Skip if it's tracked in our active set
-                        if self.active.values().any(|info| info.path.to_str() == Some(path)) {
+                        if self
+                            .active
+                            .values()
+                            .any(|info| info.path.to_str() == Some(path))
+                        {
                             continue;
                         }
                         debug!(path = %path, branch = %branch, "removing orphaned spur worktree");
@@ -546,7 +560,9 @@ mod tests_option_e {
         let base_sha = seed_base_repo(tmp.path()).await;
 
         // Worker commits their change (the scenario that broke bd-1mh.2).
-        tokio::fs::write(tmp.path().join("a.txt"), "worker change\n").await.unwrap();
+        tokio::fs::write(tmp.path().join("a.txt"), "worker change\n")
+            .await
+            .unwrap();
         git(tmp.path(), &["add", "a.txt"]).await;
         git(tmp.path(), &["commit", "-q", "-m", "worker commit"]).await;
 
@@ -564,7 +580,10 @@ mod tests_option_e {
 
         let (diff, basis) = manager.collect_diff(&sid).await.expect("collect_diff ok");
         let diff = diff.expect("expected Some(diff) via fallback, got None");
-        assert!(diff.contains("worker change"), "diff should contain worker's change, got: {diff}");
+        assert!(
+            diff.contains("worker change"),
+            "diff should contain worker's change, got: {diff}"
+        );
         assert_eq!(basis, "base_commit..HEAD");
     }
 
@@ -574,7 +593,9 @@ mod tests_option_e {
         let base_sha = seed_base_repo(tmp.path()).await;
 
         // Worker leaves uncommitted changes (NOT the self-commit scenario).
-        tokio::fs::write(tmp.path().join("a.txt"), "uncommitted\n").await.unwrap();
+        tokio::fs::write(tmp.path().join("a.txt"), "uncommitted\n")
+            .await
+            .unwrap();
 
         let sid = SessionId("s2".to_string());
         let mut manager = WorktreeManager::new_for_test(tmp.path().to_path_buf());
@@ -588,7 +609,10 @@ mod tests_option_e {
 
         let (diff, basis) = manager.collect_diff(&sid).await.expect("collect_diff ok");
         let diff = diff.expect("expected Some(diff) from HEAD path");
-        assert!(diff.contains("uncommitted"), "diff should capture uncommitted, got: {diff}");
+        assert!(
+            diff.contains("uncommitted"),
+            "diff should capture uncommitted, got: {diff}"
+        );
         assert_eq!(basis, "HEAD");
     }
 

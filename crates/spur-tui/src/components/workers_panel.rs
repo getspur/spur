@@ -31,11 +31,7 @@ fn is_active(phase: LifecycleState) -> bool {
 /// Compute the height the panel needs. Returns 0 when there are no active
 /// workers (panel hidden), 1 when collapsed, or 2 + min(active, MAX_VISIBLE)
 /// when expanded (border top/bottom + rows).
-pub fn compute_height(
-    lineage: &ExecutorLineage,
-    executor_ids: &[String],
-    collapsed: bool,
-) -> u16 {
+pub fn compute_height(lineage: &ExecutorLineage, executor_ids: &[String], collapsed: bool) -> u16 {
     let active = count_active(lineage, executor_ids);
     if active == 0 {
         return 0;

@@ -187,9 +187,7 @@ pub struct SpurToolMeta {
 /// `_meta.<vendor>.*` convention. Returns default for unknown/absent meta.
 pub fn extract_tool_meta(tc: &ToolCall, kind: AgentKind) -> SpurToolMeta {
     match kind {
-        AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => {
-            claude::extract_tool_meta(tc)
-        }
+        AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => claude::extract_tool_meta(tc),
         AgentKind::CodexAcp => codex::extract_tool_meta(tc),
         AgentKind::Kiro => kiro::extract_tool_meta(tc),
         AgentKind::Generic => SpurToolMeta::default(),

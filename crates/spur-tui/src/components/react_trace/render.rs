@@ -57,7 +57,10 @@ pub(crate) fn resolve_anchor(
     use crate::components::react_trace::types::ScrollAnchor;
     match anchor {
         ScrollAnchor::Following => total_rows.saturating_sub(visible_height),
-        ScrollAnchor::Byte { entry_idx, byte_offset } => {
+        ScrollAnchor::Byte {
+            entry_idx,
+            byte_offset,
+        } => {
             if *entry_idx >= entry_row_starts.len() {
                 return 0;
             }
@@ -103,8 +106,8 @@ pub(crate) fn fence_state_hash(
         crate::components::mermaid::MermaidState,
     >,
 ) -> u64 {
-    use std::hash::{Hash, Hasher};
     use crate::components::mermaid::MermaidState;
+    use std::hash::{Hash, Hasher};
 
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let mut entries: Vec<_> = registry.iter().collect();
@@ -603,7 +606,8 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
     ) -> Vec<Segment> {
-        let (rows, _starts, _byte_ranges) = self.build_virtual_rows(0, effective_width, states, None);
+        let (rows, _starts, _byte_ranges) =
+            self.build_virtual_rows(0, effective_width, states, None);
         let end = (offset + visible_height).min(rows.len());
         segment_visible_rows(&rows, offset, end)
     }
@@ -628,10 +632,17 @@ mod fence_state_hash_tests {
         let mut r: HashMap<MermaidId, MermaidState> = HashMap::new();
         r.insert(MermaidId(0), MermaidState::Pending { code: "g{}".into() });
         let h1 = fence_state_hash(&r);
-        r.insert(MermaidId(0), MermaidState::Error { message: "boom".into() });
+        r.insert(
+            MermaidId(0),
+            MermaidState::Error {
+                message: "boom".into(),
+            },
+        );
         let h2 = fence_state_hash(&r);
-        assert_ne!(h1, h2,
-            "Pending→Error must change fence_state_hash so cache invalidates");
+        assert_ne!(
+            h1, h2,
+            "Pending→Error must change fence_state_hash so cache invalidates"
+        );
     }
 
     #[test]
@@ -642,8 +653,11 @@ mod fence_state_hash_tests {
         let mut b: HashMap<MermaidId, MermaidState> = HashMap::new();
         b.insert(MermaidId(1), MermaidState::Rendering);
         b.insert(MermaidId(0), MermaidState::Pending { code: "x".into() });
-        assert_eq!(fence_state_hash(&a), fence_state_hash(&b),
-            "iteration order must not affect hash (must sort by id)");
+        assert_eq!(
+            fence_state_hash(&a),
+            fence_state_hash(&b),
+            "iteration order must not affect hash (must sort by id)"
+        );
     }
 }
 
@@ -661,8 +675,7 @@ mod resolve_anchor_tests {
     fn following_resolves_to_max_offset() {
         let ranges = ranges(&[Some(0..10), Some(0..10), Some(0..10)]);
         let entry_starts = vec![0, 1, 2];
-        let row = resolve_anchor(
-            &ScrollAnchor::Following, &ranges, &entry_starts, 3, 1);
+        let row = resolve_anchor(&ScrollAnchor::Following, &ranges, &entry_starts, 3, 1);
         assert_eq!(row, 2, "Following clamps to total - visible_height");
     }
 
@@ -670,12 +683,12 @@ mod resolve_anchor_tests {
     fn byte_anchor_resolves_to_containing_row() {
         // Two entries: entry 0 spans rows 0..2 with bytes 0..50; entry 1
         // spans rows 2..4 with bytes 0..30.
-        let ranges = ranges(&[
-            Some(0..50), Some(0..50),
-            Some(0..30), Some(0..30),
-        ]);
+        let ranges = ranges(&[Some(0..50), Some(0..50), Some(0..30), Some(0..30)]);
         let entry_starts = vec![0, 2];
-        let anchor = ScrollAnchor::Byte { entry_idx: 1, byte_offset: 15 };
+        let anchor = ScrollAnchor::Byte {
+            entry_idx: 1,
+            byte_offset: 15,
+        };
         let row = resolve_anchor(&anchor, &ranges, &entry_starts, 4, 2);
         assert_eq!(row, 2, "byte 15 in entry 1 lands on its first row");
     }
@@ -684,7 +697,10 @@ mod resolve_anchor_tests {
     fn evicted_entry_snaps_to_zero() {
         let ranges = ranges(&[Some(0..10)]);
         let entry_starts = vec![0];
-        let anchor = ScrollAnchor::Byte { entry_idx: 99, byte_offset: 0 };
+        let anchor = ScrollAnchor::Byte {
+            entry_idx: 99,
+            byte_offset: 0,
+        };
         let row = resolve_anchor(&anchor, &ranges, &entry_starts, 1, 1);
         assert_eq!(row, 0, "anchor pointing at evicted entry snaps to 0");
     }

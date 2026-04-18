@@ -9,7 +9,8 @@ use spur_tui::views::dashboard::DashboardView;
 use spur_tui::views::View;
 
 fn test_ctx() -> spur_tui::views::ViewContext<'static> {
-    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+        std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
     spur_tui::test_support::test_view_ctx(&LINEAGE)
 }
 
@@ -23,9 +24,12 @@ fn delegation_completed(status: DelegationStatus) -> SpurEvent {
 #[test]
 fn dashboard_modified_status_renders_as_complete_not_failed() {
     let mut dash = DashboardView::new();
-    dash.handle_spur_event(&delegation_completed(DelegationStatus::Modified {
-        reviewer_note: "fix the typo in README".to_string(),
-    }), &test_ctx());
+    dash.handle_spur_event(
+        &delegation_completed(DelegationStatus::Modified {
+            reviewer_note: "fix the typo in README".to_string(),
+        }),
+        &test_ctx(),
+    );
 
     let entries = dash.activity_log().entries();
     assert_eq!(entries.len(), 1, "one log entry expected");
@@ -51,9 +55,12 @@ fn dashboard_modified_status_renders_as_complete_not_failed() {
 #[test]
 fn dashboard_rejected_status_renders_with_reason() {
     let mut dash = DashboardView::new();
-    dash.handle_spur_event(&delegation_completed(DelegationStatus::Rejected {
-        reason: "scope too large".to_string(),
-    }), &test_ctx());
+    dash.handle_spur_event(
+        &delegation_completed(DelegationStatus::Rejected {
+            reason: "scope too large".to_string(),
+        }),
+        &test_ctx(),
+    );
 
     let entries = dash.activity_log().entries();
     assert_eq!(entries.len(), 1);
@@ -78,10 +85,13 @@ fn dashboard_rejected_status_renders_with_reason() {
 #[test]
 fn dashboard_timed_out_status_renders_with_wait_duration() {
     let mut dash = DashboardView::new();
-    dash.handle_spur_event(&delegation_completed(DelegationStatus::TimedOut {
-        waited_for: std::time::Duration::from_secs(1800),
-        fallback: TimeoutFallback::Abandon,
-    }), &test_ctx());
+    dash.handle_spur_event(
+        &delegation_completed(DelegationStatus::TimedOut {
+            waited_for: std::time::Duration::from_secs(1800),
+            fallback: TimeoutFallback::Abandon,
+        }),
+        &test_ctx(),
+    );
 
     let entries = dash.activity_log().entries();
     assert_eq!(entries.len(), 1);

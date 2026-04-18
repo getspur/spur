@@ -82,25 +82,25 @@ pub struct DelegationResult {
 pub struct DelegationPlan {
     /// Candidate agents the brain considered.
     #[serde(default)]
-    pub candidates:    Vec<PlanCandidate>,
+    pub candidates: Vec<PlanCandidate>,
     /// Subtask breakdown for multi-task dispatches.
     #[serde(default)]
     pub decomposition: Vec<PlanSubtask>,
     /// The agent the brain committed to (or "self"/"parallel").
-    pub chosen:        Option<String>,
+    pub chosen: Option<String>,
     /// Short justification surfaced to the review gate.
-    pub rationale:     Option<String>,
+    pub rationale: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PlanCandidate {
-    pub agent:     Option<String>,
+    pub agent: Option<String>,
     pub rationale: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PlanSubtask {
-    pub subtask:             Option<String>,
+    pub subtask: Option<String>,
     #[serde(default)]
     pub parallelizable_with: Vec<String>,
 }

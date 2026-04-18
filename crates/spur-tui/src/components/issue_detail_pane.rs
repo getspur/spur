@@ -66,21 +66,16 @@ impl IssueDetailPane {
         // ── Metadata line 1: status · priority · type · assignee ─────────────────
         let status_span = status_colored_span(&issue.status);
         let priority_span = match issue.priority {
-            Some(p) => Span::styled(
-                format!("P{}", p),
-                Style::default().fg(Color::Yellow),
-            ),
+            Some(p) => Span::styled(format!("P{}", p), Style::default().fg(Color::Yellow)),
             None => Span::styled("--", Style::default().fg(Color::DarkGray)),
         };
-        let type_span = Span::raw(
-            issue
-                .issue_type
-                .as_deref()
-                .unwrap_or("--")
-                .to_string(),
-        );
+        let type_span = Span::raw(issue.issue_type.as_deref().unwrap_or("--").to_string());
         let assignee_span = Span::styled(
-            issue.assignee.as_deref().unwrap_or("unassigned").to_string(),
+            issue
+                .assignee
+                .as_deref()
+                .unwrap_or("unassigned")
+                .to_string(),
             Style::default().fg(Color::White),
         );
 
@@ -183,7 +178,12 @@ impl IssueDetailPane {
             Span::styled("locked ", Style::default().fg(Color::DarkGray)),
             Span::styled("[d]", Style::default().fg(Color::DarkGray)),
             Span::styled("one  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[W]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[W]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("ork  ", Style::default().fg(Color::DarkGray)),
             Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
             Span::styled(" back", Style::default().fg(Color::DarkGray)),

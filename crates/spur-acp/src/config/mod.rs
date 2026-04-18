@@ -23,42 +23,46 @@ use std::time::Duration;
 pub struct DelegationDescriptor {
     /// One-line human summary. Rendered into the workers-block of the
     /// brain prompt when non-empty.
-    pub description:        Option<String>,
+    pub description: Option<String>,
     /// Routing preference signal. Specialists are preferred when their
     /// good_for matches; generalists are fallback.
-    pub tier:               Option<Tier>,
+    pub tier: Option<Tier>,
     /// Positive task patterns. Used by the brain to route.
-    pub good_for:           Vec<String>,
+    pub good_for: Vec<String>,
     /// Negative task patterns. Soft signal; brain MAY override with
     /// stated rationale when no better agent exists.
-    pub avoid_for:          Vec<String>,
+    pub avoid_for: Vec<String>,
     /// Held back from workers-block; injected into per-dispatch task
     /// prompt only.
-    pub strengths:          Vec<String>,
+    pub strengths: Vec<String>,
     /// Held back from workers-block; injected into per-dispatch task
     /// prompt only.
-    pub limitations:        Vec<String>,
+    pub limitations: Vec<String>,
     /// Held back from routing; shown to brain when dispatching so it
     /// can shape CONTEXT appropriately.
     pub input_expectations: Option<String>,
     /// Routing-relevant via `list_available_workers`. Brain uses for
     /// EXPECTED_OUTPUT section of dispatched task prompt.
-    pub output_shape:       Option<String>,
+    pub output_shape: Option<String>,
     /// Default true. When false, user fields are used verbatim
     /// (including empty vecs — no built-in merge).
     // Field-level default needed even with struct-level `#[serde(default)]`:
     // the struct-level default only fires when the whole block is absent.
     #[serde(default = "default_true")]
-    pub inherit_defaults:   bool,
+    pub inherit_defaults: bool,
 }
 
 impl Default for DelegationDescriptor {
     fn default() -> Self {
         Self {
-            description: None, tier: None,
-            good_for: Vec::new(), avoid_for: Vec::new(),
-            strengths: Vec::new(), limitations: Vec::new(),
-            input_expectations: None, output_shape: None,
+            description: None,
+            tier: None,
+            good_for: Vec::new(),
+            avoid_for: Vec::new(),
+            strengths: Vec::new(),
+            limitations: Vec::new(),
+            input_expectations: None,
+            output_shape: None,
             inherit_defaults: true,
         }
     }
@@ -66,7 +70,10 @@ impl Default for DelegationDescriptor {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Tier { Specialist, Generalist }
+pub enum Tier {
+    Specialist,
+    Generalist,
+}
 
 /// Configuration for a single registered agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,7 +370,11 @@ pub struct BrainDelegationConfig {
 impl Default for BrainDelegationConfig {
     fn default() -> Self {
         Self {
-            framework: if cfg!(debug_assertions) { "v1".into() } else { "legacy".into() },
+            framework: if cfg!(debug_assertions) {
+                "v1".into()
+            } else {
+                "legacy".into()
+            },
         }
     }
 }
@@ -596,7 +607,10 @@ mod delegation_descriptor_tests {
             good_for = ["one-offs"]
         "#;
         let cfg: AgentConfig = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.delegation.description.as_deref(), Some("custom claude variant"));
+        assert_eq!(
+            cfg.delegation.description.as_deref(),
+            Some("custom claude variant")
+        );
         assert_eq!(cfg.delegation.good_for, vec!["one-offs".to_string()]);
     }
 
@@ -676,7 +690,11 @@ mod tests {
             default = "claude-code-acp"
         "#;
         let cfg: BrainConfig = toml::from_str(toml).unwrap();
-        let expected = if cfg!(debug_assertions) { "v1" } else { "legacy" };
+        let expected = if cfg!(debug_assertions) {
+            "v1"
+        } else {
+            "legacy"
+        };
         assert_eq!(cfg.delegation.framework, expected);
     }
 
