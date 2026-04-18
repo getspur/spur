@@ -2414,7 +2414,7 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.as_str().map_or(false, |s| s.contains("auto-rejected")
+                .any(|w| w.as_str().is_some_and(|s| s.contains("auto-rejected")
                     && s.contains("MAX_ATTEMPTS"))),
             "expected auto-reject warning, got {warnings:?}"
         );

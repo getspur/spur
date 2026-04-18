@@ -121,11 +121,16 @@ fn delegate_parallel_def() -> ToolDefinition {
                         "type": "object",
                         "properties": {
                             "agent": { "type": "string", "description": "Worker agent name" },
-                            "task":  { "type": "string", "description": "Task description" }
+                            "task":  { "type": "string", "description": "Task description" },
+                            "context_files": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Optional supplementary file paths for this task. Prepended as a '## Relevant Files' section in the worker prompt."
+                            }
                         },
                         "required": ["agent", "task"]
                     },
-                    "description": "List of tasks to delegate in parallel"
+                    "description": "List of tasks to delegate in parallel. Each task carries its own context_files (and, after T1.3, its own issue_id and delegation_plan)."
                 },
                 "delegation_plan": {
                     "type": "object",
@@ -728,6 +733,35 @@ fn execute_epic_def() -> ToolDefinition {
     }
 }
 
+/// Returns all tool definitions for the MCP `tools/list` response.
+pub fn tools_list() -> Vec<ToolDefinition> {
+    vec![
+        delegate_to_worker_def(),
+        delegate_parallel_def(),
+        delegate_async_def(),
+        wait_delegation_def(),
+        check_delegation_status_def(),
+        cancel_delegation_def(),
+        list_available_workers_def(),
+        get_issue_def(),
+        list_issues_def(),
+        update_issue_def(),
+        create_issue_def(),
+        add_dependency_def(),
+        create_pr_def(),
+        graph_triage_def(),
+        graph_plan_def(),
+        graph_insights_def(),
+        graph_alerts_def(),
+        graph_subgraph_def(),
+        submit_plan_def(),
+        execute_epic_def(),
+        get_plan_status_def(),
+        get_task_diff_def(),
+        review_task_def(),
+    ]
+}
+
 #[cfg(test)]
 mod schema_truthfulness_tests {
     use super::*;
@@ -757,33 +791,4 @@ mod schema_truthfulness_tests {
             "update_issue must not advertise `source` until multi-backend lands",
         );
     }
-}
-
-/// Returns all tool definitions for the MCP `tools/list` response.
-pub fn tools_list() -> Vec<ToolDefinition> {
-    vec![
-        delegate_to_worker_def(),
-        delegate_parallel_def(),
-        delegate_async_def(),
-        wait_delegation_def(),
-        check_delegation_status_def(),
-        cancel_delegation_def(),
-        list_available_workers_def(),
-        get_issue_def(),
-        list_issues_def(),
-        update_issue_def(),
-        create_issue_def(),
-        add_dependency_def(),
-        create_pr_def(),
-        graph_triage_def(),
-        graph_plan_def(),
-        graph_insights_def(),
-        graph_alerts_def(),
-        graph_subgraph_def(),
-        submit_plan_def(),
-        execute_epic_def(),
-        get_plan_status_def(),
-        get_task_diff_def(),
-        review_task_def(),
-    ]
 }
