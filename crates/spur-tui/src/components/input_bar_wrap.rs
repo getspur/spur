@@ -194,7 +194,7 @@ pub fn wrap(lines: &[String], width: u16) -> WrapLayout {
 /// A position we can legally break after.
 fn is_break_opportunity(line: &str, byte_start: usize, byte_end: usize) -> bool {
     let s = &line[byte_start..byte_end];
-    s.chars().any(|c| c.is_whitespace())
+    s.chars().any(|c| c.is_ascii_whitespace())
         || matches!(s, "、" | "。" | "，" | "．" | "　")
 }
 
@@ -315,5 +315,25 @@ mod tests {
         let total_cells: u32 = layout.rows.iter().map(|r| r.used_cells as u32).sum();
         // Source has: 'a' (1) + '\t' (4) + "bcd" (3) + '\t' (4) + "ef" (2) = 14.
         assert_eq!(total_cells, 14);
+    }
+
+    #[test]
+    fn wrap_does_not_break_at_no_break_space() {
+        // With the bug: is_whitespace() matches U+00A0, so the wrap algorithm
+        // breaks after "ab\u{00A0}" on overflow → row 0 has 3 graphemes.
+        // Without the bug: no ASCII-whitespace break opportunity exists, so
+        // the algorithm falls through to grapheme-break at the overflow
+        // point → row 0 contains all 5 leading graphemes.
+        let lines = v(&["ab\u{00A0}cde"]);
+        let layout = wrap(&lines, 5);
+        // 6 graphemes each 1 cell, width 5 → must overflow after 5.
+        assert_eq!(
+            layout.rows[0].graphemes.len(),
+            5,
+            "U+00A0 must not be a break opportunity; row 0 grapheme count {} (rows: {:?})",
+            layout.rows[0].graphemes.len(),
+            layout.rows,
+        );
+        assert_eq!(layout.rows[0].used_cells, 5);
     }
 }
