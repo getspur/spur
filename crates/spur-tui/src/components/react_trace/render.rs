@@ -41,6 +41,9 @@ pub(in crate::components) struct VirtualRowCacheEntry {
 /// Resolve a ScrollAnchor to an effective row index.
 ///
 /// `Following` clamps to `total_rows - visible_height`.
+/// `Row` returns `entry_row_starts[entry_idx] + min(row_within_entry, entry_height - 1)`,
+/// guaranteeing the result lies within the entry's row range. If the entry
+/// was evicted (entry_idx out of range), snaps to 0.
 /// `Byte` walks `entry_row_starts` to the entry, then finds the first
 /// row whose `byte_ranges[i]` contains `byte_offset`. If the anchor's
 /// entry was evicted (entry_idx >= entry_row_starts.len()), snaps to 0.
@@ -70,7 +73,12 @@ pub(crate) fn resolve_anchor(
                 .copied()
                 .unwrap_or(total_rows);
             let entry_height = row_end.saturating_sub(row_start);
-            let clamped = (*row_within_entry).min(entry_height.saturating_sub(1));
+            if entry_height == 0 {
+                // Defensive: zero-row entry shouldn't occur in production but
+                // keep the contract `result < total_rows` for non-empty traces.
+                return row_start.min(total_rows.saturating_sub(1));
+            }
+            let clamped = (*row_within_entry).min(entry_height - 1);
             row_start + clamped
         }
         ScrollAnchor::Byte {
@@ -756,5 +764,19 @@ mod resolve_anchor_tests {
         };
         let row = resolve_anchor(&anchor, &ranges, &entry_starts, 2, 1);
         assert_eq!(row, 0);
+    }
+
+    #[test]
+    fn row_anchor_zero_height_entry_stays_in_bounds() {
+        // Two entries: entry 0 has 2 rows, entry 1 is zero-row (degenerate).
+        let ranges = ranges(&[Some(0..50), Some(0..50)]);
+        let entry_starts = vec![0, 2];
+        let anchor = ScrollAnchor::Row {
+            entry_idx: 1,
+            row_within_entry: 5,
+        };
+        // total_rows = 2, entry 1 spans rows 2..2 (height 0).
+        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 2, 1);
+        assert!(row < 2, "result must be < total_rows even for zero-height entry; got {}", row);
     }
 }
