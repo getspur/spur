@@ -857,10 +857,8 @@ impl ReactTrace {
         &self.entries
     }
 
-    pub fn scroll_offset_for_tests(&self) -> usize {
-        // Legacy test accessor — returns 0 after anchor migration.
-        // Task 2.8 will update the test to use resolve_anchor instead.
-        0
+    pub fn anchor_for_tests(&self) -> crate::components::react_trace::types::ScrollAnchor {
+        self.anchor
     }
 
     pub fn set_visible_height_for_tests(&mut self, height: usize) {
