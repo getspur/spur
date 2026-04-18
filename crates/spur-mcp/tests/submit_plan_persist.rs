@@ -73,8 +73,7 @@ fn children_are_in_topological_order() {
 #[test]
 fn children_carry_spur_plan_id_plan_task_id_and_agent_labels() {
     let tasks = sample_tasks(false);
-    let (_epic, children) =
-        plan_epic_issue_creates("plan-xyz", "Title", None, &tasks).expect("ok");
+    let (_epic, children) = plan_epic_issue_creates("plan-xyz", "Title", None, &tasks).expect("ok");
     let (_, child_b) = children
         .iter()
         .find(|(k, _)| k == "b")
@@ -92,8 +91,7 @@ fn children_carry_spur_plan_id_plan_task_id_and_agent_labels() {
 #[test]
 fn children_depends_on_carries_task_id_keys_not_beads_ids() {
     let tasks = sample_tasks(false);
-    let (_epic, children) =
-        plan_epic_issue_creates("plan-xyz", "T", None, &tasks).expect("ok");
+    let (_epic, children) = plan_epic_issue_creates("plan-xyz", "T", None, &tasks).expect("ok");
     let (_, child_b) = children.iter().find(|(k, _)| k == "b").unwrap();
     assert_eq!(child_b.depends_on, vec!["a".to_string()]);
 }
@@ -101,8 +99,7 @@ fn children_depends_on_carries_task_id_keys_not_beads_ids() {
 #[test]
 fn children_parent_field_is_unset_before_epic_creation() {
     let tasks = sample_tasks(false);
-    let (_epic, children) =
-        plan_epic_issue_creates("plan-xyz", "T", None, &tasks).expect("ok");
+    let (_epic, children) = plan_epic_issue_creates("plan-xyz", "T", None, &tasks).expect("ok");
     for (_, c) in &children {
         assert!(c.parent.is_none(), "parent must be None at this stage");
     }

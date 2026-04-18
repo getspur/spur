@@ -718,6 +718,10 @@ mod resolve_anchor_tests {
         };
         // total_rows = 2, entry 1 spans rows 2..2 (height 0).
         let row = resolve_anchor(&anchor, &ranges, &entry_starts, 2, 1);
-        assert!(row < 2, "result must be < total_rows even for zero-height entry; got {}", row);
+        assert!(
+            row < 2,
+            "result must be < total_rows even for zero-height entry; got {}",
+            row
+        );
     }
 }

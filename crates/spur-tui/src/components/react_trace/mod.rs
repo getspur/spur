@@ -4,9 +4,9 @@ mod types;
 
 #[cfg(feature = "markdown")]
 pub use types::RenderContext;
+pub use types::{ActStatus, TraceEntry, TraceKind};
 #[cfg(all(test, feature = "markdown"))]
 pub(crate) use types::{Segment, VirtualRow};
-pub use types::{ActStatus, TraceEntry, TraceKind};
 
 use spur_acp::{
     adapter::{mode_badge, ToolInputDisplay},
@@ -54,7 +54,6 @@ pub struct ReactTrace {
     #[cfg(feature = "markdown")]
     pub(super) line_cache: Option<render::VirtualRowCacheEntry>,
 }
-
 
 /// Inverse of `resolve_anchor` for the Row variant: given a row index,
 /// find which entry it belongs to and the row-within-entry offset.
@@ -790,9 +789,7 @@ impl ReactTrace {
                     let (act_glyph, _) = family_glyph(*family);
                     let id_str = input_summary(input, tool);
                     let tail = match status {
-                        ActStatus::Pending | ActStatus::InProgress { .. } => {
-                            "\u{2026}".to_string()
-                        }
+                        ActStatus::Pending | ActStatus::InProgress { .. } => "\u{2026}".to_string(),
                         ActStatus::Completed(Some(p)) => {
                             let (glyph, _, stats) = observe_compact(p);
                             if stats.is_empty() {
@@ -1060,8 +1057,7 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
     ) {
-        let (rows, entry_row_starts, byte_ranges) =
-            self.build_virtual_rows(0, width, states, None);
+        let (rows, entry_row_starts, byte_ranges) = self.build_virtual_rows(0, width, states, None);
         self.line_cache = Some(render::VirtualRowCacheEntry {
             rows,
             entry_row_starts,
@@ -1741,11 +1737,8 @@ mod tests {
     fn map_initial_status_completed_with_output_yields_completed_some() {
         use spur_acp::{AgentKind, ToolCallStatus};
         let out = serde_json::json!({"text": "hi"});
-        let got = super::map_initial_status(
-            ToolCallStatus::Completed,
-            Some(&out),
-            AgentKind::Generic,
-        );
+        let got =
+            super::map_initial_status(ToolCallStatus::Completed, Some(&out), AgentKind::Generic);
         assert!(matches!(got, ActStatus::Completed(Some(_))));
     }
 

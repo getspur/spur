@@ -282,9 +282,7 @@ pub async fn build_epic_subgraph(
             .iter()
             .map(|dep_key| {
                 task_map.get(dep_key).cloned().ok_or_else(|| {
-                    format!(
-                        "task '{task_id}' depends on '{dep_key}' which was not yet created",
-                    )
+                    format!("task '{task_id}' depends on '{dep_key}' which was not yet created",)
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -310,7 +308,13 @@ pub fn plan_epic_issue_creates(
     epic_title: &str,
     epic_body: Option<&str>,
     tasks: &[crate::plan::PlanTask],
-) -> Result<(spur_pm::types::IssueCreate, Vec<(String, spur_pm::types::IssueCreate)>), String> {
+) -> Result<
+    (
+        spur_pm::types::IssueCreate,
+        Vec<(String, spur_pm::types::IssueCreate)>,
+    ),
+    String,
+> {
     let epic_create = spur_pm::types::IssueCreate {
         title: epic_title.to_string(),
         description: epic_body.map(String::from),
@@ -381,9 +385,10 @@ fn topological_order(tasks: &[crate::plan::PlanTask]) -> Result<Vec<usize>, Stri
     while let Some(i) = ready.pop_front() {
         out.push(i);
         for (j, t) in tasks.iter().enumerate() {
-            if t.depends_on.iter().any(|dep| {
-                key_to_idx.get(dep.as_str()).copied() == Some(i)
-            }) {
+            if t.depends_on
+                .iter()
+                .any(|dep| key_to_idx.get(dep.as_str()).copied() == Some(i))
+            {
                 in_degree[j] -= 1;
                 if in_degree[j] == 0 {
                     ready.push_back(j);
@@ -994,19 +999,18 @@ impl McpCallbackServer {
     /// status is surfaced as success; the body is `result.summary` when
     /// present, else a debug-rendered status.
     #[allow(private_interfaces)]
-    pub(crate) fn cancel_result_to_response(id: Value, result: DelegationResult) -> JsonRpcResponse {
+    pub(crate) fn cancel_result_to_response(
+        id: Value,
+        result: DelegationResult,
+    ) -> JsonRpcResponse {
         if let DelegationStatus::Failed { ref error } = result.status {
-            return JsonRpcResponse::error(
-                id,
-                -32601,
-                format!("cancel_delegation: {error}"),
-            );
+            return JsonRpcResponse::error(id, -32601, format!("cancel_delegation: {error}"));
         }
-        let text = result.summary.clone().unwrap_or_else(|| format!("{:?}", result.status));
-        JsonRpcResponse::success(
-            id,
-            json!({ "content": [{ "type": "text", "text": text }] }),
-        )
+        let text = result
+            .summary
+            .clone()
+            .unwrap_or_else(|| format!("{:?}", result.status));
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
 
     async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -1516,7 +1520,12 @@ impl McpCallbackServer {
             .map(String::from);
 
         if persist_as_epic {
-            if epic_title.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            if epic_title
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
                 return JsonRpcResponse::invalid_params(
                     id,
                     "submit_plan: epic_title is required when persist_as_epic is true",
@@ -1539,7 +1548,10 @@ impl McpCallbackServer {
         // Build the beads epic subgraph before spawning the executor so
         // any creation error is surfaced synchronously.
         let epic_subgraph: Option<EpicSubgraph> = if persist_as_epic {
-            let pm = self.pm_service.as_deref().expect("gate ensures pm is beads");
+            let pm = self
+                .pm_service
+                .as_deref()
+                .expect("gate ensures pm is beads");
             let title = epic_title.as_deref().expect("gate ensures non-empty title");
             match build_epic_subgraph(pm, &plan_id, title, epic_body.as_deref(), &tasks).await {
                 Ok(sg) => {
@@ -1598,8 +1610,8 @@ impl McpCallbackServer {
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
         let response_text = if let Some(sg) = &epic_subgraph {
-            let task_map_json = serde_json::to_string(&sg.task_map)
-                .unwrap_or_else(|_| "{}".to_string());
+            let task_map_json =
+                serde_json::to_string(&sg.task_map).unwrap_or_else(|_| "{}".to_string());
             format!(
                 "Plan submitted: {task_count} tasks.\n\
                  plan_id: {plan_id}\n\
@@ -2258,7 +2270,8 @@ mod cancel_delegation_tests {
         assert_eq!(err.code, -32601);
         assert!(
             err.message.contains("cancel_delegation"),
-            "error message should reference the tool: {}", err.message,
+            "error message should reference the tool: {}",
+            err.message,
         );
     }
 
