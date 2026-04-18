@@ -57,6 +57,22 @@ pub(crate) fn resolve_anchor(
     use crate::components::react_trace::types::ScrollAnchor;
     match anchor {
         ScrollAnchor::Following => total_rows.saturating_sub(visible_height),
+        ScrollAnchor::Row {
+            entry_idx,
+            row_within_entry,
+        } => {
+            if *entry_idx >= entry_row_starts.len() {
+                return 0;
+            }
+            let row_start = entry_row_starts[*entry_idx];
+            let row_end = entry_row_starts
+                .get(*entry_idx + 1)
+                .copied()
+                .unwrap_or(total_rows);
+            let entry_height = row_end.saturating_sub(row_start);
+            let clamped = (*row_within_entry).min(entry_height.saturating_sub(1));
+            row_start + clamped
+        }
         ScrollAnchor::Byte {
             entry_idx,
             byte_offset,
@@ -703,5 +719,42 @@ mod resolve_anchor_tests {
         };
         let row = resolve_anchor(&anchor, &ranges, &entry_starts, 1, 1);
         assert_eq!(row, 0, "anchor pointing at evicted entry snaps to 0");
+    }
+
+    #[test]
+    fn row_anchor_resolves_within_entry() {
+        let ranges = ranges(&[Some(0..50), Some(0..50), Some(0..30), Some(0..30)]);
+        let entry_starts = vec![0, 2];
+        let anchor = ScrollAnchor::Row {
+            entry_idx: 1,
+            row_within_entry: 1,
+        };
+        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 4, 2);
+        assert_eq!(row, 3, "Row{{1,1}} resolves to entry_starts[1]+1 = 3");
+    }
+
+    #[test]
+    fn row_anchor_clamps_to_entry_last() {
+        let ranges = ranges(&[Some(0..50), Some(0..50), Some(0..30), Some(0..30)]);
+        let entry_starts = vec![0, 2];
+        // Entry 1 is 2 rows (rows 2-3); asking row_within_entry=99 must clamp.
+        let anchor = ScrollAnchor::Row {
+            entry_idx: 1,
+            row_within_entry: 99,
+        };
+        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 4, 2);
+        assert_eq!(row, 3, "row_within_entry=99 clamps to entry's last row (3)");
+    }
+
+    #[test]
+    fn row_anchor_evicted_entry_snaps_to_zero() {
+        let ranges = ranges(&[Some(0..50), Some(0..50)]);
+        let entry_starts = vec![0];
+        let anchor = ScrollAnchor::Row {
+            entry_idx: 5,
+            row_within_entry: 0,
+        };
+        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 2, 1);
+        assert_eq!(row, 0);
     }
 }
