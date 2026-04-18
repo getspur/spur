@@ -1529,7 +1529,7 @@ impl View for SessionDetailView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
-        self.render_inner(frame, area, Some(ctx.lineage));
+        self.render_inner(frame, area, Some(ctx.lineage), ctx.license_badge);
     }
 }
 impl SessionDetailView {
@@ -1538,6 +1538,7 @@ impl SessionDetailView {
         frame: &mut Frame,
         area: Rect,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
     ) {
         let elapsed = self.elapsed();
 
@@ -1711,6 +1712,7 @@ impl SessionDetailView {
                 stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
                 issue_count: 0,
                 alert_summary: None,
+                license_badge,
             },
         );
 
@@ -1902,6 +1904,7 @@ mod invalidate_protocols_tests {
         crate::views::ViewContext {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,
+            license_badge: None,
         }
     }
 
@@ -2058,6 +2061,7 @@ mod cancel_state_tests {
         crate::views::ViewContext {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,
+            license_badge: None,
         }
     }
 

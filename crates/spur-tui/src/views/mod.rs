@@ -10,6 +10,7 @@ use ratatui::Frame;
 use spur_acp::SpurEvent;
 
 use crate::action::Action;
+use crate::components::status_bar::LicenseBadge;
 
 // ── macOS Option-key normalisation ────────────────────────────────────
 //
@@ -82,6 +83,7 @@ fn macos_option_char(ch: char) -> Option<char> {
 pub struct ViewContext<'a> {
     pub lineage: &'a spur_core::lineage::projection::ExecutorLineage,
     pub brain_status: &'a crate::app::BrainStatus,
+    pub license_badge: Option<&'a LicenseBadge>,
 }
 
 /// Test-only default context backed by empty lineage and idle status.
@@ -96,6 +98,7 @@ impl ViewContext<'_> {
         ViewContext {
             lineage,
             brain_status: &TEST_BRAIN_STATUS,
+            license_badge: None,
         }
     }
 }

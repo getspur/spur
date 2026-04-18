@@ -1,0 +1,363 @@
+use std::collections::BTreeSet;
+use std::sync::{Arc, RwLock};
+
+use async_trait::async_trait;
+use licenseseat::{Config, EventKind, LicenseSeat};
+use tokio::sync::broadcast;
+
+use crate::provider::{LicenseProvider, RefreshPolicy};
+use crate::{
+    BindingMode, LicenseError, LicenseEvent, LicenseEventKind, LicenseState, LicenseStatus, Plan,
+    Result, SubjectKind,
+};
+
+const LICENSESEAT_API_KEY_ENV: &str = "SPUR_LICENSESEAT_API_KEY";
+const LICENSESEAT_PRODUCT_SLUG_ENV: &str = "SPUR_LICENSESEAT_PRODUCT_SLUG";
+
+pub fn from_env() -> Result<LicenseSeatProvider> {
+    let api_key = std::env::var(LICENSESEAT_API_KEY_ENV).map_err(|_| {
+        LicenseError::NotConfigured(format!(
+            "missing environment variable {LICENSESEAT_API_KEY_ENV}"
+        ))
+    })?;
+    let product_slug = std::env::var(LICENSESEAT_PRODUCT_SLUG_ENV).map_err(|_| {
+        LicenseError::NotConfigured(format!(
+            "missing environment variable {LICENSESEAT_PRODUCT_SLUG_ENV}"
+        ))
+    })?;
+    Ok(LicenseSeatProvider::new(api_key, product_slug))
+}
+
+pub fn from_env_or_disabled() -> Arc<dyn LicenseProvider> {
+    match (
+        std::env::var(LICENSESEAT_API_KEY_ENV),
+        std::env::var(LICENSESEAT_PRODUCT_SLUG_ENV),
+    ) {
+        (Ok(api_key), Ok(product_slug)) => {
+            Arc::new(LicenseSeatProvider::new(api_key, product_slug))
+        }
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => {
+            Arc::new(DisabledProvider::new("licensing not configured"))
+        }
+        _ => Arc::new(DisabledProvider::new(
+            "incomplete licensing environment configuration",
+        )),
+    }
+}
+
+#[derive(Clone)]
+pub struct LicenseSeatProvider {
+    sdk: LicenseSeat,
+    state: Arc<RwLock<LicenseState>>,
+    events_tx: broadcast::Sender<LicenseEvent>,
+    refresh_policy: RefreshPolicy,
+}
+
+impl LicenseSeatProvider {
+    pub fn new(api_key: String, product_slug: String) -> Self {
+        let mut config = Config::new(api_key, product_slug);
+        config.telemetry_enabled = false;
+        config.app_version = Some(env!("CARGO_PKG_VERSION").into());
+
+        let refresh_policy = RefreshPolicy {
+            validate_interval: config.auto_validate_interval,
+            heartbeat_interval: config.heartbeat_interval,
+        };
+
+        let sdk = LicenseSeat::new(config);
+        let initial_state = if sdk.current_license().is_some() {
+            LicenseState::active_cached()
+        } else {
+            LicenseState::inactive("No active license")
+        };
+
+        let (events_tx, _) = broadcast::channel(64);
+        let provider = Self {
+            sdk,
+            state: Arc::new(RwLock::new(initial_state)),
+            events_tx,
+            refresh_policy,
+        };
+        provider.spawn_sdk_event_bridge();
+        provider
+    }
+
+    fn replace_state(&self, next: LicenseState, kind: LicenseEventKind, message: Option<String>) {
+        if let Ok(mut state) = self.state.write() {
+            *state = next.clone();
+        }
+        let _ = self.events_tx.send(LicenseEvent {
+            kind,
+            state: next,
+            message,
+        });
+    }
+
+    fn spawn_sdk_event_bridge(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let mut rx = self.sdk.subscribe();
+        let state = Arc::clone(&self.state);
+        let tx = self.events_tx.clone();
+        handle.spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                let kind = map_event_kind(event.kind);
+                let snapshot = state
+                    .read()
+                    .map(|state| state.clone())
+                    .unwrap_or_else(|_| LicenseState::inactive("License state unavailable"));
+                let _ = tx.send(LicenseEvent {
+                    kind,
+                    state: snapshot,
+                    message: None,
+                });
+            }
+        });
+    }
+
+    fn current_snapshot(&self) -> LicenseState {
+        self.state
+            .read()
+            .map(|state| state.clone())
+            .unwrap_or_else(|_| LicenseState::inactive("License state unavailable"))
+    }
+
+    fn degrade_current(&self, message: impl Into<String>, kind: LicenseEventKind) -> LicenseState {
+        let mut next = self.current_snapshot();
+        next.status = LicenseStatus::Degraded;
+        next.status_text = message.into();
+        self.replace_state(next.clone(), kind, Some(next.status_text.clone()));
+        next
+    }
+}
+
+#[async_trait]
+impl LicenseProvider for LicenseSeatProvider {
+    fn current_state(&self) -> LicenseState {
+        if self.sdk.current_license().is_some() {
+            let mut state = self.current_snapshot();
+            if matches!(
+                state.status,
+                LicenseStatus::Inactive | LicenseStatus::ConfigError
+            ) {
+                state.status = LicenseStatus::Active;
+                state.status_text = "Cached license available".into();
+            }
+            state
+        } else {
+            self.current_snapshot()
+        }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<LicenseEvent> {
+        self.events_tx.subscribe()
+    }
+
+    fn refresh_policy(&self) -> RefreshPolicy {
+        self.refresh_policy
+    }
+
+    fn has_entitlement(&self, feature: &str) -> bool {
+        self.sdk.has_entitlement(feature)
+    }
+
+    async fn activate(&self, key: &str) -> Result<LicenseState> {
+        let response = self
+            .sdk
+            .activate(key)
+            .await
+            .map_err(|err| LicenseError::Provider(err.to_string()))?;
+
+        let mut next = LicenseState::active_cached();
+        next.plan = response
+            .trusted_license
+            .as_ref()
+            .map(|license| Plan::from_key(&license.plan_key))
+            .unwrap_or(Plan::Unknown);
+        next.status_text = "License activated".into();
+        self.replace_state(next.clone(), LicenseEventKind::Activated, None);
+        Ok(next)
+    }
+
+    async fn validate(&self) -> Result<LicenseState> {
+        let result = self
+            .sdk
+            .validate()
+            .await
+            .map_err(|err| LicenseError::Provider(err.to_string()))?;
+
+        let next = if result.valid {
+            let mut state = LicenseState::active_validated(
+                Plan::from_key(&result.license.plan_key),
+                result
+                    .license
+                    .active_entitlements
+                    .iter()
+                    .map(|entitlement| entitlement.key.clone())
+                    .collect::<BTreeSet<_>>(),
+            );
+            state.expires_at = result.license.expires_at;
+            state.status_text = result
+                .warnings
+                .as_ref()
+                .filter(|warnings| !warnings.is_empty())
+                .map(|warnings| {
+                    warnings
+                        .iter()
+                        .map(|warning| warning.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_else(|| "License validated".into());
+            state
+        } else {
+            let mut state = LicenseState::inactive(
+                result
+                    .code
+                    .as_deref()
+                    .unwrap_or("license validation failed"),
+            );
+            state.status = LicenseStatus::Invalid;
+            state
+        };
+
+        self.replace_state(
+            next.clone(),
+            if next.is_active() {
+                LicenseEventKind::Validated
+            } else {
+                LicenseEventKind::ValidationFailed
+            },
+            None,
+        );
+        Ok(next)
+    }
+
+    async fn heartbeat(&self) -> Result<LicenseState> {
+        match self.sdk.heartbeat().await {
+            Ok(_) => {
+                let mut next = self.current_snapshot();
+                if next.is_active() && matches!(next.status, LicenseStatus::Degraded) {
+                    next.status = LicenseStatus::Active;
+                    next.status_text = "Heartbeat restored connectivity".into();
+                }
+                self.replace_state(next.clone(), LicenseEventKind::HeartbeatOk, None);
+                Ok(next)
+            }
+            Err(err) => {
+                let degraded = self.degrade_current(
+                    format!("Heartbeat failed: {err}"),
+                    LicenseEventKind::HeartbeatFailed,
+                );
+                Err(LicenseError::Provider(degraded.status_text))
+            }
+        }
+    }
+
+    async fn deactivate(&self) -> Result<LicenseState> {
+        self.sdk
+            .deactivate()
+            .await
+            .map_err(|err| LicenseError::Provider(err.to_string()))?;
+        let next = LicenseState::inactive("License deactivated");
+        self.replace_state(next.clone(), LicenseEventKind::Deactivated, None);
+        Ok(next)
+    }
+}
+
+pub struct DisabledProvider {
+    state: Arc<RwLock<LicenseState>>,
+    events_tx: broadcast::Sender<LicenseEvent>,
+}
+
+impl DisabledProvider {
+    pub fn new(message: impl Into<String>) -> Self {
+        let state = LicenseState::config_error(message);
+        let (events_tx, _) = broadcast::channel(8);
+        Self {
+            state: Arc::new(RwLock::new(state)),
+            events_tx,
+        }
+    }
+
+    fn snapshot(&self) -> LicenseState {
+        self.state
+            .read()
+            .map(|state| state.clone())
+            .unwrap_or_else(|_| LicenseState::inactive("License state unavailable"))
+    }
+}
+
+#[async_trait]
+impl LicenseProvider for DisabledProvider {
+    fn current_state(&self) -> LicenseState {
+        self.snapshot()
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<LicenseEvent> {
+        self.events_tx.subscribe()
+    }
+
+    fn refresh_policy(&self) -> RefreshPolicy {
+        RefreshPolicy::default()
+    }
+
+    fn has_entitlement(&self, _feature: &str) -> bool {
+        false
+    }
+
+    async fn activate(&self, _key: &str) -> Result<LicenseState> {
+        Err(LicenseError::NotConfigured(self.snapshot().status_text))
+    }
+
+    async fn validate(&self) -> Result<LicenseState> {
+        Ok(self.snapshot())
+    }
+
+    async fn heartbeat(&self) -> Result<LicenseState> {
+        Ok(self.snapshot())
+    }
+
+    async fn deactivate(&self) -> Result<LicenseState> {
+        Ok(self.snapshot())
+    }
+}
+
+fn map_event_kind(kind: EventKind) -> LicenseEventKind {
+    match kind {
+        EventKind::ActivationSuccess => LicenseEventKind::Activated,
+        EventKind::ActivationError => LicenseEventKind::ActivationFailed,
+        EventKind::ValidationSuccess => LicenseEventKind::Validated,
+        EventKind::ValidationFailed
+        | EventKind::ValidationError
+        | EventKind::ValidationOfflineFailed
+        | EventKind::ValidationAuthFailed
+        | EventKind::ValidationAutoFailed
+        | EventKind::LicenseRevoked
+        | EventKind::OfflineValidationFailed
+        | EventKind::OfflineTokenVerificationFailed
+        | EventKind::MachineFileVerificationFailed => LicenseEventKind::ValidationFailed,
+        EventKind::DeactivationSuccess => LicenseEventKind::Deactivated,
+        EventKind::DeactivationError => LicenseEventKind::DeactivationFailed,
+        EventKind::HeartbeatSuccess => LicenseEventKind::HeartbeatOk,
+        EventKind::HeartbeatError => LicenseEventKind::HeartbeatFailed,
+        _ => LicenseEventKind::Validated,
+    }
+}
+
+pub fn classify_binding_mode(active: bool) -> BindingMode {
+    if active {
+        BindingMode::NodeLocked
+    } else {
+        BindingMode::Unknown
+    }
+}
+
+pub fn classify_subject(active: bool) -> SubjectKind {
+    if active {
+        SubjectKind::User
+    } else {
+        SubjectKind::Unknown
+    }
+}

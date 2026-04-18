@@ -333,7 +333,13 @@ impl DashboardView {
     }
 
     /// Render the dashboard with access to the current lineage projection.
-    fn render_with_lineage(&mut self, frame: &mut Frame, area: Rect, lineage: &ExecutorLineage) {
+    fn render_with_lineage(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        lineage: &ExecutorLineage,
+        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+    ) {
         let node_count = lineage.nodes().count();
 
         // Compute aggregates once for both empty and non-empty paths.
@@ -415,6 +421,7 @@ impl DashboardView {
                     stream_in_flight: false,
                     issue_count: self.tracked_issues.len(),
                     alert_summary: self.alert_summary,
+                    license_badge,
                 },
             );
             return;
@@ -508,6 +515,7 @@ impl DashboardView {
                 stream_in_flight: false,
                 issue_count: self.tracked_issues.len(),
                 alert_summary: self.alert_summary,
+                license_badge,
             },
         );
     }
@@ -1521,7 +1529,7 @@ impl View for DashboardView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
-        self.render_with_lineage(frame, area, ctx.lineage);
+        self.render_with_lineage(frame, area, ctx.lineage, ctx.license_badge);
     }
 }
 

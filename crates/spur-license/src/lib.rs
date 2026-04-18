@@ -1,0 +1,241 @@
+mod licenseseat;
+pub mod provider;
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+pub use crate::licenseseat::{
+    classify_binding_mode, classify_subject, from_env, from_env_or_disabled,
+};
+pub use crate::provider::{LicenseProvider, RefreshPolicy};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LicenseStatus {
+    Inactive,
+    Active,
+    Degraded,
+    Invalid,
+    ConfigError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubjectKind {
+    User,
+    Organization,
+    Ci,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BindingMode {
+    NodeLocked,
+    FloatingCi,
+    Organization,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Plan {
+    Community,
+    StarterLtd,
+    BuilderLtd,
+    FounderLtd,
+    Pro,
+    Team,
+    Enterprise,
+    Unknown,
+}
+
+impl Plan {
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "community" => Self::Community,
+            "starter_ltd" | "starter-ltd" => Self::StarterLtd,
+            "builder_ltd" | "builder-ltd" => Self::BuilderLtd,
+            "founder_ltd" | "founder-ltd" => Self::FounderLtd,
+            "pro" => Self::Pro,
+            "team" => Self::Team,
+            "enterprise" => Self::Enterprise,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Community => "Community",
+            Self::StarterLtd => "Starter LTD",
+            Self::BuilderLtd => "Builder LTD",
+            Self::FounderLtd => "Founder LTD",
+            Self::Pro => "Pro",
+            Self::Team => "Team",
+            Self::Enterprise => "Enterprise",
+            Self::Unknown => "Licensed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LicenseState {
+    pub status: LicenseStatus,
+    pub subject_kind: SubjectKind,
+    pub plan: Plan,
+    pub features: BTreeSet<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub binding_mode: BindingMode,
+    pub offline_ok: bool,
+    pub status_text: String,
+}
+
+impl LicenseState {
+    pub fn inactive(message: impl Into<String>) -> Self {
+        Self {
+            status: LicenseStatus::Inactive,
+            subject_kind: SubjectKind::Unknown,
+            plan: Plan::Community,
+            features: BTreeSet::new(),
+            expires_at: None,
+            binding_mode: BindingMode::Unknown,
+            offline_ok: false,
+            status_text: message.into(),
+        }
+    }
+
+    pub fn config_error(message: impl Into<String>) -> Self {
+        let mut state = Self::inactive(message);
+        state.status = LicenseStatus::ConfigError;
+        state.status_text = state.status_text.trim().to_string();
+        state
+    }
+
+    pub fn active_cached() -> Self {
+        Self {
+            status: LicenseStatus::Active,
+            subject_kind: SubjectKind::User,
+            plan: Plan::Unknown,
+            features: BTreeSet::new(),
+            expires_at: None,
+            binding_mode: BindingMode::NodeLocked,
+            offline_ok: true,
+            status_text: "Cached license available".into(),
+        }
+    }
+
+    pub fn active_validated(plan: Plan, features: BTreeSet<String>) -> Self {
+        Self {
+            status: LicenseStatus::Active,
+            subject_kind: SubjectKind::User,
+            plan,
+            features,
+            expires_at: None,
+            binding_mode: BindingMode::NodeLocked,
+            offline_ok: true,
+            status_text: "License validated".into(),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self.status, LicenseStatus::Active | LicenseStatus::Degraded)
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        matches!(self.status, LicenseStatus::Degraded)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LicenseEvent {
+    pub kind: LicenseEventKind,
+    pub state: LicenseState,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LicenseEventKind {
+    Activated,
+    ActivationFailed,
+    Validated,
+    ValidationFailed,
+    Deactivated,
+    DeactivationFailed,
+    HeartbeatOk,
+    HeartbeatFailed,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LicenseError {
+    #[error("{0}")]
+    NotConfigured(String),
+    #[error("{0}")]
+    Provider(String),
+}
+
+pub type Result<T> = std::result::Result<T, LicenseError>;
+
+#[derive(Clone)]
+pub struct SpurLicense {
+    provider: Arc<dyn LicenseProvider>,
+}
+
+impl SpurLicense {
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
+            provider: Arc::new(crate::licenseseat::from_env()?),
+        })
+    }
+
+    pub fn from_env_or_disabled() -> Self {
+        Self {
+            provider: crate::licenseseat::from_env_or_disabled(),
+        }
+    }
+
+    pub fn current_state(&self) -> LicenseState {
+        self.provider.current_state()
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<LicenseEvent> {
+        self.provider.subscribe()
+    }
+
+    pub fn refresh_policy(&self) -> RefreshPolicy {
+        self.provider.refresh_policy()
+    }
+
+    pub fn has_entitlement(&self, feature: &str) -> bool {
+        self.provider.has_entitlement(feature)
+    }
+
+    pub async fn activate(&self, key: &str) -> Result<LicenseState> {
+        self.provider.activate(key).await
+    }
+
+    pub async fn validate(&self) -> Result<LicenseState> {
+        self.provider.validate().await
+    }
+
+    pub async fn heartbeat(&self) -> Result<LicenseState> {
+        self.provider.heartbeat().await
+    }
+
+    pub async fn deactivate(&self) -> Result<LicenseState> {
+        self.provider.deactivate().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_plan_maps_to_unknown() {
+        assert_eq!(Plan::from_key("mystery"), Plan::Unknown);
+    }
+
+    #[test]
+    fn inactive_state_is_not_active() {
+        assert!(!LicenseState::inactive("nope").is_active());
+    }
+}

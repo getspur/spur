@@ -16,6 +16,7 @@ spur-acp = { workspace = true }
 spur-core = { workspace = true }
 spur-cost = { workspace = true }
 spur-pm = { workspace = true }
+spur-license = { workspace = true }
 spur-tui = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

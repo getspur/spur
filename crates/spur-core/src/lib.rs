@@ -1,5 +1,6 @@
 pub mod event_funnel;
 pub mod event_sink;
+pub mod license_runtime;
 pub mod lineage;
 pub(crate) mod notification_drain;
 pub mod notification_pump;

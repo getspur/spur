@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -176,6 +177,57 @@ pub struct IssueDetailEvent {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Snapshot of licensing state mirrored into the ACP event bus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LicenseStateEvent {
+    pub status: LicenseStatusEvent,
+    pub subject_kind: LicenseSubjectKind,
+    pub plan: LicensePlan,
+    pub features: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub binding_mode: LicenseBindingMode,
+    pub offline_ok: bool,
+    pub status_text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LicenseStatusEvent {
+    Inactive,
+    Active,
+    Degraded,
+    Invalid,
+    ConfigError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LicenseSubjectKind {
+    User,
+    Organization,
+    Ci,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LicenseBindingMode {
+    NodeLocked,
+    FloatingCi,
+    Organization,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LicensePlan {
+    Community,
+    StarterLtd,
+    BuilderLtd,
+    FounderLtd,
+    Pro,
+    Team,
+    Enterprise,
+    Unknown,
+}
+
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpurEventBody {
@@ -325,6 +377,12 @@ pub enum SpurEventBody {
         /// Human-readable alert messages (top 5) for TUI activity log.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         details: Vec<String>,
+    },
+
+    /// Licensing state snapshot, emitted at startup and whenever the
+    /// provider refreshes cached state.
+    LicenseUpdated {
+        state: LicenseStateEvent,
     },
 
     // ── Interactive loop events ──────────────────────────────────────

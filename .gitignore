@@ -3,7 +3,13 @@
 .worktrees/
 *.db
 .idea/
+.DS_Store
+.claude/
 python/dist/
 
 # bv (beads viewer) local config and caches
 .bv/
+**/.spur/events/**
+**/.spur/logs/**
+.spur/session_metadata.json
+/.beads/

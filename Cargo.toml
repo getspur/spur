@@ -7,6 +7,7 @@ members = [
     "crates/spur-pm",
     "crates/spur-worktree",
     "crates/spur-cost",
+    "crates/spur-license",
     "crates/spur-tui",
     "crates/spur-cli",
 ]
@@ -57,6 +58,7 @@ directories = "5"
 
 # ACP SDK
 agent-client-protocol = { version = "0.10", features = ["unstable_session_usage"] }
+licenseseat = "=0.5.3"
 
 # Workspace crates
 spur-acp = { path = "crates/spur-acp" }
@@ -65,6 +67,7 @@ spur-core = { path = "crates/spur-core" }
 spur-pm = { path = "crates/spur-pm" }
 spur-worktree = { path = "crates/spur-worktree" }
 spur-cost = { path = "crates/spur-cost" }
+spur-license = { path = "crates/spur-license" }
 spur-tui = { path = "crates/spur-tui" }
 
 # The profile that 'dist' will build with
