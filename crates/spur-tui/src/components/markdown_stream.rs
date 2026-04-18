@@ -257,7 +257,7 @@ impl MarkdownStream {
     /// Force a flush immediately.
     pub fn flush_now(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         self.dirty_since = None;
-        self.rebuild(states)
+        self.rebuild(states, /* permit_eof_closure */ false)
     }
 
     /// Force the next `maybe_flush`/`flush_now` to rebuild even if not yet
@@ -453,161 +453,39 @@ impl MarkdownStream {
         (items, placeholders, new_fences, refreshed)
     }
 
-    /// Rebuild `cached_lines` from `raw_text`.
-    fn rebuild(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
-        // ── Stage 1: pre-scan raw_text for closed ```mermaid fences ───────
-        // Skipped entirely when the terminal has no image-protocol support —
-        // mermaid fences then flow through tui-markdown as ordinary code.
-        let mut discovered: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-        if self.mermaid_enabled {
-            use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-            let parser = Parser::new_ext(&self.raw_text, Options::empty()).into_offset_iter();
-            let mut open_fence_start: Option<usize> = None;
-            let mut buf = String::new();
-            for (ev, range) in parser {
-                match ev {
-                    Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
-                        if info.as_ref().trim().eq_ignore_ascii_case("mermaid") {
-                            open_fence_start = Some(range.start);
-                            buf.clear();
-                        }
-                    }
-                    Event::Text(t) if open_fence_start.is_some() => {
-                        buf.push_str(&t);
-                    }
-                    Event::End(TagEnd::CodeBlock) => {
-                        if let Some(start) = open_fence_start.take() {
-                            // pulldown-cmark auto-closes open fences at EOF.
-                            // Distinguish a truly closed fence by checking
-                            // that the slice just before range.end ends with
-                            // a closing ``` (3+ backticks after trimming ws).
-                            let slice = self.raw_text[..range.end]
-                                .trim_end_matches(['\n', '\r', ' ', '\t']);
-                            if slice.ends_with("```") {
-                                discovered.push((start..range.end, std::mem::take(&mut buf)));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+    /// Rebuild `cached_items` from raw_text. Two stages:
+    /// Stage 0: pulldown scan for offsets + mermaid fences.
+    /// Stage 1: tui_markdown parse of raw_text[..authoritative_end].
+    ///
+    /// `permit_eof_closure = true` relaxes the cursor rule to allow events
+    /// at EOF; used by `flush_final` on TurnComplete.
+    ///
+    /// Panic safety: mutations to cached_items / fence_placeholders /
+    /// known_fences happen before flushed_byte_len is assigned. If any
+    /// stage panics, flushed_byte_len retains its prior value; the next
+    /// successful rebuild restores consistency (C1).
+    fn rebuild(
+        &mut self,
+        states: &StateLookup<'_>,
+        permit_eof_closure: bool,
+    ) -> Vec<FenceRef> {
+        // Stage 0: pulldown scan.
+        let (new_flushed, discovered_fences) =
+            scan_authoritative(&self.raw_text, self.mermaid_enabled, permit_eof_closure);
 
-        // ── Stage 2: match against known_fences; assign ids to new ones ───
-        let mut new_fences: Vec<FenceRef> = Vec::new();
-        let mut refreshed: Vec<FenceRef> = Vec::with_capacity(discovered.len());
-        for (range, code) in discovered {
-            let existing = self
-                .known_fences
-                .iter()
-                .find(|f| f.byte_range == range)
-                .cloned();
-            match existing {
-                Some(f) => refreshed.push(f),
-                None => {
-                    let id = MermaidId(self.next_fence_id);
-                    self.next_fence_id += 1;
-                    let f = FenceRef {
-                        id,
-                        byte_range: range,
-                        code,
-                    };
-                    new_fences.push(f.clone());
-                    refreshed.push(f);
-                }
-            }
-        }
-        self.known_fences = refreshed.clone();
+        // Stage 1: build items for the committed prefix.
+        // `.to_owned()` decouples the borrow on self.raw_text so we can
+        // then mutate self inside build_items_for without overlapping
+        // borrows.
+        let prefix_owned = self.raw_text[..new_flushed].to_owned();
+        let (items, placeholders, new_fences, refreshed) =
+            self.build_items_for(&prefix_owned, discovered_fences, states);
 
-        // ── Stage 3: build transformed input with sentinel lines ──────────
-        let transformed = {
-            let mut out = String::with_capacity(self.raw_text.len());
-            let mut cursor = 0usize;
-            for f in &refreshed {
-                if f.byte_range.start > cursor {
-                    out.push_str(&self.raw_text[cursor..f.byte_range.start]);
-                }
-                // Surrounding blank lines ensure pulldown-cmark treats the
-                // sentinel as its own paragraph, not a continuation.
-                out.push_str(&format!("\n\u{0000}MERMAID:{}\u{0000}\n", f.id.0));
-                cursor = f.byte_range.end;
-            }
-            if cursor < self.raw_text.len() {
-                out.push_str(&self.raw_text[cursor..]);
-            }
-            out
-        };
-
-        // ── Stage 3.5: force table-like rows onto their own lines ────────
-        // `tui-markdown` does not yet render GFM tables; without this,
-        // rows are reflowed into a single paragraph line. Injecting
-        // CommonMark hard breaks preserves line boundaries without
-        // producing any visible markers in the output.
-        let transformed = inject_hard_breaks_in_tables(&transformed);
-
-        // ── Stage 4: parse transformed text via tui-markdown ──────────────
-        if transformed.is_empty() {
-            self.cached_items.clear();
-            self.fence_placeholders.clear();
-            return new_fences;
-        }
-        let text = tui_markdown::from_str(&transformed);
-        let parsed_lines: Vec<ratatui::text::Line<'static>> = text
-            .lines
-            .into_iter()
-            .map(|line| {
-                let spans: Vec<ratatui::text::Span<'static>> =
-                    line.spans.into_iter().map(convert_span).collect();
-                let mut out = ratatui::text::Line::from(spans);
-                out.style = convert_style(line.style);
-                out.alignment = line.alignment.map(convert_alignment);
-                out
-            })
-            .collect();
-
-        // ── Stage 5 (revised): split lines into StreamItems by fence sentinels ──
-        let mut items: Vec<StreamItem> = Vec::new();
-        let mut current_text: Vec<ratatui::text::Line<'static>> = Vec::new();
-        let mut placeholders: std::collections::HashMap<MermaidId, Line<'static>> =
-            std::collections::HashMap::new();
-
-        for line in parsed_lines {
-            let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let trimmed = raw.trim();
-            if let Some(rest) = trimmed
-                .strip_prefix('\u{0000}')
-                .and_then(|s| s.strip_suffix('\u{0000}'))
-                .and_then(|s| s.strip_prefix("MERMAID:"))
-            {
-                if !current_text.is_empty() {
-                    items.push(StreamItem::Text(std::mem::take(&mut current_text)));
-                }
-                let id_num: u64 = rest.parse().unwrap_or(0);
-                let id = MermaidId(id_num);
-
-                // State-aware placeholder for the back-compat `lines()`
-                // view. The shared helper keeps this text in sync with the
-                // inline render path in react_trace.rs.
-                use super::mermaid::FenceRender;
-                let render = if states.is_err(id) {
-                    FenceRender::Error
-                } else if states.is_pending(id) {
-                    FenceRender::Pending
-                } else {
-                    FenceRender::Ready(1) // height unused in the 📊 fallback
-                };
-                placeholders.insert(id, super::mermaid::fence_placeholder_line(id, render));
-                items.push(StreamItem::Fence(id));
-            } else {
-                current_text.push(line);
-            }
-        }
-        if !current_text.is_empty() {
-            items.push(StreamItem::Text(current_text));
-        }
-
+        // Stage 2: commit. flushed_byte_len assigned LAST (panic discipline).
         self.cached_items = items;
         self.fence_placeholders = placeholders;
+        self.known_fences = refreshed;
+        self.flushed_byte_len = new_flushed;
 
         new_fences
     }
@@ -767,7 +645,9 @@ mod stream_item_tests {
     #[test]
     fn items_splits_text_and_fences() {
         let mut s = MarkdownStream::new();
-        s.append("Intro prose\n\n```mermaid\nflowchart LR\nA-->B\n```\n\nOutro prose\n");
+        // "Outro prose\n\n" followed by more content ensures the cursor
+        // advances past "Outro prose" (End(Paragraph) at range.end < len).
+        s.append("Intro prose\n\n```mermaid\nflowchart LR\nA-->B\n```\n\nOutro prose\n\nMore\n");
         let _ = s.flush_now(&StateLookup::empty());
 
         let items = s.items();
@@ -844,8 +724,9 @@ mod stream_item_tests {
     fn gfm_table_is_wrapped_and_preserves_line_boundaries() {
         // Without the wrap, tui-markdown flows these rows into one paragraph
         // line. With the wrap, they must render as separate lines.
+        // Trailing paragraph ensures the cursor advances past the table block.
         let mut s = MarkdownStream::new();
-        s.append("| Key | Action |\n|---|---|\n| Esc | cancel |\n| Enter | submit |\n");
+        s.append("| Key | Action |\n|---|---|\n| Esc | cancel |\n| Enter | submit |\n\nEnd\n");
         let _ = s.flush_now(&StateLookup::empty());
 
         let joined = s.cached_lines_debug().join("\n");
@@ -943,6 +824,7 @@ mod stream_item_tests {
         // Realistic LLM output: prose, table, more prose, no blank-line
         // separators. Must render every row on its own line, separated
         // from surrounding prose, with no visible ``` markers.
+        // Trailing paragraph ensures cursor advances past "That's it." block.
         let mut s = MarkdownStream::new();
         s.append(
             "Here are the keybindings:\n\
@@ -950,7 +832,8 @@ mod stream_item_tests {
              |---|---|\n\
              | Esc | cancel |\n\
              | Enter | submit |\n\
-             That's it.\n",
+             That's it.\n\
+             \nDone\n",
         );
         let _ = s.flush_now(&StateLookup::empty());
         let joined = s.cached_lines_debug().join("\n");
