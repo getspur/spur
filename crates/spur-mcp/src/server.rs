@@ -730,6 +730,28 @@ impl McpCallbackServer {
         JsonRpcResponse::error(id, -32602, format!("Unknown delegation: {delegation_id}"))
     }
 
+    /// Translate a `DelegationResult` from the orchestrator's `__cancel_delegation`
+    /// stub into a JSON-RPC response. Extracted as a free function so it can
+    /// be unit-tested without a live channel. When the status is `Failed`,
+    /// the response is a JSON-RPC error (code -32601, "Method not
+    /// implemented") carrying the orchestrator's error message. Any other
+    /// status is surfaced as success; the body is `result.summary` when
+    /// present, else a debug-rendered status.
+    pub(crate) fn cancel_result_to_response(id: Value, result: DelegationResult) -> JsonRpcResponse {
+        if let DelegationStatus::Failed { ref error } = result.status {
+            return JsonRpcResponse::error(
+                id,
+                -32601,
+                format!("cancel_delegation: {error}"),
+            );
+        }
+        let text = result.summary.clone().unwrap_or_else(|| format!("{:?}", result.status));
+        JsonRpcResponse::success(
+            id,
+            json!({ "content": [{ "type": "text", "text": text }] }),
+        )
+    }
+
     async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
         let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
             Some(d) => d.to_string(),
@@ -792,14 +814,7 @@ impl McpCallbackServer {
             // will return the actual cancellation result.
             match rx.await {
                 Ok(result) => {
-                    let text = result.summary.unwrap_or_else(|| match &result.status {
-                        DelegationStatus::Failed { error } => error.clone(),
-                        other => format!("{:?}", other),
-                    });
-                    return JsonRpcResponse::success(
-                        id,
-                        json!({ "content": [{ "type": "text", "text": text }] }),
-                    );
+                    return Self::cancel_result_to_response(id, result);
                 }
                 Err(_) => {
                     return JsonRpcResponse::internal_error(
@@ -1868,5 +1883,62 @@ transport = "acp""#,
         assert_eq!(info.name, "unknown-agent");
         assert!(info.description.is_none());
         assert!(info.good_for.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cancel_delegation_tests {
+    use super::*;
+    use serde_json::json;
+    use spur_acp::{DelegationResult, DelegationStatus};
+
+    /// Simulated orchestrator response shape for the `__cancel_delegation`
+    /// stub: status=Failed, summary=None. The test only exercises the
+    /// pure translation from `DelegationResult` to `JsonRpcResponse` —
+    /// extract this into a pure helper fn on McpCallbackServer so the
+    /// test doesn't need a live channel.
+    #[test]
+    fn failed_result_maps_to_jsonrpc_error() {
+        let id = json!(1);
+        let result = DelegationResult {
+            status: DelegationStatus::Failed {
+                error: "Internal operation not yet wired: __cancel_delegation".into(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+        };
+
+        let resp = McpCallbackServer::cancel_result_to_response(id.clone(), result);
+
+        // MUST be a JSON-RPC error, not success.
+        assert!(
+            resp.error.is_some(),
+            "cancel_delegation stub-Failed must become JSON-RPC error, got success: {resp:?}",
+        );
+        let err = resp.error.as_ref().unwrap();
+        assert_eq!(err.code, -32601);
+        assert!(
+            err.message.contains("cancel_delegation"),
+            "error message should reference the tool: {}", err.message,
+        );
+    }
+
+    #[test]
+    fn successful_result_stays_success() {
+        let id = json!(1);
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("cancelled".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+        };
+
+        let resp = McpCallbackServer::cancel_result_to_response(id, result);
+        assert!(resp.error.is_none(), "success result must stay success");
     }
 }
