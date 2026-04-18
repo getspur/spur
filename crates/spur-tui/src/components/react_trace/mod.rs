@@ -263,6 +263,13 @@ impl ReactTrace {
         self.dirty_from = Some(prev.map_or(idx, |d| d.min(idx)));
     }
 
+    /// Public wrapper for external callers that legitimately mutate an
+    /// entry in-place (e.g. `SessionUpdate::ToolCallUpdate` merging into
+    /// an existing `Act`). Bumps generation + marks cache dirty from idx.
+    pub(crate) fn mark_dirty_from_for_update(&mut self, idx: usize) {
+        self.mark_dirty_from(idx);
+    }
+
     /// Return a short kind name for the most recent entry, or `None` if empty.
     pub fn last_entry_kind_name(&self) -> Option<&'static str> {
         self.entries.last().map(|e| match &e.kind {
