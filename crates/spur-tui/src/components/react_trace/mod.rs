@@ -443,6 +443,10 @@ impl ReactTrace {
     }
 
     /// Force an immediate rebuild of every markdown stream.
+    ///
+    /// Used on TurnComplete — uses `flush_final` so trailing content
+    /// (paragraphs / fence closes at EOF) gets committed and styled
+    /// instead of rendering as plain tail.
     #[cfg(feature = "markdown")]
     pub fn force_flush_all(
         &mut self,
@@ -451,7 +455,7 @@ impl ReactTrace {
         let mut out = Vec::new();
         for (idx, entry) in self.entries.iter_mut().enumerate() {
             if let Some(stream) = entry.markdown.as_mut() {
-                for fence in stream.flush_now(states) {
+                for fence in stream.flush_final(states) {
                     out.push((idx, fence));
                 }
             }
@@ -618,19 +622,38 @@ impl ReactTrace {
                     lines.push(format!("{} ✉ {}", entry.timestamp, agent));
 
                     #[cfg(feature = "markdown")]
-                    let used_markdown = entry
-                        .markdown
-                        .as_ref()
-                        .filter(|stream| !stream.items().is_empty())
-                        .map(|stream| {
-                            for line in stream.lines() {
-                                let joined: String =
-                                    line.spans.iter().map(|s| s.content.as_ref()).collect();
-                                lines.push(format!("   {}", joined));
+                    let used_markdown = if let Some(stream) = entry.markdown.as_ref() {
+                        use crate::components::markdown_stream::StreamItem;
+                        let (items, tail) = stream.items_and_tail();
+                        for item in items {
+                            match item {
+                                StreamItem::Text(text_lines) => {
+                                    for line in text_lines {
+                                        let joined: String =
+                                            line.spans.iter().map(|s| s.content.as_ref()).collect();
+                                        lines.push(format!("   {}", joined));
+                                    }
+                                }
+                                StreamItem::Fence(id) => {
+                                    let placeholder = stream
+                                        .fence_placeholder_for(*id)
+                                        .map(|l| {
+                                            l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                                        })
+                                        .unwrap_or_else(|| {
+                                            format!("[📊 mermaid #{} · press Alt-v to view]", id.0)
+                                        });
+                                    lines.push(format!("   {}", placeholder));
+                                }
                             }
-                            true
-                        })
-                        .unwrap_or(false);
+                        }
+                        for tail_line in tail.lines() {
+                            lines.push(format!("   {}", tail_line));
+                        }
+                        true
+                    } else {
+                        false
+                    };
 
                     #[cfg(not(feature = "markdown"))]
                     let used_markdown = false;
@@ -751,14 +774,39 @@ impl ReactTrace {
 
 #[cfg(test)]
 impl ReactTrace {
-    /// Test-only helper: mutable access to the entry list.
-    pub(crate) fn entries_mut_for_test(&mut self) -> &mut [TraceEntry] {
-        &mut self.entries
-    }
-
     /// Test-only helper: returns each line as a joined `String` of span text.
     pub(crate) fn render_lines_for_test(&self, _width: u16) -> Vec<String> {
         self.render_to_strings()
+    }
+
+    pub fn new_for_tests() -> Self {
+        Self::new()
+    }
+
+    #[cfg(feature = "markdown")]
+    pub fn build_virtual_rows_for_tests(
+        &self,
+        from: usize,
+        width: u16,
+        states: &std::collections::HashMap<
+            crate::components::mermaid::MermaidId,
+            crate::components::mermaid::FenceRender,
+        >,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+    ) -> (Vec<VirtualRow>, Vec<usize>) {
+        self.build_virtual_rows(from, width, states, lineage)
+    }
+
+    pub fn entries_for_tests(&self) -> &[TraceEntry] {
+        &self.entries
+    }
+
+    pub fn build_display_lines_for_tests(
+        &self,
+        spinner_frame: &str,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+    ) -> Vec<ratatui::text::Line<'static>> {
+        self.build_display_lines(spinner_frame, lineage)
     }
 }
 
@@ -783,10 +831,13 @@ mod markdown_integration_tests {
     fn post_flush_rendered_lines_still_show_text() {
         use crate::components::markdown_stream::StateLookup;
         let mut trace = ReactTrace::new();
-        trace.append_message("# Heading\n\nBody text", "claude", "10:00:00".to_string());
+        // Two paragraphs separated by \n\n with trailing content after the
+        // second paragraph so its End event has range.end < raw_text.len(),
+        // making it authoritative under flush_now (permit_eof_closure=false).
+        trace.append_message("# Heading\n\nBody text\n\nmore", "claude", "10:00:00".to_string());
 
         let states = StateLookup::empty();
-        let _ = trace.drain_fence_dispatches(&states);
+        let _ = trace.force_flush_all(&states);
 
         let rendered = trace.render_lines_for_test(60);
         let joined = rendered.join("\n");
@@ -803,9 +854,11 @@ mod markdown_integration_tests {
     #[test]
     fn items_path_renders_same_text_as_lines_path() {
         let mut trace = ReactTrace::new();
-        trace.append_message("# Heading\n\nBody", "claude", "10:00".to_string());
+        // Two paragraphs separated by \n\n with trailing content so the
+        // second paragraph's End event has range.end < raw_text.len().
+        trace.append_message("# Heading\n\nBody\n\nmore", "claude", "10:00".to_string());
         use crate::components::markdown_stream::StateLookup;
-        let _ = trace.drain_fence_dispatches(&StateLookup::empty());
+        let _ = trace.force_flush_all(&StateLookup::empty());
 
         let rendered = trace.render_lines_for_test(60);
         let joined = rendered.join("\n");
@@ -826,10 +879,10 @@ mod markdown_integration_tests {
         let states = StateLookup::empty();
         let _ = trace.force_flush_all(&states);
 
-        let entries = trace.entries_mut_for_test();
+        let entries = trace.entries_for_test();
         assert!(!entries.is_empty(), "expected at least one entry");
         for entry in entries {
-            if let Some(stream) = entry.markdown.as_mut() {
+            if let Some(stream) = entry.markdown.as_ref() {
                 let has_fence = stream
                     .items()
                     .iter()
@@ -1058,6 +1111,9 @@ mod virtual_row_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod streaming_tests;
 
 #[cfg(test)]
 mod tests {

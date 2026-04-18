@@ -25,7 +25,8 @@ fn append_chunks_then_flush_equals_full_parse() {
 #[test]
 fn debounce_does_not_rebuild_until_flush_or_timeout() {
     let mut s = MarkdownStream::new();
-    s.append("# A\n");
+    // Trailing paragraph ensures cursor advances past the heading block.
+    s.append("# A\n\nbody\n");
     s.flush_now(&StateLookup::empty());
     assert!(!s.cached_lines_debug().is_empty());
 }
@@ -40,7 +41,8 @@ fn empty_stream_renders_to_empty_lines() {
 #[test]
 fn headings_preserve_bold_style() {
     let mut s = MarkdownStream::new();
-    s.append("# Heading\n");
+    // Trailing paragraph ensures cursor advances past the heading block.
+    s.append("# Heading\n\nbody\n");
     s.flush_now(&StateLookup::empty());
     // The first Line carries BOLD via Line::style (tui-markdown uses
     // Line::styled for heading prefixes, placing the style on the line
@@ -200,4 +202,322 @@ fn pending_to_ready_transition_flips_placeholder() {
         rendered.contains('📊'),
         "should show ready placeholder: {rendered}"
     );
+}
+
+#[test]
+fn flushed_byte_len_starts_at_zero() {
+    let s = MarkdownStream::new();
+    assert_eq!(s.flushed_byte_len_for_tests(), 0);
+}
+
+#[test]
+fn finalized_starts_false() {
+    let s = MarkdownStream::new();
+    assert!(!s.is_finalized());
+}
+
+#[test]
+fn items_and_tail_empty_stream() {
+    let s = MarkdownStream::new();
+    let (items, tail) = s.items_and_tail();
+    assert_eq!(items.len(), 0);
+    assert_eq!(tail, "");
+}
+
+#[test]
+fn items_and_tail_before_flush_shows_entire_raw_text_as_tail() {
+    let mut s = MarkdownStream::new();
+    s.append("Hello world");
+    let (items, tail) = s.items_and_tail();
+    assert_eq!(items.len(), 0, "no flush yet, no committed items");
+    assert_eq!(tail, "Hello world", "all raw_text should be in the tail");
+}
+
+#[test]
+fn fence_placeholder_for_unknown_id_returns_none() {
+    use spur_tui::components::mermaid::MermaidId;
+    let s = MarkdownStream::new();
+    assert!(s.fence_placeholder_for(MermaidId(999)).is_none());
+}
+
+#[test]
+fn scan_authoritative_empty_input() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let (end, fences) = scan_authoritative_for_tests("", /*mermaid*/ true, /*permit_eof*/ false);
+    assert_eq!(end, 0);
+    assert!(fences.is_empty());
+}
+
+#[test]
+fn scan_authoritative_paragraph_at_eof_not_authoritative() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let (end, _) = scan_authoritative_for_tests("Hello", true, false);
+    assert_eq!(end, 0, "paragraph at EOF must not advance");
+}
+
+#[test]
+fn scan_authoritative_paragraph_with_content_after_advances() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let input = "Hello\n\nworld";
+    let (end, _) = scan_authoritative_for_tests(input, true, false);
+    assert!(end > 0 && end < input.len(),
+        "end={} len={}", end, input.len());
+}
+
+#[test]
+fn scan_authoritative_open_list_not_authoritative() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    // Depth-gate test: open list at EOF must not leak End(Item) authority.
+    let (end, _) = scan_authoritative_for_tests("- item1\n- item2\n", true, false);
+    assert_eq!(end, 0);
+}
+
+#[test]
+fn scan_authoritative_eof_permissive_commits_final_paragraph() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let input = "Hello";
+    let (end, _) = scan_authoritative_for_tests(input, true, /*permit_eof*/ true);
+    assert_eq!(end, input.len());
+}
+
+#[test]
+fn scan_authoritative_registers_closed_mermaid_fence() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let input = "```mermaid\nflowchart LR\nA-->B\n```\nmore\n";
+    let (_, fences) = scan_authoritative_for_tests(input, true, false);
+    assert_eq!(fences.len(), 1);
+    assert!(fences[0].1.contains("flowchart LR"));
+}
+
+#[test]
+fn scan_authoritative_does_not_register_fence_at_eof() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    // Fence close is the last byte; coherence fix must not register it.
+    let input = "```mermaid\nflowchart LR\nA-->B\n```";
+    let (_, fences) = scan_authoritative_for_tests(input, true, false);
+    assert_eq!(fences.len(), 0, "fence ending at EOF must not register");
+}
+
+#[test]
+fn rebuild_advances_cursor_past_authoritative_events() {
+    let mut s = MarkdownStream::new();
+    s.append("# Title\n\nBody paragraph\n\nMore");
+    s.flush_now(&StateLookup::empty());
+    let flushed = s.flushed_byte_len_for_tests();
+    assert!(flushed > 0 && flushed < s.raw_text().len(),
+        "flushed={} raw_len={}", flushed, s.raw_text().len());
+}
+
+#[test]
+fn rebuild_does_not_advance_past_open_list() {
+    let mut s = MarkdownStream::new();
+    s.append("- item1\n- item2\n");
+    s.flush_now(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), 0,
+        "open list at EOF must not advance cursor");
+}
+
+#[test]
+fn flushed_byte_len_is_monotonic() {
+    let mut s = MarkdownStream::new();
+    s.append("# A\n\n");
+    s.flush_now(&StateLookup::empty());
+    let a = s.flushed_byte_len_for_tests();
+    s.append("# B\n\n");
+    s.flush_now(&StateLookup::empty());
+    let b = s.flushed_byte_len_for_tests();
+    assert!(b >= a, "monotonic: {} -> {}", a, b);
+}
+
+#[test]
+fn flush_final_commits_trailing_paragraph() {
+    let mut s = MarkdownStream::new();
+    s.append("# Title\n\nFinal paragraph");
+    s.flush_final(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), s.raw_text().len(),
+        "flush_final must commit all bytes including EOF");
+    assert!(s.is_finalized());
+}
+
+#[test]
+fn flush_final_commits_trailing_fence() {
+    let mut s = MarkdownStream::new();
+    s.append("Intro\n\n```rust\nfn x() {}\n```");
+    s.flush_final(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), s.raw_text().len());
+}
+
+#[test]
+fn heuristic_fires_on_double_newline_with_content() {
+    use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
+    assert!(has_authoritative_closure_pattern_for_tests("para\n\nmore"));
+}
+
+#[test]
+fn heuristic_declines_double_newline_at_eof() {
+    use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
+    assert!(!has_authoritative_closure_pattern_for_tests("para\n\n"));
+}
+
+#[test]
+fn heuristic_fires_on_fence_close_with_content() {
+    use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
+    assert!(has_authoritative_closure_pattern_for_tests("```\ncode\n```\nmore"));
+}
+
+#[test]
+fn heuristic_declines_fence_close_at_eof() {
+    use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
+    assert!(!has_authoritative_closure_pattern_for_tests("```\ncode\n```\n"));
+}
+
+#[test]
+fn safety_cap_is_64kib() {
+    use spur_tui::components::markdown_stream::SAFETY_CAP_BYTES;
+    assert_eq!(SAFETY_CAP_BYTES, 64 * 1024);
+}
+
+#[test]
+fn maybe_flush_short_circuits_when_not_dirty() {
+    let mut s = MarkdownStream::new();
+    s.append("# A\n\nbody");
+    s.flush_now(&StateLookup::empty());
+    assert!(!s.is_dirty(), "flush_now clears dirty_since");
+    // maybe_flush on a clean stream must return empty without work.
+    let out = s.maybe_flush(&StateLookup::empty());
+    assert!(out.is_empty());
+}
+
+#[test]
+fn maybe_flush_fast_path_fires_on_boundary_pattern() {
+    let mut s = MarkdownStream::new();
+    // Append content that contains \n\n with trailing content — heuristic
+    // fires before DEBOUNCE elapses.
+    s.append("paragraph\n\nmore content");
+    let before = s.flushed_byte_len_for_tests();
+    s.maybe_flush(&StateLookup::empty());
+    let after = s.flushed_byte_len_for_tests();
+    assert!(after > before,
+        "fast path should have flushed immediately; before={} after={}",
+        before, after);
+}
+
+#[test]
+fn maybe_flush_declines_when_no_boundary_before_debounce() {
+    let mut s = MarkdownStream::new();
+    s.append("streaming without boundaries");
+    // Immediately after append, dirty but no boundary, debounce not
+    // elapsed → no flush.
+    s.maybe_flush(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), 0);
+    // Stream still dirty.
+    assert!(s.is_dirty());
+}
+
+#[test]
+fn maybe_flush_safety_cap_suppresses_rebuild() {
+    use spur_tui::components::markdown_stream::SAFETY_CAP_BYTES;
+    let mut s = MarkdownStream::new();
+    // A long boundary-free tail.
+    let huge = "x".repeat(SAFETY_CAP_BYTES + 100);
+    s.append(&huge);
+    let out = s.maybe_flush(&StateLookup::empty());
+    assert!(out.is_empty());
+    // Safety valve clears dirty_since so we don't re-enter on next tick.
+    assert!(!s.is_dirty(),
+        "safety valve must clear dirty_since to prevent tight looping");
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "append after flush_final")]
+fn append_after_flush_final_debug_asserts() {
+    let mut s = MarkdownStream::new();
+    s.append("hello");
+    s.flush_final(&StateLookup::empty());
+    // Contract violation:
+    s.append("more");
+}
+
+#[test]
+fn append_before_flush_final_never_panics() {
+    let mut s = MarkdownStream::new();
+    s.append("hello");
+    s.append(" world");
+    assert_eq!(s.raw_text(), "hello world");
+}
+
+#[test]
+fn setext_promotion_retroactively_restyles_at_boundary() {
+    let mut s = MarkdownStream::new();
+    s.append("Hello\n");
+    s.flush_now(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), 0);
+
+    s.append("===\n\nbody");
+    s.flush_now(&StateLookup::empty());
+    assert!(s.flushed_byte_len_for_tests() > 0,
+        "setext + trailing content should advance cursor");
+
+    let rendered = s.cached_lines_debug().join("\n");
+    assert!(rendered.to_lowercase().contains("hello"),
+        "committed prefix should contain the heading text");
+}
+
+#[test]
+fn list_in_progress_renders_markers_as_plain_tail() {
+    let mut s = MarkdownStream::new();
+    s.append("- item1\n- item2\n");
+    s.flush_now(&StateLookup::empty());
+    let (items, tail) = s.items_and_tail();
+    assert_eq!(items.len(), 0, "open list: nothing committed");
+    assert_eq!(tail, "- item1\n- item2\n");
+}
+
+#[test]
+fn list_promotes_on_close() {
+    let mut s = MarkdownStream::new();
+    s.append("- item1\n- item2\n\nafter");
+    s.flush_now(&StateLookup::empty());
+    let (items, _) = s.items_and_tail();
+    assert!(!items.is_empty(), "closed list should produce committed items");
+}
+
+#[test]
+fn unicode_content_cursor_advances_on_char_boundary() {
+    let mut s = MarkdownStream::new();
+    s.append("# 漢字 🎉\n\nmore content");
+    s.flush_now(&StateLookup::empty());
+    let flushed = s.flushed_byte_len_for_tests();
+    assert!(s.raw_text().is_char_boundary(flushed),
+        "flushed_byte_len {} must be on UTF-8 char boundary", flushed);
+}
+
+#[test]
+fn tail_above_safety_cap_with_boundary_still_flushes() {
+    use spur_tui::components::markdown_stream::SAFETY_CAP_BYTES;
+    let mut s = MarkdownStream::new();
+    // Pathologically large boundary-free prefix, followed by a clean
+    // closure pattern so the safety valve should NOT suppress rebuild.
+    let huge = "x".repeat(SAFETY_CAP_BYTES + 100);
+    s.append(&huge);
+    s.append("\n\nboundary content");
+    let before = s.flushed_byte_len_for_tests();
+    s.maybe_flush(&StateLookup::empty());
+    let after = s.flushed_byte_len_for_tests();
+    assert!(after > before,
+        "safety cap must NOT suppress when closure pattern is present; before={} after={}",
+        before, after);
+}
+
+#[test]
+fn no_fence_registered_with_range_end_at_eof() {
+    let mut s = MarkdownStream::new();
+    s.append("```mermaid\nflowchart LR\nA-->B\n```");
+    let fences = s.flush_now(&StateLookup::empty());
+    assert_eq!(fences.len(), 0, "fence at EOF must not register");
+
+    s.append("\n\ntrailing");
+    let fences2 = s.flush_now(&StateLookup::empty());
+    assert_eq!(fences2.len(), 1, "once trailing content arrives, fence registers");
 }
