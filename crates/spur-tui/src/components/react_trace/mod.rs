@@ -760,6 +760,27 @@ impl ReactTrace {
     pub(crate) fn render_lines_for_test(&self, _width: u16) -> Vec<String> {
         self.render_to_strings()
     }
+
+    pub fn new_for_tests() -> Self {
+        Self::new()
+    }
+
+    pub fn build_virtual_rows_for_tests(
+        &self,
+        from: usize,
+        width: u16,
+        states: &std::collections::HashMap<
+            crate::components::mermaid::MermaidId,
+            crate::components::mermaid::FenceRender,
+        >,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+    ) -> (Vec<VirtualRow>, Vec<usize>) {
+        self.build_virtual_rows(from, width, states, lineage)
+    }
+
+    pub fn entries_for_tests(&self) -> &[TraceEntry] {
+        &self.entries
+    }
 }
 
 #[cfg(all(test, feature = "markdown"))]
@@ -1063,6 +1084,9 @@ mod virtual_row_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod streaming_tests;
 
 #[cfg(test)]
 mod tests {
