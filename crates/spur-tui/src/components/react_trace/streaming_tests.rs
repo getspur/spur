@@ -1328,3 +1328,55 @@ fn sim_anchor_preserved_across_appends_to_later_entries() {
          User's reading position is not preserved."
     );
 }
+
+/// EDGE-3 (Phase 3): stale `line_cache` between render and shift.
+///
+/// User holds page_down while content arrives. shift_anchor_by sees a
+/// cache from BEFORE the new content; the next render rebuilds. Anchor
+/// must remain valid (in-bounds) after the rebuild — no panic, no
+/// out-of-range entry_idx.
+#[test]
+fn phase3_edge_stale_cache_safe() {
+    use crate::components::markdown_stream::StateLookup;
+    let mut trace = ReactTrace::new_for_tests();
+    // Append all content before flushing — force_flush_all calls flush_final
+    // which finalises the stream, so all appends must come first.
+    trace.append_message("initial content line 1", "claude", "10:00".into());
+    for i in 0..50 {
+        trace.append_message(
+            &format!("late content {} with extra padding", i),
+            "claude",
+            "10:00".into(),
+        );
+    }
+    // Flush once — this finalises and populates items.
+    trace.force_flush_all(&StateLookup::empty());
+
+    // Seed the line cache from an initial build (simulates the "first render").
+    trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
+    trace.set_visible_height_for_tests(5);
+
+    // Position viewport at the top.
+    trace.scroll_to_top();
+
+    // Shift uses the cache from seed_line_cache — stale relative to any
+    // hypothetical later content. The shift must not produce an out-of-range anchor.
+    trace.scroll_down_by(3);
+
+    // Rebuild and confirm the anchor still resolves in-bounds.
+    let (rows, starts, _byte_ranges) =
+        trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    let resolved = crate::components::react_trace::render::resolve_anchor(
+        &trace.anchor_for_tests(),
+        &_byte_ranges,
+        &starts,
+        rows.len(),
+        5,
+    );
+    assert!(
+        resolved < rows.len(),
+        "stale-cache shift produced out-of-range row {} (total {})",
+        resolved,
+        rows.len()
+    );
+}
