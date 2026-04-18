@@ -975,26 +975,23 @@ impl InputBar {
     }
 
     /// Required render height given the available `width`.
+    ///
+    /// Includes 2 rows for top+bottom borders. The inner rows are the
+    /// visual-row count produced by the soft-wrap layer, clamped to
+    /// `[1, 5]` so the input bar never dominates the view.
     pub fn required_height(&self, width: u16) -> u16 {
-        let inner_w = (width.saturating_sub(2)) as usize;
+        let inner_w = width.saturating_sub(2);
         if inner_w == 0 {
             return 3;
         }
 
-        let prefix_len = self.status.as_ref().map(|s| s.len() + 1).unwrap_or(0) + 2;
-        let text = self.text();
-        let mut rows: usize = 0;
-
-        for (i, line) in text.split('\n').enumerate() {
-            let line_len = if i == 0 {
-                line.len() + prefix_len + 1
-            } else {
-                line.len() + 1
-            };
-            rows += 1.max((line_len + inner_w - 1) / inner_w);
+        let mut lines: Vec<String> = self.textarea.lines().to_vec();
+        if lines.is_empty() {
+            lines.push(String::new());
         }
 
-        let inner = (rows as u16).clamp(1, 5);
+        let layout = crate::components::input_bar_wrap::wrap(&lines, inner_w);
+        let inner = layout.visual_height().clamp(1, 5);
         inner + 2
     }
 
@@ -1028,6 +1025,42 @@ impl InputBar {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_widget(&self.textarea, inner);
+    }
+}
+
+#[cfg(test)]
+mod required_height_tests {
+    use super::*;
+
+    #[test]
+    fn required_height_empty_is_3() {
+        // 1 visual row + 2 border rows.
+        let bar = InputBar::new();
+        assert_eq!(bar.required_height(80), 3);
+    }
+
+    #[test]
+    fn required_height_wraps_long_ascii_line() {
+        let mut bar = InputBar::new();
+        bar.set_text("a".repeat(200), 200);
+        // 200 / 80 = 3 visual rows (200 = 2*80 + 40) = ceil → 3.
+        // Plus 2 border rows = 5. Clamp max is 5.
+        assert_eq!(bar.required_height(82), 5); // inner width = 80
+    }
+
+    #[test]
+    fn required_height_clamps_at_max_5_plus_borders() {
+        let mut bar = InputBar::new();
+        bar.set_text("a".repeat(10_000), 0);
+        assert_eq!(bar.required_height(82), 7); // clamp(inner, 1, 5) + 2
+    }
+
+    #[test]
+    fn required_height_cjk_counts_cells() {
+        let mut bar = InputBar::new();
+        // 10 CJK chars = 20 cells → fits in inner width 20 on one row.
+        bar.set_text("你好世界你好世界你好".to_string(), 0);
+        assert_eq!(bar.required_height(22), 3); // inner width = 20 → 1 row
     }
 }
 
