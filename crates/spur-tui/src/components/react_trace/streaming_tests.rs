@@ -1331,48 +1331,68 @@ fn sim_anchor_preserved_across_appends_to_later_entries() {
 
 /// EDGE-3 (Phase 3): stale `line_cache` between render and shift.
 ///
-/// User holds page_down while content arrives. shift_anchor_by sees a
-/// cache from BEFORE the new content; the next render rebuilds. Anchor
-/// must remain valid (in-bounds) after the rebuild — no panic, no
-/// out-of-range entry_idx.
+/// Cache populated → new entries arrive → shift uses STALE cache →
+/// re-render produces fresh cache. Anchor must still resolve in-bounds.
 #[test]
 fn phase3_edge_stale_cache_safe() {
     use crate::components::markdown_stream::StateLookup;
+
     let mut trace = ReactTrace::new_for_tests();
-    // Append all content before flushing — force_flush_all calls flush_final
-    // which finalises the stream, so all appends must come first.
-    trace.append_message("initial content line 1", "claude", "10:00".into());
-    for i in 0..50 {
+
+    // Seed initial trace with 5 entries from different agents.
+    for i in 0..5 {
         trace.append_message(
-            &format!("late content {} with extra padding", i),
-            "claude",
+            &format!("entry {} content here", i),
+            &format!("agent{}", i),
             "10:00".into(),
         );
     }
-    // Flush once — this finalises and populates items.
     trace.force_flush_all(&StateLookup::empty());
 
-    // Seed the line cache from an initial build (simulates the "first render").
+    // Populate cache (this is the "prior render" snapshot).
     trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
-    trace.set_visible_height_for_tests(5);
+    trace.set_visible_height_for_tests(3);
 
-    // Position viewport at the top.
+    // Position viewport at entry 2 area.
     trace.scroll_to_top();
+    trace.scroll_down_by(2);
+    let anchor_after_initial_scroll = trace.anchor_for_tests();
+    eprintln!("EDGE-3 initial anchor: {:?}", anchor_after_initial_scroll);
 
-    // Shift uses the cache from seed_line_cache — stale relative to any
-    // hypothetical later content. The shift must not produce an out-of-range anchor.
-    trace.scroll_down_by(3);
+    // NEW content arrives — DIFFERENT agents so each is a new entry
+    // (avoids append-after-flush_final contract violation).
+    for i in 5..15 {
+        trace.append_message(
+            &format!("late entry {} content", i),
+            &format!("agent{}", i),
+            "10:00".into(),
+        );
+    }
+    trace.force_flush_all(&StateLookup::empty());
 
-    // Rebuild and confirm the anchor still resolves in-bounds.
-    let (rows, starts, _byte_ranges) =
-        trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    // Cache is now STALE — it reflects 5 entries, but trace has 15.
+    // Shift uses the stale cache.
+    trace.scroll_down_by(2);
+    let anchor_after_stale_shift = trace.anchor_for_tests();
+    eprintln!("EDGE-3 stale-shift anchor: {:?}", anchor_after_stale_shift);
+
+    // Now build the FRESH layout (this is what the next real render would do).
+    let (rows, starts, byte_ranges) = trace
+        .build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let resolved = crate::components::react_trace::render::resolve_anchor(
         &trace.anchor_for_tests(),
-        &_byte_ranges,
+        &byte_ranges,
         &starts,
         rows.len(),
-        5,
+        3,
     );
+    eprintln!(
+        "EDGE-3 resolved row in fresh layout: {} (total {})",
+        resolved,
+        rows.len()
+    );
+
+    // Stale-cache anchor must still resolve in-bounds against fresh layout.
     assert!(
         resolved < rows.len(),
         "stale-cache shift produced out-of-range row {} (total {})",
