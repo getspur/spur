@@ -783,10 +783,13 @@ mod markdown_integration_tests {
     fn post_flush_rendered_lines_still_show_text() {
         use crate::components::markdown_stream::StateLookup;
         let mut trace = ReactTrace::new();
-        trace.append_message("# Heading\n\nBody text", "claude", "10:00:00".to_string());
+        // Two paragraphs separated by \n\n with trailing content after the
+        // second paragraph so its End event has range.end < raw_text.len(),
+        // making it authoritative under flush_now (permit_eof_closure=false).
+        trace.append_message("# Heading\n\nBody text\n\nmore", "claude", "10:00:00".to_string());
 
         let states = StateLookup::empty();
-        let _ = trace.drain_fence_dispatches(&states);
+        let _ = trace.force_flush_all(&states);
 
         let rendered = trace.render_lines_for_test(60);
         let joined = rendered.join("\n");
@@ -803,9 +806,11 @@ mod markdown_integration_tests {
     #[test]
     fn items_path_renders_same_text_as_lines_path() {
         let mut trace = ReactTrace::new();
-        trace.append_message("# Heading\n\nBody", "claude", "10:00".to_string());
+        // Two paragraphs separated by \n\n with trailing content so the
+        // second paragraph's End event has range.end < raw_text.len().
+        trace.append_message("# Heading\n\nBody\n\nmore", "claude", "10:00".to_string());
         use crate::components::markdown_stream::StateLookup;
-        let _ = trace.drain_fence_dispatches(&StateLookup::empty());
+        let _ = trace.force_flush_all(&StateLookup::empty());
 
         let rendered = trace.render_lines_for_test(60);
         let joined = rendered.join("\n");

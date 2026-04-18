@@ -376,3 +376,54 @@ fn safety_cap_is_64kib() {
     use spur_tui::components::markdown_stream::SAFETY_CAP_BYTES;
     assert_eq!(SAFETY_CAP_BYTES, 64 * 1024);
 }
+
+#[test]
+fn maybe_flush_short_circuits_when_not_dirty() {
+    let mut s = MarkdownStream::new();
+    s.append("# A\n\nbody");
+    s.flush_now(&StateLookup::empty());
+    assert!(!s.is_dirty(), "flush_now clears dirty_since");
+    // maybe_flush on a clean stream must return empty without work.
+    let out = s.maybe_flush(&StateLookup::empty());
+    assert!(out.is_empty());
+}
+
+#[test]
+fn maybe_flush_fast_path_fires_on_boundary_pattern() {
+    let mut s = MarkdownStream::new();
+    // Append content that contains \n\n with trailing content — heuristic
+    // fires before DEBOUNCE elapses.
+    s.append("paragraph\n\nmore content");
+    let before = s.flushed_byte_len_for_tests();
+    s.maybe_flush(&StateLookup::empty());
+    let after = s.flushed_byte_len_for_tests();
+    assert!(after > before,
+        "fast path should have flushed immediately; before={} after={}",
+        before, after);
+}
+
+#[test]
+fn maybe_flush_declines_when_no_boundary_before_debounce() {
+    let mut s = MarkdownStream::new();
+    s.append("streaming without boundaries");
+    // Immediately after append, dirty but no boundary, debounce not
+    // elapsed → no flush.
+    s.maybe_flush(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), 0);
+    // Stream still dirty.
+    assert!(s.is_dirty());
+}
+
+#[test]
+fn maybe_flush_safety_cap_suppresses_rebuild() {
+    use spur_tui::components::markdown_stream::SAFETY_CAP_BYTES;
+    let mut s = MarkdownStream::new();
+    // A long boundary-free tail.
+    let huge = "x".repeat(SAFETY_CAP_BYTES + 100);
+    s.append(&huge);
+    let out = s.maybe_flush(&StateLookup::empty());
+    assert!(out.is_empty());
+    // Safety valve clears dirty_since so we don't re-enter on next tick.
+    assert!(!s.is_dirty(),
+        "safety valve must clear dirty_since to prevent tight looping");
+}
