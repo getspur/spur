@@ -25,7 +25,8 @@ fn append_chunks_then_flush_equals_full_parse() {
 #[test]
 fn debounce_does_not_rebuild_until_flush_or_timeout() {
     let mut s = MarkdownStream::new();
-    s.append("# A\n");
+    // Trailing paragraph ensures cursor advances past the heading block.
+    s.append("# A\n\nbody\n");
     s.flush_now(&StateLookup::empty());
     assert!(!s.cached_lines_debug().is_empty());
 }
@@ -40,7 +41,8 @@ fn empty_stream_renders_to_empty_lines() {
 #[test]
 fn headings_preserve_bold_style() {
     let mut s = MarkdownStream::new();
-    s.append("# Heading\n");
+    // Trailing paragraph ensures cursor advances past the heading block.
+    s.append("# Heading\n\nbody\n");
     s.flush_now(&StateLookup::empty());
     // The first Line carries BOLD via Line::style (tui-markdown uses
     // Line::styled for heading prefixes, placing the style on the line
@@ -294,4 +296,35 @@ fn scan_authoritative_does_not_register_fence_at_eof() {
     let input = "```mermaid\nflowchart LR\nA-->B\n```";
     let (_, fences) = scan_authoritative_for_tests(input, true, false);
     assert_eq!(fences.len(), 0, "fence ending at EOF must not register");
+}
+
+#[test]
+fn rebuild_advances_cursor_past_authoritative_events() {
+    let mut s = MarkdownStream::new();
+    s.append("# Title\n\nBody paragraph\n\nMore");
+    s.flush_now(&StateLookup::empty());
+    let flushed = s.flushed_byte_len_for_tests();
+    assert!(flushed > 0 && flushed < s.raw_text().len(),
+        "flushed={} raw_len={}", flushed, s.raw_text().len());
+}
+
+#[test]
+fn rebuild_does_not_advance_past_open_list() {
+    let mut s = MarkdownStream::new();
+    s.append("- item1\n- item2\n");
+    s.flush_now(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), 0,
+        "open list at EOF must not advance cursor");
+}
+
+#[test]
+fn flushed_byte_len_is_monotonic() {
+    let mut s = MarkdownStream::new();
+    s.append("# A\n\n");
+    s.flush_now(&StateLookup::empty());
+    let a = s.flushed_byte_len_for_tests();
+    s.append("# B\n\n");
+    s.flush_now(&StateLookup::empty());
+    let b = s.flushed_byte_len_for_tests();
+    assert!(b >= a, "monotonic: {} -> {}", a, b);
 }
