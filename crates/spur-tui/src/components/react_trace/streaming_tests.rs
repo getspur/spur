@@ -1329,6 +1329,79 @@ fn sim_anchor_preserved_across_appends_to_later_entries() {
     );
 }
 
+/// COUNTER-2 (Phase 3): streaming + page_up monotonicity.
+///
+/// User holds page_up while content streams in via new entries. Each
+/// page_up sees a freshly-seeded cache (entry list growing). The
+/// resolved render row must NEVER move backward (downward) between
+/// consecutive page_ups.
+#[test]
+fn phase3_counter_streaming_pageup_monotonic() {
+    use crate::components::markdown_stream::StateLookup;
+
+    let mut trace = ReactTrace::new_for_tests();
+
+    // Seed initial set of long messages from different agents.
+    for i in 0..40 {
+        trace.append_message(
+            &format!("entry {} paragraph one\n\nentry {} paragraph two", i, i),
+            &format!("agent{}", i),
+            "10:00".into(),
+        );
+    }
+    trace.force_flush_all(&StateLookup::empty());
+    trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
+    trace.set_visible_height_for_tests(10);
+
+    // Start at the bottom (Following), then walk up via page_up.
+    trace.scroll_to_bottom();
+    let mut prev_resolved: Option<usize> = None;
+    for step in 0..5 {
+        // Streaming: append more entries (new agents) BEFORE the page_up,
+        // then re-seed cache so shift sees the new layout.
+        for j in 0..3 {
+            let agent_idx = 40 + step * 3 + j;
+            trace.append_message(
+                &format!("stream entry {}", agent_idx),
+                &format!("agent{}", agent_idx),
+                "10:00".into(),
+            );
+        }
+        trace.force_flush_all(&StateLookup::empty());
+        trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
+
+        trace.page_up();
+
+        // Resolve against the SAME cache the shift used.
+        let (rows2, starts2, byte_ranges2) =
+            trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+        let resolved = crate::components::react_trace::render::resolve_anchor(
+            &trace.anchor_for_tests(),
+            &byte_ranges2,
+            &starts2,
+            rows2.len(),
+            10,
+        );
+        eprintln!(
+            "COUNTER-2 step {}: total={} row={} anchor={:?}",
+            step,
+            rows2.len(),
+            resolved,
+            trace.anchor_for_tests()
+        );
+        if let Some(p) = prev_resolved {
+            assert!(
+                resolved <= p,
+                "step {}: page_up moved DOWN (prev={} now={})",
+                step,
+                p,
+                resolved
+            );
+        }
+        prev_resolved = Some(resolved);
+    }
+}
+
 /// EDGE-3 (Phase 3): stale `line_cache` between render and shift.
 ///
 /// Cache populated → new entries arrive → shift uses STALE cache →
