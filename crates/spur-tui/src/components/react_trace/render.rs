@@ -515,3 +515,41 @@ impl ReactTrace {
         segment_visible_rows(&rows, offset, end)
     }
 }
+
+#[cfg(all(test, feature = "markdown"))]
+mod fence_state_hash_tests {
+    use super::*;
+    use crate::components::mermaid::{MermaidId, MermaidState};
+    use std::collections::HashMap;
+
+    #[test]
+    fn empty_registry_has_stable_hash() {
+        let r: HashMap<MermaidId, MermaidState> = HashMap::new();
+        let a = fence_state_hash(&r);
+        let b = fence_state_hash(&r);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pending_to_error_changes_hash() {
+        let mut r: HashMap<MermaidId, MermaidState> = HashMap::new();
+        r.insert(MermaidId(0), MermaidState::Pending { code: "g{}".into() });
+        let h1 = fence_state_hash(&r);
+        r.insert(MermaidId(0), MermaidState::Error { message: "boom".into() });
+        let h2 = fence_state_hash(&r);
+        assert_ne!(h1, h2,
+            "Pending→Error must change fence_state_hash so cache invalidates");
+    }
+
+    #[test]
+    fn order_independent() {
+        let mut a: HashMap<MermaidId, MermaidState> = HashMap::new();
+        a.insert(MermaidId(0), MermaidState::Pending { code: "x".into() });
+        a.insert(MermaidId(1), MermaidState::Rendering);
+        let mut b: HashMap<MermaidId, MermaidState> = HashMap::new();
+        b.insert(MermaidId(1), MermaidState::Rendering);
+        b.insert(MermaidId(0), MermaidState::Pending { code: "x".into() });
+        assert_eq!(fence_state_hash(&a), fence_state_hash(&b),
+            "iteration order must not affect hash (must sort by id)");
+    }
+}
