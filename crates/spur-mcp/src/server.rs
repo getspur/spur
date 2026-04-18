@@ -239,6 +239,201 @@ pub fn parse_parallel_tasks(args: &Value) -> Result<Vec<DelegationRequest>, Stri
     Ok(out)
 }
 
+/// Result of building a beads epic subgraph for a persisted plan.
+#[derive(Debug, Clone)]
+pub struct EpicSubgraph {
+    pub epic_id: String,
+    /// Maps each `PlanTask.task_id` → beads child issue ID.
+    pub task_map: std::collections::HashMap<String, String>,
+}
+
+/// Compose a beads epic + child issues + dependency edges from a
+/// validated plan. Labels each child with `spur.plan_id=<plan_id>` so
+/// review_task can correlate approvals back to beads.
+///
+/// Creates issues in topological order (deps-first) so each child's
+/// `depends_on` references beads IDs that already exist. Callers must
+/// ensure the plan is validated (no cycles) before invoking.
+///
+/// On failure mid-creation: partial state lands in beads (epic +
+/// whatever children succeeded). Caller should surface the error and
+/// leave cleanup to the brain / human. Transactional rollback is out
+/// of scope for v1 — beads CLI doesn't expose txn primitives.
+pub async fn build_epic_subgraph(
+    pm: &spur_pm::PmService,
+    plan_id: &str,
+    epic_title: &str,
+    epic_body: Option<&str>,
+    tasks: &[crate::plan::PlanTask],
+) -> Result<EpicSubgraph, String> {
+    // 1. Create the epic itself.
+    let epic_create = spur_pm::types::IssueCreate {
+        title: epic_title.to_string(),
+        description: epic_body.map(String::from),
+        issue_type: Some("epic".to_string()),
+        labels: vec![format!("spur.plan_id={}", plan_id)],
+        ..Default::default()
+    };
+    let epic_id = pm
+        .create_issue(epic_create)
+        .await
+        .map_err(|e| format!("failed to create beads epic: {e}"))?;
+
+    // 2. Topological order so each child can reference already-created deps.
+    let order = topological_order(tasks).map_err(|e| {
+        format!("plan dependency order (should have been caught by validate_plan): {e}")
+    })?;
+
+    let mut task_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for idx in order {
+        let task = &tasks[idx];
+        let depends_on_beads: Vec<String> = task
+            .depends_on
+            .iter()
+            .map(|dep_key| {
+                task_map.get(dep_key).cloned().ok_or_else(|| {
+                    format!(
+                        "task '{}' depends on '{}' which was not yet created (topological order bug)",
+                        task.task_id, dep_key,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut labels = vec![
+            format!("spur.plan_id={}", plan_id),
+            format!("spur.plan_task_id={}", task.task_id),
+            format!("spur.agent={}", task.agent),
+        ];
+        if let Some(existing_issue_id) = &task.issue_id {
+            labels.push(format!("spur.source_issue={}", existing_issue_id));
+        }
+
+        let child_create = spur_pm::types::IssueCreate {
+            title: format!("{}: {}", task.task_id, truncate_for_title(&task.task)),
+            description: Some(task.task.clone()),
+            issue_type: Some("task".to_string()),
+            labels,
+            parent: Some(epic_id.clone()),
+            depends_on: depends_on_beads,
+            ..Default::default()
+        };
+
+        let child_id = pm
+            .create_issue(child_create)
+            .await
+            .map_err(|e| format!("failed to create child issue for task '{}': {e}", task.task_id))?;
+
+        task_map.insert(task.task_id.clone(), child_id);
+    }
+
+    Ok(EpicSubgraph { epic_id, task_map })
+}
+
+/// Truncate a task description to a reasonable issue-title length.
+/// Beads has no hard limit but overly long titles are unwieldy in UIs.
+fn truncate_for_title(s: &str) -> String {
+    const MAX_TITLE_LEN: usize = 80;
+    let first_line = s.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() <= MAX_TITLE_LEN {
+        first_line.to_string()
+    } else {
+        let truncated: String = first_line.chars().take(MAX_TITLE_LEN - 3).collect();
+        format!("{truncated}...")
+    }
+}
+
+/// Return task indices in a valid topological order. Callers must have
+/// already validated that the plan is acyclic via `plan::validate_plan`.
+fn topological_order(tasks: &[crate::plan::PlanTask]) -> Result<Vec<usize>, String> {
+    use std::collections::HashMap;
+    let key_to_idx: HashMap<&str, usize> = tasks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.task_id.as_str(), i))
+        .collect();
+
+    let mut in_degree: Vec<usize> = tasks.iter().map(|t| t.depends_on.len()).collect();
+    let mut ready: std::collections::VecDeque<usize> = in_degree
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &d)| if d == 0 { Some(i) } else { None })
+        .collect();
+
+    let mut out = Vec::with_capacity(tasks.len());
+    while let Some(i) = ready.pop_front() {
+        out.push(i);
+        for (j, t) in tasks.iter().enumerate() {
+            if t.depends_on.iter().any(|dep| {
+                key_to_idx.get(dep.as_str()).copied() == Some(i)
+            }) {
+                in_degree[j] -= 1;
+                if in_degree[j] == 0 {
+                    ready.push_back(j);
+                }
+            }
+        }
+    }
+
+    if out.len() != tasks.len() {
+        return Err(format!(
+            "topological order incomplete: {} of {} tasks reachable (cycle?)",
+            out.len(),
+            tasks.len()
+        ));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod topo_tests {
+    use super::topological_order;
+    use crate::plan::PlanTask;
+
+    fn t(id: &str, deps: &[&str]) -> PlanTask {
+        PlanTask {
+            task_id: id.to_string(),
+            agent: "x".to_string(),
+            task: "body".to_string(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn linear_chain_is_ordered() {
+        let tasks = vec![t("a", &[]), t("b", &["a"]), t("c", &["b"])];
+        let order = topological_order(&tasks).unwrap();
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn diamond_respects_all_parents() {
+        // a → b, a → c, b+c → d
+        let tasks = vec![
+            t("a", &[]),
+            t("b", &["a"]),
+            t("c", &["a"]),
+            t("d", &["b", "c"]),
+        ];
+        let order = topological_order(&tasks).unwrap();
+        let pos_a = order.iter().position(|&i| i == 0).unwrap();
+        let pos_b = order.iter().position(|&i| i == 1).unwrap();
+        let pos_c = order.iter().position(|&i| i == 2).unwrap();
+        let pos_d = order.iter().position(|&i| i == 3).unwrap();
+        assert!(pos_a < pos_b && pos_a < pos_c);
+        assert!(pos_b < pos_d && pos_c < pos_d);
+    }
+
+    #[test]
+    fn cycle_is_detected() {
+        let tasks = vec![t("a", &["b"]), t("b", &["a"])];
+        let err = topological_order(&tasks).unwrap_err();
+        assert!(err.contains("incomplete") || err.contains("cycle"));
+    }
+}
+
 impl McpCallbackServer {
     /// Create a new MCP callback server for the given session.
     ///
