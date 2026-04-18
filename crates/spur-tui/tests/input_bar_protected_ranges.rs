@@ -4,6 +4,9 @@ use spur_tui::components::input_bar::InputBar;
 fn press(bar: &mut InputBar, code: KeyCode) {
     bar.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
 }
+fn ctrl(bar: &mut InputBar, c: char) {
+    bar.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+}
 fn type_str(bar: &mut InputBar, s: &str) {
     for c in s.chars() {
         press(bar, KeyCode::Char(c));
@@ -135,4 +138,99 @@ fn enter_captures_text_and_ranges() {
     assert_eq!(ranges.len(), 1);
     assert_eq!(&text[ranges[0].start..ranges[0].end], "@a.rs");
     assert!(!interrupt); // '!' at end, not start
+}
+
+#[test]
+fn deleting_first_of_two_atoms_rebases_second_atom() {
+    let mut b = InputBar::new();
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " and ");
+    b.insert_atom("@b.rs", "file:///b".into(), "b.rs".into());
+
+    press(&mut b, KeyCode::Home);
+    press(&mut b, KeyCode::Delete);
+
+    assert_eq!(b.text(), " and @b.rs");
+    let ranges = b.protected_ranges();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(&b.text()[ranges[0].start..ranges[0].end], "@b.rs");
+}
+
+#[test]
+fn ctrl_u_removes_deleted_atom_and_keeps_later_atom_shifted() {
+    let mut b = InputBar::new();
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " ");
+    b.insert_atom("@b.rs", "file:///b".into(), "b.rs".into());
+
+    let second_start = b.protected_ranges()[1].start;
+    b.set_text_cursor_for_test(second_start);
+    ctrl(&mut b, 'u');
+
+    assert_eq!(b.text(), "@b.rs");
+    let ranges = b.protected_ranges();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].start, 0);
+    assert_eq!(&b.text()[ranges[0].start..ranges[0].end], "@b.rs");
+}
+
+#[test]
+fn ctrl_k_keeps_later_line_atom_and_shifts_it() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "hello");
+    b.insert_paste("\n");
+    b.insert_atom("@b.rs", "file:///b".into(), "b.rs".into());
+
+    b.set_text_cursor_for_test(2);
+    ctrl(&mut b, 'k');
+
+    assert_eq!(b.text(), "he\n@b.rs");
+    let ranges = b.protected_ranges();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(&b.text()[ranges[0].start..ranges[0].end], "@b.rs");
+}
+
+#[test]
+fn ctrl_w_preserves_earlier_atom_when_deleting_previous_word() {
+    let mut b = InputBar::new();
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " hello");
+
+    ctrl(&mut b, 'w');
+
+    assert_eq!(b.text(), "@a.rs ");
+    let ranges = b.protected_ranges();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(&b.text()[ranges[0].start..ranges[0].end], "@a.rs");
+}
+
+#[test]
+fn deleting_unicode_atom_only_removes_atom_text() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "x ");
+    b.insert_atom("@猫", "file:///cat".into(), "cat".into());
+    type_str(&mut b, " y");
+
+    let atom_end = b.protected_ranges()[0].end;
+    b.set_text_cursor_for_test(atom_end);
+    press(&mut b, KeyCode::Backspace);
+
+    assert_eq!(b.text(), "x  y");
+    assert!(b.protected_ranges().is_empty());
+}
+
+#[test]
+fn deleting_multibyte_char_before_atom_rebases_by_utf8_width() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "é ");
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+
+    press(&mut b, KeyCode::Home);
+    press(&mut b, KeyCode::Delete);
+
+    assert_eq!(b.text(), " @a.rs");
+    let ranges = b.protected_ranges();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].start, 1);
+    assert_eq!(&b.text()[ranges[0].start..ranges[0].end], "@a.rs");
 }
