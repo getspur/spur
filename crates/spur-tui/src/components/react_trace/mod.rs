@@ -700,6 +700,13 @@ impl ReactTrace {
         &self.entries
     }
 
+    /// Test-only mutable accessor.
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub(crate) fn entries_mut_for_test(&mut self) -> &mut Vec<TraceEntry> {
+        &mut self.entries
+    }
+
     /// Return the text of the most recent entry, or `None` if the trace is empty.
     #[cfg(test)]
     pub fn last_text(&self) -> Option<String> {
