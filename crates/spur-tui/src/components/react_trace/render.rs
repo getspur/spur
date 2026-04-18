@@ -35,6 +35,37 @@ pub(in crate::components) struct VirtualRowCacheEntry {
     pub(super) fence_gen: u64,
 }
 
+/// Hash of the mermaid registry's per-fence state. Replaces the
+/// `registry.len()` cache key, which missed Pending/Rendering/Ready/Error
+/// transitions when registry size stayed constant.
+///
+/// Sorts by MermaidId so iteration order doesn't affect the hash.
+/// For Ready state, includes image dimensions because they affect
+/// ImageRow height.
+#[cfg(feature = "markdown")]
+pub(crate) fn fence_state_hash(
+    registry: &std::collections::HashMap<
+        crate::components::mermaid::MermaidId,
+        crate::components::mermaid::MermaidState,
+    >,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use crate::components::mermaid::MermaidState;
+
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut entries: Vec<_> = registry.iter().collect();
+    entries.sort_by_key(|(id, _)| id.0);
+    for (id, state) in entries {
+        id.0.hash(&mut h);
+        std::mem::discriminant(state).hash(&mut h);
+        if let MermaidState::Ready { image, .. } = state {
+            image.width().hash(&mut h);
+            image.height().hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
 /// Group contiguous virtual rows into render batches. Only rows in
 /// `[start_idx, end_idx)` are considered.
 #[cfg(feature = "markdown")]
@@ -322,11 +353,7 @@ impl ReactTrace {
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
 
-        // Use a simple hash of mermaid registry state count as a cheap
-        // fence-generation signal. A full hash is overkill — the generation
-        // counter already covers content mutations; this catches
-        // Pending→Ready transitions that don't touch entries.
-        let fence_gen = ctx.mermaid_registry.len() as u64;
+        let fence_gen = fence_state_hash(ctx.mermaid_registry);
 
         // Cache check: rebuild only when generation, width, or fence state changed.
         // Incremental path: if only the tail entries are dirty, truncate and
