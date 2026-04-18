@@ -266,7 +266,51 @@ pub async fn build_epic_subgraph(
     epic_body: Option<&str>,
     tasks: &[crate::plan::PlanTask],
 ) -> Result<EpicSubgraph, String> {
-    // 1. Create the epic itself.
+    let (epic_create, child_specs) =
+        plan_epic_issue_creates(plan_id, epic_title, epic_body, tasks)?;
+
+    let epic_id = pm
+        .create_issue(epic_create)
+        .await
+        .map_err(|e| format!("failed to create beads epic: {e}"))?;
+
+    let mut task_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (task_id, mut child_create) in child_specs {
+        // Rewrite `depends_on` from task_id keys → created beads IDs.
+        child_create.depends_on = child_create
+            .depends_on
+            .iter()
+            .map(|dep_key| {
+                task_map.get(dep_key).cloned().ok_or_else(|| {
+                    format!(
+                        "task '{task_id}' depends on '{dep_key}' which was not yet created",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        child_create.parent = Some(epic_id.clone());
+
+        let child_id = pm
+            .create_issue(child_create)
+            .await
+            .map_err(|e| format!("failed to create child for task '{task_id}': {e}"))?;
+        task_map.insert(task_id, child_id);
+    }
+
+    Ok(EpicSubgraph { epic_id, task_map })
+}
+
+/// Pure helper: compute the IssueCreate values that build_epic_subgraph
+/// would dispatch to PmService. Returns the epic's IssueCreate plus a
+/// Vec of (task_id, IssueCreate) for each child in topological order.
+/// Child IssueCreate.depends_on carries task_id keys, NOT beads IDs —
+/// the caller rewrites them as children are created.
+pub fn plan_epic_issue_creates(
+    plan_id: &str,
+    epic_title: &str,
+    epic_body: Option<&str>,
+    tasks: &[crate::plan::PlanTask],
+) -> Result<(spur_pm::types::IssueCreate, Vec<(String, spur_pm::types::IssueCreate)>), String> {
     let epic_create = spur_pm::types::IssueCreate {
         title: epic_title.to_string(),
         description: epic_body.map(String::from),
@@ -274,60 +318,33 @@ pub async fn build_epic_subgraph(
         labels: vec![format!("spur.plan_id={}", plan_id)],
         ..Default::default()
     };
-    let epic_id = pm
-        .create_issue(epic_create)
-        .await
-        .map_err(|e| format!("failed to create beads epic: {e}"))?;
 
-    // 2. Topological order so each child can reference already-created deps.
-    let order = topological_order(tasks).map_err(|e| {
-        format!("plan dependency order (should have been caught by validate_plan): {e}")
-    })?;
-
-    let mut task_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let order = topological_order(tasks)?;
+    let mut child_specs = Vec::with_capacity(tasks.len());
     for idx in order {
         let task = &tasks[idx];
-        let depends_on_beads: Vec<String> = task
-            .depends_on
-            .iter()
-            .map(|dep_key| {
-                task_map.get(dep_key).cloned().ok_or_else(|| {
-                    format!(
-                        "task '{}' depends on '{}' which was not yet created (topological order bug)",
-                        task.task_id, dep_key,
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         let mut labels = vec![
             format!("spur.plan_id={}", plan_id),
             format!("spur.plan_task_id={}", task.task_id),
             format!("spur.agent={}", task.agent),
         ];
-        if let Some(existing_issue_id) = &task.issue_id {
-            labels.push(format!("spur.source_issue={}", existing_issue_id));
+        if let Some(existing) = &task.issue_id {
+            labels.push(format!("spur.source_issue={}", existing));
         }
-
         let child_create = spur_pm::types::IssueCreate {
             title: format!("{}: {}", task.task_id, truncate_for_title(&task.task)),
             description: Some(task.task.clone()),
             issue_type: Some("task".to_string()),
             labels,
-            parent: Some(epic_id.clone()),
-            depends_on: depends_on_beads,
+            // depends_on carries task_id keys; rewritten by build_epic_subgraph.
+            depends_on: task.depends_on.clone(),
+            // parent set by build_epic_subgraph once epic_id is known.
+            parent: None,
             ..Default::default()
         };
-
-        let child_id = pm
-            .create_issue(child_create)
-            .await
-            .map_err(|e| format!("failed to create child issue for task '{}': {e}", task.task_id))?;
-
-        task_map.insert(task.task_id.clone(), child_id);
+        child_specs.push((task.task_id.clone(), child_create));
     }
-
-    Ok(EpicSubgraph { epic_id, task_map })
+    Ok((epic_create, child_specs))
 }
 
 /// Truncate a task description to a reasonable issue-title length.
