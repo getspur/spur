@@ -9,7 +9,7 @@ use spur_acp::{
     adapter::{ObservePayload, ToolFamily, ToolInputDisplay},
     AgentKind,
 };
-use spur_tui::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
+use spur_tui::components::react_trace::{ActStatus, ReactTrace, TraceEntry, TraceKind};
 
 fn make_trace(kind: AgentKind) -> ReactTrace {
     ReactTrace::with_kind(kind)
@@ -27,6 +27,8 @@ fn push_act(
             tool: tool.to_string(),
             family,
             input,
+            tool_call_id: None,
+            status: ActStatus::Pending,
         },
         text: fallback_text.to_string(),
         timestamp: "12:00:00".to_string(),

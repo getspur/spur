@@ -6,7 +6,7 @@ mod types;
 pub use types::RenderContext;
 #[cfg(all(test, feature = "markdown"))]
 pub(crate) use types::{Segment, VirtualRow};
-pub use types::{TraceEntry, TraceKind};
+pub use types::{ActStatus, TraceEntry, TraceKind};
 
 use spur_acp::{
     adapter::{mode_badge, ToolInputDisplay},
@@ -657,6 +657,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    ..
                 } = &entry.kind
                 {
                     let (act_glyph, _) = family_glyph(*family);
@@ -755,6 +756,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    ..
                 } => {
                     let (glyph, _) = family_glyph(*family);
                     lines.push(format!("{} {} {}", entry.timestamp, glyph, tool));
@@ -1201,6 +1203,8 @@ mod virtual_row_tests {
                     cmd: "echo hi".to_string(),
                     cwd: None,
                 },
+                tool_call_id: None,
+                status: ActStatus::Pending,
             },
             text: String::new(),
             timestamp: "10:00".to_string(),
@@ -1410,6 +1414,8 @@ mod tests {
                 tool: "read_file".to_string(),
                 family: ToolFamily::Unknown,
                 input: ToolInputDisplay::Empty,
+                tool_call_id: None,
+                status: ActStatus::Pending,
             },
             text: "read_file(path=...)".to_string(),
             timestamp: "10:00:02".to_string(),

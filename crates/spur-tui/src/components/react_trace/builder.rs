@@ -39,6 +39,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    ..
                 } = &entry.kind
                 {
                     let (act_glyph, act_color) = family_glyph(*family);
@@ -150,6 +151,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    ..
                 } => {
                     let (glyph, glyph_color) = family_glyph(*family);
                     lines.push(Line::from(vec![
@@ -504,6 +506,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    ..
                 } = &entry.kind
                 {
                     let (act_glyph, act_color) = family_glyph(*family);
@@ -667,6 +670,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    ..
                 } => {
                     let (glyph, glyph_color) = family_glyph(*family);
                     push_wrapped(

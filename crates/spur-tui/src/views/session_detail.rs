@@ -13,7 +13,7 @@ use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 
 use crate::action::{Action, ViewId};
 use crate::components::input_bar::{EditMode, InputBar};
-use crate::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
+use crate::components::react_trace::{ActStatus, ReactTrace, TraceEntry, TraceKind};
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 
 use super::View;
@@ -1216,6 +1216,8 @@ impl View for SessionDetailView {
                                 tool,
                                 family,
                                 input,
+                                tool_call_id: None,
+                                status: ActStatus::Pending,
                             },
                             text: fallback_text,
                             timestamp: Self::now_stamp(),
