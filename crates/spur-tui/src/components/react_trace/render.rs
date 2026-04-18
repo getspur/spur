@@ -38,6 +38,57 @@ pub(in crate::components) struct VirtualRowCacheEntry {
     pub(super) fence_gen: u64,
 }
 
+/// Resolve a ScrollAnchor to an effective row index.
+///
+/// `Following` clamps to `total_rows - visible_height`.
+/// `Byte` walks `entry_row_starts` to the entry, then finds the first
+/// row whose `byte_ranges[i]` contains `byte_offset`. If the anchor's
+/// entry was evicted (entry_idx >= entry_row_starts.len()), snaps to 0.
+/// If the byte position falls in a gap (consolidated by reflow), snaps
+/// to the nearest preceding row whose range covers a byte ≤ byte_offset.
+#[cfg(feature = "markdown")]
+pub(crate) fn resolve_anchor(
+    anchor: &crate::components::react_trace::types::ScrollAnchor,
+    byte_ranges: &[Option<std::ops::Range<usize>>],
+    entry_row_starts: &[usize],
+    total_rows: usize,
+    visible_height: usize,
+) -> usize {
+    use crate::components::react_trace::types::ScrollAnchor;
+    match anchor {
+        ScrollAnchor::Following => total_rows.saturating_sub(visible_height),
+        ScrollAnchor::Byte { entry_idx, byte_offset } => {
+            if *entry_idx >= entry_row_starts.len() {
+                return 0;
+            }
+            let row_start = entry_row_starts[*entry_idx];
+            let row_end = entry_row_starts
+                .get(*entry_idx + 1)
+                .copied()
+                .unwrap_or(total_rows);
+
+            // First row whose range contains byte_offset.
+            for i in row_start..row_end.min(byte_ranges.len()) {
+                if let Some(r) = &byte_ranges[i] {
+                    if r.contains(byte_offset) {
+                        return i;
+                    }
+                }
+            }
+            // Snap to last preceding row with range start <= byte_offset.
+            let mut snap = row_start;
+            for i in row_start..row_end.min(byte_ranges.len()) {
+                if let Some(r) = &byte_ranges[i] {
+                    if r.start <= *byte_offset {
+                        snap = i;
+                    }
+                }
+            }
+            snap
+        }
+    }
+}
+
 /// Hash of the mermaid registry's per-fence state. Replaces the
 /// `registry.len()` cache key, which missed Pending/Rendering/Ready/Error
 /// transitions when registry size stayed constant.
