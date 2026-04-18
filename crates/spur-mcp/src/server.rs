@@ -1773,7 +1773,7 @@ impl McpCallbackServer {
             plan_id: plan_id.clone(),
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
-            epic_id: None, // populated by Task 7 when persist_as_epic=true
+            epic_id: None, // TODO follow-up: set to Some(epic_id_arg.clone()) so review_task can correlate
         };
         let state = Arc::new(tokio::sync::Mutex::new(state));
 

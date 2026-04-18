@@ -104,7 +104,7 @@ Creates a beads epic with child issues for each task, linked by `depends_on` edg
 **Use this when:**
 - The plan spans multiple sessions (restart safety).
 - Humans outside Spur should see progress (beads UI / CLI / dashboard).
-- You want `review_task(approve)` to auto-close the corresponding beads child.
+- You want the child issues visible in beads UI for later auto-close (follow-up; v1 only auto-closes brain-supplied pre-existing issue_ids via `review_task(approve)`).
 
 **Do NOT use this when:**
 - The plan is ephemeral (session-local work).
@@ -131,7 +131,7 @@ loop {
 ```
 
 Decisions:
-- `approve` → task marked done, dependents auto-dispatched. If `persist_as_epic=true`, the beads child closes too.
+- `approve` → task marked done, dependents auto-dispatched. If the task was submitted with a pre-existing `issue_id`, that beads issue auto-closes. Auto-close of persist_as_epic-created children is a planned follow-up.
 - `reject` → task terminal. Pending/ready dependents cascade-fail. Use for work that's fundamentally misconceived.
 - `request_changes` → re-dispatch the worker with `feedback` verbatim. Max 3 attempts per task. Use for fixable issues.
 
