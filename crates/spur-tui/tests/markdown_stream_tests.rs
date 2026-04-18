@@ -213,3 +213,20 @@ fn finalized_starts_false() {
     let s = MarkdownStream::new();
     assert!(!s.is_finalized());
 }
+
+#[test]
+fn items_and_tail_empty_stream() {
+    let s = MarkdownStream::new();
+    let (items, tail) = s.items_and_tail();
+    assert_eq!(items.len(), 0);
+    assert_eq!(tail, "");
+}
+
+#[test]
+fn items_and_tail_before_flush_shows_entire_raw_text_as_tail() {
+    let mut s = MarkdownStream::new();
+    s.append("Hello world");
+    let (items, tail) = s.items_and_tail();
+    assert_eq!(items.len(), 0, "no flush yet, no committed items");
+    assert_eq!(tail, "Hello world", "all raw_text should be in the tail");
+}
