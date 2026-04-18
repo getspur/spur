@@ -91,18 +91,12 @@ pub(crate) enum Segment {
 /// at `entry_idx`. Resolved at render time via `entry_row_starts`. Width
 /// resize clamps to the entry's last row (Phase 3 trade-off; v1 byte
 /// anchor was entry-coarse and snapped to entry start anyway).
-/// `Byte` is the legacy variant kept during Phase 3 migration; will be
-/// removed in the final task of this plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollAnchor {
     Following,
     Row {
         entry_idx: usize,
         row_within_entry: usize,
-    },
-    Byte {
-        entry_idx: usize,
-        byte_offset: usize,
     },
 }
 

@@ -995,22 +995,18 @@ fn phase2_f3_anchor_survives_eviction() {
 
     let anchor = trace.anchor_for_tests();
     match anchor {
-        ScrollAnchor::Byte {
+        ScrollAnchor::Row {
             entry_idx,
-            byte_offset,
+            row_within_entry,
         } => {
             assert!(
                 entry_idx < trace.entries_for_tests().len(),
                 "anchor.entry_idx must point at a surviving entry"
             );
             assert!(
-                byte_offset == 0 || entry_idx > 0,
+                row_within_entry == 0 || entry_idx > 0,
                 "evicted-entry anchor must snap to (0, 0)"
             );
-        }
-        ScrollAnchor::Row { entry_idx, .. } => {
-            assert!(entry_idx < trace.entries_for_tests().len(),
-                "anchor.entry_idx must point at a surviving entry");
         }
         ScrollAnchor::Following => {
             // Acceptable: streaming pushed user back to bottom.
@@ -1234,9 +1230,6 @@ fn sim_mermaid_state_mismatch_in_shift() {
         ScrollAnchor::Following => {
             // Acceptable if scroll target reached the end.
             eprintln!("SIM-10: anchor became Following — acceptable if real layout was used");
-        }
-        ScrollAnchor::Byte { .. } => {
-            panic!("SIM-10: anchor is Byte variant — Phase 3 emits Row, not Byte");
         }
     }
 }
