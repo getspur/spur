@@ -138,7 +138,7 @@ fn delegate_parallel_def() -> ToolDefinition {
                         },
                         "required": ["agent", "task"]
                     },
-                    "description": "List of tasks to delegate in parallel. Each task carries its own context_files (and, after T1.3, its own issue_id and delegation_plan)."
+                    "description": "List of tasks to delegate in parallel. Each task carries its own context_files, issue_id, and delegation_plan."
                 },
                 "delegation_plan": {
                     "type": "object",
