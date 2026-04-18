@@ -15,13 +15,23 @@ use crate::components::markdown_stream::StateLookup;
 /// Old behavior (RC1 bug): builder.rs renders only `stream.items()` when
 /// non-empty, silently dropping the tail.
 /// New behavior: render_agent_message_body renders items + tail.
+///
+/// Note: uses `drain_fence_dispatches` (mid-stream, non-finalizing) rather than
+/// `force_flush_all` (which now calls `flush_final`, a finalizing operation that
+/// would prevent the subsequent `append_message`). The input `"First sentence.\n\nsep"`
+/// contains `\n\n` with following content, so `has_authoritative_closure_pattern`
+/// fires immediately inside `maybe_flush`, driving a synchronous `flush_now`.
 #[test]
 fn ghost_text_rc1_regression() {
     let mut trace = ReactTrace::new_for_tests();
     // First chunk ends with `\n\n<word>` so the paragraph's End event
     // lands at range.end < raw_text.len() and cursor advances after flush.
     trace.append_message("First sentence.\n\nsep", "claude", "10:00:00".to_string());
-    trace.force_flush_all(&StateLookup::empty());
+
+    // Mid-stream flush (non-finalizing) via the existing public API.
+    // `has_authoritative_closure_pattern` fires on `\n\n` + content, so
+    // `maybe_flush` takes the fast path and calls `flush_now` synchronously.
+    let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
     // Verify the setup produces a committed prefix.
     let committed_before = trace
@@ -58,13 +68,40 @@ fn ghost_text_rc1_regression() {
     );
 }
 
+/// T5.2 — trailing fenced code block renders with markdown styling on
+/// TurnComplete (force_flush_all), not as plain tail.
+#[test]
+fn turn_complete_final_code_fence_renders_styled() {
+    let mut trace = ReactTrace::new_for_tests();
+    trace.append_message(
+        "Here's the code:\n\n```rust\nfn main() {}\n```",
+        "claude",
+        "10:00".to_string(),
+    );
+    trace.force_flush_all(&StateLookup::empty());
+
+    // After flush_final, the stream's tail should be empty — everything committed.
+    let stream = trace
+        .entries_for_tests()
+        .iter()
+        .find_map(|e| e.markdown.as_ref())
+        .expect("agent message entry has a markdown stream");
+    let (_, tail) = stream.items_and_tail();
+    assert_eq!(tail, "", "TurnComplete must commit all raw_text; tail={:?}", tail);
+    assert!(stream.is_finalized());
+}
+
 /// T4.3 — both render paths produce the same textual content.
+///
+/// Note: all content is appended before `force_flush_all` because `force_flush_all`
+/// now calls `flush_final`, which finalizes the stream and prevents further appends.
 #[test]
 fn both_render_paths_produce_identical_textual_content() {
     let mut trace = ReactTrace::new_for_tests();
-    trace.append_message("# Title\n\nBody text.\n\nmore ", "claude", "10:00".to_string());
+    // Append all content before flushing — force_flush_all uses flush_final
+    // (finalizing), so no appends may follow it.
+    trace.append_message("# Title\n\nBody text.\n\nmore tail bytes", "claude", "10:00".to_string());
     trace.force_flush_all(&StateLookup::empty());
-    trace.append_message("tail bytes", "claude", "10:00".to_string());
 
     let flat = trace.build_display_lines_for_tests("", None);
     let flat_text: String = flat.iter().map(|l| {
