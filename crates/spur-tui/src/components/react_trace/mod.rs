@@ -10,7 +10,7 @@ pub use types::{ActStatus, TraceEntry, TraceKind};
 
 use spur_acp::{
     adapter::{mode_badge, ToolInputDisplay},
-    AgentKind,
+    AgentKind, ToolCallId,
 };
 
 use ratatui::style::Color;
@@ -633,6 +633,30 @@ impl ReactTrace {
             executor_id = %executor_id,
             "DelegationDispatched arrived but no matching Delegate entry"
         );
+    }
+
+    /// Locate the newest `TraceKind::Act` entry whose `tool_call_id` matches.
+    /// Returns the absolute entry index and a mutable reference, or `None`.
+    ///
+    /// Compares the inner `Arc<str>` content rather than `Arc` identity, so
+    /// ids produced by separate protocol round trips still compare equal.
+    pub(crate) fn find_act_by_id_mut(
+        &mut self,
+        id: &ToolCallId,
+    ) -> Option<(usize, &mut TraceEntry)> {
+        let needle: &str = id.0.as_ref();
+        for (idx, entry) in self.entries.iter_mut().enumerate().rev() {
+            if let TraceKind::Act {
+                tool_call_id: Some(existing),
+                ..
+            } = &entry.kind
+            {
+                if existing.0.as_ref() == needle {
+                    return Some((idx, entry));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1527,5 +1551,54 @@ mod tests {
             user[0].text, "list the files in src/",
             "must not double the seeded text"
         );
+    }
+
+    #[test]
+    fn find_act_by_id_mut_returns_newest_matching_act() {
+        use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+        use spur_acp::ToolCallId;
+        use std::sync::Arc;
+
+        let mut trace = ReactTrace::new();
+        let id_a: ToolCallId = ToolCallId::new(Arc::from("call-A"));
+        let id_b: ToolCallId = ToolCallId::new(Arc::from("call-B"));
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "first".into(),
+                family: ToolFamily::Unknown,
+                input: ToolInputDisplay::Empty,
+                tool_call_id: Some(id_a.clone()),
+                status: ActStatus::Pending,
+            },
+            text: String::new(),
+            timestamp: "t0".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "second".into(),
+                family: ToolFamily::Unknown,
+                input: ToolInputDisplay::Empty,
+                tool_call_id: Some(id_b.clone()),
+                status: ActStatus::Pending,
+            },
+            text: String::new(),
+            timestamp: "t1".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+
+        let found = trace.find_act_by_id_mut(&id_a);
+        assert!(found.is_some(), "should find act by id");
+        let (idx, entry) = found.unwrap();
+        assert_eq!(idx, 0, "should return the matching entry's absolute index");
+        assert!(
+            matches!(&entry.kind, TraceKind::Act { tool, .. } if tool == "first"),
+            "should return a mutable reference to the matching entry"
+        );
+
+        let id_missing: ToolCallId = ToolCallId::new(Arc::from("nope"));
+        assert!(trace.find_act_by_id_mut(&id_missing).is_none());
     }
 }
