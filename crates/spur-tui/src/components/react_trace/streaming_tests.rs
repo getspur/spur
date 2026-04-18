@@ -48,7 +48,7 @@ fn ghost_text_rc1_regression() {
     // Second chunk — this is the one the RC1 bug would hide.
     trace.append_message(" Second chunk.", "claude", "10:00:00".to_string());
 
-    let (rows, _) = trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    let (rows, _, _) = trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let rendered: String = rows.iter().filter_map(|r| match r {
         crate::components::react_trace::VirtualRow::Text(line) => Some(
             line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
@@ -135,7 +135,7 @@ fn both_render_paths_produce_identical_textual_content() {
         l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
     }).collect::<Vec<_>>().join("\n");
 
-    let (rows, _) = trace.build_virtual_rows_for_tests(0, 200, &std::collections::HashMap::new(), None);
+    let (rows, _, _) = trace.build_virtual_rows_for_tests(0, 200, &std::collections::HashMap::new(), None);
     let virt_text: String = rows.iter().filter_map(|r| match r {
         crate::components::react_trace::VirtualRow::Text(line) => Some(
             line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
@@ -192,7 +192,7 @@ fn sim_tail_to_items_reflow_row_delta() {
     let (items_before, tail_before) = stream_before.items_and_tail();
     let items_before_len = items_before.len();
     let tail_before_len = tail_before.len();
-    let (rows_before, _) =
+    let (rows_before, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let r_before = rows_before.len();
 
@@ -208,7 +208,7 @@ fn sim_tail_to_items_reflow_row_delta() {
     let (items_after, tail_after) = stream_after.items_and_tail();
     let items_after_len = items_after.len();
     let tail_after_len = tail_after.len();
-    let (rows_after, _) =
+    let (rows_after, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let r_after = rows_after.len();
 
@@ -269,7 +269,7 @@ fn sim_viewport_content_shifts_under_flush_with_no_input() {
     payload.push_str("trailing");
     trace.append_message(&payload, "claude", "10:00:00".to_string());
 
-    let (rows_initial, _) =
+    let (rows_initial, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let visible_height = 8usize;
     // Position viewport near the END — that's where the trailing blank gets
@@ -297,7 +297,7 @@ fn sim_viewport_content_shifts_under_flush_with_no_input() {
     // No new append. Flush only.
     let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
-    let (rows_after, _) =
+    let (rows_after, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let visible_after = slice_to_string(&rows_after, scroll_offset, visible_end);
 
@@ -413,7 +413,7 @@ fn sim_fix_content_anchor_eliminates_ghost_text() {
     payload.push_str("trailing");
     trace.append_message(&payload, "claude", "10:00:00".to_string());
 
-    let (rows_before, _) =
+    let (rows_before, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let visible_height = 8usize;
     let scroll_offset_before = rows_before.len().saturating_sub(visible_height);
@@ -431,7 +431,7 @@ fn sim_fix_content_anchor_eliminates_ghost_text() {
 
     // Re-anchor: ask "where did our anchor land?" instead of trusting the
     // old row index. This is what F3 would do in scroll_offset's place.
-    let (rows_after, _) =
+    let (rows_after, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let scroll_offset_after = anchor_to_row(&rows_after, &anchor)
         .expect("anchor should be resolvable post-reflow");
@@ -490,7 +490,7 @@ fn sim_fix_content_anchor_survives_repeated_flushes() {
         trace.append_message(c, "claude", "10:00:00".to_string());
     }
     // Don't drain yet — capture the all-tail state.
-    let (rows_initial, _) =
+    let (rows_initial, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let visible_height = 6usize;
     // Anchor on a row in the middle of the document (worst case for reflow).
@@ -506,7 +506,7 @@ fn sim_fix_content_anchor_survives_repeated_flushes() {
     let mut last_visible: Vec<String> = visible_initial.clone();
     for round in 0..5 {
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
-        let (rows_after, _) = trace.build_virtual_rows_for_tests(
+        let (rows_after, _, _) = trace.build_virtual_rows_for_tests(
             0, 80, &std::collections::HashMap::new(), None);
         let new_offset = anchor_to_row(&rows_after, &anchor);
         if let Some(off) = new_offset {
@@ -526,7 +526,7 @@ fn sim_fix_content_anchor_survives_repeated_flushes() {
     }
 
     // Final assertion: anchor's text still present in document.
-    let (rows_final, _) =
+    let (rows_final, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let final_offset = anchor_to_row(&rows_final, &anchor);
     assert!(
@@ -588,14 +588,14 @@ fn sim_f1_design_quantifies_pre_vs_post_flush_gap() {
         // Trace A: pre-flush
         let mut a = ReactTrace::new_for_tests();
         a.append_message(payload, "claude", "10:00:00".into());
-        let (rows_pre, _) =
+        let (rows_pre, _, _) =
             a.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
 
         // Trace B: post-flush (force_flush_all uses flush_final)
         let mut b = ReactTrace::new_for_tests();
         b.append_message(payload, "claude", "10:00:00".into());
         b.force_flush_all(&StateLookup::empty());
-        let (rows_post, _) =
+        let (rows_post, _, _) =
             b.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
 
         let pre = dump_rows(&rows_pre);
@@ -643,9 +643,9 @@ fn sim_f1_prototype_freezes_viewport_under_reflow() {
 
     // Render twice. With F1 simulated, both renders should be identical
     // because no additional reflow can happen.
-    let (rows_1, _) =
+    let (rows_1, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
-    let (rows_2, _) =
+    let (rows_2, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     assert_eq!(rows_1.len(), rows_2.len(),
         "SIM-6: post-flush renders must be deterministic; got {} vs {}",
@@ -688,7 +688,7 @@ fn sim_f3_anchor_under_realistic_streaming_with_appends() {
         "claude", "10:00:00".into());
     let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
-    let (rows_initial, _) = trace.build_virtual_rows_for_tests(
+    let (rows_initial, _, _) = trace.build_virtual_rows_for_tests(
         0, 80, &std::collections::HashMap::new(), None);
     let visible_height = 5;
     // Anchor near the TOP — this is the user reading earlier content
@@ -711,7 +711,7 @@ fn sim_f3_anchor_under_realistic_streaming_with_appends() {
         trace.append_message(chunk, "claude", "10:00:00".into());
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
-        let (rows_now, _) = trace.build_virtual_rows_for_tests(
+        let (rows_now, _, _) = trace.build_virtual_rows_for_tests(
             0, 80, &std::collections::HashMap::new(), None);
         let new_offset = anchor_to_row(&rows_now, &anchor)
             .expect("anchor must remain resolvable");
@@ -749,14 +749,14 @@ fn sim_f3_anchor_under_terminal_resize() {
     trace.force_flush_all(&StateLookup::empty());
 
     // Anchor on a row containing the marker at width 80.
-    let (rows_w80, _) = trace.build_virtual_rows_for_tests(
+    let (rows_w80, _, _) = trace.build_virtual_rows_for_tests(
         0, 80, &std::collections::HashMap::new(), None);
     let marker_row_w80 = rows_w80.iter().position(|r| row_text(r).contains("MARKER_ALPHA"))
         .expect("marker must be present at width 80");
     let anchor = row_to_anchor(&rows_w80, marker_row_w80);
 
     // Resize to width 60 — wrapping changes substantially.
-    let (rows_w60, _) = trace.build_virtual_rows_for_tests(
+    let (rows_w60, _, _) = trace.build_virtual_rows_for_tests(
         0, 60, &std::collections::HashMap::new(), None);
     let resolved_w60 = anchor_to_row(&rows_w60, &anchor);
     eprintln!("SIM-8 width 80→60: marker at row {} (w80) resolves to {:?} (w60)",

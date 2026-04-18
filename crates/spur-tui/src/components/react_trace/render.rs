@@ -28,6 +28,9 @@ pub(in crate::components) struct VirtualRowCacheEntry {
     /// Row index where each entry's virtual rows begin.
     /// `entry_row_starts[i]` = index into `rows` where entry `i` starts.
     pub(super) entry_row_starts: Vec<usize>,
+    /// Per-row byte range within the source entry content. Co-indexed with
+    /// `rows`. `None` means the row is synthetic (blank separator, etc.).
+    pub(super) byte_ranges: Vec<Option<std::ops::Range<usize>>>,
     pub(super) width: u16,
     pub(super) generation: u64,
     /// Snapshot of mermaid fence states at cache time. If any state changes
@@ -384,14 +387,16 @@ impl ReactTrace {
                             c.rows.len()
                         };
                         c.rows.truncate(trunc_row);
+                        c.byte_ranges.truncate(trunc_row);
                         c.entry_row_starts.truncate(dirty_idx);
                         let base = c.rows.len();
                         // Drop the mutable borrow before calling &self method.
                         let states = compute_fence_states(ctx, effective_width);
-                        let (new_rows, new_starts) =
+                        let (new_rows, new_starts, new_byte_ranges) =
                             self.build_virtual_rows(dirty_idx, effective_width, &states, lineage);
                         let c = self.line_cache.as_mut().unwrap();
                         c.rows.extend(new_rows);
+                        c.byte_ranges.extend(new_byte_ranges);
                         c.entry_row_starts
                             .extend(new_starts.iter().map(|s| s + base));
                         c.generation = self.generation;
@@ -400,11 +405,12 @@ impl ReactTrace {
                     _ => {
                         // Full rebuild (dirty_idx == 0 or no cache).
                         let states = compute_fence_states(ctx, effective_width);
-                        let (rows, entry_row_starts) =
+                        let (rows, entry_row_starts, byte_ranges) =
                             self.build_virtual_rows(0, effective_width, &states, lineage);
                         self.line_cache = Some(VirtualRowCacheEntry {
                             rows,
                             entry_row_starts,
+                            byte_ranges,
                             width: effective_width,
                             generation: self.generation,
                             fence_gen,
@@ -415,11 +421,12 @@ impl ReactTrace {
             } else {
                 // Width or fence state changed — full rebuild.
                 let states = compute_fence_states(ctx, effective_width);
-                let (rows, entry_row_starts) =
+                let (rows, entry_row_starts, byte_ranges) =
                     self.build_virtual_rows(0, effective_width, &states, lineage);
                 self.line_cache = Some(VirtualRowCacheEntry {
                     rows,
                     entry_row_starts,
+                    byte_ranges,
                     width: effective_width,
                     generation: self.generation,
                     fence_gen,
@@ -539,7 +546,7 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
     ) -> Vec<Segment> {
-        let (rows, _starts) = self.build_virtual_rows(0, effective_width, states, None);
+        let (rows, _starts, _byte_ranges) = self.build_virtual_rows(0, effective_width, states, None);
         let end = (offset + visible_height).min(rows.len());
         segment_visible_rows(&rows, offset, end)
     }
