@@ -1636,14 +1636,8 @@ impl McpCallbackServer {
             resp.insert("worker_branch".into(), json!(branch));
         }
         if let Some(ref result) = entry.result {
-            if let Some(ref diff) = result.diff {
-                resp.insert("diff".into(), json!(diff));
-            }
-            if let Some(ref ds) = result.diff_summary {
-                resp.insert("diff_summary".into(), serde_json::to_value(ds).unwrap_or_default());
-            }
-            if let Some(ref s) = result.summary {
-                resp.insert("summary".into(), json!(s));
+            for (k, v) in crate::plan::build_task_diff_fields(result) {
+                resp.insert(k, v);
             }
         }
 

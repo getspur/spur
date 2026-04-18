@@ -931,6 +931,36 @@ pub(crate) fn format_request_changes_comment(
     )
 }
 
+/// Build the JSON fields for a `get_task_diff` response given a
+/// DelegationResult. Pure — no I/O. Owns the contract that the "diff"
+/// key is ALWAYS present when the task has a result; when the diff is
+/// None, a structured marker tells the brain why (Option E from
+/// docs/rca/2026-04-18-get-task-diff-empty.md).
+pub(crate) fn build_task_diff_fields(
+    result: &spur_acp::DelegationResult,
+) -> Vec<(String, serde_json::Value)> {
+    use serde_json::json;
+    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+
+    match &result.diff {
+        Some(diff) => {
+            out.push(("diff".into(), json!(diff)));
+        }
+        None => {
+            out.push(("diff".into(), serde_json::Value::Null));
+            out.push(("diff_status".into(), json!("no_changes_detected")));
+            out.push(("diff_basis".into(), json!("base_commit..HEAD")));
+        }
+    }
+    if let Some(ref ds) = result.diff_summary {
+        out.push(("diff_summary".into(), serde_json::to_value(ds).unwrap_or_default()));
+    }
+    if let Some(ref s) = result.summary {
+        out.push(("summary".into(), json!(s)));
+    }
+    out
+}
+
 /// Review a task in a plan: approve, reject, or request_changes.
 /// Optionally syncs with beads (pm), emits events (sink), and dispatches
 /// newly-ready tasks on approval (delegation_tx / task_tracker / plan_arc).
@@ -2351,5 +2381,45 @@ mod tests {
             is_terminal_plan_status(overall),
             "expected terminal overall status, got {overall:?}"
         );
+    }
+
+    #[test]
+    fn build_task_diff_fields_emits_marker_when_diff_none() {
+        let result = spur_acp::DelegationResult {
+            diff: None,
+            diff_summary: None,
+            summary: Some("did work".to_string()),
+            status: spur_acp::DelegationStatus::Success,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+        };
+        let fields = super::build_task_diff_fields(&result);
+        let m: std::collections::HashMap<String, serde_json::Value> =
+            fields.into_iter().collect();
+
+        assert!(m.contains_key("diff"), "diff key must always be present");
+        assert!(m["diff"].is_null(), "diff value should be null, got {:?}", m["diff"]);
+        assert_eq!(m.get("diff_status").and_then(|v| v.as_str()), Some("no_changes_detected"));
+        assert_eq!(m.get("diff_basis").and_then(|v| v.as_str()), Some("base_commit..HEAD"));
+        assert_eq!(m.get("summary").and_then(|v| v.as_str()), Some("did work"));
+    }
+
+    #[test]
+    fn build_task_diff_fields_emits_diff_when_present() {
+        let result = spur_acp::DelegationResult {
+            diff: Some("diff --git a/x b/x\n...".to_string()),
+            diff_summary: None,
+            summary: None,
+            status: spur_acp::DelegationStatus::Success,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+        };
+        let fields = super::build_task_diff_fields(&result);
+        let m: std::collections::HashMap<String, serde_json::Value> =
+            fields.into_iter().collect();
+
+        assert_eq!(m.get("diff").and_then(|v| v.as_str()), Some("diff --git a/x b/x\n..."));
+        assert!(!m.contains_key("diff_status"));
+        assert!(!m.contains_key("diff_basis"));
     }
 }
