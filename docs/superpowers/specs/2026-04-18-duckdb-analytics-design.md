@@ -72,32 +72,116 @@ Pick one: repo-local `.spur/events` (present in this repo, matches current code 
 
 ## Architecture
 
-### Data flow
+### System architecture
 
-```text
-vendor subprocess / ACP session
-          │
-          ▼
- SPUR runtime event stream  ── UsageUpdate ──► LiveBurnObserver
-          │                                         │
-          │                                         ├─ in-mem aggregator per session
-          │                                         │   (session view, zero I/O)
-          │                                         │
-          │                                         └─ ParquetSessionWriter
-          │                                              (append row-groups ~5s cadence)
-          ▼
-    NDJSON event log (raw, replayable)                   │
-                                                         ▼
-                                        ~/.spur/warehouse/hot/**/*.parquet
-                                                         │
-                                                         ▼
-                                           DuckDB (read-only, glob over hot path)
-                                                         │
-                                                         ▼
-                                    BurnRateQuery   (TTL-cached: project 5s, global 30s)
-                                                         │
-                                                         ▼
-                                          TUI project & global cards, CLI reports
+```mermaid
+flowchart TB
+  subgraph vendors["Vendor agents"]
+    C["Claude<br/>stream-json"]
+    K["Kiro<br/>JSONL"]
+    X["Codex<br/>ACP"]
+  end
+
+  subgraph runtime["SPUR runtime — spur-core"]
+    ES["Event stream<br/>UsageUpdate, CostUpdate, ..."]
+    LBO["LiveBurnObserver"]
+    AGG["BurnRateAggregator<br/>per ACP session<br/>DashMap keyed"]
+    PW["ParquetSessionWriter<br/>row-groups every 5s / 100 samples"]
+  end
+
+  subgraph storage["Storage layer"]
+    NDJSON[".spur/events/*.ndjson<br/>raw replayable log"]
+    PARQ["~/.spur/warehouse/hot/<br/>dt=.../session=.../run=*.parquet"]
+    STATE["~/.spur/state/burn_aggregator/<br/>&lt;acp_session&gt;.bin — postcard"]
+    SQLITE["~/.spur/cost.db<br/>operational ledger"]
+    VENDOR_ARCH["~/.claude/projects/**<br/>~/.kiro/sessions/cli/**"]
+  end
+
+  subgraph query["Query layer — spur-analytics"]
+    INGEST["refresh — normalize<br/>vendor archives to Parquet cold/"]
+    BRQ["BurnRateQuery<br/>per-query in-mem DuckDB<br/>TTL cache"]
+    RPT["Reports<br/>burn-rate, routing,<br/>forecast, cost"]
+  end
+
+  subgraph ui["UI surface"]
+    TUI_S["TUI session card<br/>sub-second"]
+    TUI_P["TUI project card<br/>5s TTL"]
+    TUI_G["TUI global card<br/>30s TTL"]
+    CLI["CLI reports"]
+  end
+
+  C --> ES
+  K --> ES
+  X --> ES
+  ES --> LBO
+  ES --> NDJSON
+  LBO --> AGG
+  LBO --> PW
+  AGG -. graceful shutdown .-> STATE
+  STATE -. startup restore .-> AGG
+  PW --> PARQ
+
+  SQLITE --> INGEST
+  VENDOR_ARCH --> INGEST
+  INGEST --> PARQ
+
+  AGG --> TUI_S
+  PARQ --> BRQ
+  BRQ --> TUI_P
+  BRQ --> TUI_G
+  BRQ --> RPT
+  RPT --> CLI
+
+  classDef hot fill:#e1f5ff,stroke:#01579b
+  classDef warm fill:#fff3e0,stroke:#e65100
+  classDef cold fill:#f3e5f5,stroke:#4a148c
+  class AGG,LBO,TUI_S hot
+  class PW,PARQ,NDJSON warm
+  class BRQ,RPT,TUI_P,TUI_G,CLI,INGEST cold
+```
+
+Color legend: blue = sub-second live path; orange = write path (WAL + Parquet landing); purple = read/query path (read-only DuckDB over Parquet glob).
+
+### Sample lifecycle
+
+```mermaid
+sequenceDiagram
+  participant V as Vendor
+  participant R as SPUR runtime
+  participant LBO as LiveBurnObserver
+  participant AGG as BurnRateAggregator
+  participant PW as ParquetSessionWriter
+  participant FS as Parquet files
+  participant DB as DuckDB<br/>per-query
+  participant TUI as TUI
+
+  V->>R: UsageUpdate event
+  R->>LBO: on_sample(UsageSample)
+  par live path
+    LBO->>AGG: push(sample)
+  and historical path
+    LBO->>PW: append(sample)
+    Note over PW: buffer row-group<br/>flush every 5s / 100 samples
+    PW->>FS: write tmp + atomic rename
+  end
+
+  loop per render tick (sub-second)
+    TUI->>AGG: session_rate(id)
+    AGG-->>TUI: BurnRate
+  end
+
+  loop every 5s
+    TUI->>DB: project_rate(root)
+    DB->>FS: read_parquet(glob, union_by_name)
+    FS-->>DB: row groups
+    DB-->>TUI: BurnRate (cached 5s)
+  end
+
+  loop every 30s
+    TUI->>DB: global_rate()
+    DB->>FS: read_parquet(glob, union_by_name)
+    DB-->>TUI: BurnRate (cached 30s)
+  end
 ```
 
 Vendor archive ingest (Claude `~/.claude/projects/**/*.jsonl`, Kiro `~/.kiro/sessions/cli/*.jsonl`) reuses the same Parquet landing: `spur analytics refresh` normalizes vendor JSONL into the same `UsageSample` layout and writes into a `cold/` partition.
@@ -138,6 +222,34 @@ crates/
 ```
 
 `spur-cost` stays SQLite-backed as the operational ledger — no change to its responsibilities.
+
+### Crate dependencies
+
+```mermaid
+flowchart TD
+  SCHEMA["spur-analytics-schema<br/>UsageSample, CostFact,<br/>BurnRateAggregator, CostOrigin"]
+  CORE["spur-core<br/>LiveBurnObserver,<br/>ParquetSessionWriter"]
+  ACP["spur-acp<br/>events,<br/>AgentSessionReady + vendor_session_id"]
+  COST["spur-cost<br/>SQLite operational ledger"]
+  ANALYTICS["spur-analytics<br/>writer, query, ingest,<br/>identity, reports"]
+  TUI["spur-tui<br/>session / project / global cards"]
+  CLI["spur-cli<br/>spur analytics ..."]
+
+  CORE --> SCHEMA
+  CORE --> ACP
+  ANALYTICS --> SCHEMA
+  ANALYTICS -. reads .-> COST
+  TUI --> CORE
+  TUI --> ANALYTICS
+  CLI --> ANALYTICS
+
+  classDef new fill:#e8f5e9,stroke:#1b5e20
+  classDef existing fill:#eceff1,stroke:#37474f
+  class SCHEMA,ANALYTICS new
+  class CORE,ACP,COST,TUI,CLI existing
+```
+
+Green = new crates in this design; grey = existing crates modified or unchanged. `spur-analytics` does not depend on `spur-cost` directly — it reads the SQLite file via DuckDB's `sqlite_scanner` during `refresh` ingest, keeping crate boundaries clean.
 
 ---
 
@@ -189,6 +301,40 @@ pub struct CostFact {
 
 All three origins for a session are stored side-by-side. Query-time precedence: `VendorReported > DerivedFromTokens > HeuristicSessionEnd`. Overridable via CLI flag `--cost-source={best,vendor,derived,heuristic,all}`.
 
+```mermaid
+flowchart LR
+  subgraph sources["Cost sources"]
+    V["VendorReported<br/>CostUpdate events<br/>vendor-authoritative"]
+    D["DerivedFromTokens<br/>UsageSample × pricing table<br/>reproducible, auditable"]
+    H["HeuristicSessionEnd<br/>spur-cost SQLite<br/>duration × rate"]
+  end
+
+  CF["core.cost_facts<br/>all three stored with<br/>cost_origin + pricing_table_version"]
+
+  subgraph query["Query-time selection"]
+    DEFAULT["default view<br/>coalesce by precedence:<br/>Vendor → Derived → Heuristic"]
+    OVERRIDE["--cost-source override<br/>best / vendor / derived /<br/>heuristic / all"]
+  end
+
+  OUT1["Single cost_usd<br/>+ selected_origin"]
+  OUT2["Audit table<br/>all origins side-by-side<br/>for drift detection"]
+
+  V --> CF
+  D --> CF
+  H --> CF
+  CF --> DEFAULT
+  CF --> OVERRIDE
+  DEFAULT --> OUT1
+  OVERRIDE --> OUT2
+
+  classDef best fill:#c8e6c9,stroke:#1b5e20
+  classDef mid fill:#fff9c4,stroke:#f57f17
+  classDef fallback fill:#ffccbc,stroke:#bf360c
+  class V best
+  class D mid
+  class H fallback
+```
+
 ### Session identity edges
 
 ```sql
@@ -203,6 +349,49 @@ CREATE TABLE core.session_identity_edges (
 ```
 
 Query layer always prefers `confidence = 1.0` edges. Heuristic edges fire only when no runtime-logged edge exists for a pair. Heuristics are **quarantined** — they run, they are clearly labelled, they never silently win.
+
+```mermaid
+flowchart LR
+  subgraph p0["Phase-0 runtime (primary)"]
+    SPUR["spur_session_id"]
+    ACP_ID["acp_session_id"]
+    VENDOR["vendor_session_id"]
+    EVT["AgentSessionReady event<br/>carries all three"]
+  end
+
+  subgraph p1["Phase-1 heuristic (fallback, quarantined)"]
+    HEUR["Heuristic stitcher<br/>cwd + time window + agent<br/>runs only on vendor archives<br/>with no runtime edge"]
+  end
+
+  subgraph edges["core.session_identity_edges"]
+    E_RT["runtime_logged<br/>confidence 1.0"]
+    E_FN["filename_match<br/>confidence 0.9<br/>e.g. Kiro filename = vendor id"]
+    E_HR["heuristic_cwd_time<br/>confidence 0.5 – 0.8"]
+  end
+
+  SPUR --> EVT
+  ACP_ID --> EVT
+  VENDOR --> EVT
+  EVT --> E_RT
+
+  HEUR -. only when no 1.0 edge exists .-> E_HR
+  HEUR --> E_FN
+
+  Q["Query layer resolution<br/>prefer highest-confidence edge;<br/>heuristics never silently win"]
+
+  E_RT ==> Q
+  E_FN --> Q
+  E_HR -. last resort .-> Q
+
+  classDef solid fill:#c8e6c9,stroke:#1b5e20
+  classDef moderate fill:#fff9c4,stroke:#f57f17
+  classDef risky fill:#ffccbc,stroke:#bf360c
+  class E_RT solid
+  class E_FN moderate
+  class E_HR risky
+```
+
+Reading the graph: solid thick arrow = primary resolution path; dashed arrows = fallbacks. The worktree workflow (concurrent same-repo, same-agent sessions) breaks cwd+time heuristics — this is why Phase-0 exists at all.
 
 ---
 
@@ -277,6 +466,43 @@ The snapshot schema is independent of the warehouse Parquet schema. Warehouse ev
 Different refresh rates are intentional: a project-level number flickering per-sample is visual noise, not signal.
 
 Cross-process visibility comes for free: every SPUR process appends to the same hot-path tree, so any `BurnRateQuery` sees every process's output. No cross-process rendezvous, no heartbeat files.
+
+```mermaid
+flowchart LR
+  subgraph store["Unified UsageSample store"]
+    MEM["In-memory<br/>VecDeque per ACP session<br/>DashMap in LiveBurnObserver"]
+    PARQ["~/.spur/warehouse/hot/<br/>append-only Parquet glob<br/>written by every SPUR process"]
+  end
+
+  subgraph scopes["Scope views"]
+    S["Session<br/>WHERE acp_session_id = ?<br/>sub-second, zero I/O"]
+    P["Project<br/>WHERE project_root = ?<br/>5s TTL cache"]
+    G["Global<br/>no filter<br/>30s TTL cache"]
+  end
+
+  subgraph behavior["User behavior"]
+    U_S["Glance frequently<br/>intervention: seconds<br/>'kill this runaway'"]
+    U_P["Glance occasionally<br/>intervention: minutes<br/>'this project is hot today'"]
+    U_G["Review daily<br/>intervention: hours+<br/>'cross-project trend'"]
+  end
+
+  MEM --> S
+  PARQ --> P
+  PARQ --> G
+
+  S --> U_S
+  P --> U_P
+  G --> U_G
+
+  classDef live fill:#e1f5ff,stroke:#01579b
+  classDef warm fill:#fff3e0,stroke:#e65100
+  classDef cool fill:#f3e5f5,stroke:#4a148c
+  class MEM,S,U_S live
+  class PARQ,P,U_P warm
+  class G,U_G cool
+```
+
+Three latency budgets, three matched readers, one canonical sample schema — the refresh-rate asymmetry is intentional. A project-level number flickering per-sample would be visual noise; a global number refreshing every 5 s would waste I/O without informing any user decision.
 
 ---
 
