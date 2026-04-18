@@ -1517,13 +1517,37 @@ impl McpCallbackServer {
                 );
             }
         }
-        // epic_body is consumed by Task 5 (build_epic_subgraph) — keep
-        // it bound as Option<String> here so the follow-up handler wiring
-        // doesn't need to re-extract or rename. Silence the unused-binding
-        // warning for this interim commit.
-        let _ = &epic_body;
-
         let plan_id = uuid::Uuid::new_v4().to_string();
+
+        // Build the beads epic subgraph before spawning the executor so
+        // any creation error is surfaced synchronously.
+        let epic_subgraph: Option<EpicSubgraph> = if persist_as_epic {
+            let pm = self.pm_service.as_deref().expect("gate ensures pm is beads");
+            let title = epic_title.as_deref().expect("gate ensures non-empty title");
+            match build_epic_subgraph(pm, &plan_id, title, epic_body.as_deref(), &tasks).await {
+                Ok(sg) => {
+                    info!(
+                        plan_id = %plan_id,
+                        epic_id = %sg.epic_id,
+                        children = sg.task_map.len(),
+                        "submit_plan: beads epic subgraph created"
+                    );
+                    Some(sg)
+                }
+                Err(e) => {
+                    error!(plan_id = %plan_id, "build_epic_subgraph failed: {e}");
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!("submit_plan: failed to persist plan as beads epic: {e}"),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let _ = &epic_subgraph; // consumed by Task 7
+
         let entries: Vec<crate::plan::PlanTaskEntry> = tasks
             .into_iter()
             .map(|spec| crate::plan::PlanTaskEntry {
