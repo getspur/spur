@@ -76,6 +76,78 @@ fn row_to_anchor(row: usize, entry_row_starts: &[usize]) -> (usize, usize) {
     (entry_idx, within)
 }
 
+/// Merge an incoming `ToolCallUpdate.fields` into the previous `ActStatus`.
+///
+/// Rules:
+///   - Terminal `prev` (Completed / Failed): `debug_assert!` that the
+///     incoming status, if present, matches; return `prev.clone()` unchanged.
+///     Prevents a late `InProgress` update from reopening a closed tool call.
+///   - `incoming_status == None`: keep `prev` variant; refresh
+///     `InProgress.partial` only when `prev` is `InProgress` AND
+///     `incoming_raw_output` is `Some(v)`.
+///   - `incoming_status == Some(s)`: map `(s, incoming_raw_output)` to a
+///     new `ActStatus`. An incoming terminal always replaces non-terminal.
+///   - Any future `ToolCallStatus` variant not listed here (the enum may
+///     become `#[non_exhaustive]` upstream) is absorbed: log via
+///     `tracing::debug!` and return `prev.clone()`.
+pub(super) fn merge_status(
+    prev: &types::ActStatus,
+    incoming_status: Option<spur_acp::ToolCallStatus>,
+    incoming_raw_output: Option<&serde_json::Value>,
+    kind: spur_acp::AgentKind,
+) -> types::ActStatus {
+    use spur_acp::adapter::extract_observe;
+    use spur_acp::ToolCallStatus;
+    use types::ActStatus;
+
+    let parse = |v: &serde_json::Value| extract_observe(v, kind);
+
+    // Terminal prev wins.
+    if matches!(prev, ActStatus::Completed(_) | ActStatus::Failed(_)) {
+        if let Some(s) = incoming_status {
+            let prev_is_completed = matches!(prev, ActStatus::Completed(_));
+            let prev_is_failed = matches!(prev, ActStatus::Failed(_));
+            let ok = (prev_is_completed && matches!(s, ToolCallStatus::Completed))
+                || (prev_is_failed && matches!(s, ToolCallStatus::Failed));
+            if !ok {
+                tracing::warn!(
+                    ?prev,
+                    incoming = ?s,
+                    "ignoring late ToolCallUpdate on terminal ActStatus"
+                );
+            }
+        }
+        return prev.clone();
+    }
+
+    let Some(s) = incoming_status else {
+        // No status change. Possibly refresh partial on InProgress.
+        return match (prev, incoming_raw_output) {
+            (ActStatus::InProgress { .. }, Some(v)) => ActStatus::InProgress {
+                partial: Some(parse(v)),
+            },
+            _ => prev.clone(),
+        };
+    };
+
+    match s {
+        ToolCallStatus::Pending => ActStatus::Pending,
+        ToolCallStatus::InProgress => ActStatus::InProgress {
+            partial: incoming_raw_output.map(parse),
+        },
+        ToolCallStatus::Completed => ActStatus::Completed(incoming_raw_output.map(parse)),
+        ToolCallStatus::Failed => ActStatus::Failed(incoming_raw_output.map(parse)),
+        _ => {
+            tracing::debug!(
+                ?prev,
+                incoming = ?s,
+                "unknown ToolCallStatus variant; preserving prev"
+            );
+            prev.clone()
+        }
+    }
+}
+
 impl ReactTrace {
     pub fn new() -> Self {
         Self {
@@ -1551,6 +1623,52 @@ mod tests {
             user[0].text, "list the files in src/",
             "must not double the seeded text"
         );
+    }
+
+    #[test]
+    fn merge_status_pending_to_completed_with_payload() {
+        use spur_acp::adapter::ObservePayload;
+        use spur_acp::{AgentKind, ToolCallStatus};
+        let payload_json = serde_json::json!("ok");
+        let new = super::merge_status(
+            &ActStatus::Pending,
+            Some(ToolCallStatus::Completed),
+            Some(&payload_json),
+            AgentKind::Generic,
+        );
+        match new {
+            ActStatus::Completed(Some(ObservePayload::Text { .. })) => {}
+            other => panic!("expected Completed(Some(Text)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn merge_status_completed_is_terminal_ignores_late_in_progress() {
+        use spur_acp::adapter::ObservePayload;
+        use spur_acp::{AgentKind, ToolCallStatus};
+        let prev = ActStatus::Completed(Some(ObservePayload::Text {
+            body: "done".into(),
+        }));
+        let new = super::merge_status(
+            &prev,
+            Some(ToolCallStatus::InProgress),
+            None,
+            AgentKind::Generic,
+        );
+        // Terminal state must not be reopened.
+        assert!(
+            matches!(new, ActStatus::Completed(Some(_))),
+            "terminal Completed must not regress to InProgress, got {:?}",
+            new
+        );
+    }
+
+    #[test]
+    fn merge_status_none_incoming_status_preserves_variant() {
+        use spur_acp::AgentKind;
+        let prev = ActStatus::Pending;
+        let new = super::merge_status(&prev, None, None, AgentKind::Generic);
+        assert!(matches!(new, ActStatus::Pending));
     }
 
     #[test]
