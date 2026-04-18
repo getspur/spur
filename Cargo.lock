@@ -2256,6 +2256,7 @@ dependencies = [
  "tracing",
  "tui-markdown",
  "tui-textarea",
+ "unicode-segmentation",
  "unicode-width 0.1.14",
 ]
 
