@@ -352,17 +352,18 @@ use crate::components::markdown_stream::{MarkdownStream, StreamItem};
 #[cfg(feature = "markdown")]
 use crate::components::mermaid::{FenceRender, MermaidId, fence_placeholder_line};
 
-/// Render an AgentMessage body via the cursor-split contract.
+/// Render an AgentMessage body via [`MarkdownStream::preview_items`].
 ///
-/// Emits:
-/// 1. Committed items from `stream.items_and_tail().0` — styled text and
-///    fence rows (image via `emit_fence_image`, placeholder via `emit_line`).
-/// 2. The uncommitted tail from `stream.items_and_tail().1` — plain white
-///    lines with the 3-space indent.
+/// `preview_items` returns the same `Vec<StreamItem>` that `flush_final` would
+/// produce, so tail bytes receive the same paragraph context they will have
+/// after the final flush. This eliminates the row-count delta that caused ghost
+/// text (RCA Layer 2A, fix design F1 / cursor-split renderer).
 ///
-/// The two-closure split lets the primary render path emit multiple
-/// `VirtualRow::ImageRow` entries per mermaid fence while the secondary
-/// path renders a single placeholder line (no ImageRow concept).
+/// Two emit closures handle the two item kinds:
+/// - `emit_line` — called for every [`StreamItem::Text`] row, and for fence
+///   placeholders when the fence is not yet `Ready`.
+/// - `emit_fence_image` — called for [`StreamItem::Fence`] entries whose
+///   [`FenceRender`] is `Ready` with a non-zero pixel height.
 #[cfg(feature = "markdown")]
 fn render_agent_message_body(
     stream: &MarkdownStream,
