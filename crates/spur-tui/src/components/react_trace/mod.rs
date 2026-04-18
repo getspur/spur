@@ -622,19 +622,38 @@ impl ReactTrace {
                     lines.push(format!("{} ✉ {}", entry.timestamp, agent));
 
                     #[cfg(feature = "markdown")]
-                    let used_markdown = entry
-                        .markdown
-                        .as_ref()
-                        .filter(|stream| !stream.items().is_empty())
-                        .map(|stream| {
-                            for line in stream.lines() {
-                                let joined: String =
-                                    line.spans.iter().map(|s| s.content.as_ref()).collect();
-                                lines.push(format!("   {}", joined));
+                    let used_markdown = if let Some(stream) = entry.markdown.as_ref() {
+                        use crate::components::markdown_stream::StreamItem;
+                        let (items, tail) = stream.items_and_tail();
+                        for item in items {
+                            match item {
+                                StreamItem::Text(text_lines) => {
+                                    for line in text_lines {
+                                        let joined: String =
+                                            line.spans.iter().map(|s| s.content.as_ref()).collect();
+                                        lines.push(format!("   {}", joined));
+                                    }
+                                }
+                                StreamItem::Fence(id) => {
+                                    let placeholder = stream
+                                        .fence_placeholder_for(*id)
+                                        .map(|l| {
+                                            l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                                        })
+                                        .unwrap_or_else(|| {
+                                            format!("[📊 mermaid #{} · press Alt-v to view]", id.0)
+                                        });
+                                    lines.push(format!("   {}", placeholder));
+                                }
                             }
-                            true
-                        })
-                        .unwrap_or(false);
+                        }
+                        for tail_line in tail.lines() {
+                            lines.push(format!("   {}", tail_line));
+                        }
+                        true
+                    } else {
+                        false
+                    };
 
                     #[cfg(not(feature = "markdown"))]
                     let used_markdown = false;

@@ -494,6 +494,23 @@ fn unicode_content_cursor_advances_on_char_boundary() {
 }
 
 #[test]
+fn tail_above_safety_cap_with_boundary_still_flushes() {
+    use spur_tui::components::markdown_stream::SAFETY_CAP_BYTES;
+    let mut s = MarkdownStream::new();
+    // Pathologically large boundary-free prefix, followed by a clean
+    // closure pattern so the safety valve should NOT suppress rebuild.
+    let huge = "x".repeat(SAFETY_CAP_BYTES + 100);
+    s.append(&huge);
+    s.append("\n\nboundary content");
+    let before = s.flushed_byte_len_for_tests();
+    s.maybe_flush(&StateLookup::empty());
+    let after = s.flushed_byte_len_for_tests();
+    assert!(after > before,
+        "safety cap must NOT suppress when closure pattern is present; before={} after={}",
+        before, after);
+}
+
+#[test]
 fn no_fence_registered_with_range_end_at_eof() {
     let mut s = MarkdownStream::new();
     s.append("```mermaid\nflowchart LR\nA-->B\n```");
