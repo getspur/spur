@@ -346,3 +346,33 @@ fn flush_final_commits_trailing_fence() {
     s.flush_final(&StateLookup::empty());
     assert_eq!(s.flushed_byte_len_for_tests(), s.raw_text().len());
 }
+
+#[test]
+fn heuristic_fires_on_double_newline_with_content() {
+    use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
+    assert!(has_authoritative_closure_pattern_for_tests("para\n\nmore"));
+}
+
+#[test]
+fn heuristic_declines_double_newline_at_eof() {
+    use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
+    assert!(!has_authoritative_closure_pattern_for_tests("para\n\n"));
+}
+
+#[test]
+fn heuristic_fires_on_fence_close_with_content() {
+    use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
+    assert!(has_authoritative_closure_pattern_for_tests("```\ncode\n```\nmore"));
+}
+
+#[test]
+fn heuristic_declines_fence_close_at_eof() {
+    use spur_tui::components::markdown_stream::has_authoritative_closure_pattern_for_tests;
+    assert!(!has_authoritative_closure_pattern_for_tests("```\ncode\n```\n"));
+}
+
+#[test]
+fn safety_cap_is_64kib() {
+    use spur_tui::components::markdown_stream::SAFETY_CAP_BYTES;
+    assert_eq!(SAFETY_CAP_BYTES, 64 * 1024);
+}
