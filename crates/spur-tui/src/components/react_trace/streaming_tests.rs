@@ -1220,14 +1220,15 @@ fn sim_mermaid_state_mismatch_in_shift() {
             );
             eprintln!("SIM-10 resolved row in real layout: {}", resolved);
             assert!(
-                resolved >= rows_pending.len() - 3,
+                resolved >= rows_pending.len(),
                 "SIM-10: scroll math used the wrong (Pending) layout. \
-                 Anchor resolved to row {} but should be >= {} (rows_pending - visible_h). \
-                 Real layout has {} rows; Pending has {}.",
+                 Anchor resolved to row {} but must be >= rows_pending.len() = {}. \
+                 Real layout has {} rows. Under the buggy empty-states layout, scroll \
+                 would have saturated at row {} = rows_pending - visible_h.",
                 resolved,
-                rows_pending.len() - 3,
+                rows_pending.len(),
                 rows_real.len(),
-                rows_pending.len()
+                rows_pending.len() - 3
             );
         }
         ScrollAnchor::Following => {
