@@ -23,6 +23,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+unicode-segmentation = "1"
 unicode-width = "0.1"
 nucleo-matcher = "0.3"
 ignore = "0.4"
