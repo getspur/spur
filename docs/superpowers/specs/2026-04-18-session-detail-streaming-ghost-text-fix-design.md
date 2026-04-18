@@ -43,6 +43,185 @@ empirically established:
 3. Promote SIM-1, SIM-2, SIM-3 from `#[ignore]` to active regression
    guards once each phase lands.
 
+## Visualizing the Bug and the Fix
+
+### Current (broken) flow — how ghost text emerges
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Stream as AgentMessageChunk<br/>producer
+    participant App as App main loop
+    participant Trace as ReactTrace
+    participant MD as MarkdownStream
+    participant Render as render_with_ctx
+    participant TUI as Terminal
+
+    Stream->>App: chunk N
+    App->>Trace: append_message(text)
+    Trace->>MD: append(text)
+    Trace->>Trace: mark_dirty_from(idx)<br/>generation++
+    Stream->>App: chunks N+1 ... N+63
+    App->>Trace: append x63
+    Note over App: drain cap = 64<br/>no paint between chunks
+
+    App->>Render: render frame
+    Render->>MD: items_and_tail()
+    MD-->>Render: ([], "all 64 chunks")
+    Render->>Render: build rows via tail.lines()<br/>(plain split, count = R₁)
+    Render->>TUI: paint slice [scroll_offset, +H)
+
+    Note over MD: 50ms later<br/>debounce timer fires
+    App->>Trace: drain_fence_dispatches
+    Trace->>MD: maybe_flush
+    MD->>MD: flushed_byte_len ↑<br/>cached_items ↑
+    Trace->>Trace: mark_dirty_from(idx)<br/>generation++
+
+    App->>Render: render frame (zero new chunks)
+    Render->>MD: items_and_tail()
+    MD-->>Render: ([items...], "small tail")
+    Render->>Render: build rows via items + tail<br/>(pulldown-aware, count = R₂)
+    Note over Render: R₂ ≠ R₁<br/>(SIM-1: 14 → 13)
+    Render->>TUI: paint slice [scroll_offset, +H)
+    Note over TUI: SAME scroll_offset<br/>DIFFERENT content<br/>↑ GHOST TEXT
+```
+
+The bug has two structural roots visible in the diagram:
+
+- The **builder** produces different row sequences for the same bytes
+  depending on whether they're in the tail or in items.
+- The **viewport** is anchored to a row index, so a row-count change
+  shifts the visible content even with no user input.
+
+### Phase 0 (RC1) — cadence smoothing
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Stream as Producer
+    participant App as App main loop
+    participant Render as Render
+    participant TUI as Terminal
+
+    Stream->>App: chunk 1
+    App->>Render: paint
+    Render->>TUI: visible chunk 1
+    Stream->>App: chunks 2..9 (8 max per drain)
+    App->>Render: paint
+    Render->>TUI: visible chunks 1..9
+    Stream->>App: chunks 10..17
+    App->>Render: paint
+    Render->>TUI: visible chunks 1..17
+    Note over TUI: smooth typewriter cadence<br/>but layer-2 ghost text still possible
+```
+
+Phase 0 only addresses the cadence amplifier. Ghost text from
+tail/items asymmetry remains until Phase 1.
+
+### Phase 1 (F1: preview_items) — symmetric rendering
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Stream as Producer
+    participant App as App main loop
+    participant Trace as ReactTrace
+    participant MD as MarkdownStream
+    participant Render as Render
+    participant Builder as build_virtual_rows
+    participant TUI as Terminal
+
+    Stream->>App: chunk N
+    App->>Trace: append_message
+    Trace->>MD: append(text)
+    Trace->>Trace: mark_dirty_from(idx)<br/>generation++
+
+    App->>Render: render frame (drain cap 8)
+    Render->>Builder: build_virtual_rows(...)
+    Builder->>MD: preview_items(states)
+    MD->>MD: parse raw_text via pulldown<br/>memoized on (raw_text.len, fence_state_hash)
+    MD-->>Builder: Vec<StreamItem><br/>= what flush_final would produce
+    Builder-->>Render: rows (count = R)
+    Render->>TUI: paint slice
+
+    Note over MD: 50ms later<br/>debounce fires
+    App->>Trace: drain_fence_dispatches
+    Trace->>MD: maybe_flush
+    MD->>MD: flushed_byte_len ↑<br/>cached_items ↑
+    Trace->>Trace: mark_dirty_from(idx)<br/>generation++
+
+    App->>Render: render frame
+    Render->>Builder: build_virtual_rows
+    Builder->>MD: preview_items(states)
+    MD-->>Builder: SAME Vec as before<br/>(memo hit on raw_text.len)
+    Builder-->>Render: rows (count = R, IDENTICAL)
+    Render->>TUI: paint slice
+    Note over TUI: viewport stable<br/>NO GHOST TEXT (intra-entry)
+```
+
+**Key invariant Phase 1 establishes:** `rows = f(raw_text, width, fence_states)`,
+independent of `flushed_byte_len`. Whether bytes are committed or
+uncommitted no longer affects what the user sees.
+
+### Phase 2 (F3: byte-offset anchor) — viewport invariant under reflow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as User input
+    participant App as App main loop
+    participant Trace as ReactTrace
+    participant Render as Render
+    participant Builder as build_virtual_rows
+    participant Resolver as Anchor resolver
+    participant TUI as Terminal
+
+    User->>App: scroll_up
+    App->>Trace: scroll_up()
+    Trace->>Trace: anchor = ScrollAnchor::Byte<br/>{ entry_idx: 5, byte_offset: 200 }
+    Note over Trace: scroll mutator updates ANCHOR<br/>no row count needed
+
+    App->>Render: render frame
+    Render->>Builder: build_virtual_rows
+    Builder-->>Render: (rows, byte_ranges_per_row)
+    Render->>Resolver: resolve(anchor, byte_ranges)
+    Resolver->>Resolver: walk entry_row_starts to entry 5<br/>binary-search byte_ranges for byte 200
+    Resolver-->>Render: row_idx = 47
+    Render->>TUI: paint slice [47, 47+H)
+
+    Note over Trace: stream continues, layout reflows<br/>(width resize / mermaid Pending→Ready)
+    App->>Render: render frame (anchor unchanged)
+    Render->>Builder: build_virtual_rows<br/>(potentially different layout)
+    Builder-->>Render: (rows', byte_ranges')
+    Render->>Resolver: resolve(anchor, byte_ranges')
+    Resolver-->>Render: row_idx = 49<br/>(same byte 200 now at row 49)
+    Render->>TUI: paint slice [49, 49+H)
+    Note over TUI: SAME content visible<br/>viewport invariant under reflow
+```
+
+**Key invariant Phase 2 establishes:** `visible_content = g(anchor)`,
+where `anchor` only changes on user input. Layout reflow (width,
+mermaid state, eviction) cannot shift what the user sees.
+
+### Logic re-evaluation discovered during diagram construction
+
+While drawing the Phase 1 diagram, two clarifications emerged:
+
+1. **F1 absorbs the original "stream cache key" concern.** Because
+   `preview_items` output depends only on `raw_text` (append-only) and
+   fence states, and because `mark_dirty_from` is already called on
+   every flush via `drain_fence_dispatches` (mod.rs:415-438), the
+   parent `VirtualRowCacheEntry` does not need a `stream_digest` field.
+   The earlier proposal to extend the cache key with `flushed_byte_len`
+   is redundant. SIM-1's failure was the **builder** asymmetry, not a
+   cache miss — F1 fixes it at the right layer.
+
+2. **F2 should be specifically the mermaid fence-state-hash fix.** The
+   RCA's section C2 noted that `fence_gen = ctx.mermaid_registry.len()`
+   misses Pending→Ready/Error state transitions. This is a real cache
+   bug independent of stream flushes. Phase 1 includes this as F2,
+   refined below.
+
 ## Non-Goals
 
 - Rewriting the markdown parser. We continue to use `pulldown-cmark` via
@@ -105,36 +284,56 @@ a per-stream memoization keyed on `(raw_text.len(), fence_state_hash)`.
 A render that hits the cache is free. The only overhead is when the
 cache misses, which corresponds to events that already require a parse.
 
-#### F2: per-stream cache key includes flushed byte position
+#### F2: fence-state-aware cache key (replaces registry.len())
 
 **Where:** `crates/spur-tui/src/components/react_trace/render.rs`
 (`render_with_ctx`, the cache-check block at lines 334-401) and
 `VirtualRowCacheEntry`.
 
-**Design:** Extend `VirtualRowCacheEntry` with a per-stream digest:
+**Background:** Today the cache key uses
+`fence_gen = ctx.mermaid_registry.len() as u64`. This catches
+insertion/removal but not Pending→Rendering→Ready→Error state
+transitions, because the registry length stays constant during state
+changes. The placeholder/image rendering depends on state, so a
+state-only transition produces a stale render.
+
+**Design:** Replace the length-based key with a stable hash of
+`(MermaidId, MermaidState_discriminant, image_dimensions)` triples
+across the registry. The registry stores `MermaidState` (Pending /
+Rendering / Ready { image, .. } / Error). For Ready, the image
+dimensions affect ImageRow height, so they must be in the digest.
 
 ```rust
-struct VirtualRowCacheEntry {
-    rows: Vec<VirtualRow>,
-    entry_row_starts: Vec<usize>,
-    width: u16,
-    generation: u64,
-    fence_gen: u64,
-    // NEW: vector indexed by entry_idx, holds (raw_text.len(), flushed_byte_len)
-    // for each AgentMessage entry. Re-render if any entry's digest changed.
-    stream_digests: Vec<Option<StreamDigest>>,
-}
-
-#[derive(PartialEq, Eq)]
-struct StreamDigest {
-    raw_text_len: usize,
-    flushed_byte_len: usize,
+fn fence_state_hash(
+    registry: &HashMap<MermaidId, MermaidState>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut entries: Vec<_> = registry.iter().collect();
+    entries.sort_by_key(|(id, _)| id.0);
+    for (id, state) in entries {
+        id.0.hash(&mut h);
+        std::mem::discriminant(state).hash(&mut h);
+        if let MermaidState::Ready { image, .. } = state {
+            image.width().hash(&mut h);
+            image.height().hash(&mut h);
+        }
+    }
+    h.finish()
 }
 ```
 
-Cache invalidation extends to compare `stream_digests`. This catches the
-silent-flush case (debounce timer fires between two renders without
-chunk arrival) which the current `generation`/`fence_gen` keys miss.
+The cache check at `render.rs:329` becomes
+`let fence_gen = fence_state_hash(&ctx.mermaid_registry);`. No change
+to cache structure or storage cost.
+
+**Why per-stream cache keys are NOT needed:** With F1 in place,
+`preview_items` is a pure function of `(raw_text, fence_states)`.
+`raw_text` length changes are already reflected via
+`mark_dirty_from` → `generation++` (called from `append_message` and
+`drain_fence_dispatches`, mod.rs:203, 435). The
+`generation` + `fence_state_hash` + `width` triple is therefore a
+complete cache key. Adding `flushed_byte_len` would be redundant.
 
 #### RC2 (folded into Phase 1): scroll operations apply to fresh row metrics
 
@@ -205,7 +404,7 @@ Scroll mutators update the anchor:
 
 Eviction (`push()` evicts old entries when over capacity): if the
 anchor's `entry_idx` was evicted, snap to `(0, 0)` of the first
-surviving entry.
+surviving entry. Otherwise decrement `entry_idx` by the drain count.
 
 `is_following` becomes a derived property: `matches!(anchor, ScrollAnchor::Following)`.
 
@@ -213,36 +412,45 @@ surviving entry.
 just re-resolves the anchor; viewport content stays the same.
 
 **Mermaid state transition:** Pending → Ready changes the row count for
-a fence (placeholder→image). Anchor resolution falls through naturally:
-if anchor is on the placeholder row, snap to first ImageRow of the
-fence; if anchor is past the fence, the row index just shifts and
-re-resolves.
+a fence (1 placeholder line → N ImageRows). For ImageRows, the
+byte_range is the full byte range of the fence's source code. The
+resolver finds the first ImageRow whose range contains `byte_offset`,
+keeping the viewport on the fence even after Pending→Ready. If anchor
+is past the fence, the row index just shifts and re-resolves
+unchanged.
 
-## Components and data flow
+**Anchor on a deleted row** (worst case): use snap-to-preceding —
+binary-search rejects the byte; fall back to the largest byte ≤
+`byte_offset` that exists in any byte_range, walk backward to its
+row. Row 0 is always available as final fallback.
 
-After all three phases:
+## Components and data flow (post all three phases)
 
-```
-SpurEvent (chunk)
-    │
-    ▼
-SessionDetailView::handle_spur_event
-    │ (drain cap = 8, Phase 0)
-    ▼
-ReactTrace::append_message
-    │ — appends to MarkdownStream::raw_text
-    │ — bumps generation
-    │ — sets dirty_from
-    ▼
-ReactTrace::render_with_ctx
-    │ — cache check (Phase 1 F2: includes stream_digests)
-    │ — incremental rebuild from dirty_from
-    │ — build_virtual_rows emits VirtualRow + byte_range (Phase 2 F3)
-    │     └─ render_agent_message_body uses stream.preview_items() (Phase 1 F1)
-    │ — anchor resolved against fresh per-row byte ranges (Phase 2 F3)
-    │ — viewport slice paints
-    ▼
-ratatui Frame
+```mermaid
+flowchart TD
+    SpurEvent[SpurEvent: AgentMessageChunk] --> SDV[SessionDetailView::handle_spur_event<br/>drain cap = 8 ← Phase 0]
+    SDV --> Append[ReactTrace::append_message]
+    Append --> RawText[MarkdownStream.raw_text<br/>append-only]
+    Append --> MarkDirty[mark_dirty_from idx<br/>generation++]
+
+    UserKey[User key input] --> ScrollMut[ReactTrace scroll mutator<br/>scroll_up / page_down / ...]
+    ScrollMut --> Anchor[ScrollAnchor<br/>= Byte entry_idx, byte_offset<br/>← Phase 2 F3]
+
+    FrameTick[App frame tick] --> Render[ReactTrace::render_with_ctx]
+    Render --> CacheCheck{Cache key match?<br/>generation, fence_state_hash, width<br/>← Phase 1 F2}
+    CacheCheck -- hit --> UseCache[Use cached rows + byte_ranges]
+    CacheCheck -- miss --> Build[build_virtual_rows]
+    Build --> Preview[MarkdownStream::preview_items<br/>memoized on raw_text.len + fence_state_hash<br/>← Phase 1 F1]
+    Preview --> RowsAndRanges[Vec rows<br/>Vec byte_ranges co-indexed]
+    Build --> RowsAndRanges
+    RowsAndRanges --> StoreCache[(VirtualRowCacheEntry)]
+    StoreCache --> UseCache
+
+    UseCache --> Resolve[Anchor resolver<br/>← Phase 2 F3]
+    Anchor --> Resolve
+    Resolve --> RowIdx[effective row_idx]
+    RowIdx --> Slice[viewport slice<br/>rows row_idx..row_idx+H]
+    Slice --> Paint[ratatui Frame paint]
 ```
 
 ## Test plan
@@ -315,16 +523,41 @@ prior grep.
 - `crates/spur-tui/src/components/react_trace/types.rs` — Phase 2 (VirtualRow byte_range or sibling vec).
 - `crates/spur-tui/src/components/react_trace/streaming_tests.rs` — promote ignored SIMs, add new regression tests.
 
-## Open questions
+## Edge cases verified via diagram tracing
 
-None blocking implementation. Two design choices to confirm during
-implementation:
+These walked through both Phase 1 and Phase 2 sequence diagrams to
+confirm the design handles them correctly:
 
-1. byte_range carrier: extend `VirtualRow::Text` variant or return a
-   parallel `Vec<Option<Range<usize>>>` from `build_virtual_rows`?
-   Parallel vec is less invasive; embedded is more cohesive. Pick during
-   plan-writing.
-2. `preview_items` memoization key: `(raw_text.len(), fence_state_hash)`
-   versus full content hash. Length-based key is faster but assumes
-   raw_text is append-only (which it is). Confirm append-only invariant
-   holds.
+| Edge case | Phase 1 alone | Phase 1 + Phase 2 |
+|---|---|---|
+| Chunk arrives, no flush yet | preview_items emits final-flush-equivalent rows | same; byte anchor resolves against fresh ranges |
+| Flush fires between two paints | preview_items output unchanged → no shift | anchor unchanged → no shift |
+| TurnComplete (final flush) | preview_items already showed final layout → no shift | same |
+| Width resize | row sequence reflows; row-index anchor shifts | byte anchor invariant → viewport stable |
+| Mermaid Pending → Ready | row count changes mid-document; row-index anchor below the fence shifts by ΔN | ImageRows carry the fence's byte range; resolver lands on first matching ImageRow → viewport stable |
+| Mermaid Ready → Error | placeholder swap; same byte range; trivially stable | same |
+| Eviction at capacity | row-index anchor must subtract drained rows (current code does this) | byte anchor must adjust entry_idx (1 line in `push()`) |
+| Anchor on row that disappears | row-index can't represent this | snap-to-preceding policy → nearest surviving byte; viewport may shift by ≤1 row but no ghost |
+| Append while in Following | `is_following` branch in render forces bottom; correct | derived from anchor variant; same outcome |
+| Two streams flushing concurrently | each entry independent; cache rebuild isolated by entry_row_starts | same; anchor in entry A is invariant to entry B's reflow |
+| Test scroll API uses literal offsets | scroll_offset stays usize → tests still work | `Vec<Option<Range<usize>>>` API change → ~10 tests need rewrite |
+
+## Resolved design choices (during diagram-driven re-evaluation)
+
+The earlier draft listed two open questions; both are now decided.
+
+1. **byte_range carrier:** return a parallel `Vec<Option<Range<usize>>>`
+   from `build_virtual_rows` rather than embedding `byte_range` in
+   `VirtualRow::Text`. Reasoning:
+   - `VirtualRow::ImageRow` and other non-text variants don't carry
+     text, so embedding would force `Option` everywhere.
+   - The cache stores rows; embedding bloats every cached row.
+   - The resolver only needs byte ranges, which are co-indexed with
+     rows via the parallel vec.
+2. **`preview_items` memoization key:** `(raw_text.len(),
+   fence_state_hash)` is correct because `raw_text` is append-only
+   (verified: `MarkdownStream::append` only pushes; no truncation
+   path exists). `flushed_byte_len` is intentionally NOT in the key —
+   `preview_items` output must not depend on it.
+
+No remaining open questions. Ready for plan-writing.
