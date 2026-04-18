@@ -49,6 +49,47 @@ impl WrapLayout {
     pub fn visual_height(&self) -> u16 {
         self.rows.len() as u16
     }
+
+    /// Map logical `(row, byte_col)` → visual `(vrow, vcol)`.
+    ///
+    /// `byte_col` is a byte offset within `lines[row]`. Positions must lie on
+    /// a grapheme boundary or at end-of-line; other positions are clamped to
+    /// the next grapheme boundary.
+    pub fn logical_to_visual(&self, row: usize, byte_col: usize) -> (usize, usize) {
+        let (vstart, vend) = self.line_to_vrows[row];
+        for vi in vstart..vend {
+            let vr = &self.rows[vi];
+            if byte_col >= vr.byte_start && byte_col < vr.byte_end {
+                let mut vcol: u16 = 0;
+                for g in &vr.graphemes {
+                    if g.byte_start >= byte_col {
+                        break;
+                    }
+                    vcol += g.width as u16;
+                }
+                return (vi, vcol as usize);
+            }
+        }
+        // EOL: place at the end of the last vrow on this logical line.
+        let last = vend - 1;
+        (last, self.rows[last].used_cells as usize)
+    }
+
+    /// Map visual `(vrow, vcol)` → logical `(row, byte_col)`.
+    ///
+    /// `vcol` is clamped to the row's `used_cells`. If `vcol` lands inside a
+    /// wide grapheme, the result is the grapheme's starting byte.
+    pub fn visual_to_logical(&self, vrow: usize, vcol: usize) -> (usize, usize) {
+        let vr = &self.rows[vrow];
+        let mut cells: u16 = 0;
+        for g in &vr.graphemes {
+            if cells as usize + g.width as usize > vcol {
+                return (vr.logical_row, g.byte_start);
+            }
+            cells += g.width as u16;
+        }
+        (vr.logical_row, vr.byte_end)
+    }
 }
 
 /// Display cells for a single grapheme cluster.
@@ -335,5 +376,90 @@ mod tests {
             layout.rows,
         );
         assert_eq!(layout.rows[0].used_cells, 5);
+    }
+
+    /// Assert round-trip identity over every grapheme boundary + EOL, tolerating
+    /// the legal vrow-boundary aliasing (end of vrow N ≡ start of vrow N+1).
+    fn assert_roundtrip(lines: &[String], layout: &WrapLayout, case: &str) {
+        for (row, line) in lines.iter().enumerate() {
+            let mut positions: Vec<usize> =
+                line.grapheme_indices(true).map(|(i, _)| i).collect();
+            positions.push(line.len());
+
+            for &bc in &positions {
+                let (vr, vc) = layout.logical_to_visual(row, bc);
+                let (row2, bc2) = layout.visual_to_logical(vr, vc);
+                if row2 == row && bc2 == bc {
+                    continue;
+                }
+                let (_, vend) = layout.line_to_vrows[row];
+                let at_vrow_boundary = vr + 1 < vend
+                    && bc == layout.rows[vr].byte_end
+                    && bc2 == layout.rows[vr + 1].byte_start;
+                assert!(
+                    at_vrow_boundary,
+                    "[{case}] round-trip FAILED: (row={row}, bc={bc}) → vis=({vr},{vc}) → ({row2},{bc2})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mapping_roundtrip_ascii() {
+        let lines = v(&["the quick brown fox jumps over the lazy dog"]);
+        let layout = wrap(&lines, 20);
+        assert_roundtrip(&lines, &layout, "ascii");
+    }
+
+    #[test]
+    fn mapping_roundtrip_cjk() {
+        let lines = v(&["你好世界你好世界你好"]);
+        let layout = wrap(&lines, 10);
+        assert_roundtrip(&lines, &layout, "cjk");
+    }
+
+    #[test]
+    fn mapping_roundtrip_zwj_emoji() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let lines = v(&[&format!("ab{family}cd")]);
+        let layout = wrap(&lines, 5);
+        assert_roundtrip(&lines, &layout, "zwj");
+    }
+
+    #[test]
+    fn mapping_roundtrip_combining_mark() {
+        let lines = v(&["cafe\u{0301} shop"]);
+        let layout = wrap(&lines, 6);
+        assert_roundtrip(&lines, &layout, "combining");
+    }
+
+    #[test]
+    fn mapping_roundtrip_tabs() {
+        let lines = v(&["a\tbcd\tef"]);
+        let layout = wrap(&lines, 8);
+        assert_roundtrip(&lines, &layout, "tabs");
+    }
+
+    #[test]
+    fn mapping_roundtrip_multiple_lines() {
+        let lines = v(&["first line here", "second", "", "fourth line long enough"]);
+        let layout = wrap(&lines, 12);
+        assert_roundtrip(&lines, &layout, "multiline");
+    }
+
+    #[test]
+    fn mapping_roundtrip_width_one() {
+        let lines = v(&["abc 你 x"]);
+        let layout = wrap(&lines, 1);
+        assert_roundtrip(&lines, &layout, "width1");
+    }
+
+    #[test]
+    fn mapping_eol_sits_at_end_of_last_vrow() {
+        let lines = v(&["hello"]);
+        let layout = wrap(&lines, 80);
+        let (vr, vc) = layout.logical_to_visual(0, "hello".len());
+        assert_eq!(vr, 0);
+        assert_eq!(vc, 5);
     }
 }
