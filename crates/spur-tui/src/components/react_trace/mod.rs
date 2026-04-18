@@ -33,6 +33,9 @@ pub struct ReactTrace {
     pub(super) last_total_lines: usize,
     /// Cached visible height from last render.
     pub(super) last_visible_height: usize,
+    /// Width hint from the most-recent render call; used by scroll mutators
+    /// to compute fresh row counts without stale last_total_lines.
+    pub(super) last_render_width: Option<u16>,
     /// Whether mermaid rendering is available.
     pub(super) mermaid_enabled: bool,
     /// Which agent brain backs this session; drives pane title + accent color.
@@ -62,6 +65,7 @@ impl ReactTrace {
             tick_counter: 0,
             last_total_lines: 0,
             last_visible_height: 20,
+            last_render_width: None,
             mermaid_enabled: true,
             agent_kind: AgentKind::Generic,
             current_mode: None,
@@ -302,8 +306,27 @@ impl ReactTrace {
         }
     }
 
-    fn max_offset(&self) -> usize {
+    /// Compute the current total row count using the most-recent width
+    /// hint, walking entries directly. Used by scroll mutators to clamp
+    /// against fresh metrics rather than the last-render `last_total_lines`.
+    ///
+    /// O(entries × wrap-cost). Acceptable because scroll mutators run on
+    /// user input, not on the streaming hot path.
+    #[cfg(feature = "markdown")]
+    fn current_row_count(&self) -> usize {
+        let width_hint = self.last_render_width.unwrap_or(80);
+        let states = std::collections::HashMap::new();
+        let (rows, _) = self.build_virtual_rows(0, width_hint, &states, None);
+        rows.len()
+    }
+
+    #[cfg(not(feature = "markdown"))]
+    fn current_row_count(&self) -> usize {
         self.last_total_lines
+    }
+
+    fn max_offset(&self) -> usize {
+        self.current_row_count()
             .saturating_sub(self.last_visible_height)
     }
 
@@ -799,6 +822,14 @@ impl ReactTrace {
 
     pub fn entries_for_tests(&self) -> &[TraceEntry] {
         &self.entries
+    }
+
+    pub fn scroll_offset_for_tests(&self) -> usize {
+        self.scroll_offset
+    }
+
+    pub fn set_visible_height_for_tests(&mut self, height: usize) {
+        self.last_visible_height = height;
     }
 
     pub fn build_display_lines_for_tests(
