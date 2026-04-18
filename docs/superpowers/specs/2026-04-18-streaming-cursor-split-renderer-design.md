@@ -50,24 +50,43 @@ comments anchor to them.
 ### 1. Authoritative-closure cursor model
 
 **Rule for cursor advance.** During `rebuild()`, walk `raw_text` with
-`pulldown_cmark::Parser::new_ext(…).into_offset_iter()`. For every
-`Event::End(tag)` at any block-level tag, if `range.end < raw_text.len()`,
-advance the cursor to `max(cursor, range.end)`.
+`pulldown_cmark::Parser::new_ext(…).into_offset_iter()`, tracking Start/End
+nesting depth. For every `Event::End(_)`:
+1. Decrement depth.
+2. If the resulting depth is **0** AND `range.end < raw_text.len()`, advance
+   the cursor to `max(cursor, range.end)`.
+
+Depth-zero gating is load-bearing. Pulldown emits authoritative per-event
+disambiguation, but container-level resolutions (tight vs. loose lists,
+table column widths) are computed *for the whole container* and reflected
+in every event inside it. Committing a nested End prematurely (e.g., an
+`End(Item)` at `range.end < len` while the enclosing `List` is still open)
+would freeze an item's styling before the list's tight/loose status is
+determined. Later appends could change that status and the committed
+rendering would be wrong — violating I5.
 
 **Why it works.** pulldown-cmark is not incremental; each call re-parses
-`raw_text` from scratch. An event whose range ends strictly before EOF has
-had its interpretation finalized against current `raw_text`. The parser is
-deterministic and stream appends are append-only, so those earlier-offset
-events remain stable under future appends. The only residual ambiguity is
-EOF auto-close, which the `range.end < raw_text.len()` guard excludes.
+`raw_text` from scratch. An event whose range ends strictly before EOF AND
+which closes back to document root has had *all* its interpretation,
+including container-level resolution, finalized against current `raw_text`.
+The parser is deterministic and stream appends are append-only, so those
+earlier-offset top-level events remain stable under future appends.
 
-**What the rule is not.** It is not a whitelist of "safe" tags. The set
-`{CodeBlock, Heading, Rule, Table, List, Paragraph, Item, BlockQuote, …}`
-is treated uniformly. pulldown-cmark's own disambiguation (e.g., emitting
-`TagEnd::Heading` for setext-promoted paragraphs, or withholding
-`TagEnd::List` when lazy continuation could extend an item) is authoritative.
-The len-compare rule only excludes the single residual case pulldown cannot
-resolve without more input: EOF.
+**What the rule is not.** It is not a whitelist of "safe" tags. Every
+`TagEnd` variant contributes uniformly; it's the depth-0 condition that
+excludes nested cases. pulldown-cmark's per-event disambiguation (e.g.,
+emitting `TagEnd::Heading` for setext-promoted paragraphs, withholding
+`TagEnd::List` while lazy continuation could extend an item) is authoritative
+at the top level. The only residual case pulldown cannot resolve without
+more input is EOF auto-close, which the `range.end < len` guard excludes.
+
+**Grounding.** All 16 load-bearing claims are verified against real
+pulldown-cmark 0.13 behavior in
+`crates/spur-tui/tests/pulldown_cmark_grounding.rs`. Tests include the
+list tight/loose retroactive scenario (claim 7), setext promotion (claims 3,
+4, 10), fenced-code authoritative advance (claim 6), UTF-8 boundary safety
+(claim 12), EOF-permissive mode for `flush_final` (claim 13), and the
+busy-loop fast-path reproducer the dirty-guard fix addresses (claim 11).
 
 **Known limitation.** Reference link definitions (`[id]: url`) arriving in
 a later chunk than the `[id]` usage do not retroactively activate the link
