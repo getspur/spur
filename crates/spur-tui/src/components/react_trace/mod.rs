@@ -55,23 +55,6 @@ pub struct ReactTrace {
     pub(super) line_cache: Option<render::VirtualRowCacheEntry>,
 }
 
-#[cfg(feature = "markdown")]
-fn row_to_byte_anchor(
-    row: usize,
-    byte_ranges: &[Option<std::ops::Range<usize>>],
-    entry_row_starts: &[usize],
-) -> (usize, usize) {
-    let entry_idx = match entry_row_starts.binary_search(&row) {
-        Ok(i) => i,
-        Err(i) => i.saturating_sub(1),
-    };
-    let byte_offset = byte_ranges
-        .get(row)
-        .and_then(|r| r.as_ref())
-        .map(|r| r.start)
-        .unwrap_or(0);
-    (entry_idx, byte_offset)
-}
 
 /// Inverse of `resolve_anchor` for the Row variant: given a row index,
 /// find which entry it belongs to and the row-within-entry offset.
@@ -436,6 +419,8 @@ impl ReactTrace {
     /// If `line_cache` is `None` (first tick before any render), this is a
     /// no-op — anchor remains in its initial state.
     /// If the target row is the last visible row, transitions to Following.
+    /// When `total <= visible_h` (entire content fits on-screen), all scroll
+    /// inputs transition to `Following` — there is nothing to scroll.
     #[cfg(feature = "markdown")]
     fn shift_anchor_by(&mut self, delta: isize) {
         use crate::components::react_trace::types::ScrollAnchor;
