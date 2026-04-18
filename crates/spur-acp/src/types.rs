@@ -27,6 +27,34 @@ impl fmt::Display for SessionId {
     }
 }
 
+/// Newtype wrapping the brain's ACP session id. Distinct from worker
+/// `SessionId`s by type — no `Default` impl, no `::new()` that takes
+/// zero args, forcing every construction to carry a valid inner value.
+/// Enforces INV-2: every `DelegationRequest` must carry a real brain
+/// session id, not a `SessionId::new()` default.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BrainSessionId(pub SessionId);
+
+impl BrainSessionId {
+    pub fn new(id: SessionId) -> Self {
+        Self(id)
+    }
+
+    pub fn as_session_id(&self) -> &SessionId {
+        &self.0
+    }
+
+    pub fn into_session_id(self) -> SessionId {
+        self.0
+    }
+}
+
+impl fmt::Display for BrainSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
 // ─── Agent Health ──────────────────────────────────────────────────────
 
 /// Health status of a registered agent.

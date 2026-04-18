@@ -28,6 +28,7 @@ fn stub_binary(dir: &std::path::Path, name: &str) -> PathBuf {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn init_agents_finds_only_stubs_on_path() {
     let tmp = TempDir::new().unwrap();
     stub_binary(tmp.path(), "kiro-cli");
@@ -55,6 +56,7 @@ async fn init_agents_finds_only_stubs_on_path() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn init_agents_with_empty_path_returns_empty() {
     let tmp = TempDir::new().unwrap();
     // tmp is empty (no stubs created); /usr/bin has `which` but not agent binaries.
@@ -80,6 +82,7 @@ async fn init_agents_with_empty_path_returns_empty() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn init_agents_registers_full_spec12_config() {
     // Proves seed agents carry commands/permissions/display blocks,
     // not just a handful of fields like the pre-Spec-3 hardcoded table.
@@ -127,9 +130,8 @@ async fn init_agents_registers_full_spec12_config() {
     // Bypass args declared but skip = false → NOT applied (safety-by-default).
     // effective_permissions() returns the nested block.
     assert_eq!(kiro.effective_permissions().args, vec!["--trust-all-tools"]);
-    assert_eq!(
-        kiro.effective_permissions().skip,
-        false,
+    assert!(
+        !kiro.effective_permissions().skip,
         "seed template declares bypass mechanism but keeps skip=false for safety"
     );
 }

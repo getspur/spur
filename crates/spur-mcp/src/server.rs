@@ -141,8 +141,8 @@ pub struct McpCallbackServer {
     delegation_tx: mpsc::Sender<DelegationRequest>,
     /// Available worker agents (set once at creation).
     workers: Vec<WorkerInfo>,
-    /// Brain session this server belongs to.
-    brain_session_id: SessionId,
+    /// Brain session this server belongs to. INV-2: typed as BrainSessionId.
+    brain_session_id: spur_acp::BrainSessionId,
     /// Delegation IDs whose background collector is still awaiting a result.
     active_delegations: Arc<tokio::sync::Mutex<HashSet<String>>>,
     /// Results that a background collector has received but the brain has
@@ -196,7 +196,10 @@ pub fn validate_parallel_args(args: &Value) -> Result<(), String> {
 ///
 /// The returned requests have dummy oneshot senders — do not dispatch
 /// them; they are for field-value assertions only.
-pub fn parse_parallel_tasks(args: &Value) -> Result<Vec<DelegationRequest>, String> {
+pub fn parse_parallel_tasks(
+    args: &Value,
+    brain_session_id: &spur_acp::BrainSessionId,
+) -> Result<Vec<DelegationRequest>, String> {
     let tasks = args
         .get("tasks")
         .and_then(|v| v.as_array())
@@ -231,7 +234,7 @@ pub fn parse_parallel_tasks(args: &Value) -> Result<Vec<DelegationRequest>, Stri
             task,
             context_files,
             respond_to: tx,
-            brain_session_id: SessionId::new(),
+            brain_session_id: brain_session_id.clone(),
             delegation_plan,
             issue_id,
         });
@@ -462,7 +465,7 @@ impl McpCallbackServer {
     /// Returns the server instance and a `DelegationChannel` that the
     /// orchestrator uses to receive requests and send responses.
     pub fn new(
-        session_id: &SessionId,
+        session_id: &spur_acp::BrainSessionId,
         pm_service: Option<Arc<PmService>>,
         event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     ) -> (Self, DelegationChannel) {
@@ -860,7 +863,7 @@ impl McpCallbackServer {
             return JsonRpcResponse::invalid_params(id, e);
         }
 
-        let skeletons = match parse_parallel_tasks(&args) {
+        let skeletons = match parse_parallel_tasks(&args, &self.brain_session_id) {
             Ok(s) => s,
             Err(e) => return JsonRpcResponse::invalid_params(id, e),
         };

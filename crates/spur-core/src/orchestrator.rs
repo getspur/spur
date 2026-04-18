@@ -571,8 +571,9 @@ impl Orchestrator {
         // 4. Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
+        let brain_session_id = spur_acp::BrainSessionId::new(session_id.clone());
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;
 
         // Populate available workers.
@@ -580,7 +581,7 @@ impl Orchestrator {
             .registry
             .worker_capable()
             .into_iter()
-            .map(|c| build_worker_info(c))
+            .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
 
@@ -1551,15 +1552,16 @@ impl Orchestrator {
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
+        let brain_session_id = spur_acp::BrainSessionId::new(session_id.clone());
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
             .registry
             .worker_capable()
             .into_iter()
-            .map(|c| build_worker_info(c))
+            .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
 
@@ -1704,15 +1706,16 @@ impl Orchestrator {
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
+        let brain_session_id = spur_acp::BrainSessionId::new(session_id.clone());
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
             .registry
             .worker_capable()
             .into_iter()
-            .map(|c| build_worker_info(c))
+            .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
 
@@ -1954,6 +1957,7 @@ impl Orchestrator {
     /// reconnect succeeded; `None` if the breaker is open or reconnect
     /// failed (in which case `BrainReconnectFailed` was already
     /// emitted).
+    #[allow(clippy::too_many_arguments)]
     async fn reconnect_with_events(
         &mut self,
         dead_brain: BrainSession,
@@ -2601,7 +2605,7 @@ impl Orchestrator {
         original_task: String,
         context_files: Vec<String>,
         request_id: String,
-        brain_session_id: SessionId,
+        brain_session_id: spur_acp::BrainSessionId,
         delegation_plan: Option<spur_acp::domain::DelegationPlan>,
         issue_id: Option<String>,
         repo_root: PathBuf,
@@ -3300,6 +3304,7 @@ impl Drop for DelegationGuard {
 /// constructs the `DelegationResult`. Centralizing this makes the
 /// "every terminal emits DelegationCompleted" invariant locally
 /// verifiable (one call site per terminal arm in `execute_delegation`).
+#[allow(clippy::too_many_arguments)]
 fn finalize(
     funnel: &crate::event_funnel::FunnelHandle,
     worker_session: SessionId,
@@ -3571,7 +3576,7 @@ fn maybe_synthesize_file_touch(
 ///
 /// Read-only context shared across worker attempt retries.
 struct WorkerAttemptCtx<'a> {
-    brain_session_id: &'a SessionId,
+    brain_session_id: &'a spur_acp::BrainSessionId,
     agent: &'a str,
     task: &'a str,
     request_id: &'a str,
@@ -3603,7 +3608,7 @@ async fn run_one_worker_attempt(
     // stable executor_id" limitation documented for follow-up work.
     // The projection path (apply_inner) sees each event correctly.
     funnel.emit(SpurEventBody::DelegationRequested {
-        from: ctx.brain_session_id.clone(),
+        from: ctx.brain_session_id.as_session_id().clone(),
         to_agent: ctx.agent.to_string(),
         task: ctx.task.to_string(),
         request_id: ctx.request_id.to_string(),
@@ -3639,7 +3644,7 @@ async fn run_one_worker_attempt(
     if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
         let funnel_for_ext = funnel.clone();
         let executor_id_for_ext = worker_session.0.clone();
-        let brain_session_for_ext = ctx.brain_session_id.clone();
+        let brain_session_for_ext = ctx.brain_session_id.as_session_id().clone();
         tokio::spawn(async move {
             while let Some(payload) = ext_rx.recv().await {
                 crate::spur_ext_interp::interpret(
@@ -3667,7 +3672,7 @@ async fn run_one_worker_attempt(
     // Correlate this executor with the brain's delegate_to_worker call
     // so the brain-side session_detail view can render an inline card.
     funnel.emit(SpurEventBody::DelegationDispatched {
-        from: ctx.brain_session_id.clone(),
+        from: ctx.brain_session_id.as_session_id().clone(),
         request_id: ctx.request_id.to_string(),
         executor_id: worker_session.0.clone(),
     });
@@ -3719,14 +3724,14 @@ async fn run_one_worker_attempt(
             // before any other notification handling.
             maybe_synthesize_file_touch(
                 &notification,
-                ctx.brain_session_id,
+                ctx.brain_session_id.as_session_id(),
                 &worker_session.0,
                 &file_touch_dedup,
                 funnel,
             );
             // Phase 1 — stream worker notifications to TUI via event bus.
             funnel.emit(SpurEventBody::WorkerNotification {
-                brain_session_id: ctx.brain_session_id.clone(),
+                brain_session_id: ctx.brain_session_id.as_session_id().clone(),
                 executor_id: worker_session.0.clone(),
                 notification: Box::new(notification.clone()),
             });
@@ -4743,18 +4748,18 @@ mod normalize_tests {
         let dispatched = "kiro";
         let chosen = "claude";
         let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
-        assert_eq!(matched, false);
+        assert!(!matched);
 
         let dispatched = "claude-code-acp";
         let chosen = "claude";
         let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
         // claude-code-acp normalizes to "claude-code", so "claude" != "claude-code"
-        assert_eq!(matched, false);
+        assert!(!matched);
 
         let dispatched = "claude-code-acp";
         let chosen = "claude-code-acp";
         let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
-        assert_eq!(matched, true);
+        assert!(matched);
     }
 }
 

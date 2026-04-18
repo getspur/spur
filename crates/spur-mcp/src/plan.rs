@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, info, warn};
 
-use spur_acp::{DelegationResult, DelegationStatus, SessionId};
+use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus};
 
 use crate::tools::DelegationRequest;
 
@@ -92,7 +92,7 @@ fn default_attempt() -> u32 {
 pub struct PlanState {
     pub plan_id: String,
     pub tasks: Vec<PlanTaskEntry>,
-    pub brain_session_id: SessionId,
+    pub brain_session_id: BrainSessionId,
     /// beads epic ID when the plan was submitted with `persist_as_epic=true`.
     /// None for ephemeral plans. Currently informational only — auto-close of
     /// persist-created child issues from review_task(approve) is a planned
@@ -2252,7 +2252,7 @@ mod tests {
                     history: Vec::new(),
                 })
                 .collect(),
-            brain_session_id: SessionId("brain".to_string()),
+            brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
             epic_id: None,
         };
         let mut warnings = Vec::new();
@@ -2374,7 +2374,7 @@ mod tests {
         let mut state = PlanState {
             plan_id: "p1".into(),
             tasks: vec![entry],
-            brain_session_id: spur_acp::SessionId::new(),
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId::new()),
             epic_id: None,
         };
 

@@ -22,7 +22,10 @@ pub struct DelegationRequest {
     /// `DelegationRequested.from` / `DelegationDispatched.from` can
     /// correctly identify the brain in lineage. Stamped at every
     /// construction site in the MCP server.
-    pub brain_session_id: spur_acp::SessionId,
+    ///
+    /// INV-2: typed as `BrainSessionId` (no `Default` impl) so callers
+    /// cannot silently default to a phantom session id.
+    pub brain_session_id: spur_acp::BrainSessionId,
     /// Structured reasoning trace the brain passed with this call.
     /// None when brain omitted the parameter. Orchestrator uses this
     /// for reviewer-visibility and mismatch detection. See design
