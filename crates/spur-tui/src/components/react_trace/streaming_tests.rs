@@ -1684,3 +1684,206 @@ fn build_display_lines_expanded_completed_renders_outcome_body() {
     assert!(joined.contains("hi"), "expected stdout body: {joined}");
     assert!(joined.contains("✓"), "expected success glyph: {joined}");
 }
+
+#[cfg(feature = "markdown")]
+#[test]
+fn completed_status_with_no_raw_output_stops_spinner() {
+    use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+    use spur_acp::ToolCallId;
+    use std::sync::Arc;
+    let mut trace = super::ReactTrace::new();
+    let id = ToolCallId::new(Arc::from("call-1"));
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Act {
+            tool: "shell".into(),
+            family: ToolFamily::Execute,
+            input: ToolInputDisplay::Command {
+                cmd: "true".into(),
+                cwd: None,
+            },
+            tool_call_id: Some(id.clone()),
+            status: super::ActStatus::Pending,
+        },
+        text: String::new(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    // Simulate ToolCallUpdate { status: Completed, raw_output: None }.
+    let prev_snapshot = match &trace.entries()[0].kind {
+        super::TraceKind::Act { status, .. } => status.clone(),
+        _ => unreachable!(),
+    };
+    let new = super::merge_status(
+        &prev_snapshot,
+        Some(spur_acp::ToolCallStatus::Completed),
+        None,
+        spur_acp::AgentKind::Generic,
+    );
+    if let super::TraceKind::Act { status, .. } = &mut trace.entries_mut_for_test()[0].kind {
+        *status = new;
+    }
+    assert_eq!(trace.first_active_spinner(), None);
+    assert!(matches!(
+        trace.entries()[0].kind,
+        super::TraceKind::Act {
+            status: super::ActStatus::Completed(None),
+            ..
+        }
+    ));
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn in_progress_with_partial_raw_output_keeps_spinner() {
+    use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+    use spur_acp::ToolCallId;
+    use std::sync::Arc;
+    let mut trace = super::ReactTrace::new();
+    let id = ToolCallId::new(Arc::from("call-2"));
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Act {
+            tool: "shell".into(),
+            family: ToolFamily::Execute,
+            input: ToolInputDisplay::Command {
+                cmd: "long".into(),
+                cwd: None,
+            },
+            tool_call_id: Some(id.clone()),
+            status: super::ActStatus::Pending,
+        },
+        text: String::new(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    let partial = serde_json::json!({"text": "partial output"});
+    let new = super::merge_status(
+        &super::ActStatus::Pending,
+        Some(spur_acp::ToolCallStatus::InProgress),
+        Some(&partial),
+        spur_acp::AgentKind::Generic,
+    );
+    if let super::TraceKind::Act { status, .. } = &mut trace.entries_mut_for_test()[0].kind {
+        *status = new;
+    }
+    assert_eq!(trace.first_active_spinner(), Some(0));
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn multiple_updates_mutate_in_place_keep_entries_len_stable() {
+    use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+    use spur_acp::ToolCallId;
+    use std::sync::Arc;
+    let mut trace = super::ReactTrace::new();
+    let id = ToolCallId::new(Arc::from("call-3"));
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Act {
+            tool: "shell".into(),
+            family: ToolFamily::Execute,
+            input: ToolInputDisplay::Command {
+                cmd: "c".into(),
+                cwd: None,
+            },
+            tool_call_id: Some(id.clone()),
+            status: super::ActStatus::Pending,
+        },
+        text: String::new(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    assert_eq!(trace.entry_count(), 1);
+    // In-progress update.
+    if let Some((_idx, entry)) = trace.find_act_by_id_mut(&id) {
+        if let super::TraceKind::Act { status, .. } = &mut entry.kind {
+            let prev = status.clone();
+            *status = super::merge_status(
+                &prev,
+                Some(spur_acp::ToolCallStatus::InProgress),
+                None,
+                spur_acp::AgentKind::Generic,
+            );
+        }
+    }
+    assert_eq!(trace.entry_count(), 1);
+    // Completion.
+    let out = serde_json::json!({"text": "done"});
+    if let Some((_, entry)) = trace.find_act_by_id_mut(&id) {
+        if let super::TraceKind::Act { status, .. } = &mut entry.kind {
+            let prev = status.clone();
+            *status = super::merge_status(
+                &prev,
+                Some(spur_acp::ToolCallStatus::Completed),
+                Some(&out),
+                spur_acp::AgentKind::Generic,
+            );
+        }
+    }
+    assert_eq!(trace.entry_count(), 1);
+    // Accept ObservePayload::Text OR ObservePayload::Json depending on how
+    // extract_observe maps {"text":"done"} under AgentKind::Generic.
+    assert!(matches!(
+        trace.entries()[0].kind,
+        super::TraceKind::Act {
+            status: super::ActStatus::Completed(Some(_)),
+            ..
+        }
+    ));
+    let _ = ObservePayload::Text { body: String::new() };
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn interleaved_observe_note_does_not_break_lookup() {
+    use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+    use spur_acp::ToolCallId;
+    use std::sync::Arc;
+    let mut trace = super::ReactTrace::new();
+    let id = ToolCallId::new(Arc::from("call-4"));
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Act {
+            tool: "shell".into(),
+            family: ToolFamily::Execute,
+            input: ToolInputDisplay::Empty,
+            tool_call_id: Some(id.clone()),
+            status: super::ActStatus::Pending,
+        },
+        text: String::new(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    // Informational note pushed as Observe{None}.
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Observe { payload: None },
+        text: "system note".into(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    // Terminal update still finds the original Act.
+    let found = trace.find_act_by_id_mut(&id);
+    assert!(found.is_some(), "note interleaving must not break id lookup");
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn failed_status_renders_failure_glyph_even_with_non_error_payload() {
+    use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+    let mut trace = super::ReactTrace::new();
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Act {
+            tool: "shell".into(),
+            family: ToolFamily::Execute,
+            input: ToolInputDisplay::Empty,
+            tool_call_id: None,
+            // Failed with a Text payload (NOT Error variant) — must still
+            // render as failure.
+            status: super::ActStatus::Failed(Some(ObservePayload::Text {
+                body: "meh".into(),
+            })),
+        },
+        text: String::new(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    let joined = trace.render_to_strings().join("\n");
+    assert!(joined.contains("✗"), "Failed must use ✗ regardless of payload shape: {joined}");
+}
