@@ -8,7 +8,7 @@ use crate::components::trace_format::{
     observe_payload_lines, observe_verb, outcome_glyph,
 };
 
-use super::types::TraceKind;
+use super::types::{ActStatus, TraceKind};
 use super::ReactTrace;
 use super::SPINNER_FRAMES;
 
@@ -39,6 +39,8 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
+                    ..
                 } = &entry.kind
                 {
                     let (act_glyph, act_color) = family_glyph(*family);
@@ -51,29 +53,49 @@ impl ReactTrace {
                         ),
                         Span::raw("  "),
                     ];
-                    let consumed = if let Some(TraceKind::Observe { payload: Some(p) }) =
-                        self.entries.get(i + 1).map(|e| &e.kind)
-                    {
-                        let (obs_glyph, obs_color, stats) = observe_compact(p);
-                        spans.push(Span::styled(
-                            obs_glyph.to_string(),
-                            Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
-                        ));
-                        if !stats.is_empty() {
-                            spans.push(Span::raw(" "));
-                            spans.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+                    match status {
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {
+                            spans.push(Span::styled(
+                                spinner_frame.to_string(),
+                                Style::default().fg(Color::Yellow),
+                            ));
                         }
-                        2
-                    } else {
-                        spans.push(Span::styled(
-                            spinner_frame.to_string(),
-                            Style::default().fg(Color::Yellow),
-                        ));
-                        1
-                    };
+                        ActStatus::Completed(Some(p)) => {
+                            let (obs_glyph, obs_color, stats) = observe_compact(p);
+                            spans.push(Span::styled(
+                                obs_glyph.to_string(),
+                                Style::default()
+                                    .fg(obs_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                            if !stats.is_empty() {
+                                spans.push(Span::raw(" "));
+                                spans.push(Span::styled(
+                                    stats,
+                                    Style::default().fg(Color::DarkGray),
+                                ));
+                            }
+                        }
+                        ActStatus::Completed(None) => {
+                            spans.push(Span::styled(
+                                "✓".to_string(),
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                        ActStatus::Failed(_) => {
+                            spans.push(Span::styled(
+                                "✗".to_string(),
+                                Style::default()
+                                    .fg(Color::Red)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                    }
                     lines.push(Line::from(spans));
                     lines.push(Line::from(""));
-                    i += consumed;
+                    i += 1;
                     continue;
                 }
             }
@@ -150,6 +172,8 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
+                    ..
                 } => {
                     let (glyph, glyph_color) = family_glyph(*family);
                     lines.push(Line::from(vec![
@@ -173,6 +197,60 @@ impl ReactTrace {
                         }
                     } else {
                         lines.extend(input_display_lines(input));
+                    }
+                    // Render outcome body inline from `status` — no paired
+                    // Observe entry exists in the new model.
+                    match status {
+                        ActStatus::Completed(Some(p)) => {
+                            let (og, oc) = outcome_glyph(p);
+                            let verb = observe_verb(p);
+                            lines.push(Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    format!("{} {}", og, verb),
+                                    Style::default()
+                                        .fg(oc)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                            lines.extend(observe_payload_lines(p, collapsed));
+                        }
+                        ActStatus::Failed(Some(p)) => {
+                            let verb = observe_verb(p);
+                            lines.push(Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    format!("✗ {}", verb),
+                                    Style::default()
+                                        .fg(Color::Red)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                            lines.extend(observe_payload_lines(p, collapsed));
+                        }
+                        ActStatus::Completed(None) => {
+                            lines.push(Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    "✓ done".to_string(),
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                        }
+                        ActStatus::Failed(None) => {
+                            lines.push(Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    "✗ failed".to_string(),
+                                    Style::default()
+                                        .fg(Color::Red)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                        }
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
                     }
                 }
 
@@ -320,14 +398,9 @@ impl ReactTrace {
                 }
             }
 
-            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
-                && matches!(
-                    self.entries.get(i + 1).map(|e| &e.kind),
-                    Some(TraceKind::Observe { payload: Some(_) })
-                );
-            if !skip_blank {
-                lines.push(Line::from(""));
-            }
+            // Blank separator between entries. No adjacency skip needed: Act outcome
+            // is now rendered from `status` inline, not from a neighbouring Observe.
+            lines.push(Line::from(""));
             i += 1;
         }
 
@@ -475,21 +548,6 @@ impl ReactTrace {
         };
 
         let mut i = from;
-        // When starting mid-trace in collapsed mode, skip an Observe that
-        // was consumed by the preceding Act.
-        if collapsed && i > 0 {
-            if matches!(
-                &self.entries.get(i).map(|e| &e.kind),
-                Some(TraceKind::Observe { payload: Some(_) })
-            ) {
-                if matches!(
-                    &self.entries.get(i - 1).map(|e| &e.kind),
-                    Some(TraceKind::Act { .. })
-                ) {
-                    i += 1;
-                }
-            }
-        }
         while i < self.entries.len() {
             entry_row_starts[i - from] = rows.len();
             let entry = &self.entries[i];
@@ -504,6 +562,8 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
+                    ..
                 } = &entry.kind
                 {
                     let (act_glyph, act_color) = family_glyph(*family);
@@ -516,26 +576,46 @@ impl ReactTrace {
                         ),
                         Span::raw("  "),
                     ];
-                    let consumed = if let Some(TraceKind::Observe { payload: Some(p) }) =
-                        self.entries.get(i + 1).map(|e| &e.kind)
-                    {
-                        let (obs_glyph, obs_color, stats) = observe_compact(p);
-                        spans.push(Span::styled(
-                            obs_glyph.to_string(),
-                            Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
-                        ));
-                        if !stats.is_empty() {
-                            spans.push(Span::raw(" "));
-                            spans.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+                    match status {
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {
+                            spans.push(Span::styled(
+                                spinner_frame.to_string(),
+                                Style::default().fg(Color::Yellow),
+                            ));
                         }
-                        2
-                    } else {
-                        spans.push(Span::styled(
-                            spinner_frame.to_string(),
-                            Style::default().fg(Color::Yellow),
-                        ));
-                        1
-                    };
+                        ActStatus::Completed(Some(p)) => {
+                            let (obs_glyph, obs_color, stats) = observe_compact(p);
+                            spans.push(Span::styled(
+                                obs_glyph.to_string(),
+                                Style::default()
+                                    .fg(obs_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                            if !stats.is_empty() {
+                                spans.push(Span::raw(" "));
+                                spans.push(Span::styled(
+                                    stats,
+                                    Style::default().fg(Color::DarkGray),
+                                ));
+                            }
+                        }
+                        ActStatus::Completed(None) => {
+                            spans.push(Span::styled(
+                                "✓".to_string(),
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                        ActStatus::Failed(_) => {
+                            spans.push(Span::styled(
+                                "✗".to_string(),
+                                Style::default()
+                                    .fg(Color::Red)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                    }
                     push_wrapped(
                         &mut rows,
                         &mut byte_ranges,
@@ -543,10 +623,7 @@ impl ReactTrace {
                         Line::from(spans),
                     );
                     push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
-                    if consumed == 2 && i + 1 >= from {
-                        entry_row_starts[i + 1 - from] = rows.len();
-                    }
-                    i += consumed;
+                    i += 1;
                     continue;
                 }
             }
@@ -667,6 +744,8 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
+                    ..
                 } => {
                     let (glyph, glyph_color) = family_glyph(*family);
                     push_wrapped(
@@ -702,6 +781,82 @@ impl ReactTrace {
                         for line in input_display_lines(input) {
                             push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line);
                         }
+                    }
+                    match status {
+                        ActStatus::Completed(Some(p)) => {
+                            let (og, oc) = outcome_glyph(p);
+                            let verb = observe_verb(p);
+                            push_wrapped(
+                                &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
+                                Line::from(vec![
+                                    ts_span.clone(),
+                                    Span::styled(
+                                        format!("{} {}", og, verb),
+                                        Style::default()
+                                            .fg(oc)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ]),
+                            );
+                            for l in observe_payload_lines(p, collapsed) {
+                                push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), l);
+                            }
+                        }
+                        ActStatus::Failed(Some(p)) => {
+                            let verb = observe_verb(p);
+                            push_wrapped(
+                                &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
+                                Line::from(vec![
+                                    ts_span.clone(),
+                                    Span::styled(
+                                        format!("✗ {}", verb),
+                                        Style::default()
+                                            .fg(Color::Red)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ]),
+                            );
+                            for l in observe_payload_lines(p, collapsed) {
+                                push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), l);
+                            }
+                        }
+                        ActStatus::Completed(None) => {
+                            push_wrapped(
+                                &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
+                                Line::from(vec![
+                                    ts_span.clone(),
+                                    Span::styled(
+                                        "✓ done".to_string(),
+                                        Style::default()
+                                            .fg(Color::Green)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ]),
+                            );
+                        }
+                        ActStatus::Failed(None) => {
+                            push_wrapped(
+                                &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
+                                Line::from(vec![
+                                    ts_span.clone(),
+                                    Span::styled(
+                                        "✗ failed".to_string(),
+                                        Style::default()
+                                            .fg(Color::Red)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ]),
+                            );
+                        }
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
                     }
                 }
 
@@ -909,15 +1064,9 @@ impl ReactTrace {
                 }
             }
 
-            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
-                && matches!(
-                    self.entries.get(i + 1).map(|e| &e.kind),
-                    Some(TraceKind::Observe { payload: Some(_) })
-                );
-            if !skip_blank {
-                // Blank separator row — synthetic, so None byte range.
-                push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
-            }
+            // Blank separator between entries. No adjacency skip needed: Act outcome
+            // is now rendered from `status` inline, not from a neighbouring Observe.
+            push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
             i += 1;
         }
 

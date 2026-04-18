@@ -9,7 +9,7 @@ use spur_acp::{
     adapter::{ObservePayload, ToolFamily, ToolInputDisplay},
     AgentKind,
 };
-use spur_tui::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
+use spur_tui::components::react_trace::{ActStatus, ReactTrace, TraceEntry, TraceKind};
 
 fn make_trace(kind: AgentKind) -> ReactTrace {
     ReactTrace::with_kind(kind)
@@ -27,6 +27,8 @@ fn push_act(
             tool: tool.to_string(),
             family,
             input,
+            tool_call_id: None,
+            status: ActStatus::Pending,
         },
         text: fallback_text.to_string(),
         timestamp: "12:00:00".to_string(),
@@ -158,26 +160,30 @@ fn claude_edit_collapsed_renders_one_line_summary() {
     let mut trace = make_trace(AgentKind::ClaudeCodeAcp);
     // Default is collapsed — leave as-is.
 
-    push_act(
-        &mut trace,
-        "Edit",
-        ToolFamily::Edit,
-        ToolInputDisplay::Diff {
-            path: "/tmp/foo.rs".to_string(),
-            diff: "-a\n+b\n".to_string(),
+    // Push a single completed Act (ActStatus::Completed) rather than
+    // separate Act(Pending) + Observe entries.  The collapsed renderer
+    // folds the outcome into the Act line; a trailing standalone Observe
+    // would produce an extra non-empty line.
+    trace.push(TraceEntry {
+        kind: TraceKind::Act {
+            tool: "Edit".to_string(),
+            family: ToolFamily::Edit,
+            input: ToolInputDisplay::Diff {
+                path: "/tmp/foo.rs".to_string(),
+                diff: "-a\n+b\n".to_string(),
+            },
+            tool_call_id: None,
+            status: ActStatus::Completed(Some(ObservePayload::EditResult {
+                path: Some("/tmp/foo.rs".to_string()),
+                replacements: Some(1),
+                diff: None,
+            })),
         },
-        "",
-    );
-
-    push_observe(
-        &mut trace,
-        Some(ObservePayload::EditResult {
-            path: Some("/tmp/foo.rs".to_string()),
-            replacements: Some(1),
-            diff: None,
-        }),
-        "",
-    );
+        text: String::new(),
+        timestamp: "12:00:00".to_string(),
+        #[cfg(feature = "markdown")]
+        markdown: None,
+    });
 
     let actual = render_to_string(&trace);
     // Grouped one-line summary: glyph + path + outcome + stats

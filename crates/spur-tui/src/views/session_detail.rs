@@ -1190,14 +1190,16 @@ impl View for SessionDetailView {
                         use spur_acp::adapter::{self, ToolInputDisplay};
                         let kind = self.agent_kind();
                         let meta = spur_acp::adapter::extract_tool_meta(tc, kind);
-                        let display_name = meta.tool_name.as_deref().unwrap_or(tc.title.as_str());
+                        let display_name =
+                            meta.tool_name.as_deref().unwrap_or(tc.title.as_str());
                         let depth = meta
                             .parent_tool_use_id
                             .as_ref()
                             .and_then(|pid| self.tool_depth.get(pid).copied())
                             .map(|d| d.saturating_add(1).min(8))
                             .unwrap_or(0);
-                        self.tool_depth.insert(tc.tool_call_id.0.to_string(), depth);
+                        self.tool_depth
+                            .insert(tc.tool_call_id.0.to_string(), depth);
                         let indent = "  ".repeat(depth as usize);
                         let tool = format!("{}{}", indent, display_name);
                         let family = adapter::classify_tool(tc, kind);
@@ -1206,16 +1208,21 @@ impl View for SessionDetailView {
                             .as_ref()
                             .map(|v| adapter::format_input(v, kind))
                             .unwrap_or(ToolInputDisplay::Empty);
-                        // Prefer structured content (Diff, Terminal) over raw_input for
-                        // the fallback text, so diff bodies and terminal placeholders render.
                         let fallback_text = extract_tool_call_text(&tc.content)
                             .or_else(|| tc.raw_input.as_ref().map(format_tool_args))
                             .unwrap_or_default();
+                        let status = crate::components::react_trace::map_initial_status(
+                            tc.status,
+                            tc.raw_output.as_ref(),
+                            kind,
+                        );
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Act {
                                 tool,
                                 family,
                                 input,
+                                tool_call_id: Some(tc.tool_call_id.clone()),
+                                status,
                             },
                             text: fallback_text,
                             timestamp: Self::now_stamp(),
@@ -1224,26 +1231,63 @@ impl View for SessionDetailView {
                         });
                     }
                     spur_acp::SessionUpdate::ToolCallUpdate(tcu) => {
-                        use spur_acp::adapter;
                         let kind = self.agent_kind();
-                        let payload = tcu
-                            .fields
-                            .raw_output
-                            .as_ref()
-                            .map(|v| adapter::extract_observe(v, kind));
-                        let fallback_text = tcu
-                            .fields
-                            .raw_output
-                            .as_ref()
-                            .map(format_observe_output)
-                            .unwrap_or_default();
-                        self.react_trace.push(TraceEntry {
-                            kind: TraceKind::Observe { payload },
-                            text: fallback_text,
-                            timestamp: Self::now_stamp(),
-                            #[cfg(feature = "markdown")]
-                            markdown: None,
-                        });
+                        if let Some((idx, act_entry)) =
+                            self.react_trace.find_act_by_id_mut(&tcu.tool_call_id)
+                        {
+                            let new_status = if let TraceKind::Act { status, .. } =
+                                &act_entry.kind
+                            {
+                                crate::components::react_trace::merge_status(
+                                    status,
+                                    tcu.fields.status,
+                                    tcu.fields.raw_output.as_ref(),
+                                    kind,
+                                )
+                            } else {
+                                unreachable!("find_act_by_id_mut only returns Act entries")
+                            };
+                            if let TraceKind::Act { status, .. } = &mut act_entry.kind {
+                                *status = new_status;
+                            }
+                            self.react_trace.mark_dirty_from_for_update(idx);
+                        } else if tcu.fields.title.is_some() || tcu.fields.kind.is_some() {
+                            // Out-of-order update arriving before ToolCall — synthesize.
+                            tracing::debug!(
+                                id = ?tcu.tool_call_id,
+                                "ToolCallUpdate before ToolCall; synthesizing Act"
+                            );
+                            let tool = tcu
+                                .fields
+                                .title
+                                .clone()
+                                .unwrap_or_else(|| "unknown".into());
+                            let family = spur_acp::adapter::ToolFamily::Unknown;
+                            let input = spur_acp::adapter::ToolInputDisplay::Empty;
+                            let status = crate::components::react_trace::map_initial_status(
+                                tcu.fields.status.unwrap_or(spur_acp::ToolCallStatus::Pending),
+                                tcu.fields.raw_output.as_ref(),
+                                kind,
+                            );
+                            self.react_trace.push(TraceEntry {
+                                kind: TraceKind::Act {
+                                    tool,
+                                    family,
+                                    input,
+                                    tool_call_id: Some(tcu.tool_call_id.clone()),
+                                    status,
+                                },
+                                text: String::new(),
+                                timestamp: Self::now_stamp(),
+                                #[cfg(feature = "markdown")]
+                                markdown: None,
+                            });
+                        } else {
+                            tracing::debug!(
+                                id = ?tcu.tool_call_id,
+                                "dropping ToolCallUpdate with no matching Act and no title/kind"
+                            );
+                        }
                     }
                     spur_acp::SessionUpdate::Plan(plan) => {
                         let text = plan
@@ -1841,33 +1885,6 @@ fn format_tool_args(input: &serde_json::Value) -> String {
     truncate_str(&s, 80)
 }
 
-/// Format tool result output for display. Truncates to 3 lines.
-fn format_observe_output(output: &serde_json::Value) -> String {
-    if output.is_null() {
-        return "[no output]".to_string();
-    }
-    // If it's a simple string, use directly
-    if let Some(text) = output.as_str() {
-        return truncate_lines(text, 3);
-    }
-    // Extract text from ACP wrapper: {"items":[{"Text":"..."}, ...]}
-    if let Some(items) = output.get("items").and_then(|v| v.as_array()) {
-        let texts: Vec<&str> = items
-            .iter()
-            .filter_map(|item| {
-                item.get("Text")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| item.get("text").and_then(|v| v.as_str()))
-            })
-            .collect();
-        if !texts.is_empty() {
-            let joined = texts.join("\n");
-            return truncate_lines(&joined, 3);
-        }
-    }
-    // Fallback: stringify JSON
-    truncate_lines(&output.to_string(), 3)
-}
 
 /// Truncate a string to max_len chars, respecting UTF-8 boundaries.
 fn truncate_str(s: &str, max_len: usize) -> String {
@@ -1881,15 +1898,6 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     format!("{}...", &s[..end])
 }
 
-/// Truncate text to max_lines, showing a count of remaining lines.
-fn truncate_lines(s: &str, max_lines: usize) -> String {
-    let total = s.lines().count();
-    if total <= max_lines {
-        return s.to_string();
-    }
-    let preview: String = s.lines().take(max_lines).collect::<Vec<_>>().join("\n");
-    format!("{}\n... [{} more lines]", preview, total - max_lines)
-}
 
 #[cfg(all(test, feature = "markdown"))]
 mod invalidate_protocols_tests {
