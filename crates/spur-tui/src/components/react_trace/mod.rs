@@ -776,30 +776,33 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
                     ..
                 } = &entry.kind
                 {
                     let (act_glyph, _) = family_glyph(*family);
                     let id_str = input_summary(input, tool);
-                    let (tail, consumed) = if let Some(TraceKind::Observe { payload: Some(p) }) =
-                        self.entries.get(i + 1).map(|e| &e.kind)
-                    {
-                        let (obs_glyph, _, stats) = observe_compact(p);
-                        let mut t = obs_glyph.to_string();
-                        if !stats.is_empty() {
-                            t.push(' ');
-                            t.push_str(&stats);
+                    let tail = match status {
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {
+                            "\u{2026}".to_string()
                         }
-                        (t, 2)
-                    } else {
-                        ("\u{2026}".to_string(), 1)
+                        ActStatus::Completed(Some(p)) => {
+                            let (glyph, _, stats) = observe_compact(p);
+                            if stats.is_empty() {
+                                glyph.to_string()
+                            } else {
+                                format!("{} {}", glyph, stats)
+                            }
+                        }
+                        ActStatus::Completed(None) => "✓".to_string(),
+                        ActStatus::Failed(_) => "✗".to_string(),
                     };
                     lines.push(format!(
                         "{} {} {}  {}",
                         entry.timestamp, act_glyph, id_str, tail
                     ));
                     lines.push(String::new());
-                    i += consumed;
+                    i += 1;
                     continue;
                 }
             }
@@ -875,6 +878,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
                     ..
                 } => {
                     let (glyph, _) = family_glyph(*family);
@@ -889,6 +893,36 @@ impl ReactTrace {
                                 l.spans.iter().map(|s| s.content.as_ref()).collect();
                             lines.push(joined);
                         }
+                    }
+                    // Terminal states in expanded mode also render the outcome
+                    // body inline from `status` (there is no paired Observe).
+                    match status {
+                        ActStatus::Completed(Some(p)) => {
+                            let verb = observe_verb(p);
+                            let (glyph, _) = outcome_glyph(p);
+                            lines.push(format!("{} {} {}", entry.timestamp, glyph, verb));
+                            for l in observe_payload_lines(p, self.observe_collapsed) {
+                                let joined: String =
+                                    l.spans.iter().map(|s| s.content.as_ref()).collect();
+                                lines.push(joined);
+                            }
+                        }
+                        ActStatus::Failed(Some(p)) => {
+                            let verb = observe_verb(p);
+                            lines.push(format!("{} ✗ {}", entry.timestamp, verb));
+                            for l in observe_payload_lines(p, self.observe_collapsed) {
+                                let joined: String =
+                                    l.spans.iter().map(|s| s.content.as_ref()).collect();
+                                lines.push(joined);
+                            }
+                        }
+                        ActStatus::Completed(None) => {
+                            lines.push(format!("{} ✓ done", entry.timestamp));
+                        }
+                        ActStatus::Failed(None) => {
+                            lines.push(format!("{} ✗ failed", entry.timestamp));
+                        }
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
                     }
                 }
 
@@ -955,14 +989,9 @@ impl ReactTrace {
                 }
             }
 
-            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
-                && matches!(
-                    self.entries.get(i + 1).map(|e| &e.kind),
-                    Some(TraceKind::Observe { payload: Some(_) })
-                );
-            if !skip_blank {
-                lines.push(String::new());
-            }
+            // Blank separator between entries. No adjacency skip needed: Act outcome
+            // is now rendered from `status` inline, not from a neighbouring Observe entry.
+            lines.push(String::new());
             i += 1;
         }
 
@@ -1786,5 +1815,71 @@ mod tests {
             *status = ActStatus::Completed(None);
         }
         assert_eq!(trace.first_active_spinner(), None);
+    }
+
+    #[test]
+    fn render_to_strings_completed_act_shows_outcome_glyph_not_spinner() {
+        use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "shell".into(),
+                family: ToolFamily::Execute,
+                input: ToolInputDisplay::Command {
+                    cmd: "echo hi".into(),
+                    cwd: None,
+                },
+                tool_call_id: None,
+                status: ActStatus::Completed(Some(ObservePayload::CommandOutput {
+                    exit_code: Some(0),
+                    stdout: "hi".into(),
+                    stderr: String::new(),
+                })),
+            },
+            text: String::new(),
+            timestamp: "10:00".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        let lines = trace.render_to_strings().join("\n");
+        assert!(
+            lines.contains("✓"),
+            "expected success glyph in collapsed render, got:\n{lines}"
+        );
+        for frame in SPINNER_FRAMES {
+            assert!(
+                !lines.contains(frame),
+                "completed Act must not render a spinner frame ({frame}) in:\n{lines}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_to_strings_pending_act_shows_spinner_placeholder() {
+        use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "shell".into(),
+                family: ToolFamily::Execute,
+                input: ToolInputDisplay::Command {
+                    cmd: "sleep 5".into(),
+                    cwd: None,
+                },
+                tool_call_id: None,
+                status: ActStatus::Pending,
+            },
+            text: String::new(),
+            timestamp: "10:00".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        let joined = trace.render_to_strings().join("\n");
+        // render_to_strings emits the Unicode ellipsis placeholder for the
+        // plain-text path's spinner slot (not a real animated frame).
+        assert!(
+            joined.contains("\u{2026}") || SPINNER_FRAMES.iter().any(|f| joined.contains(f)),
+            "pending Act must render a spinner placeholder, got:\n{joined}"
+        );
     }
 }
