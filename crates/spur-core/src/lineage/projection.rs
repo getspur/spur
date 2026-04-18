@@ -47,6 +47,10 @@ pub struct ExecutorLineage {
     /// Insertion-ordered queue of ids with active pending reviews. Maintained
     /// alongside `nodes` so `pending_reviews()` returns deterministic order.
     pending_review_order: VecDeque<ExecutorId>,
+    /// Buffer for `DelegationRequested` events waiting for their
+    /// `DelegationDispatched` counterpart.  Key is `request_id`.
+    /// Value is `(task_spec, issue_id)`.
+    pending_task_by_request_id: HashMap<String, (String, Option<String>)>,
 }
 
 impl ExecutorLineage {
@@ -414,6 +418,15 @@ impl ExecutorLineage {
 
     pub(crate) fn nodes_mut_vec(&mut self) -> Vec<&mut ExecutorNode> {
         self.nodes.values_mut().collect()
+    }
+
+    /// Mutable access to the pending-task buffer, keyed by `request_id`.
+    /// Used by the legacy adapter to buffer `DelegationRequested` until the
+    /// matching `DelegationDispatched` arrives with the concrete executor id.
+    pub(crate) fn pending_task_by_request_id_mut(
+        &mut self,
+    ) -> &mut HashMap<String, (String, Option<String>)> {
+        &mut self.pending_task_by_request_id
     }
 }
 
