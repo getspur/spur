@@ -20,3 +20,43 @@ fn per_task_context_files_survive_to_delegation_requests() {
     assert_eq!(parsed[0].context_files, vec!["src/a1.rs".to_string(), "src/a2.rs".to_string()]);
     assert_eq!(parsed[1].context_files, vec!["src/b1.rs".to_string()]);
 }
+
+#[test]
+fn per_task_issue_id_and_delegation_plan_survive_unshared() {
+    let args = json!({
+        "tasks": [
+            {
+                "agent": "claude-code-acp",
+                "task": "Task A",
+                "issue_id": "bd-1",
+                "delegation_plan": { "chosen": "claude-code-acp", "rationale": "A rationale" }
+            },
+            {
+                "agent": "gpt-5-acp",
+                "task": "Task B",
+                "issue_id": "bd-2",
+                "delegation_plan": { "chosen": "gpt-5-acp", "rationale": "B rationale" }
+            }
+        ],
+        "delegation_plan": { "chosen": "batch-top-level", "rationale": "SHOULD NOT propagate" }
+    });
+
+    let parsed = spur_mcp::parse_parallel_tasks(&args).expect("parse ok");
+    assert_eq!(parsed.len(), 2);
+
+    assert_eq!(parsed[0].issue_id.as_deref(), Some("bd-1"));
+    assert_eq!(parsed[1].issue_id.as_deref(), Some("bd-2"));
+
+    // Per-task plans are distinct.
+    let p0 = parsed[0].delegation_plan.as_ref().expect("plan A present");
+    let p1 = parsed[1].delegation_plan.as_ref().expect("plan B present");
+    assert_eq!(p0.chosen.as_deref(), Some("claude-code-acp"));
+    assert_eq!(p1.chosen.as_deref(), Some("gpt-5-acp"));
+
+    // Top-level plan from the args MUST NOT have been propagated.
+    assert!(
+        p0.chosen.as_deref() != Some("batch-top-level"),
+        "top-level delegation_plan leaked into per-task request",
+    );
+    assert!(p1.chosen.as_deref() != Some("batch-top-level"));
+}

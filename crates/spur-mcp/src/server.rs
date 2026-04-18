@@ -195,6 +195,13 @@ pub fn parse_parallel_tasks(args: &Value) -> Result<Vec<DelegationRequest>, Stri
             .get("context_files")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        let issue_id = task_obj
+            .get("issue_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let delegation_plan: Option<spur_acp::DelegationPlan> = task_obj
+            .get("delegation_plan")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         out.push(DelegationRequest {
             id: uuid::Uuid::new_v4().to_string(),
@@ -203,8 +210,8 @@ pub fn parse_parallel_tasks(args: &Value) -> Result<Vec<DelegationRequest>, Stri
             context_files,
             respond_to: tx,
             brain_session_id: SessionId::new(),
-            delegation_plan: None,
-            issue_id: None,
+            delegation_plan,
+            issue_id,
         });
     }
     Ok(out)
@@ -603,13 +610,12 @@ impl McpCallbackServer {
     }
 
     async fn handle_delegate_parallel(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let shared_plan: Option<spur_acp::DelegationPlan> = args
-            .get("delegation_plan")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let shared_issue_id = args
-            .get("issue_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        if let Some(batch_plan) = args.get("delegation_plan") {
+            tracing::info!(
+                batch_plan = %batch_plan,
+                "delegate_parallel received batch-level delegation_plan (not propagated into per-task requests)",
+            );
+        }
 
         let skeletons = match parse_parallel_tasks(&args) {
             Ok(s) => s,
@@ -624,8 +630,6 @@ impl McpCallbackServer {
             let (tx, rx) = tokio::sync::oneshot::channel();
             skeleton.respond_to = tx;
             skeleton.brain_session_id = self.brain_session_id.clone();
-            skeleton.delegation_plan = shared_plan.clone();
-            skeleton.issue_id = shared_issue_id.clone();
 
             info!(agent = %agent, request_id = %request_id, "Sending parallel delegation request");
 
