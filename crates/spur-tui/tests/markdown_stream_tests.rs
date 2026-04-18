@@ -201,3 +201,9 @@ fn pending_to_ready_transition_flips_placeholder() {
         "should show ready placeholder: {rendered}"
     );
 }
+
+#[test]
+fn flushed_byte_len_starts_at_zero() {
+    let s = MarkdownStream::new();
+    assert_eq!(s.flushed_byte_len_for_tests(), 0);
+}
