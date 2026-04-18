@@ -328,3 +328,21 @@ fn flushed_byte_len_is_monotonic() {
     let b = s.flushed_byte_len_for_tests();
     assert!(b >= a, "monotonic: {} -> {}", a, b);
 }
+
+#[test]
+fn flush_final_commits_trailing_paragraph() {
+    let mut s = MarkdownStream::new();
+    s.append("# Title\n\nFinal paragraph");
+    s.flush_final(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), s.raw_text().len(),
+        "flush_final must commit all bytes including EOF");
+    assert!(s.is_finalized());
+}
+
+#[test]
+fn flush_final_commits_trailing_fence() {
+    let mut s = MarkdownStream::new();
+    s.append("Intro\n\n```rust\nfn x() {}\n```");
+    s.flush_final(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), s.raw_text().len());
+}

@@ -260,6 +260,17 @@ impl MarkdownStream {
         self.rebuild(states, /* permit_eof_closure */ false)
     }
 
+    /// TurnComplete flush. Permits cursor advance past events at EOF
+    /// (`range.end == raw_text.len()`) since no more bytes will arrive.
+    /// Sets `finalized = true`; subsequent `append` is a contract
+    /// violation (debug_assert'd, self-heals in release).
+    pub fn flush_final(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
+        self.dirty_since = None;
+        let out = self.rebuild(states, /* permit_eof_closure */ true);
+        self.finalized = true;
+        out
+    }
+
     /// Force the next `maybe_flush`/`flush_now` to rebuild even if not yet
     /// dirty by time. Used when external state (mermaid registry errors)
     /// changes so the placeholder reflects the new state on the next tick.
