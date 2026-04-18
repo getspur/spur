@@ -230,3 +230,10 @@ fn items_and_tail_before_flush_shows_entire_raw_text_as_tail() {
     assert_eq!(items.len(), 0, "no flush yet, no committed items");
     assert_eq!(tail, "Hello world", "all raw_text should be in the tail");
 }
+
+#[test]
+fn fence_placeholder_for_unknown_id_returns_none() {
+    use spur_tui::components::mermaid::MermaidId;
+    let s = MarkdownStream::new();
+    assert!(s.fence_placeholder_for(MermaidId(999)).is_none());
+}
