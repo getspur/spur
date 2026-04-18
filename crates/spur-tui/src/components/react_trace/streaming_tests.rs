@@ -1473,3 +1473,54 @@ fn phase3_edge_stale_cache_safe() {
         rows.len()
     );
 }
+
+/// EDGE-7 (Phase 3): mermaid Pending→Ready transition keeps the anchor
+/// in-bounds. Anchor pinned mid-entry must remain valid after the fence
+/// expands from 1 row to N rows.
+#[test]
+fn phase3_edge_mermaid_pending_to_ready_stable() {
+    use crate::components::markdown_stream::StateLookup;
+    use crate::components::mermaid::{FenceRender, MermaidId};
+
+    let mut trace = ReactTrace::new_for_tests();
+    trace.append_message(
+        "Intro paragraph.\n\n```mermaid\ngraph LR\nA --> B\n```\n\nOutro paragraph.",
+        "claude",
+        "10:00".into(),
+    );
+    trace.force_flush_all(&StateLookup::empty());
+
+    // Pending state: empty FenceRender registry → 1 row for the fence.
+    let pending: std::collections::HashMap<MermaidId, FenceRender> =
+        std::collections::HashMap::new();
+    let (rows_p, starts_p, ranges_p) =
+        trace.build_virtual_rows_for_tests(0, 80, &pending, None);
+
+    // Ready state: registry has Ready(6) → 6 rows for the fence.
+    let mut ready = std::collections::HashMap::new();
+    ready.insert(MermaidId(0), FenceRender::Ready(6));
+    let (rows_r, starts_r, ranges_r) =
+        trace.build_virtual_rows_for_tests(0, 80, &ready, None);
+
+    assert!(
+        rows_r.len() > rows_p.len(),
+        "Ready layout must be taller than Pending; got pending={} ready={}",
+        rows_p.len(),
+        rows_r.len(),
+    );
+
+    // Pin anchor mid-entry under Pending.
+    use crate::components::react_trace::types::ScrollAnchor;
+    let anchor = ScrollAnchor::Row {
+        entry_idx: 0,
+        row_within_entry: 1,
+    };
+    let row_p = crate::components::react_trace::render::resolve_anchor(
+        &anchor, &ranges_p, &starts_p, rows_p.len(), 5,
+    );
+    let row_r = crate::components::react_trace::render::resolve_anchor(
+        &anchor, &ranges_r, &starts_r, rows_r.len(), 5,
+    );
+    assert!(row_p < rows_p.len(), "Pending: in-bounds row {} of {}", row_p, rows_p.len());
+    assert!(row_r < rows_r.len(), "Ready: in-bounds row {} of {}", row_r, rows_r.len());
+}
