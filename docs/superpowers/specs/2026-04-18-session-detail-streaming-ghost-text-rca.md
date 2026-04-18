@@ -291,3 +291,12 @@ The strongest remaining explanation is:
   depends on last-render totals rather than current content
 
 The next implementation should target those two issues first.
+
+## Resolution (2026-04-18)
+
+The corrective actions in this RCA were superseded by the fix design at
+`docs/superpowers/specs/2026-04-18-session-detail-streaming-ghost-text-fix-design.md`.
+Phase 0 (RC1), Phase 1 (F1+F2+RC2), and Phase 2 (F3) are implemented on
+branch `feat/ghost-text-fix`. SIM-1, SIM-2, SIM-3 are active regression
+guards. Final test count: 153 lib tests pass, 1 ignored (informational
+diagnostic only).
