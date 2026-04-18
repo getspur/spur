@@ -335,23 +335,41 @@ impl ReactTrace {
             let drain = self.entries.len() - MAX_LOG_ENTRIES;
             self.entries.drain(..drain);
             // Adjust anchor's entry_idx; if anchor pointed at evicted entry,
-            // snap to (0, 0).
-            if let crate::components::react_trace::types::ScrollAnchor::Byte {
-                entry_idx,
-                byte_offset,
-            } = self.anchor
-            {
-                if entry_idx < drain {
-                    self.anchor = crate::components::react_trace::types::ScrollAnchor::Byte {
-                        entry_idx: 0,
-                        byte_offset: 0,
-                    };
-                } else {
-                    self.anchor = crate::components::react_trace::types::ScrollAnchor::Byte {
-                        entry_idx: entry_idx - drain,
-                        byte_offset,
+            // snap to the first surviving entry's first row.
+            match self.anchor {
+                crate::components::react_trace::types::ScrollAnchor::Row {
+                    entry_idx,
+                    row_within_entry,
+                } => {
+                    self.anchor = if entry_idx < drain {
+                        crate::components::react_trace::types::ScrollAnchor::Row {
+                            entry_idx: 0,
+                            row_within_entry: 0,
+                        }
+                    } else {
+                        crate::components::react_trace::types::ScrollAnchor::Row {
+                            entry_idx: entry_idx - drain,
+                            row_within_entry,
+                        }
                     };
                 }
+                crate::components::react_trace::types::ScrollAnchor::Byte {
+                    entry_idx,
+                    byte_offset,
+                } => {
+                    self.anchor = if entry_idx < drain {
+                        crate::components::react_trace::types::ScrollAnchor::Byte {
+                            entry_idx: 0,
+                            byte_offset: 0,
+                        }
+                    } else {
+                        crate::components::react_trace::types::ScrollAnchor::Byte {
+                            entry_idx: entry_idx - drain,
+                            byte_offset,
+                        }
+                    };
+                }
+                crate::components::react_trace::types::ScrollAnchor::Following => {}
             }
             self.invalidate_cache();
         } else {
@@ -399,9 +417,9 @@ impl ReactTrace {
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.anchor = crate::components::react_trace::types::ScrollAnchor::Byte {
+        self.anchor = crate::components::react_trace::types::ScrollAnchor::Row {
             entry_idx: 0,
-            byte_offset: 0,
+            row_within_entry: 0,
         };
     }
 
@@ -410,25 +428,28 @@ impl ReactTrace {
     }
 
     /// Apply a row delta to the current anchor by:
-    /// 1. resolving the current anchor to a row index using fresh metrics,
+    /// 1. resolving the current anchor against the cached layout from the
+    ///    most recent render (P2-δ — guarantees scroll math uses the same
+    ///    coordinate system render painted with),
     /// 2. computing the target row,
-    /// 3. converting back to a byte anchor at the target row.
+    /// 3. converting back to a Row anchor at the target row.
+    /// If `line_cache` is `None` (first tick before any render), this is a
+    /// no-op — anchor remains in its initial state.
     /// If the target row is the last visible row, transitions to Following.
     #[cfg(feature = "markdown")]
     fn shift_anchor_by(&mut self, delta: isize) {
         use crate::components::react_trace::types::ScrollAnchor;
 
-        let width = self.last_render_width.unwrap_or(80);
-        let states = std::collections::HashMap::new();
-        let (_rows, entry_row_starts, byte_ranges) =
-            self.build_virtual_rows(0, width, &states, None);
-        let total = byte_ranges.len();
+        let Some(cache) = self.line_cache.as_ref() else {
+            return;
+        };
+        let total = cache.rows.len();
         let visible_h = self.last_visible_height.max(1);
 
         let current_row = crate::components::react_trace::render::resolve_anchor(
             &self.anchor,
-            &byte_ranges,
-            &entry_row_starts,
+            &cache.byte_ranges,
+            &cache.entry_row_starts,
             total,
             visible_h,
         );
@@ -442,11 +463,10 @@ impl ReactTrace {
             return;
         }
 
-        // Convert target row back to a byte anchor.
-        let (entry_idx, byte_offset) = row_to_byte_anchor(target, &byte_ranges, &entry_row_starts);
-        self.anchor = ScrollAnchor::Byte {
+        let (entry_idx, row_within_entry) = row_to_anchor(target, &cache.entry_row_starts);
+        self.anchor = ScrollAnchor::Row {
             entry_idx,
-            byte_offset,
+            row_within_entry,
         };
     }
 
@@ -902,6 +922,32 @@ impl ReactTrace {
 
     pub fn set_visible_height_for_tests(&mut self, height: usize) {
         self.last_visible_height = height;
+    }
+
+    /// Seed `line_cache` with a virtual-row layout built from the given
+    /// fence states and width.  Tests call this before exercising scroll
+    /// operations that require a populated cache (shift_anchor_by,
+    /// page_up, etc.).
+    #[cfg(feature = "markdown")]
+    pub fn seed_line_cache_for_tests(
+        &mut self,
+        width: u16,
+        states: &std::collections::HashMap<
+            crate::components::mermaid::MermaidId,
+            crate::components::mermaid::FenceRender,
+        >,
+    ) {
+        let (rows, entry_row_starts, byte_ranges) =
+            self.build_virtual_rows(0, width, states, None);
+        self.line_cache = Some(render::VirtualRowCacheEntry {
+            rows,
+            entry_row_starts,
+            byte_ranges,
+            width,
+            generation: self.generation,
+            fence_gen: 0,
+        });
+        self.last_render_width = Some(width);
     }
 
     pub fn build_display_lines_for_tests(
