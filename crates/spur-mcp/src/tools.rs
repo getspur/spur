@@ -126,6 +126,14 @@ fn delegate_parallel_def() -> ToolDefinition {
                                 "type": "array",
                                 "items": { "type": "string" },
                                 "description": "Optional supplementary file paths for this task. Prepended as a '## Relevant Files' section in the worker prompt."
+                            },
+                            "issue_id": {
+                                "type": "string",
+                                "description": "Optional beads issue ID to auto-track for this task. Must be unique across tasks in a single batch."
+                            },
+                            "delegation_plan": {
+                                "type": "object",
+                                "description": "Per-task structured reasoning. Used for reviewer mismatch detection. Takes precedence over the batch-level delegation_plan."
                             }
                         },
                         "required": ["agent", "task"]
@@ -134,17 +142,13 @@ fn delegate_parallel_def() -> ToolDefinition {
                 },
                 "delegation_plan": {
                     "type": "object",
-                    "description": "Structured reasoning for the parallel dispatch. The `decomposition` section MUST demonstrate subtasks are independent.",
+                    "description": "Batch-level decomposition rationale. Documents why these N subtasks together and how they are independent. Per-task delegation_plan (inside tasks[]) takes precedence for reviewer mismatch checks.",
                     "properties": {
                         "candidates":    { "type": "array" },
                         "decomposition": { "type": "array" },
                         "chosen":        { "type": "string" },
                         "rationale":     { "type": "string" }
                     }
-                },
-                "issue_id": {
-                    "type": "string",
-                    "description": "Optional beads issue ID to auto-track"
                 }
             },
             "required": ["tasks"]
