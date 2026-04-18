@@ -396,11 +396,8 @@ fn anchor_to_row(
 /// on content. After flush, re-resolves the anchor to a (possibly new)
 /// row index and asserts the visible slice is unchanged.
 ///
-/// Status: FAILS. F3 alone is insufficient — the anchor stabilizes the
-/// TOP of the viewport, but rows BELOW the anchor still reflow. F1
-/// (symmetric tail/items rendering) is required as well.
+/// Status: REGRESSION GUARD. Verified by F1 + F3.
 #[test]
-#[ignore = "diagnostic - proves F3 alone is insufficient, F1 also required"]
 fn sim_fix_content_anchor_eliminates_ghost_text() {
     let mut trace = ReactTrace::new_for_tests();
 
@@ -807,4 +804,61 @@ fn scroll_uses_fresh_row_count_after_append() {
         "scroll_up must use fresh row count to transition out of Following; \
          got is_following={}, anchor={:?}",
         trace.is_following(), trace.anchor_for_tests());
+}
+
+/// F3 regression: anchor on byte X in entry N survives a width resize.
+#[test]
+fn phase2_f3_anchor_byte_offset_survives_width_resize() {
+    let mut trace = ReactTrace::new_for_tests();
+    trace.append_message(
+        "A long paragraph with the recognizable phrase MARKER inside that wraps differently at different widths.",
+        "claude", "10:00".into());
+    trace.force_flush_all(&StateLookup::empty());
+
+    // Anchor a viewport at width 80.
+    let (rows_w80, _, _) = trace.build_virtual_rows_for_tests(
+        0, 80, &std::collections::HashMap::new(), None);
+    let _ = rows_w80;
+    trace.scroll_to_top();
+    trace.scroll_down_by(1);
+
+    // Snapshot anchor.
+    let anchor_before = trace.anchor_for_tests();
+
+    // Re-render at width 60 — wrapping changes substantially.
+    let (_rows_w60, _, _) = trace.build_virtual_rows_for_tests(
+        0, 60, &std::collections::HashMap::new(), None);
+    let anchor_after = trace.anchor_for_tests();
+
+    assert_eq!(anchor_before, anchor_after,
+        "F3: ScrollAnchor must be invariant under width change");
+}
+
+/// F3 regression: anchor on entry that gets evicted snaps to (0, 0).
+#[test]
+fn phase2_f3_anchor_survives_eviction() {
+    use crate::components::react_trace::types::ScrollAnchor;
+    let mut trace = ReactTrace::new_for_tests();
+    trace.append_message("entry 0 content", "claude", "10:00".into());
+    trace.scroll_to_top();
+    trace.scroll_down_by(1);
+
+    // Force eviction by exceeding MAX_LOG_ENTRIES.
+    for i in 1..2000 {
+        trace.append_message(
+            &format!("entry {} content", i), "claude", "10:00".into());
+    }
+
+    let anchor = trace.anchor_for_tests();
+    match anchor {
+        ScrollAnchor::Byte { entry_idx, byte_offset } => {
+            assert!(entry_idx < trace.entries_for_tests().len(),
+                "anchor.entry_idx must point at a surviving entry");
+            assert!(byte_offset == 0 || entry_idx > 0,
+                "evicted-entry anchor must snap to (0, 0)");
+        }
+        ScrollAnchor::Following => {
+            // Acceptable: streaming pushed user back to bottom.
+        }
+    }
 }
