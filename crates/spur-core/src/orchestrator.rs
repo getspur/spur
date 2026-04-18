@@ -27,6 +27,7 @@ use agent_client_protocol::{
 };
 
 use spur_cost::CostTracker;
+use spur_license::SpurLicense;
 use spur_mcp::{
     build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
 };
@@ -476,6 +477,11 @@ impl Orchestrator {
     /// Subscribe to orchestrator events (for TUI, logging, etc.).
     pub fn subscribe(&self) -> broadcast::Receiver<SpurEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Spawn the licensing runtime helper against this orchestrator's event funnel.
+    pub fn spawn_license_runtime(&self, license: SpurLicense) -> JoinHandle<()> {
+        crate::license_runtime::spawn_license_runtime(license, self.funnel.clone())
     }
 
     /// Classify an error as an auth-required failure.
@@ -4934,7 +4940,9 @@ mod format_worker_task_tests {
             "crates/spur-acp/src/adapter/claude.rs".to_string(),
         ];
         let out = format_worker_task("Go.", &files);
-        let idx_first = out.find("- crates/spur-mcp/src/server.rs").expect("first bullet");
+        let idx_first = out
+            .find("- crates/spur-mcp/src/server.rs")
+            .expect("first bullet");
         let idx_second = out
             .find("- crates/spur-acp/src/adapter/claude.rs")
             .expect("second bullet");

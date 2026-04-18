@@ -367,7 +367,12 @@ impl SessionPickerView {
         Self::display_text(session, show_cwd)
     }
 
-    fn render_loading(&self, frame: &mut Frame, area: Rect) {
+    fn render_loading(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+    ) {
         let lines = vec![
             Line::from(Span::styled(
                 "Sessions",
@@ -413,6 +418,7 @@ impl SessionPickerView {
                 stream_in_flight: false,
                 issue_count: 0,
                 alert_summary: None,
+                license_badge,
             },
         );
         render_footer_hint(frame, chunks[2]);
@@ -426,6 +432,7 @@ impl SessionPickerView {
         &self,
         frame: &mut Frame,
         area: Rect,
+        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         agent: &str,
         sessions: &[SessionInfo],
         cursor: usize,
@@ -712,13 +719,20 @@ impl SessionPickerView {
                     stream_in_flight: false,
                     issue_count: 0,
                     alert_summary: None,
+                    license_badge,
                 },
             );
         }
         render_footer_hint(frame, chunks[footer_idx]);
     }
 
-    fn render_error(&self, frame: &mut Frame, area: Rect, message: &str) {
+    fn render_error(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        message: &str,
+        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+    ) {
         let lines = vec![
             Line::from(Span::styled(
                 "Sessions",
@@ -765,6 +779,7 @@ impl SessionPickerView {
                 stream_in_flight: false,
                 issue_count: 0,
                 alert_summary: None,
+                license_badge,
             },
         );
         render_footer_hint(frame, chunks[2]);
@@ -1030,9 +1045,9 @@ impl View for SessionPickerView {
         // which calls set_sessions() or set_error() directly.
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _ctx: &super::ViewContext) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         match &self.state {
-            PickerState::Loading => self.render_loading(frame, area),
+            PickerState::Loading => self.render_loading(frame, area, ctx.license_badge),
             PickerState::Populated {
                 agent,
                 sessions,
@@ -1043,6 +1058,7 @@ impl View for SessionPickerView {
             } => self.render_populated(
                 frame,
                 area,
+                ctx.license_badge,
                 agent,
                 sessions,
                 *cursor,
@@ -1050,7 +1066,9 @@ impl View for SessionPickerView {
                 *search_focused,
                 filter,
             ),
-            PickerState::Error { message } => self.render_error(frame, area, message),
+            PickerState::Error { message } => {
+                self.render_error(frame, area, message, ctx.license_badge)
+            }
         }
     }
 
@@ -1072,6 +1090,7 @@ mod current_session_shortcut_tests {
         crate::views::ViewContext {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,
+            license_badge: None,
         }
     }
 

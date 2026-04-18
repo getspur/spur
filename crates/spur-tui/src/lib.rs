@@ -29,6 +29,7 @@ pub mod test_support {
         crate::views::ViewContext {
             lineage,
             brain_status: &IDLE,
+            license_badge: None,
         }
     }
 

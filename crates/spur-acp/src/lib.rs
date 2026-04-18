@@ -27,7 +27,8 @@ pub use crate::domain::events::{
 };
 pub use domain::{
     DelegationPlan, DelegationResult, DelegationStatus, HistoryEntry, IssueDetailEvent,
-    IssueSummaryEvent, PlanCandidate, PlanSubtask, SpurEvent, SpurEventBody, TimeoutFallback,
+    IssueSummaryEvent, LicenseBindingMode, LicensePlan, LicenseStateEvent, LicenseStatusEvent,
+    LicenseSubjectKind, PlanCandidate, PlanSubtask, SpurEvent, SpurEventBody, TimeoutFallback,
 };
 
 // Re-export all remaining types for backward compatibility

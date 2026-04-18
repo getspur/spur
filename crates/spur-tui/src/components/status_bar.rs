@@ -10,6 +10,44 @@ use crate::action::ViewId;
 
 pub struct StatusBar;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LicenseBadge {
+    pub label: String,
+    pub tone: LicenseBadgeTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LicenseBadgeTone {
+    Neutral,
+    Success,
+    Warning,
+    Danger,
+}
+
+impl LicenseBadge {
+    pub fn new(label: impl Into<String>, tone: LicenseBadgeTone) -> Self {
+        Self {
+            label: label.into(),
+            tone,
+        }
+    }
+
+    fn style(&self) -> Style {
+        match self.tone {
+            LicenseBadgeTone::Neutral => Style::default().fg(Color::DarkGray),
+            LicenseBadgeTone::Success => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            LicenseBadgeTone::Warning => Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            LicenseBadgeTone::Danger => {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            }
+        }
+    }
+}
+
 /// Returns the status-bar hint string for the SessionDetail view.
 ///
 /// When `stream_in_flight` is true the hint shows `[Esc]stop`; when the
@@ -42,6 +80,8 @@ pub struct StatusBarProps<'a> {
     pub issue_count: usize,
     /// Graph alert summary from bv: (total, critical, warning). None if bv unavailable.
     pub alert_summary: Option<(usize, usize, usize)>,
+    /// Compact license snapshot rendered as a pill, if licensing is active.
+    pub license_badge: Option<&'a LicenseBadge>,
 }
 
 impl StatusBar {
@@ -97,6 +137,10 @@ impl StatusBar {
                 right_spans.push(Span::styled(format!("{total} alerts"), style));
                 right_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
             }
+        }
+        if let Some(badge) = props.license_badge {
+            right_spans.push(Span::styled(format!("{} ", badge.label), badge.style()));
+            right_spans.push(Span::styled("· ", Style::default().fg(Color::DarkGray)));
         }
         right_spans.extend([
             Span::styled(
