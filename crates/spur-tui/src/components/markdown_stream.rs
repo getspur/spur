@@ -271,6 +271,16 @@ impl MarkdownStream {
         &self.cached_items
     }
 
+    /// Split view of committed parsed items + uncommitted tail text.
+    ///
+    /// - `items`: parsed StreamItems covering `raw_text[..flushed_byte_len]`.
+    /// - `tail`: `raw_text[flushed_byte_len..]`, to be rendered as plain text.
+    ///
+    /// Renderers must emit both: items styled, tail plain.
+    pub fn items_and_tail(&self) -> (&[StreamItem], &str) {
+        (&self.cached_items, &self.raw_text[self.flushed_byte_len..])
+    }
+
     /// Whether the stream has pending changes awaiting flush.
     pub fn is_dirty(&self) -> bool {
         self.dirty_since.is_some()
