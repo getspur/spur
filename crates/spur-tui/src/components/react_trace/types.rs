@@ -1,6 +1,31 @@
 use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+use spur_acp::ToolCallId;
 
 use ratatui::text::Line;
+
+/// Terminal/non-terminal state of a tool call.
+///
+/// Mirrors `agent_client_protocol::ToolCallStatus` but embeds the outcome
+/// payload directly so a single `TraceEntry` represents the full lifecycle
+/// of one tool call. Non-terminal variants keep the spinner animating;
+/// terminal variants render the outcome glyph.
+#[derive(Debug, Clone)]
+pub enum ActStatus {
+    Pending,
+    InProgress {
+        /// Streamed partial output. Stored but NOT rendered in Phase 1.
+        partial: Option<ObservePayload>,
+    },
+    Completed(Option<ObservePayload>),
+    Failed(Option<ObservePayload>),
+}
+
+impl ActStatus {
+    /// True when the spinner should keep animating.
+    pub fn is_active(&self) -> bool {
+        matches!(self, ActStatus::Pending | ActStatus::InProgress { .. })
+    }
+}
 
 /// What kind of ReAct trace step this entry represents.
 #[derive(Debug, Clone)]
@@ -13,7 +38,14 @@ pub enum TraceKind {
         tool: String,
         family: ToolFamily,
         input: ToolInputDisplay,
+        /// ACP-originated calls carry their protocol id; synthetic or
+        /// test-generated Acts may use `None`.
+        tool_call_id: Option<ToolCallId>,
+        /// Drives spinner vs. outcome rendering.
+        status: ActStatus,
     },
+    /// Informational notes only (system, brain events). Tool-call lifecycle
+    /// lives on `Act.status` — do not use `Observe` for tool outcomes.
     Observe {
         payload: Option<ObservePayload>,
     },
