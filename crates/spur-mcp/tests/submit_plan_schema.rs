@@ -73,3 +73,22 @@ fn persist_fields_are_not_required() {
         "epic_title is only required when persist_as_epic is true (enforced in handler)"
     );
 }
+
+#[test]
+fn persist_as_epic_without_title_is_documented_as_handler_error() {
+    // Schema-level test only: epic_title is optional at schema level.
+    // Handler-level rejection lives in submit_plan_persist.rs once the
+    // handler branch is implemented (Task 6).
+    let schema = submit_plan_def();
+    // Documented via description text containing "Required when".
+    let desc = schema
+        .get("properties")
+        .and_then(|p| p.get("epic_title"))
+        .and_then(|p| p.get("description"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        desc.to_lowercase().contains("required when"),
+        "epic_title description must document its conditional-required semantics; got: {desc}",
+    );
+}
