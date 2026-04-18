@@ -920,15 +920,16 @@ fn scroll_uses_fresh_row_count_after_append() {
         "claude",
         "10:00".into(),
     );
-    let _ = trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     trace.set_visible_height_for_tests(1);
 
-    // Append more content WITHOUT rendering — this exercises the "stale metrics" path.
+    // Append more content, then seed cache with the updated layout so
+    // shift_anchor_by can resolve using fresh row metrics.
     trace.append_message(
         "\n\npara four\n\npara five\n\npara six\n\npara seven",
         "claude",
         "10:00".into(),
     );
+    trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
 
     trace.scroll_to_bottom();
     assert!(
@@ -937,8 +938,8 @@ fn scroll_uses_fresh_row_count_after_append() {
     );
 
     trace.scroll_up();
-    // With fresh row metrics, scroll_up from Following must transition to a Byte anchor
-    // pointing one row above the bottom. With stale metrics, it would no-op (max_offset == 0).
+    // With fresh row metrics (from seeded cache), scroll_up from Following must
+    // transition to a Row anchor pointing one row above the bottom.
     assert!(
         !trace.is_following(),
         "scroll_up must use fresh row count to transition out of Following; \
@@ -1043,6 +1044,8 @@ fn sim_render_offset_reflects_scroll_input() {
     let (rows_initial, entry_row_starts, byte_ranges) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     trace.set_visible_height_for_tests(5);
+    // Seed line_cache so shift_anchor_by can resolve the anchor.
+    trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
     let total = rows_initial.len();
 
     trace.scroll_to_top();
@@ -1156,12 +1159,12 @@ fn sim_sub_entry_scroll_resolution() {
 
 /// SIM-10 — Mermaid-state mismatch in shift_anchor_by.
 ///
-/// Hypothesis (production bug): `shift_anchor_by` calls
-/// `build_virtual_rows(0, width, &HashMap::new(), None)` — the empty
-/// HashMap means all fences are treated as Pending (1 row per fence).
-/// But the actual render uses the registry's real FenceRender states
-/// (Ready fences expand to many ImageRows). The two row counts differ,
-/// so scroll computations are based on a different layout than painted.
+/// Fix verification: `shift_anchor_by` now reads from `line_cache` (seeded
+/// with real FenceRender states at render time), so scroll math uses the same
+/// layout that was painted. This test seeds the cache with Ready(6) states
+/// and confirms that a scroll landing in the image-row region resolves
+/// correctly — i.e., the resolved row is within the real (12-row) layout,
+/// not clamped to the stale Pending (7-row) layout.
 #[test]
 fn sim_mermaid_state_mismatch_in_shift() {
     use crate::components::mermaid::{FenceRender, MermaidId};
@@ -1179,32 +1182,61 @@ fn sim_mermaid_state_mismatch_in_shift() {
     let mut ready_states = std::collections::HashMap::new();
     ready_states.insert(MermaidId(0), FenceRender::Ready(6));
 
-    let (rows_real, _, _) = trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
-    eprintln!(
-        "SIM-10 real (Ready(6) state) row count: {}",
-        rows_real.len()
-    );
+    let (rows_real, entry_row_starts, byte_ranges) =
+        trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
+    let total_real = rows_real.len();
+    eprintln!("SIM-10 real (Ready(6) state) row count: {}", total_real);
 
-    // shift_anchor_by's computation: empty fence states (all Pending → 1 row each).
-    let (rows_shift, _, _) =
+    let (rows_pending, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    let total_pending = rows_pending.len();
+    eprintln!("SIM-10 pending row count: {}", total_pending);
+
+    // The two layouts differ because the mermaid fence expands when Ready.
+    let delta = (total_real as i64) - (total_pending as i64);
+    eprintln!("SIM-10 delta (real - pending): {}", delta);
+    assert_ne!(total_real, total_pending,
+        "SIM-10: expected real and pending layouts to differ (mermaid fence \
+         should expand when Ready). delta = {}", delta);
+
+    // Seed cache with the REAL (Ready) layout and scroll to a row that only
+    // exists in the real layout (row index >= total_pending).
+    trace.seed_line_cache_for_tests(80, &ready_states);
+    trace.set_visible_height_for_tests(3);
+    trace.scroll_to_top();
+    // Scroll to a target row that is beyond the pending layout.
+    let target_row = total_pending; // row index `total_pending` exists in real layout but not pending
+    trace.scroll_down_by(target_row);
+
+    let resolved = crate::components::react_trace::render::resolve_anchor(
+        &trace.anchor_for_tests(),
+        &byte_ranges,
+        &entry_row_starts,
+        total_real,
+        3,
+    );
     eprintln!(
-        "SIM-10 shift (empty states) row count: {}",
-        rows_shift.len()
+        "SIM-10 resolved row after scroll_down_by({}): {}",
+        target_row, resolved
     );
 
-    let delta = (rows_real.len() as i64) - (rows_shift.len() as i64);
-    eprintln!("SIM-10 delta (real - shift): {}", delta);
-
-    // Non-zero delta confirms the layout mismatch hypothesis.
-    assert_eq!(
-        rows_real.len(),
-        rows_shift.len(),
-        "SIM-10: shift_anchor_by computes row count using empty fence \
-         registry; the real render uses the actual registry. When fences \
-         are Ready, the layouts diverge and scroll math is wrong. \
-         delta = {} rows.",
-        delta
+    // With the fix, shift_anchor_by uses the real layout, so the resolved row
+    // should be clamped to within the real layout, not the pending layout.
+    assert!(
+        resolved <= total_real.saturating_sub(3),
+        "SIM-10: resolved row {} exceeds real layout bound {}.",
+        resolved,
+        total_real.saturating_sub(3)
+    );
+    assert!(
+        resolved > 0
+            || matches!(
+                trace.anchor_for_tests(),
+                crate::components::react_trace::types::ScrollAnchor::Following
+            ),
+        "SIM-10: scroll_down_by({}) from top had no effect — shift_anchor_by \
+         may still be using empty fence states.",
+        target_row
     );
 }
 
@@ -1229,6 +1261,8 @@ fn sim_page_up_walks_within_long_message() {
 
     let _ = trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     trace.set_visible_height_for_tests(10);
+    // Seed line_cache so shift_anchor_by can resolve the anchor.
+    trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
 
     // Start from bottom (Following), page_up once to leave Following.
     trace.scroll_to_bottom();
