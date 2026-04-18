@@ -1,0 +1,60 @@
+# Draft migration from ~/.kiro/settings/mcp.json to Codex config.toml.
+#
+# Usage:
+# - Copy selected blocks into ~/.codex/config.toml for user-wide servers.
+# - Copy repo-specific blocks into .codex/config.toml for trusted projects.
+# - Replace placeholders with your own values before use.
+
+# Optional: if you use OAuth-based MCP servers and need a fixed callback.
+# mcp_oauth_callback_port = 5555
+# mcp_oauth_callback_url = "https://your-devbox.example/callback"
+
+[mcp_servers.sequentialthinking]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+
+[mcp_servers.aws_docs]
+command = "uvx"
+args = ["awslabs.aws-documentation-mcp-server@latest"]
+
+[mcp_servers.aws_docs.env]
+FASTMCP_LOG_LEVEL = "ERROR"
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp", "--api-key", "YOUR_CONTEXT7_API_KEY"]
+required = false
+
+# Kiro had this server disabled. Keep it disabled here until you need it.
+[mcp_servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+enabled = false
+
+# Kiro had this server disabled and used an inline placeholder token.
+# Prefer an environment variable instead of a literal secret in config.
+[mcp_servers.github]
+command = "docker"
+args = [
+  "run",
+  "-i",
+  "--rm",
+  "-e",
+  "GITHUB_PERSONAL_ACCESS_TOKEN",
+  "ghcr.io/github/github-mcp-server",
+]
+enabled = false
+env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+
+# Repo-local example. Prefer placing this block in .codex/config.toml
+# inside the repo rather than your global ~/.codex/config.toml.
+[mcp_servers.knowledge_graph]
+url = "http://localhost:27496/mcp"
+required = false
+startup_timeout_sec = 20
+
+# Optional official docs MCP from OpenAI.
+# codex mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+required = false
