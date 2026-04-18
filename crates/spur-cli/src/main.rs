@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 
 use tracing_subscriber::prelude::*;
 
+use commands::auth::AuthCommands;
 use spur_acp::config::SpurConfig;
 use spur_acp::SessionId;
 use spur_core::{Orchestrator, RunOpts};
+use spur_license::SpurLicense;
 
 /// Returns an optional guard that must be held until process exit to flush buffered logs.
 fn init_tracing(
@@ -124,6 +126,11 @@ enum Commands {
     Connect {
         /// Service name (e.g., "github")
         service: String,
+    },
+    /// Manage commercial licensing
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
     },
     /// Manage workflows
     Workflow {
@@ -411,6 +418,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Auth { command } => commands::auth::run(command).await,
         Commands::Workflow { command } => {
             match command {
                 WorkflowCommands::Validate { file } => {
@@ -441,6 +449,8 @@ async fn main() -> Result<()> {
                 }
             };
             let config_arc = std::sync::Arc::new(config.clone());
+            let license = SpurLicense::from_env_or_disabled();
+            let initial_license_state = spur_core::license_runtime::to_event_state(license.current_state());
 
             // Create PmService (optional — returns None if no backend available)
             let pm_service = spur_pm::PmService::try_new(
@@ -463,6 +473,7 @@ async fn main() -> Result<()> {
             } else {
                 orch
             };
+            let _license_runtime = orch.spawn_license_runtime(license.clone());
             let event_rx = orch.subscribe();
 
             // Clone the review_sink BEFORE orch is moved.
@@ -607,12 +618,13 @@ async fn main() -> Result<()> {
             // Run TUI (blocks). Capture the result so we can run structured
             // shutdown before propagating any error — otherwise `?` would
             // leak the orchestrator/dispatcher/translator tasks.
-            let tui_result = spur_tui::app::run_tui_with_config(
+            let tui_result = spur_tui::app::run_tui_with_license(
                 event_rx,
                 Some(tui_tx),
                 Some(perm_rx),
                 force_picker,
                 config_arc,
+                initial_license_state,
             )
             .await;
 

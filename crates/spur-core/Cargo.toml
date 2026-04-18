@@ -7,11 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+rand = "0.8"
 spur-acp = { workspace = true }
 spur-mcp = { workspace = true }
 spur-pm = { workspace = true }
 spur-worktree = { workspace = true }
 spur-cost = { workspace = true }
+spur-license = { workspace = true }
 agent-client-protocol = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
