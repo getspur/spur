@@ -276,7 +276,7 @@ impl ReactTrace {
         area: Rect,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) {
-        let following_indicator = if self.is_following {
+        let following_indicator = if self.is_following() {
             " ▼ following "
         } else {
             ""
@@ -350,12 +350,14 @@ impl ReactTrace {
         self.last_visible_height = visible_height;
         self.last_render_width = Some(effective_width);
 
-        // Clamp or pin scroll offset.
+        // Resolve anchor to a row offset.
         let max_offset = total_lines.saturating_sub(visible_height);
-        let offset = if self.is_following {
+        let offset = if self.is_following() {
             max_offset
         } else {
-            self.scroll_offset.min(max_offset)
+            // Non-markdown path: anchor is always Following or Byte{0,0}.
+            // Byte anchors don't have byte_ranges here, so clamp to max.
+            max_offset
         };
 
         // Viewport slice: only clone the visible lines instead of all lines.
@@ -389,7 +391,7 @@ impl ReactTrace {
         ctx: &RenderContext<'_>,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) {
-        let following_indicator = if self.is_following {
+        let following_indicator = if self.is_following() {
             " ▼ following "
         } else {
             ""
@@ -486,20 +488,24 @@ impl ReactTrace {
             }
         }
 
-        let rows = &self.line_cache.as_ref().expect("cache just populated").rows;
+        let (total, offset) = {
+            let c = self.line_cache.as_ref().expect("cache just populated");
+            let t = c.rows.len();
+            let o = resolve_anchor(
+                &self.anchor,
+                &c.byte_ranges,
+                &c.entry_row_starts,
+                t,
+                visible_height,
+            );
+            (t, o)
+        };
 
-        let total = rows.len();
         self.last_total_lines = total;
         self.last_visible_height = visible_height;
         self.last_render_width = Some(effective_width);
 
-        let max_offset = total.saturating_sub(visible_height);
-        let offset = if self.is_following {
-            max_offset
-        } else {
-            self.scroll_offset.min(max_offset)
-        };
-
+        let rows = &self.line_cache.as_ref().expect("cache just populated").rows;
         let visible_end = (offset + visible_height).min(total);
         let segments = segment_visible_rows(rows, offset, visible_end);
 
