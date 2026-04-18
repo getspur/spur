@@ -163,11 +163,8 @@ fn both_render_paths_produce_identical_textual_content() {
 /// the AgentMessage entry changes — even though no new bytes were
 /// appended between the two render snapshots.
 ///
-/// Status: PROVEN. With markdown structure (heading + code fence + list),
-/// row count drops by 1 on flush. Pulldown-cmark consolidates the blank
-/// line between the trailing list and following content.
+/// Status: REGRESSION GUARD. Verified by F1 (preview_items).
 #[test]
-#[ignore = "diagnostic for ghost-text Layer 2A — currently failing, awaiting fix"]
 fn sim_tail_to_items_reflow_row_delta() {
     let mut trace = ReactTrace::new_for_tests();
 
@@ -253,11 +250,8 @@ fn sim_tail_to_items_reflow_row_delta() {
 /// `rows[scroll_offset..scroll_offset+visible_height]` returns different
 /// CONTENT for the same scroll_offset.
 ///
-/// Status: PROVEN. With viewport positioned near the end of a
-/// markdown-structured stream, the visible slice changes (a blank line
-/// disappears, "trailing" jumps up one row) on flush — zero new input.
+/// Status: REGRESSION GUARD. Verified by F1 (preview_items) for the streaming-flush case.
 #[test]
-#[ignore = "diagnostic for ghost-text Layer 3E — currently failing, awaiting fix"]
 fn sim_viewport_content_shifts_under_flush_with_no_input() {
     let mut trace = ReactTrace::new_for_tests();
 
