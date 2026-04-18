@@ -172,6 +172,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
                     ..
                 } => {
                     let (glyph, glyph_color) = family_glyph(*family);
@@ -196,6 +197,60 @@ impl ReactTrace {
                         }
                     } else {
                         lines.extend(input_display_lines(input));
+                    }
+                    // Render outcome body inline from `status` — no paired
+                    // Observe entry exists in the new model.
+                    match status {
+                        ActStatus::Completed(Some(p)) => {
+                            let (og, oc) = outcome_glyph(p);
+                            let verb = observe_verb(p);
+                            lines.push(Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    format!("{} {}", og, verb),
+                                    Style::default()
+                                        .fg(oc)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                            lines.extend(observe_payload_lines(p, collapsed));
+                        }
+                        ActStatus::Failed(Some(p)) => {
+                            let verb = observe_verb(p);
+                            lines.push(Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    format!("✗ {}", verb),
+                                    Style::default()
+                                        .fg(Color::Red)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                            lines.extend(observe_payload_lines(p, collapsed));
+                        }
+                        ActStatus::Completed(None) => {
+                            lines.push(Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    "✓ done".to_string(),
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                        }
+                        ActStatus::Failed(None) => {
+                            lines.push(Line::from(vec![
+                                ts_span.clone(),
+                                Span::styled(
+                                    "✗ failed".to_string(),
+                                    Style::default()
+                                        .fg(Color::Red)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                        }
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
                     }
                 }
 
@@ -343,14 +398,9 @@ impl ReactTrace {
                 }
             }
 
-            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
-                && matches!(
-                    self.entries.get(i + 1).map(|e| &e.kind),
-                    Some(TraceKind::Observe { payload: Some(_) })
-                );
-            if !skip_blank {
-                lines.push(Line::from(""));
-            }
+            // Blank separator between entries. No adjacency skip needed: Act outcome
+            // is now rendered from `status` inline, not from a neighbouring Observe.
+            lines.push(Line::from(""));
             i += 1;
         }
 
@@ -934,15 +984,9 @@ impl ReactTrace {
                 }
             }
 
-            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
-                && matches!(
-                    self.entries.get(i + 1).map(|e| &e.kind),
-                    Some(TraceKind::Observe { payload: Some(_) })
-                );
-            if !skip_blank {
-                // Blank separator row — synthetic, so None byte range.
-                push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
-            }
+            // Blank separator between entries. No adjacency skip needed: Act outcome
+            // is now rendered from `status` inline, not from a neighbouring Observe.
+            push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
             i += 1;
         }
 

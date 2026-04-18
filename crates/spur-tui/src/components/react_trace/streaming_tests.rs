@@ -1608,3 +1608,37 @@ fn build_display_lines_completed_shows_outcome_glyph() {
         );
     }
 }
+
+#[cfg(feature = "markdown")]
+#[test]
+fn build_display_lines_expanded_completed_renders_outcome_body() {
+    use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+    let mut trace = super::ReactTrace::new();
+    trace.toggle_observe_collapsed(); // expanded
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Act {
+            tool: "shell".into(),
+            family: ToolFamily::Execute,
+            input: ToolInputDisplay::Command {
+                cmd: "echo hi".into(),
+                cwd: None,
+            },
+            tool_call_id: None,
+            status: super::ActStatus::Completed(Some(ObservePayload::CommandOutput {
+                exit_code: Some(0),
+                stdout: "hi".into(),
+                stderr: String::new(),
+            })),
+        },
+        text: String::new(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    let lines = trace.build_display_lines_for_tests(super::SPINNER_FRAMES[0], None);
+    let joined: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+        .collect();
+    assert!(joined.contains("hi"), "expected stdout body: {joined}");
+    assert!(joined.contains("✓"), "expected success glyph: {joined}");
+}
