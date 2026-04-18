@@ -764,6 +764,7 @@ impl ReactTrace {
         Self::new()
     }
 
+    #[cfg(feature = "markdown")]
     pub fn build_virtual_rows_for_tests(
         &self,
         from: usize,
