@@ -75,6 +75,13 @@ fn row_to_byte_anchor(
 
 /// Inverse of `resolve_anchor` for the Row variant: given a row index,
 /// find which entry it belongs to and the row-within-entry offset.
+///
+/// Assumes `entry_row_starts[0] == 0` (builder invariant). For `row`
+/// values smaller than `entry_row_starts[0]`, `within` would underflow
+/// in release mode; callers must clamp inputs.
+///
+/// Used by `shift_anchor_by` in Task 4.
+#[allow(dead_code)]
 #[cfg(feature = "markdown")]
 fn row_to_anchor(row: usize, entry_row_starts: &[usize]) -> (usize, usize) {
     if entry_row_starts.is_empty() {
