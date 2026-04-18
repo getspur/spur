@@ -783,3 +783,31 @@ fn sim_f3_anchor_under_terminal_resize() {
         );
     }
 }
+
+/// RC2 — scroll mutators must use fresh row metrics, not stale
+/// last_total_lines from a previous render.
+#[test]
+fn scroll_uses_fresh_row_count_after_append() {
+    let mut trace = ReactTrace::new_for_tests();
+    // Use a small visible height so even a few rows exceed it.
+    trace.set_visible_height_for_tests(1);
+    // First message: two paragraphs separated by \n\n (hard break in markdown).
+    trace.append_message("para one\n\npara two", "claude", "10:00".into());
+    // First render establishes last_total_lines.
+    let _ = trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+
+    // Append more paragraphs WITHOUT rendering — this is the stale-metric case.
+    trace.append_message(
+        "\n\npara three\n\npara four\n\npara five", "claude", "10:00".into());
+
+    // scroll_up should NOT clamp against the stale (small) last_total_lines.
+    // Fresh row count should be larger; scroll_up sets is_following=false and
+    // moves offset down by 1 from max.
+    trace.scroll_to_bottom();
+    let bottom_then_up_should_have_room = trace.scroll_offset_for_tests();
+    trace.scroll_up();
+    let after_scroll_up = trace.scroll_offset_for_tests();
+    assert!(after_scroll_up < bottom_then_up_should_have_room,
+        "scroll_up should reveal a new offset when fresh row count is larger; \
+         got {} after, {} before", after_scroll_up, bottom_then_up_should_have_room);
+}

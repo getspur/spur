@@ -294,6 +294,7 @@ impl ReactTrace {
         let total_lines = wrapped.len();
         self.last_total_lines = total_lines;
         self.last_visible_height = visible_height;
+        self.last_render_width = Some(effective_width);
 
         // Clamp or pin scroll offset.
         let max_offset = total_lines.saturating_sub(visible_height);
@@ -432,6 +433,7 @@ impl ReactTrace {
         let total = rows.len();
         self.last_total_lines = total;
         self.last_visible_height = visible_height;
+        self.last_render_width = Some(effective_width);
 
         let max_offset = total.saturating_sub(visible_height);
         let offset = if self.is_following {
