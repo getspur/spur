@@ -28,11 +28,96 @@ pub(in crate::components) struct VirtualRowCacheEntry {
     /// Row index where each entry's virtual rows begin.
     /// `entry_row_starts[i]` = index into `rows` where entry `i` starts.
     pub(super) entry_row_starts: Vec<usize>,
+    /// Per-row byte range within the source entry content. Co-indexed with
+    /// `rows`. `None` means the row is synthetic (blank separator, etc.).
+    pub(super) byte_ranges: Vec<Option<std::ops::Range<usize>>>,
     pub(super) width: u16,
     pub(super) generation: u64,
     /// Snapshot of mermaid fence states at cache time. If any state changes
     /// (e.g. Pending→Ready), the cache must be rebuilt.
     pub(super) fence_gen: u64,
+}
+
+/// Resolve a ScrollAnchor to an effective row index.
+///
+/// `Following` clamps to `total_rows - visible_height`.
+/// `Byte` walks `entry_row_starts` to the entry, then finds the first
+/// row whose `byte_ranges[i]` contains `byte_offset`. If the anchor's
+/// entry was evicted (entry_idx >= entry_row_starts.len()), snaps to 0.
+/// If the byte position falls in a gap (consolidated by reflow), snaps
+/// to the nearest preceding row whose range covers a byte ≤ byte_offset.
+#[cfg(feature = "markdown")]
+pub(crate) fn resolve_anchor(
+    anchor: &crate::components::react_trace::types::ScrollAnchor,
+    byte_ranges: &[Option<std::ops::Range<usize>>],
+    entry_row_starts: &[usize],
+    total_rows: usize,
+    visible_height: usize,
+) -> usize {
+    use crate::components::react_trace::types::ScrollAnchor;
+    match anchor {
+        ScrollAnchor::Following => total_rows.saturating_sub(visible_height),
+        ScrollAnchor::Byte { entry_idx, byte_offset } => {
+            if *entry_idx >= entry_row_starts.len() {
+                return 0;
+            }
+            let row_start = entry_row_starts[*entry_idx];
+            let row_end = entry_row_starts
+                .get(*entry_idx + 1)
+                .copied()
+                .unwrap_or(total_rows);
+
+            // First row whose range contains byte_offset.
+            for i in row_start..row_end.min(byte_ranges.len()) {
+                if let Some(r) = &byte_ranges[i] {
+                    if r.contains(byte_offset) {
+                        return i;
+                    }
+                }
+            }
+            // Snap to last preceding row with range start <= byte_offset.
+            let mut snap = row_start;
+            for i in row_start..row_end.min(byte_ranges.len()) {
+                if let Some(r) = &byte_ranges[i] {
+                    if r.start <= *byte_offset {
+                        snap = i;
+                    }
+                }
+            }
+            snap
+        }
+    }
+}
+
+/// Hash of the mermaid registry's per-fence state. Replaces the
+/// `registry.len()` cache key, which missed Pending/Rendering/Ready/Error
+/// transitions when registry size stayed constant.
+///
+/// Sorts by MermaidId so iteration order doesn't affect the hash.
+/// For Ready state, includes image dimensions because they affect
+/// ImageRow height.
+#[cfg(feature = "markdown")]
+pub(crate) fn fence_state_hash(
+    registry: &std::collections::HashMap<
+        crate::components::mermaid::MermaidId,
+        crate::components::mermaid::MermaidState,
+    >,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use crate::components::mermaid::MermaidState;
+
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut entries: Vec<_> = registry.iter().collect();
+    entries.sort_by_key(|(id, _)| id.0);
+    for (id, state) in entries {
+        id.0.hash(&mut h);
+        std::mem::discriminant(state).hash(&mut h);
+        if let MermaidState::Ready { image, .. } = state {
+            image.width().hash(&mut h);
+            image.height().hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// Group contiguous virtual rows into render batches. Only rows in
@@ -191,7 +276,7 @@ impl ReactTrace {
         area: Rect,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) {
-        let following_indicator = if self.is_following {
+        let following_indicator = if self.is_following() {
             " ▼ following "
         } else {
             ""
@@ -263,13 +348,16 @@ impl ReactTrace {
         let total_lines = wrapped.len();
         self.last_total_lines = total_lines;
         self.last_visible_height = visible_height;
+        self.last_render_width = Some(effective_width);
 
-        // Clamp or pin scroll offset.
+        // Resolve anchor to a row offset.
         let max_offset = total_lines.saturating_sub(visible_height);
-        let offset = if self.is_following {
+        let offset = if self.is_following() {
             max_offset
         } else {
-            self.scroll_offset.min(max_offset)
+            // Non-markdown path: anchor is always Following or Byte{0,0}.
+            // Byte anchors don't have byte_ranges here, so clamp to max.
+            max_offset
         };
 
         // Viewport slice: only clone the visible lines instead of all lines.
@@ -303,7 +391,7 @@ impl ReactTrace {
         ctx: &RenderContext<'_>,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) {
-        let following_indicator = if self.is_following {
+        let following_indicator = if self.is_following() {
             " ▼ following "
         } else {
             ""
@@ -322,11 +410,7 @@ impl ReactTrace {
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
 
-        // Use a simple hash of mermaid registry state count as a cheap
-        // fence-generation signal. A full hash is overkill — the generation
-        // counter already covers content mutations; this catches
-        // Pending→Ready transitions that don't touch entries.
-        let fence_gen = ctx.mermaid_registry.len() as u64;
+        let fence_gen = fence_state_hash(ctx.mermaid_registry);
 
         // Cache check: rebuild only when generation, width, or fence state changed.
         // Incremental path: if only the tail entries are dirty, truncate and
@@ -356,14 +440,16 @@ impl ReactTrace {
                             c.rows.len()
                         };
                         c.rows.truncate(trunc_row);
+                        c.byte_ranges.truncate(trunc_row);
                         c.entry_row_starts.truncate(dirty_idx);
                         let base = c.rows.len();
                         // Drop the mutable borrow before calling &self method.
                         let states = compute_fence_states(ctx, effective_width);
-                        let (new_rows, new_starts) =
+                        let (new_rows, new_starts, new_byte_ranges) =
                             self.build_virtual_rows(dirty_idx, effective_width, &states, lineage);
                         let c = self.line_cache.as_mut().unwrap();
                         c.rows.extend(new_rows);
+                        c.byte_ranges.extend(new_byte_ranges);
                         c.entry_row_starts
                             .extend(new_starts.iter().map(|s| s + base));
                         c.generation = self.generation;
@@ -372,11 +458,12 @@ impl ReactTrace {
                     _ => {
                         // Full rebuild (dirty_idx == 0 or no cache).
                         let states = compute_fence_states(ctx, effective_width);
-                        let (rows, entry_row_starts) =
+                        let (rows, entry_row_starts, byte_ranges) =
                             self.build_virtual_rows(0, effective_width, &states, lineage);
                         self.line_cache = Some(VirtualRowCacheEntry {
                             rows,
                             entry_row_starts,
+                            byte_ranges,
                             width: effective_width,
                             generation: self.generation,
                             fence_gen,
@@ -387,11 +474,12 @@ impl ReactTrace {
             } else {
                 // Width or fence state changed — full rebuild.
                 let states = compute_fence_states(ctx, effective_width);
-                let (rows, entry_row_starts) =
+                let (rows, entry_row_starts, byte_ranges) =
                     self.build_virtual_rows(0, effective_width, &states, lineage);
                 self.line_cache = Some(VirtualRowCacheEntry {
                     rows,
                     entry_row_starts,
+                    byte_ranges,
                     width: effective_width,
                     generation: self.generation,
                     fence_gen,
@@ -400,19 +488,24 @@ impl ReactTrace {
             }
         }
 
-        let rows = &self.line_cache.as_ref().expect("cache just populated").rows;
-
-        let total = rows.len();
-        self.last_total_lines = total;
-        self.last_visible_height = visible_height;
-
-        let max_offset = total.saturating_sub(visible_height);
-        let offset = if self.is_following {
-            max_offset
-        } else {
-            self.scroll_offset.min(max_offset)
+        let (total, offset) = {
+            let c = self.line_cache.as_ref().expect("cache just populated");
+            let t = c.rows.len();
+            let o = resolve_anchor(
+                &self.anchor,
+                &c.byte_ranges,
+                &c.entry_row_starts,
+                t,
+                visible_height,
+            );
+            (t, o)
         };
 
+        self.last_total_lines = total;
+        self.last_visible_height = visible_height;
+        self.last_render_width = Some(effective_width);
+
+        let rows = &self.line_cache.as_ref().expect("cache just populated").rows;
         let visible_end = (offset + visible_height).min(total);
         let segments = segment_visible_rows(rows, offset, visible_end);
 
@@ -510,8 +603,89 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
     ) -> Vec<Segment> {
-        let (rows, _starts) = self.build_virtual_rows(0, effective_width, states, None);
+        let (rows, _starts, _byte_ranges) = self.build_virtual_rows(0, effective_width, states, None);
         let end = (offset + visible_height).min(rows.len());
         segment_visible_rows(&rows, offset, end)
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
+mod fence_state_hash_tests {
+    use super::*;
+    use crate::components::mermaid::{MermaidId, MermaidState};
+    use std::collections::HashMap;
+
+    #[test]
+    fn empty_registry_has_stable_hash() {
+        let r: HashMap<MermaidId, MermaidState> = HashMap::new();
+        let a = fence_state_hash(&r);
+        let b = fence_state_hash(&r);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pending_to_error_changes_hash() {
+        let mut r: HashMap<MermaidId, MermaidState> = HashMap::new();
+        r.insert(MermaidId(0), MermaidState::Pending { code: "g{}".into() });
+        let h1 = fence_state_hash(&r);
+        r.insert(MermaidId(0), MermaidState::Error { message: "boom".into() });
+        let h2 = fence_state_hash(&r);
+        assert_ne!(h1, h2,
+            "Pending→Error must change fence_state_hash so cache invalidates");
+    }
+
+    #[test]
+    fn order_independent() {
+        let mut a: HashMap<MermaidId, MermaidState> = HashMap::new();
+        a.insert(MermaidId(0), MermaidState::Pending { code: "x".into() });
+        a.insert(MermaidId(1), MermaidState::Rendering);
+        let mut b: HashMap<MermaidId, MermaidState> = HashMap::new();
+        b.insert(MermaidId(1), MermaidState::Rendering);
+        b.insert(MermaidId(0), MermaidState::Pending { code: "x".into() });
+        assert_eq!(fence_state_hash(&a), fence_state_hash(&b),
+            "iteration order must not affect hash (must sort by id)");
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
+mod resolve_anchor_tests {
+    use super::*;
+    use crate::components::react_trace::types::ScrollAnchor;
+    use std::ops::Range;
+
+    fn ranges(slices: &[Option<Range<usize>>]) -> Vec<Option<Range<usize>>> {
+        slices.to_vec()
+    }
+
+    #[test]
+    fn following_resolves_to_max_offset() {
+        let ranges = ranges(&[Some(0..10), Some(0..10), Some(0..10)]);
+        let entry_starts = vec![0, 1, 2];
+        let row = resolve_anchor(
+            &ScrollAnchor::Following, &ranges, &entry_starts, 3, 1);
+        assert_eq!(row, 2, "Following clamps to total - visible_height");
+    }
+
+    #[test]
+    fn byte_anchor_resolves_to_containing_row() {
+        // Two entries: entry 0 spans rows 0..2 with bytes 0..50; entry 1
+        // spans rows 2..4 with bytes 0..30.
+        let ranges = ranges(&[
+            Some(0..50), Some(0..50),
+            Some(0..30), Some(0..30),
+        ]);
+        let entry_starts = vec![0, 2];
+        let anchor = ScrollAnchor::Byte { entry_idx: 1, byte_offset: 15 };
+        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 4, 2);
+        assert_eq!(row, 2, "byte 15 in entry 1 lands on its first row");
+    }
+
+    #[test]
+    fn evicted_entry_snaps_to_zero() {
+        let ranges = ranges(&[Some(0..10)]);
+        let entry_starts = vec![0];
+        let anchor = ScrollAnchor::Byte { entry_idx: 99, byte_offset: 0 };
+        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 1, 1);
+        assert_eq!(row, 0, "anchor pointing at evicted entry snaps to 0");
     }
 }

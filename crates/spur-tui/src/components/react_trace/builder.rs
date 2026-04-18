@@ -352,17 +352,18 @@ use crate::components::markdown_stream::{MarkdownStream, StreamItem};
 #[cfg(feature = "markdown")]
 use crate::components::mermaid::{FenceRender, MermaidId, fence_placeholder_line};
 
-/// Render an AgentMessage body via the cursor-split contract.
+/// Render an AgentMessage body via [`MarkdownStream::preview_items`].
 ///
-/// Emits:
-/// 1. Committed items from `stream.items_and_tail().0` — styled text and
-///    fence rows (image via `emit_fence_image`, placeholder via `emit_line`).
-/// 2. The uncommitted tail from `stream.items_and_tail().1` — plain white
-///    lines with the 3-space indent.
+/// `preview_items` returns the same `Vec<StreamItem>` that `flush_final` would
+/// produce, so tail bytes receive the same paragraph context they will have
+/// after the final flush. This eliminates the row-count delta that caused ghost
+/// text (RCA Layer 2A, fix design F1 / cursor-split renderer).
 ///
-/// The two-closure split lets the primary render path emit multiple
-/// `VirtualRow::ImageRow` entries per mermaid fence while the secondary
-/// path renders a single placeholder line (no ImageRow concept).
+/// Two emit closures handle the two item kinds:
+/// - `emit_line` — called for every [`StreamItem::Text`] row, and for fence
+///   placeholders when the fence is not yet `Ready`.
+/// - `emit_fence_image` — called for [`StreamItem::Fence`] entries whose
+///   [`FenceRender`] is `Ready` with a non-zero pixel height.
 #[cfg(feature = "markdown")]
 fn render_agent_message_body(
     stream: &MarkdownStream,
@@ -370,14 +371,26 @@ fn render_agent_message_body(
     mut emit_line: impl FnMut(ratatui::text::Line<'static>),
     mut emit_fence_image: impl FnMut(MermaidId, u16),
 ) {
-    use ratatui::{
-        style::{Color, Style},
-        text::{Line, Span},
+    use ratatui::text::{Line, Span};
+
+    use std::collections::HashSet;
+    let mut errors: HashSet<crate::components::mermaid::MermaidId> = HashSet::new();
+    let mut pending: HashSet<crate::components::mermaid::MermaidId> = HashSet::new();
+    for (id, render) in fence_state {
+        match render {
+            crate::components::mermaid::FenceRender::Error => { errors.insert(*id); }
+            crate::components::mermaid::FenceRender::Pending => { pending.insert(*id); }
+            crate::components::mermaid::FenceRender::Ready(_) => {}
+        }
+    }
+    let state_lookup = crate::components::markdown_stream::StateLookup {
+        errors: &errors,
+        pending: &pending,
     };
 
-    let (items, tail) = stream.items_and_tail();
+    let items = stream.preview_items(&state_lookup);
 
-    for item in items {
+    for item in &items {
         match item {
             StreamItem::Text(text_lines) => {
                 for line in text_lines {
@@ -409,17 +422,6 @@ fn render_agent_message_body(
             },
         }
     }
-
-    // Plain-text tail, indented, white.
-    for text_line in tail.lines() {
-        emit_line(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(
-                text_line.to_string(),
-                Style::default().fg(Color::White),
-            ),
-        ]));
-    }
 }
 
 #[cfg(feature = "markdown")]
@@ -441,16 +443,20 @@ impl ReactTrace {
             crate::components::mermaid::FenceRender,
         >,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
-    ) -> (Vec<VirtualRow>, Vec<usize>) {
+    ) -> (Vec<VirtualRow>, Vec<usize>, Vec<Option<std::ops::Range<usize>>>) {
         let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
         let collapsed = self.observe_collapsed;
 
         let mut rows: Vec<VirtualRow> = Vec::new();
         let mut entry_row_starts = vec![0; self.entries.len().saturating_sub(from)];
+        let mut byte_ranges: Vec<Option<std::ops::Range<usize>>> = Vec::new();
 
         // Helper: wrap a Line to effective_width and push each wrapped visual
         // line as a VirtualRow::Text.
-        let push_wrapped = |rows: &mut Vec<VirtualRow>, line: Line<'static>| {
+        let push_wrapped = |rows: &mut Vec<VirtualRow>,
+                            byte_ranges: &mut Vec<Option<std::ops::Range<usize>>>,
+                            range: Option<std::ops::Range<usize>>,
+                            line: Line<'static>| {
             for w in wrap_line_to_width(&line, effective_width) {
                 let spans: Vec<Span<'static>> = w
                     .spans
@@ -461,6 +467,7 @@ impl ReactTrace {
                 out.style = w.style;
                 out.alignment = w.alignment;
                 rows.push(VirtualRow::Text(out));
+                byte_ranges.push(range.clone());
             }
         };
 
@@ -520,8 +527,8 @@ impl ReactTrace {
                         ));
                         1
                     };
-                    push_wrapped(&mut rows, Line::from(spans));
-                    push_wrapped(&mut rows, Line::from(""));
+                    push_wrapped(&mut rows, &mut byte_ranges, Some(0..entry.text.len()), Line::from(spans));
+                    push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
                     if consumed == 2 && i + 1 >= from {
                         entry_row_starts[i + 1 - from] = rows.len();
                     }
@@ -530,10 +537,23 @@ impl ReactTrace {
                 }
             }
 
+            // Compute the byte length for this entry's content rows (coarse v1).
+            let entry_byte_len = match &entry.kind {
+                TraceKind::AgentMessage { .. } => entry
+                    .markdown
+                    .as_ref()
+                    .map(|s| s.raw_text().len())
+                    .unwrap_or(entry.text.len()),
+                _ => entry.text.len(),
+            };
+            let content_range = Some(0..entry_byte_len);
+
             match &entry.kind {
                 TraceKind::Think => {
                     push_wrapped(
                         &mut rows,
+                        &mut byte_ranges,
+                        content_range.clone(),
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
@@ -547,6 +567,8 @@ impl ReactTrace {
                     for text_line in entry.text.lines() {
                         push_wrapped(
                             &mut rows,
+                            &mut byte_ranges,
+                            content_range.clone(),
                             Line::from(vec![
                                 Span::raw("   "),
                                 Span::styled(
@@ -561,6 +583,8 @@ impl ReactTrace {
                 TraceKind::AgentMessage { agent } => {
                     push_wrapped(
                         &mut rows,
+                        &mut byte_ranges,
+                        content_range.clone(),
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
@@ -589,7 +613,7 @@ impl ReactTrace {
                         );
                         for item in staged.into_inner() {
                             match item {
-                                BodyRow::Line(line) => push_wrapped(&mut rows, line),
+                                BodyRow::Line(line) => push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line),
                                 BodyRow::Image { id, h } => {
                                     for r in 0..h {
                                         rows.push(VirtualRow::ImageRow {
@@ -597,6 +621,7 @@ impl ReactTrace {
                                             row_within: r,
                                             total_rows: h,
                                         });
+                                        byte_ranges.push(content_range.clone());
                                     }
                                 }
                             }
@@ -605,6 +630,8 @@ impl ReactTrace {
                         for text_line in entry.text.lines() {
                             push_wrapped(
                                 &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
                                 Line::from(vec![
                                     Span::raw("   "),
                                     Span::styled(
@@ -625,6 +652,8 @@ impl ReactTrace {
                     let (glyph, glyph_color) = family_glyph(*family);
                     push_wrapped(
                         &mut rows,
+                        &mut byte_ranges,
+                        content_range.clone(),
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
@@ -639,6 +668,8 @@ impl ReactTrace {
                         for text_line in entry.text.lines() {
                             push_wrapped(
                                 &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
                                 Line::from(vec![
                                     Span::raw("   "),
                                     Span::styled(
@@ -650,7 +681,7 @@ impl ReactTrace {
                         }
                     } else {
                         for line in input_display_lines(input) {
-                            push_wrapped(&mut rows, line);
+                            push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line);
                         }
                     }
                 }
@@ -661,6 +692,8 @@ impl ReactTrace {
                         let verb = observe_verb(p);
                         push_wrapped(
                             &mut rows,
+                            &mut byte_ranges,
+                            content_range.clone(),
                             Line::from(vec![
                                 ts_span.clone(),
                                 Span::styled(
@@ -672,11 +705,13 @@ impl ReactTrace {
                             ]),
                         );
                         for line in observe_payload_lines(p, collapsed) {
-                            push_wrapped(&mut rows, line);
+                            push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line);
                         }
                     } else {
                         push_wrapped(
                             &mut rows,
+                            &mut byte_ranges,
+                            content_range.clone(),
                             Line::from(vec![
                                 ts_span.clone(),
                                 Span::styled(
@@ -690,6 +725,8 @@ impl ReactTrace {
                         for text_line in entry.text.lines() {
                             push_wrapped(
                                 &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
                                 Line::from(vec![
                                     Span::raw("   "),
                                     Span::styled(
@@ -711,6 +748,8 @@ impl ReactTrace {
                 } => {
                     push_wrapped(
                         &mut rows,
+                        &mut byte_ranges,
+                        content_range.clone(),
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
@@ -724,6 +763,8 @@ impl ReactTrace {
                     if !task.is_empty() {
                         push_wrapped(
                             &mut rows,
+                            &mut byte_ranges,
+                            content_range.clone(),
                             Line::from(vec![
                                 Span::raw("   "),
                                 Span::styled(task.clone(), Style::default().fg(Color::Cyan)),
@@ -742,6 +783,8 @@ impl ReactTrace {
                         };
                         push_wrapped(
                             &mut rows,
+                            &mut byte_ranges,
+                            content_range.clone(),
                             Line::from(vec![Span::styled(
                                 status_text,
                                 Style::default().fg(Color::Cyan),
@@ -755,7 +798,7 @@ impl ReactTrace {
                             /* focused = */ false,
                         );
                         for line in card_lines {
-                            push_wrapped(&mut rows, line);
+                            push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line);
                         }
                     }
                 }
@@ -763,6 +806,8 @@ impl ReactTrace {
                 TraceKind::UserMessage => {
                     push_wrapped(
                         &mut rows,
+                        &mut byte_ranges,
+                        content_range.clone(),
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
@@ -776,6 +821,8 @@ impl ReactTrace {
                     for text_line in entry.text.lines() {
                         push_wrapped(
                             &mut rows,
+                            &mut byte_ranges,
+                            content_range.clone(),
                             Line::from(vec![
                                 Span::raw("   "),
                                 Span::styled(
@@ -794,6 +841,8 @@ impl ReactTrace {
                 } => {
                     push_wrapped(
                         &mut rows,
+                        &mut byte_ranges,
+                        content_range.clone(),
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
@@ -812,6 +861,8 @@ impl ReactTrace {
                         };
                         push_wrapped(
                             &mut rows,
+                            &mut byte_ranges,
+                            content_range.clone(),
                             Line::from(vec![Span::styled(
                                 hint_text,
                                 Style::default()
@@ -824,6 +875,8 @@ impl ReactTrace {
                         for text_line in entry.text.lines() {
                             push_wrapped(
                                 &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
                                 Line::from(vec![
                                     Span::raw("   "),
                                     Span::styled(
@@ -843,11 +896,12 @@ impl ReactTrace {
                     Some(TraceKind::Observe { payload: Some(_) })
                 );
             if !skip_blank {
-                push_wrapped(&mut rows, Line::from(""));
+                // Blank separator row — synthetic, so None byte range.
+                push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
             }
             i += 1;
         }
 
-        (rows, entry_row_starts)
+        (rows, entry_row_starts, byte_ranges)
     }
 }

@@ -1624,7 +1624,7 @@ pub async fn run_tui_with_config(
         // iteration; no event is lost, just deferred by one frame. `Lagged`
         // counts toward the cap so a subscriber that's badly behind still makes
         // progress instead of spinning on drop notifications.
-        const DRAIN_CAP_PER_FRAME: u32 = 64;
+        const DRAIN_CAP_PER_FRAME: u32 = 8;
         let mut drained_this_phase: u32 = 0;
         while drained_this_phase < DRAIN_CAP_PER_FRAME {
             match event_rx.try_recv() {

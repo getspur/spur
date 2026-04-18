@@ -316,6 +316,25 @@ impl MarkdownStream {
         out
     }
 
+    /// Returns the StreamItems that `flush_final` would produce for the
+    /// current `raw_text`, without mutating self. Callers use this to render
+    /// the tail with the same row sequence final flush would emit, eliminating
+    /// the tail-vs-items asymmetry that caused ghost text (RCA Layer 2A).
+    ///
+    /// Pure with respect to self. Cost is one pulldown parse pass per call;
+    /// the parent VirtualRow cache amortizes across renders.
+    pub fn preview_items(&self, states: &StateLookup<'_>) -> Vec<StreamItem> {
+        if self.raw_text.is_empty() {
+            return Vec::new();
+        }
+        let mut clone = self.clone();
+        // flush_final allows EOF closure (permit_eof_closure=true), so the
+        // entire raw_text is committed and trailing tail bytes get the same
+        // paragraph context they would after TurnComplete.
+        let _ = clone.flush_final(states);
+        clone.cached_items
+    }
+
     /// Force the next `maybe_flush`/`flush_now` to rebuild even if not yet
     /// dirty by time. Used when external state (mermaid registry errors)
     /// changes so the placeholder reflects the new state on the next tick.
