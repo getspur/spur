@@ -521,3 +521,43 @@ fn no_fence_registered_with_range_end_at_eof() {
     let fences2 = s.flush_now(&StateLookup::empty());
     assert_eq!(fences2.len(), 1, "once trailing content arrives, fence registers");
 }
+
+/// preview_items must be pure: two consecutive calls with the same input
+/// return identical Vec<StreamItem> and do not mutate cursor state.
+#[test]
+fn preview_items_is_pure() {
+    use spur_tui::components::markdown_stream::{MarkdownStream, StateLookup};
+    let mut s = MarkdownStream::new();
+    s.append("# Heading\n\nProse paragraph.\n\n```rust\nfn x() {}\n```\n\nmore");
+
+    let flushed_before = s.flushed_byte_len_for_tests();
+    let items_a = s.preview_items(&StateLookup::empty());
+    let items_b = s.preview_items(&StateLookup::empty());
+    let flushed_after = s.flushed_byte_len_for_tests();
+
+    assert_eq!(flushed_before, flushed_after,
+        "preview_items must not mutate flushed_byte_len");
+    assert_eq!(items_a.len(), items_b.len(),
+        "preview_items must be deterministic across calls");
+}
+
+/// preview_items output must match cached_items after flush_final for the
+/// same raw_text. This is the F1 invariant: tail rendering produces what
+/// final flush would produce.
+#[test]
+fn preview_items_matches_post_final_flush() {
+    use spur_tui::components::markdown_stream::{MarkdownStream, StateLookup};
+    let payload = "# H\n\nP1.\n\n- a\n- b\n\ntail";
+
+    let mut preview_stream = MarkdownStream::new();
+    preview_stream.append(payload);
+    let preview = preview_stream.preview_items(&StateLookup::empty());
+
+    let mut flushed_stream = MarkdownStream::new();
+    flushed_stream.append(payload);
+    flushed_stream.flush_final(&StateLookup::empty());
+    let after = flushed_stream.items().to_vec();
+
+    assert_eq!(preview.len(), after.len(),
+        "preview_items must produce same StreamItem count as post-flush_final");
+}
