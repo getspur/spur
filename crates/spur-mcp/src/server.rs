@@ -1546,7 +1546,6 @@ impl McpCallbackServer {
         } else {
             None
         };
-        let _ = &epic_subgraph; // consumed by Task 7
 
         let entries: Vec<crate::plan::PlanTaskEntry> = tasks
             .into_iter()
@@ -1565,7 +1564,7 @@ impl McpCallbackServer {
             plan_id: plan_id.clone(),
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
-            epic_id: None, // populated by Task 7 when persist_as_epic=true
+            epic_id: epic_subgraph.as_ref().map(|sg| sg.epic_id.clone()),
         };
         let state = Arc::new(tokio::sync::Mutex::new(state));
 
@@ -1581,15 +1580,30 @@ impl McpCallbackServer {
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
+        let response_text = if let Some(sg) = &epic_subgraph {
+            let task_map_json = serde_json::to_string(&sg.task_map)
+                .unwrap_or_else(|_| "{}".to_string());
+            format!(
+                "Plan submitted: {task_count} tasks.\n\
+                 plan_id: {plan_id}\n\
+                 epic_id: {epic_id} (beads)\n\
+                 task_map: {task_map_json}\n\
+                 Poll with get_plan_status to monitor progress.",
+                epic_id = sg.epic_id,
+            )
+        } else {
+            format!(
+                "Plan submitted: {task_count} tasks. plan_id: {plan_id}\n\
+                 Poll with get_plan_status to monitor progress."
+            )
+        };
+
         JsonRpcResponse::success(
             id,
             json!({
                 "content": [{
                     "type": "text",
-                    "text": format!(
-                        "Plan submitted: {task_count} tasks. plan_id: {plan_id}\n\
-                         Poll with get_plan_status to monitor progress."
-                    )
+                    "text": response_text
                 }]
             }),
         )
