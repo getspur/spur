@@ -569,24 +569,16 @@ impl ReactTrace {
         }
     }
 
-    /// Returns the index of the first entry showing an animated spinner.
-    fn first_active_spinner(&self) -> Option<usize> {
-        let len = self.entries.len();
-        for (i, entry) in self.entries.iter().enumerate() {
-            if let TraceKind::Act { .. } = &entry.kind {
-                if self.observe_collapsed {
-                    let has_observe = i + 1 < len
-                        && matches!(
-                            &self.entries[i + 1].kind,
-                            TraceKind::Observe { payload: Some(_) }
-                        );
-                    if !has_observe {
-                        return Some(i);
-                    }
-                }
-            }
-        }
-        None
+    /// Returns the index of the first entry whose tool call is still
+    /// animating (Pending or InProgress). Caller uses this to drive cache
+    /// invalidation in `tick`.
+    pub(crate) fn first_active_spinner(&self) -> Option<usize> {
+        self.entries.iter().position(|e| {
+            matches!(
+                &e.kind,
+                TraceKind::Act { status, .. } if status.is_active()
+            )
+        })
     }
 
     /// Drain any mermaid fences detected during the last debounce window.
@@ -1768,5 +1760,31 @@ mod tests {
 
         let id_missing: ToolCallId = ToolCallId::new(Arc::from("nope"));
         assert!(trace.find_act_by_id_mut(&id_missing).is_none());
+    }
+
+    #[test]
+    fn first_active_spinner_returns_pending_act_index() {
+        use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "t".into(),
+                family: ToolFamily::Unknown,
+                input: ToolInputDisplay::Empty,
+                tool_call_id: None,
+                status: ActStatus::Pending,
+            },
+            text: String::new(),
+            timestamp: "t0".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        assert_eq!(trace.first_active_spinner(), Some(0));
+
+        // Transition to Completed: spinner should stop.
+        if let TraceKind::Act { status, .. } = &mut trace.entries[0].kind {
+            *status = ActStatus::Completed(None);
+        }
+        assert_eq!(trace.first_active_spinner(), None);
     }
 }
