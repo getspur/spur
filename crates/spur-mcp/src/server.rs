@@ -875,7 +875,6 @@ impl McpCallbackServer {
             let agent = skeleton.agent.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             skeleton.respond_to = tx;
-            skeleton.brain_session_id = self.brain_session_id.clone();
 
             info!(agent = %agent, request_id = %request_id, "Sending parallel delegation request");
 

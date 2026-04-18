@@ -33,7 +33,7 @@ impl fmt::Display for SessionId {
 /// Enforces INV-2: every `DelegationRequest` must carry a real brain
 /// session id, not a `SessionId::new()` default.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct BrainSessionId(pub SessionId);
+pub struct BrainSessionId(SessionId);
 
 impl BrainSessionId {
     pub fn new(id: SessionId) -> Self {
@@ -52,6 +52,12 @@ impl BrainSessionId {
 impl fmt::Display for BrainSessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl From<SessionId> for BrainSessionId {
+    fn from(id: SessionId) -> Self {
+        Self(id)
     }
 }
 

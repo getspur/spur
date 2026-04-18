@@ -571,7 +571,7 @@ impl Orchestrator {
         // 4. Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
-        let brain_session_id = spur_acp::BrainSessionId::new(session_id.clone());
+        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let (mcp_server, delegation_channel) =
             McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;
@@ -1552,7 +1552,7 @@ impl Orchestrator {
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
-        let brain_session_id = spur_acp::BrainSessionId::new(session_id.clone());
+        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let (mcp_server, delegation_channel) =
             McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;
@@ -1706,7 +1706,7 @@ impl Orchestrator {
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
-        let brain_session_id = spur_acp::BrainSessionId::new(session_id.clone());
+        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let (mcp_server, delegation_channel) =
             McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;

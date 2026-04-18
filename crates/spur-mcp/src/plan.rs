@@ -2374,7 +2374,7 @@ mod tests {
         let mut state = PlanState {
             plan_id: "p1".into(),
             tasks: vec![entry],
-            brain_session_id: BrainSessionId::new(spur_acp::SessionId::new()),
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId("test-brain".into())),
             epic_id: None,
         };
 
