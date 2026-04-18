@@ -963,6 +963,14 @@ pub(crate) fn build_task_diff_fields(
 /// Review a task in a plan: approve, reject, or request_changes.
 /// Optionally syncs with beads (pm), emits events (sink), and dispatches
 /// newly-ready tasks on approval (delegation_tx / task_tracker / plan_arc).
+///
+/// # Test-only
+/// This function is compiled only in `#[cfg(test)]` builds. Production code
+/// must use `handle_review_task`, which drops the plan lock before beads I/O.
+/// Having a separate non-production path avoids divergence risk; the test
+/// exercises the beads-warning path (pm passed inline) which `handle_review_task`
+/// intentionally omits from its synchronous phase.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn review_task(
     plan_id: &str,
@@ -2085,13 +2093,19 @@ pub mod test_support {
     use super::PmLike;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Mutex;
 
-    /// A `PmLike` implementation whose `update_issue` sleeps for a fixed
-    /// duration. Use this to verify that `handle_review_task` releases the
-    /// plan lock BEFORE calling `update_issue`.
+    /// A `PmLike` implementation whose `update_issue` fires a signal and then
+    /// sleeps for a fixed duration.  The signal lets the test observe that
+    /// `update_issue` has been entered (and therefore the plan lock must already
+    /// be released) before asserting lock availability.
     pub struct SleepyPm {
         sleep: Duration,
         closed: &'static str,
+        /// Fired once, just before the sleep, to signal that `update_issue`
+        /// has been entered.  Wrapped in `Mutex<Option<…>>` so it can be taken
+        /// from `&self` (trait requires shared ref).
+        entered_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     }
 
     #[async_trait::async_trait]
@@ -2101,6 +2115,10 @@ pub mod test_support {
             _id: &str,
             _update: spur_pm::IssueUpdate,
         ) -> anyhow::Result<()> {
+            // Signal that we've reached the await point — lock must be free by now.
+            if let Some(tx) = self.entered_tx.lock().await.take() {
+                let _ = tx.send(());
+            }
             tokio::time::sleep(self.sleep).await;
             Ok(())
         }
@@ -2109,12 +2127,28 @@ pub mod test_support {
         }
     }
 
-    /// Build a `SleepyPm` wrapped in `Arc<dyn PmLike>`.
+    /// Build a `SleepyPm` with no entry signal.
     pub fn make_sleepy_pm(sleep: Duration) -> Arc<dyn PmLike> {
         Arc::new(SleepyPm {
             sleep,
             closed: "closed",
+            entered_tx: Mutex::new(None),
         })
+    }
+
+    /// Build a `SleepyPm` that sends `()` on `entered_tx` just before sleeping.
+    /// Await the returned receiver before calling `try_lock` to guarantee the
+    /// approve task has actually reached `update_issue`'s await point.
+    pub fn make_sleepy_pm_with_signal(
+        sleep: Duration,
+    ) -> (Arc<dyn PmLike>, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let pm = Arc::new(SleepyPm {
+            sleep,
+            closed: "closed",
+            entered_tx: Mutex::new(Some(tx)),
+        });
+        (pm, rx)
     }
 }
 
