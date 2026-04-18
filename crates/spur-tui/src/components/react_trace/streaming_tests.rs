@@ -153,8 +153,10 @@ fn both_render_paths_produce_identical_textual_content() {
 
 // ─── L9 RCA ICEBERG SIMULATIONS ────────────────────────────────────────
 //
-// Diagnostic-only tests that empirically prove failure modes the current
-// RCA misses. They are falsifiable hypotheses, not regression guards.
+// Mix of active regression guards and ignored diagnostics. Each test's
+// individual Status line indicates its current role:
+// - REGRESSION GUARD: actively run, fails if a fix regresses
+// - diagnostic: #[ignore]'d, run manually to surface a hypothesis
 
 /// SIM-1 — Tail→items reflow row-count delta.
 ///
