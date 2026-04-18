@@ -90,7 +90,7 @@ fn row_to_anchor(row: usize, entry_row_starts: &[usize]) -> (usize, usize) {
 ///   - Any future `ToolCallStatus` variant not listed here (the enum may
 ///     become `#[non_exhaustive]` upstream) is absorbed: log via
 ///     `tracing::debug!` and return `prev.clone()`.
-pub(super) fn merge_status(
+pub(crate) fn merge_status(
     prev: &types::ActStatus,
     incoming_status: Option<spur_acp::ToolCallStatus>,
     incoming_raw_output: Option<&serde_json::Value>,
@@ -145,6 +145,30 @@ pub(super) fn merge_status(
             );
             prev.clone()
         }
+    }
+}
+
+/// Map an ACP `ToolCallStatus` + optional `raw_output` to an `ActStatus`
+/// for a newly-created Act entry. Honours the incoming status — an agent
+/// may stream an already-completed tool call on the first event.
+pub(crate) fn map_initial_status(
+    status: spur_acp::ToolCallStatus,
+    raw_output: Option<&serde_json::Value>,
+    kind: spur_acp::AgentKind,
+) -> types::ActStatus {
+    use spur_acp::adapter::extract_observe;
+    use spur_acp::ToolCallStatus;
+    use types::ActStatus;
+
+    let parse = |v: &serde_json::Value| extract_observe(v, kind);
+    match status {
+        ToolCallStatus::Pending => ActStatus::Pending,
+        ToolCallStatus::InProgress => ActStatus::InProgress {
+            partial: raw_output.map(parse),
+        },
+        ToolCallStatus::Completed => ActStatus::Completed(raw_output.map(parse)),
+        ToolCallStatus::Failed => ActStatus::Failed(raw_output.map(parse)),
+        _ => ActStatus::Pending,
     }
 }
 
@@ -1669,6 +1693,25 @@ mod tests {
         let prev = ActStatus::Pending;
         let new = super::merge_status(&prev, None, None, AgentKind::Generic);
         assert!(matches!(new, ActStatus::Pending));
+    }
+
+    #[test]
+    fn map_initial_status_pending_yields_pending() {
+        use spur_acp::{AgentKind, ToolCallStatus};
+        let got = super::map_initial_status(ToolCallStatus::Pending, None, AgentKind::Generic);
+        assert!(matches!(got, ActStatus::Pending));
+    }
+
+    #[test]
+    fn map_initial_status_completed_with_output_yields_completed_some() {
+        use spur_acp::{AgentKind, ToolCallStatus};
+        let out = serde_json::json!({"text": "hi"});
+        let got = super::map_initial_status(
+            ToolCallStatus::Completed,
+            Some(&out),
+            AgentKind::Generic,
+        );
+        assert!(matches!(got, ActStatus::Completed(Some(_))));
     }
 
     #[test]
