@@ -94,8 +94,10 @@ pub struct PlanState {
     pub tasks: Vec<PlanTaskEntry>,
     pub brain_session_id: SessionId,
     /// beads epic ID when the plan was submitted with `persist_as_epic=true`.
-    /// None for ephemeral plans. Used by review_task's auto-close path to
-    /// resolve the child beads issue from the task's `spur.plan_id` label.
+    /// None for ephemeral plans. Currently informational only — auto-close of
+    /// persist-created child issues from review_task(approve) is a planned
+    /// follow-up (v1 auto-closes only `PlanTaskEntry.spec.issue_id`, the
+    /// brain-supplied pre-existing ref).
     pub epic_id: Option<String>,
 }
 
