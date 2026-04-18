@@ -56,6 +56,38 @@ pub fn normalize_agent_name(name: &str) -> String {
     lower
 }
 
+/// Format a worker task string with an optional `## Relevant Files`
+/// section prepended.
+///
+/// - When `context_files.is_empty()`, the task string is returned
+///   unchanged (no section prepended).
+/// - Otherwise a `## Relevant Files` header is prepended with each
+///   path as a Markdown bullet, followed by a `## Task` header and
+///   the original task body. Order of the bullets preserves the input
+///   order.
+///
+/// This function does no file I/O. The worker's own Read tool is
+/// responsible for opening the listed paths.
+pub(crate) fn format_worker_task(task: &str, context_files: &[String]) -> String {
+    if context_files.is_empty() {
+        return task.to_string();
+    }
+    let mut out = String::with_capacity(task.len() + 128 + context_files.len() * 64);
+    out.push_str("## Relevant Files\n\n");
+    out.push_str(
+        "The following files were declared as relevant by the caller. \
+         Open them with your Read tool as needed.\n\n",
+    );
+    for path in context_files {
+        out.push_str("- ");
+        out.push_str(path);
+        out.push('\n');
+    }
+    out.push_str("\n## Task\n\n");
+    out.push_str(task);
+    out
+}
+
 // ─── Run options ─────────────────────────────────────────────────────
 
 /// Options for `spur run`.
@@ -4857,5 +4889,51 @@ mod prompt_v1_tests {
         let a = render_workers_block_over(&agents);
         let b = render_workers_block_over(&agents);
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod format_worker_task_tests {
+    use super::format_worker_task;
+
+    #[test]
+    fn empty_list_passes_task_through_unchanged() {
+        let task = "Do the thing.";
+        let out = format_worker_task(task, &[]);
+        assert_eq!(out, task);
+    }
+
+    #[test]
+    fn single_path_prepends_relevant_files_section() {
+        let task = "Do the thing.";
+        let files = vec!["src/a.rs".to_string()];
+        let out = format_worker_task(task, &files);
+        assert!(
+            out.starts_with("## Relevant Files\n\n"),
+            "expected Relevant Files header first, got: {out}",
+        );
+        assert!(out.contains("- src/a.rs"));
+        assert!(out.contains("## Task\n\nDo the thing."));
+    }
+
+    #[test]
+    fn multiple_paths_produce_ordered_bullets() {
+        let files = vec![
+            "crates/spur-mcp/src/server.rs".to_string(),
+            "crates/spur-acp/src/adapter/claude.rs".to_string(),
+        ];
+        let out = format_worker_task("Go.", &files);
+        let idx_first = out.find("- crates/spur-mcp/src/server.rs").expect("first bullet");
+        let idx_second = out
+            .find("- crates/spur-acp/src/adapter/claude.rs")
+            .expect("second bullet");
+        assert!(idx_first < idx_second, "order must be preserved");
+    }
+
+    #[test]
+    fn whitespace_task_body_still_gets_section_when_files_nonempty() {
+        let out = format_worker_task("   ", &["x.rs".into()]);
+        assert!(out.starts_with("## Relevant Files\n\n"));
+        assert!(out.ends_with("   "));
     }
 }
