@@ -2022,24 +2022,28 @@ impl McpCallbackServer {
                 .ok_or_else(|| format!("unknown plan '{plan_id}'"))?
         };
 
-        let pm = self.pm_service.as_deref();
         let sink: Option<&dyn crate::events::McpEventSink> = self.event_sink.as_deref();
 
-        let mut state = plan_arc.lock().await;
-        let result = crate::plan::review_task(
+        // INV-5: use handle_review_task so the plan lock is dropped before
+        // pm.update_issue() is called.  The pm_service field stores a concrete
+        // Arc<PmService>; deref as &dyn PmLike for the call.
+        let pm_like: Option<&dyn crate::plan::PmLike> = self
+            .pm_service
+            .as_deref()
+            .map(|s| s as &dyn crate::plan::PmLike);
+
+        let result = crate::plan::handle_review_task(
+            plan_arc,
             &plan_id,
             &task_id,
             decision,
             feedback,
-            &mut state,
-            pm,
+            pm_like,
             sink,
             Some(&self.delegation_tx),
             Some(&self.task_tracker),
-            Some(plan_arc.clone()),
         )
         .await?;
-        drop(state);
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }

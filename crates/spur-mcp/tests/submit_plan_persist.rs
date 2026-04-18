@@ -149,3 +149,86 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
         .collect();
     assert!(required.contains(&"tasks"));
 }
+
+/// INV-5: verify that `handle_review_task` releases the plan-state lock BEFORE
+/// it calls `pm.update_issue`, so concurrent readers are not blocked by network
+/// latency.
+///
+/// Mechanism: a `SleepyPm` suspends inside `update_issue`. With
+/// `current_thread + start_paused`, the sleep suspends the approve task but
+/// does NOT advance virtual time until all tasks are waiting. After two
+/// `yield_now`s the approve task has had a chance to either (a) drop the lock
+/// before sleeping (fixed) or (b) still be holding the lock during the sleep
+/// (unfixed). We use `try_lock` to observe which case we are in — it must
+/// succeed with the fix in place.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn review_approve_releases_plan_lock_before_beads_io() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    let state = spur_mcp::plan::PlanState {
+        plan_id: "p1".into(),
+        tasks: vec![spur_mcp::plan::PlanTaskEntry {
+            spec: spur_mcp::plan::PlanTask {
+                task_id: "t1".into(),
+                agent: "a".into(),
+                task: "T".into(),
+                depends_on: vec![],
+                issue_id: Some("bd-1".into()),
+                context_files: vec![],
+            },
+            status: spur_mcp::plan::PlanTaskStatus::AwaitingReview { summary: None },
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+        }],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
+        epic_id: None,
+    };
+    let plan_arc: Arc<Mutex<spur_mcp::plan::PlanState>> = Arc::new(Mutex::new(state));
+
+    // SleepyPm sleeps 1 s (virtual) inside update_issue.
+    let sleepy_pm = spur_mcp::test_support::make_sleepy_pm(Duration::from_secs(1));
+
+    // Start approve in the background.
+    let plan_ref = Arc::clone(&plan_arc);
+    let pm_ref = sleepy_pm.clone();
+    let approve = tokio::spawn(async move {
+        spur_mcp::plan::handle_review_task(
+            plan_ref,
+            "p1",
+            "t1",
+            "approve",
+            Some("ok"),
+            Some(pm_ref.as_ref()),
+            None,
+            None,
+            None,
+        )
+        .await
+    });
+
+    // Yield twice so the approve task can run:
+    //   1st yield: approve acquires lock, runs apply_decision_and_extract, drops lock, enters
+    //              update_issue → tokio::time::sleep(1s) → task suspends.
+    //   2nd yield: (belt-and-suspenders, in case scheduler needs another round)
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+
+    // With the fix the lock must be available now — approve dropped it before sleeping.
+    // Without the fix it is still held, and try_lock returns Err.
+    let guard = plan_arc.try_lock();
+    assert!(
+        guard.is_ok(),
+        "plan lock must be released before pm.update_issue — INV-5 violated"
+    );
+    drop(guard);
+
+    // Let the approve finish (auto-advances virtual time past the 1 s sleep).
+    approve
+        .await
+        .expect("approve task panicked")
+        .expect("approve returned Err");
+}
