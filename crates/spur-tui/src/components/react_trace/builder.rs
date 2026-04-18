@@ -112,45 +112,42 @@ impl ReactTrace {
                     ]));
 
                     #[cfg(feature = "markdown")]
-                    let used_markdown = entry
-                        .markdown
-                        .as_ref()
-                        .filter(|stream| !stream.items().is_empty())
-                        .map(|stream| {
-                            for line in stream.lines() {
-                                let mut spans = vec![Span::raw("   ")];
-                                spans.extend(line.spans.iter().cloned());
-                                let mut new_line = Line::from(spans);
-                                new_line.style = line.style;
-                                new_line.alignment = line.alignment;
-                                lines.push(new_line);
+                    {
+                        if let Some(stream) = entry.markdown.as_ref() {
+                            let empty_state: std::collections::HashMap<
+                                crate::components::mermaid::MermaidId,
+                                crate::components::mermaid::FenceRender,
+                            > = std::collections::HashMap::new();
+                            render_agent_message_body(
+                                stream,
+                                &empty_state,
+                                |line| lines.push(line),
+                                |_id, _h| {
+                                    unreachable!("secondary path passes empty fence_state")
+                                },
+                            );
+                        } else {
+                            for text_line in entry.text.lines() {
+                                lines.push(Line::from(vec![
+                                    Span::raw("   "),
+                                    Span::styled(
+                                        text_line.to_string(),
+                                        Style::default().fg(Color::White),
+                                    ),
+                                ]));
                             }
-                            true
-                        })
-                        .unwrap_or(false);
+                        }
+                    }
 
                     #[cfg(not(feature = "markdown"))]
-                    let used_markdown = false;
-
-                    if !used_markdown {
-                        #[cfg(feature = "markdown")]
-                        let source: &str = entry
-                            .markdown
-                            .as_ref()
-                            .map(|s| s.raw_text())
-                            .unwrap_or(entry.text.as_str());
-                        #[cfg(not(feature = "markdown"))]
-                        let source: &str = entry.text.as_str();
-
-                        for text_line in source.lines() {
-                            lines.push(Line::from(vec![
-                                Span::raw("   "),
-                                Span::styled(
-                                    text_line.to_string(),
-                                    Style::default().fg(Color::White),
-                                ),
-                            ]));
-                        }
+                    for text_line in entry.text.lines() {
+                        lines.push(Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(
+                                text_line.to_string(),
+                                Style::default().fg(Color::White),
+                            ),
+                        ]));
                     }
                 }
 

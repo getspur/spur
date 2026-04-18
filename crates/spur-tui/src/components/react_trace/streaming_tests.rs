@@ -57,3 +57,32 @@ fn ghost_text_rc1_regression() {
         rendered
     );
 }
+
+/// T4.3 — both render paths produce the same textual content.
+#[test]
+fn both_render_paths_produce_identical_textual_content() {
+    let mut trace = ReactTrace::new_for_tests();
+    trace.append_message("# Title\n\nBody text.\n\nmore ", "claude", "10:00".to_string());
+    trace.force_flush_all(&StateLookup::empty());
+    trace.append_message("tail bytes", "claude", "10:00".to_string());
+
+    let flat = trace.build_display_lines_for_tests("", None);
+    let flat_text: String = flat.iter().map(|l| {
+        l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+    }).collect::<Vec<_>>().join("\n");
+
+    let (rows, _) = trace.build_virtual_rows_for_tests(0, 200, &std::collections::HashMap::new(), None);
+    let virt_text: String = rows.iter().filter_map(|r| match r {
+        crate::components::react_trace::VirtualRow::Text(line) => Some(
+            line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+        ),
+        _ => None,
+    }).collect::<Vec<_>>().join("\n");
+
+    // Allow minor whitespace differences from wrapping; require every
+    // substantive content fragment to appear in both.
+    for needle in ["Title", "Body text", "tail bytes"] {
+        assert!(flat_text.contains(needle), "flat missing {:?}: {}", needle, flat_text);
+        assert!(virt_text.contains(needle), "virt missing {:?}: {}", needle, virt_text);
+    }
+}
