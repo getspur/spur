@@ -166,10 +166,6 @@ fn get_issue_def() -> ToolDefinition {
         input_schema: json!({
             "type": "object",
             "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "PM source override (github, linear, plane). Defaults to configured backend if omitted."
-                },
                 "id": {
                     "type": "string",
                     "description": "Issue identifier"
@@ -234,10 +230,6 @@ fn update_issue_def() -> ToolDefinition {
         input_schema: json!({
             "type": "object",
             "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "PM source override (github, linear, plane). Defaults to configured backend if omitted."
-                },
                 "id": {
                     "type": "string",
                     "description": "Issue identifier"
@@ -761,6 +753,37 @@ fn execute_epic_def() -> ToolDefinition {
             },
             "required": ["epic_id"]
         }),
+    }
+}
+
+#[cfg(test)]
+mod schema_truthfulness_tests {
+    use super::*;
+
+    fn props_of(def: &ToolDefinition) -> Vec<String> {
+        def.input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn get_issue_schema_does_not_advertise_source() {
+        let def = get_issue_def();
+        assert!(
+            !props_of(&def).contains(&"source".to_string()),
+            "get_issue must not advertise `source` until multi-backend lands",
+        );
+    }
+
+    #[test]
+    fn update_issue_schema_does_not_advertise_source() {
+        let def = update_issue_def();
+        assert!(
+            !props_of(&def).contains(&"source".to_string()),
+            "update_issue must not advertise `source` until multi-backend lands",
+        );
     }
 }
 
