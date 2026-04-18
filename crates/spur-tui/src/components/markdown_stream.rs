@@ -499,6 +499,90 @@ impl MarkdownStream {
     }
 }
 
+/// Pulldown scan over `raw_text`, gathering:
+/// - `authoritative_end`: max byte offset where an Event::End brings
+///   nesting depth back to 0 AND `range.end < raw_text.len()` (or
+///   `<= len` when `permit_eof_closure` is true for flush_final).
+/// - `discovered_fences`: closed mermaid fences whose End range is also
+///   before EOF (coherence with cursor advance, per Section 5.9).
+///
+/// Pure over `(&str, bool, bool)`. Does no `tui_markdown` work.
+pub(crate) fn scan_authoritative(
+    raw_text: &str,
+    mermaid_enabled: bool,
+    permit_eof_closure: bool,
+) -> (usize, Vec<(std::ops::Range<usize>, String)>) {
+    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+    let mut max_end: usize = 0;
+    let mut depth: i32 = 0;
+    let mut discovered: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+
+    let mut open_fence_start: Option<usize> = None;
+    let mut fence_buf = String::new();
+
+    for (ev, range) in Parser::new_ext(raw_text, Options::empty()).into_offset_iter() {
+        match &ev {
+            Event::Start(tag) => {
+                depth += 1;
+                if mermaid_enabled {
+                    if let Tag::CodeBlock(CodeBlockKind::Fenced(info)) = tag {
+                        if info.as_ref().trim().eq_ignore_ascii_case("mermaid") {
+                            open_fence_start = Some(range.start);
+                            fence_buf.clear();
+                        }
+                    }
+                }
+            }
+            Event::Text(t) if open_fence_start.is_some() => {
+                fence_buf.push_str(t);
+            }
+            Event::End(tag_end) => {
+                depth -= 1;
+                // Authoritative cursor advance: top-level block close.
+                let permitted = if permit_eof_closure {
+                    range.end <= raw_text.len()
+                } else {
+                    range.end < raw_text.len()
+                };
+                if depth == 0 && permitted {
+                    max_end = max_end.max(range.end);
+                }
+                // Mermaid fence coherence: register only truly-closed fences
+                // whose End range is before EOF (or permitted at finalize).
+                if matches!(tag_end, TagEnd::CodeBlock) {
+                    if let Some(start) = open_fence_start.take() {
+                        let slice_trimmed = raw_text[..range.end]
+                            .trim_end_matches(['\n', '\r', ' ', '\t']);
+                        let closed_by_fence = slice_trimmed.ends_with("```");
+                        let fence_permitted = if permit_eof_closure {
+                            range.end <= raw_text.len()
+                        } else {
+                            range.end < raw_text.len()
+                        };
+                        if closed_by_fence && fence_permitted {
+                            discovered.push((start..range.end, std::mem::take(&mut fence_buf)));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (max_end, discovered)
+}
+
+/// Public test accessor (plain `pub fn`, not `#[cfg(test)]` gated — the
+/// existing convention in this module per `cached_lines_debug()`).
+pub fn scan_authoritative_for_tests(
+    raw_text: &str,
+    mermaid_enabled: bool,
+    permit_eof_closure: bool,
+) -> (usize, Vec<(std::ops::Range<usize>, String)>) {
+    scan_authoritative(raw_text, mermaid_enabled, permit_eof_closure)
+}
+
 // ───────── ratatui-core 0.1 → ratatui 0.29 type conversions ─────────
 //
 // tui-markdown 0.3 uses ratatui-core 0.1 types; the rest of this crate
