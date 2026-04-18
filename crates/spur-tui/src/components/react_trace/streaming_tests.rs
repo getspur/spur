@@ -1007,6 +1007,10 @@ fn phase2_f3_anchor_survives_eviction() {
                 "evicted-entry anchor must snap to (0, 0)"
             );
         }
+        ScrollAnchor::Row { entry_idx, .. } => {
+            assert!(entry_idx < trace.entries_for_tests().len(),
+                "anchor.entry_idx must point at a surviving entry");
+        }
         ScrollAnchor::Following => {
             // Acceptable: streaming pushed user back to bottom.
         }

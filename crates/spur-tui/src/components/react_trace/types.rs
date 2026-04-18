@@ -84,16 +84,22 @@ pub(crate) enum Segment {
     },
 }
 
-/// Anchor model for the trace viewport. Replaces the legacy `scroll_offset:
-/// usize` row index, which was unstable under reflow (RCA Layer 3E).
+/// Anchor model for the trace viewport.
 ///
 /// `Following` tracks the bottom of the document.
-/// `Byte` pins the viewport top to a specific byte position within an
-/// entry's content; resolved to a row index at render time against
-/// per-row byte ranges from `build_virtual_rows`.
+/// `Row` pins the viewport to ordinal row `row_within_entry` of the entry
+/// at `entry_idx`. Resolved at render time via `entry_row_starts`. Width
+/// resize clamps to the entry's last row (Phase 3 trade-off; v1 byte
+/// anchor was entry-coarse and snapped to entry start anyway).
+/// `Byte` is the legacy variant kept during Phase 3 migration; will be
+/// removed in the final task of this plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollAnchor {
     Following,
+    Row {
+        entry_idx: usize,
+        row_within_entry: usize,
+    },
     Byte {
         entry_idx: usize,
         byte_offset: usize,
