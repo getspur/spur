@@ -198,6 +198,9 @@ pub struct MarkdownStream {
     /// `append` after finalize is a contract violation; enforced via
     /// debug_assert (see Task 11).
     finalized: bool,
+
+    /// Production-unused; instrumented for test verification only.
+    rebuild_count: std::cell::Cell<u64>,
 }
 
 impl Default for MarkdownStream {
@@ -212,6 +215,7 @@ impl Default for MarkdownStream {
             mermaid_enabled: true,
             flushed_byte_len: 0,
             finalized: false,
+            rebuild_count: std::cell::Cell::new(0),
         }
     }
 }
@@ -234,6 +238,12 @@ impl MarkdownStream {
     /// Test-only accessor: returns the current flushed_byte_len cursor value.
     pub fn flushed_byte_len_for_tests(&self) -> usize {
         self.flushed_byte_len
+    }
+
+    /// Test-only hook: how many times has `rebuild()` been called?
+    /// Used by busy-loop regression tests.
+    pub fn rebuild_count_for_tests(&self) -> u64 {
+        self.rebuild_count.get()
     }
 
     pub fn is_finalized(&self) -> bool {
@@ -515,6 +525,8 @@ impl MarkdownStream {
         states: &StateLookup<'_>,
         permit_eof_closure: bool,
     ) -> Vec<FenceRef> {
+        self.rebuild_count.set(self.rebuild_count.get() + 1);
+
         // Stage 0: pulldown scan.
         let (new_flushed, discovered_fences) =
             scan_authoritative(&self.raw_text, self.mermaid_enabled, permit_eof_closure);

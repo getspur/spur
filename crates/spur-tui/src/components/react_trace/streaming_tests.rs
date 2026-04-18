@@ -91,6 +91,33 @@ fn turn_complete_final_code_fence_renders_styled() {
     assert!(stream.is_finalized());
 }
 
+/// TI.3 — open code fence containing `\n\n` must not busy-loop.
+///
+/// Under the stateless heuristic, this tail matches \n\n+content but
+/// pulldown can't advance the cursor (fence still open). The
+/// dirty_since guard must make the SECOND maybe_flush short-circuit.
+#[test]
+fn code_block_with_blank_line_does_not_cause_cpu_spike() {
+    use crate::components::markdown_stream::{MarkdownStream, StateLookup};
+
+    let mut s = MarkdownStream::new();
+    s.append("```rust\nfn main() {\n\n    body\n\n}\n");
+
+    let count_before = s.rebuild_count_for_tests();
+    s.maybe_flush(&StateLookup::empty());
+    let count_after_first = s.rebuild_count_for_tests();
+    s.maybe_flush(&StateLookup::empty());
+    s.maybe_flush(&StateLookup::empty());
+    s.maybe_flush(&StateLookup::empty());
+    let count_after_three_more = s.rebuild_count_for_tests();
+
+    assert_eq!(count_after_first - count_before, 1,
+        "first maybe_flush triggers one rebuild (fast-path fires)");
+    assert_eq!(count_after_three_more - count_after_first, 0,
+        "subsequent maybe_flushes must short-circuit on dirty_since=None; \
+         got {} extra rebuilds", count_after_three_more - count_after_first);
+}
+
 /// T4.3 — both render paths produce the same textual content.
 ///
 /// Note: all content is appended before `force_flush_all` because `force_flush_all`
