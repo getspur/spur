@@ -146,3 +146,30 @@ fn worker_notification_roundtrips() {
     assert!(json.contains("WorkerNotification"));
     assert!(json.contains("thinking..."));
 }
+
+#[test]
+fn plan_completed_roundtrips() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+
+    let ev = SpurEvent::now(SpurEventBody::PlanCompleted {
+        plan_id: "p1".into(),
+        approved: 3,
+        rejected: 1,
+        failed: 0,
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(round.body, SpurEventBody::PlanCompleted { .. }));
+}
+
+#[test]
+fn plan_ready_to_merge_roundtrips() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+
+    let ev = SpurEvent::now(SpurEventBody::PlanReadyToMerge {
+        plan_id: "p1".into(),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(round.body, SpurEventBody::PlanReadyToMerge { .. }));
+}

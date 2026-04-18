@@ -1606,8 +1606,9 @@ impl McpCallbackServer {
 
         // Spawn the plan executor.
         let delegation_tx = self.delegation_tx.clone();
+        let plan_sink = self.event_sink.clone();
         self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx));
+            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink));
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
@@ -1832,8 +1833,9 @@ impl McpCallbackServer {
             );
         }
         let delegation_tx = self.delegation_tx.clone();
+        let plan_sink = self.event_sink.clone();
         self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx));
+            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink));
 
         info!(
             plan_id = %plan_id,
