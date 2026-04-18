@@ -5,7 +5,6 @@
 //! pure helper that decides WHAT IssueCreate values the handler would
 //! dispatch given a plan + epic fields.
 
-use serde_json::json;
 use spur_mcp::{plan_epic_issue_creates, tools_list};
 // `pub mod plan;` is declared in lib.rs, so spur_mcp::plan::PlanTask is accessible.
 use spur_mcp::plan::PlanTask;
@@ -152,9 +151,4 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(required.contains(&"tasks"));
-}
-
-#[allow(dead_code)]
-fn _unused() -> serde_json::Value {
-    json!({})
 }
