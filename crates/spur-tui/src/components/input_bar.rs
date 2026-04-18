@@ -62,6 +62,13 @@ pub struct InputBar {
     history_cursor: Option<usize>,
     /// Stashed live input when the user enters history-browsing mode.
     draft: String,
+    /// Last inner width observed in `render()`; updated via interior mutation
+    /// so `render(&self, ...)` can record the width without requiring `&mut self`.
+    last_inner_width: std::cell::Cell<u16>,
+    /// Sticky goal column for vertical nav. Set on first vertical move,
+    /// preserved across consecutive verticals, reset on any horizontal move
+    /// or edit. Matches vim/emacs "remembered column" behavior.
+    goal_vcol: Option<u16>,
 }
 
 impl InputBar {
@@ -82,6 +89,8 @@ impl InputBar {
             history: Vec::new(),
             history_cursor: None,
             draft: String::new(),
+            last_inner_width: std::cell::Cell::new(80),
+            goal_vcol: None,
         }
     }
 
@@ -176,6 +185,14 @@ impl InputBar {
     fn handle_emacs_input(&mut self, key: KeyEvent, input: Input) -> Option<(String, bool)> {
         // Handle protected range logic for special keys
         match key.code {
+            KeyCode::Up => {
+                self.visual_line_up(self.last_inner_width());
+                return None;
+            }
+            KeyCode::Down => {
+                self.visual_line_down(self.last_inner_width());
+                return None;
+            }
             KeyCode::Left => {
                 self.move_cursor_back();
                 return None;
@@ -504,6 +521,16 @@ impl InputBar {
                 self.textarea.scroll((-1, 0));
             }
 
+            // ── Arrow-key visual-line nav (Vim Normal) ──────────────
+            Input { key: Key::Up, .. } => {
+                self.visual_line_up(self.last_inner_width());
+                return None;
+            }
+            Input { key: Key::Down, .. } => {
+                self.visual_line_down(self.last_inner_width());
+                return None;
+            }
+
             // ── Esc / Enter ─────────────────────────────────────────
             Input { key: Key::Esc, .. } => {
                 self.textarea.cancel_selection();
@@ -574,6 +601,14 @@ impl InputBar {
                 self.rebuild_line_cache();
                 return None;
             }
+            KeyCode::Up => {
+                self.visual_line_up(self.last_inner_width());
+                return None;
+            }
+            KeyCode::Down => {
+                self.visual_line_down(self.last_inner_width());
+                return None;
+            }
             KeyCode::Left => {
                 self.move_cursor_back();
                 return None;
@@ -621,6 +656,19 @@ impl InputBar {
             .map(|(i, _)| i)
             .unwrap_or(line.len());
         self.line_cache.get(row).copied().unwrap_or(0) + byte_offset
+    }
+
+    /// Logical (row, char_col) → byte offset within `lines()[row]`.
+    fn char_col_to_byte(&self, row: usize, char_col: usize) -> usize {
+        let lines = self.textarea.lines();
+        if row >= lines.len() {
+            return 0;
+        }
+        let line = &lines[row];
+        line.char_indices()
+            .nth(char_col)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len())
     }
 
     /// Rebuild the line cache after text modification.
@@ -720,6 +768,7 @@ impl InputBar {
                 self.move_cursor_to_byte(r.start + 1);
             }
         }
+        self.goal_vcol = None;
     }
 
     /// Move cursor forward, skipping protected ranges atomically.
@@ -733,6 +782,7 @@ impl InputBar {
         } else {
             self.textarea.move_cursor(CursorMove::Forward);
         }
+        self.goal_vcol = None;
     }
 
     /// Delete character before cursor, handling protected ranges.
@@ -750,6 +800,7 @@ impl InputBar {
             self.shift_ranges(cursor, -1);
         }
         self.history_cursor = None;
+        self.goal_vcol = None;
     }
 
     /// Delete character after cursor, handling protected ranges.
@@ -766,6 +817,7 @@ impl InputBar {
             self.shift_ranges(cursor, -1);
         }
         self.history_cursor = None;
+        self.goal_vcol = None;
     }
 
     /// Insert a character, replacing protected range if inside one.
@@ -779,10 +831,12 @@ impl InputBar {
         self.rebuild_line_cache();
         self.shift_ranges(cursor, c.len_utf8() as isize);
         self.history_cursor = None;
+        self.goal_vcol = None;
     }
 
     /// Submit the current text.
     fn submit(&mut self) -> Option<(String, bool)> {
+        self.goal_vcol = None;
         let text = self.textarea.lines().join("\n");
         if text.is_empty() {
             return None;
@@ -853,6 +907,7 @@ impl InputBar {
             self.shift_ranges(cursor, delta);
         }
         self.history_cursor = None;
+        self.goal_vcol = None;
     }
 
     /// The current text content.
@@ -873,10 +928,13 @@ impl InputBar {
     /// Reset text and cursor.
     pub fn clear(&mut self) {
         let mode = self.mode;
+        let last_w = self.last_inner_width.get();
         self.textarea = TextArea::default();
         self.textarea.set_cursor_line_style(Style::default());
         self.line_cache = vec![0];
         self.protected_ranges.clear();
+        self.last_inner_width.set(last_w);
+        self.goal_vcol = None;
         self.set_mode(mode);
     }
 
@@ -893,13 +951,27 @@ impl InputBar {
     /// Replace text and cursor wholesale.
     pub fn set_text(&mut self, text: String, cursor: usize) {
         let mode = self.mode;
+        let last_w = self.last_inner_width.get();
         let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
         self.textarea = TextArea::new(lines);
         self.textarea.set_cursor_line_style(Style::default());
         self.rebuild_line_cache();
         self.move_cursor_to_byte(cursor);
         self.protected_ranges.clear();
+        self.last_inner_width.set(last_w);
+        self.goal_vcol = None;
         self.set_mode(mode);
+    }
+
+    fn last_inner_width(&self) -> u16 {
+        self.last_inner_width.get()
+    }
+
+    /// Test-only: read the cached last inner width.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn last_inner_width_for_test(&self) -> u16 {
+        self.last_inner_width.get()
     }
 
     /// Set the status label.
@@ -969,32 +1041,30 @@ impl InputBar {
     }
 
     /// Test-only: set cursor position.
+    #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
     pub fn set_text_cursor_for_test(&mut self, cursor: usize) {
         self.move_cursor_to_byte(cursor);
     }
 
     /// Required render height given the available `width`.
+    ///
+    /// Includes 2 rows for top+bottom borders. The inner rows are the
+    /// visual-row count produced by the soft-wrap layer, clamped to
+    /// `[1, 5]` so the input bar never dominates the view.
     pub fn required_height(&self, width: u16) -> u16 {
-        let inner_w = (width.saturating_sub(2)) as usize;
+        let inner_w = width.saturating_sub(2);
         if inner_w == 0 {
             return 3;
         }
 
-        let prefix_len = self.status.as_ref().map(|s| s.len() + 1).unwrap_or(0) + 2;
-        let text = self.text();
-        let mut rows: usize = 0;
-
-        for (i, line) in text.split('\n').enumerate() {
-            let line_len = if i == 0 {
-                line.len() + prefix_len + 1
-            } else {
-                line.len() + 1
-            };
-            rows += 1.max((line_len + inner_w - 1) / inner_w);
+        let mut lines: Vec<String> = self.textarea.lines().to_vec();
+        if lines.is_empty() {
+            lines.push(String::new());
         }
 
-        let inner = (rows as u16).clamp(1, 5);
+        let layout = crate::components::input_bar_wrap::wrap(&lines, inner_w);
+        let inner = layout.visual_height().clamp(1, 5);
         inner + 2
     }
 
@@ -1026,9 +1096,294 @@ impl InputBar {
             .title(Span::styled(title, Style::default().fg(border_color)));
 
         let inner = block.inner(area);
+        // Record the inner width so visual-line nav keys (which can arrive
+        // before the next render) compute against the actual rendered width.
+        self.last_inner_width.set(inner.width);
         frame.render_widget(block, area);
-        frame.render_widget(&self.textarea, inner);
+
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        // Compute wrap layout for the buffer against the inner width.
+        let lines: Vec<String> = self.textarea.lines().to_vec();
+        let layout =
+            crate::components::input_bar_wrap::wrap(&lines, inner.width);
+
+        // Cursor in visual coordinates.
+        let (cursor_row, cursor_ccol) = self.textarea.cursor();
+        let cursor_byte = self.char_col_to_byte(cursor_row, cursor_ccol);
+        let (cursor_vr, cursor_vc) =
+            layout.logical_to_visual(cursor_row, cursor_byte);
+
+        // Vertical scroll: keep the cursor within the visible window.
+        let visible = inner.height as usize;
+        let total = layout.visual_height() as usize;
+        let view_top = if total <= visible {
+            0
+        } else if cursor_vr >= visible {
+            cursor_vr + 1 - visible
+        } else {
+            0
+        };
+
+        // Selection range in bytes (once, for quick intersection per grapheme).
+        let selection =
+            self.textarea.selection_range().map(|((sr, sc), (er, ec))| {
+                let sb = self.char_col_to_byte(sr, sc);
+                let eb = self.char_col_to_byte(er, ec);
+                (sr, sb, er, eb)
+            });
+
+        // Build visible lines.
+        let last_vr = (view_top + visible).min(total);
+        let mut out_lines: Vec<ratatui::text::Line<'static>> =
+            Vec::with_capacity(last_vr - view_top);
+
+        for vi in view_top..last_vr {
+            let vr = &layout.rows[vi];
+            let logical = &lines[vr.logical_row];
+
+            // Hoisted once per visual row: flat byte offset where this
+            // logical row starts, and where the next logical row starts.
+            // line_cache[row] is the flat byte offset of the '\n'-joined
+            // buffer at which logical row `row` begins.
+            let row_start_flat = self
+                .line_cache
+                .get(vr.logical_row)
+                .copied()
+                .unwrap_or(0);
+            let next_row_start = self
+                .line_cache
+                .get(vr.logical_row + 1)
+                .copied()
+                .unwrap_or(usize::MAX);
+
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(vr.graphemes.len());
+            for g in &vr.graphemes {
+                let piece_slice = &logical[g.byte_start..g.byte_end];
+                // Substitute visual expansions for special graphemes.
+                let piece: String = if piece_slice == "\t" {
+                    " ".repeat(crate::components::input_bar_wrap::TAB_WIDTH)
+                } else {
+                    piece_slice.to_string()
+                };
+
+                let mut style = Style::default();
+
+                // Atom styling: LightBlue + underline for graphemes inside
+                // any protected range on the current logical line. Atoms
+                // store flat byte offsets (into the \n-joined buffer), so
+                // translate to per-line coordinates via line_cache.
+                for atom in &self.protected_ranges {
+                    // Skip atoms that belong to a different logical row.
+                    if atom.start < row_start_flat || atom.start >= next_row_start {
+                        continue;
+                    }
+                    let atom_start_in_row = atom.start - row_start_flat;
+                    let atom_end_in_row = atom.end - row_start_flat;
+                    if g.byte_start >= atom_start_in_row && g.byte_end <= atom_end_in_row {
+                        style = style
+                            .fg(Color::LightBlue)
+                            .add_modifier(Modifier::UNDERLINED);
+                    }
+                }
+
+                // Selection styling.
+                if let Some((sr, sb, er, eb)) = selection {
+                    let in_sel = if sr == er && vr.logical_row == sr {
+                        g.byte_start >= sb && g.byte_end <= eb
+                    } else if vr.logical_row == sr {
+                        g.byte_start >= sb
+                    } else if vr.logical_row == er {
+                        g.byte_end <= eb
+                    } else {
+                        vr.logical_row > sr && vr.logical_row < er
+                    };
+                    if in_sel {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+                }
+
+                spans.push(Span::styled(piece, style));
+            }
+
+            out_lines.push(ratatui::text::Line::from(spans));
+        }
+
+        let paragraph = ratatui::widgets::Paragraph::new(out_lines);
+        frame.render_widget(paragraph, inner);
+
+        // Place the cursor cell if it is within the visible window.
+        if cursor_vr >= view_top && cursor_vr < last_vr {
+            let cx = inner.x + cursor_vc as u16;
+            let cy = inner.y + (cursor_vr - view_top) as u16;
+            frame.set_cursor_position((cx, cy));
+        }
     }
+
+    /// Visual-line Down: move cursor one visual row down, preserving vcol.
+    pub fn visual_line_down(&mut self, inner_width: u16) {
+        self.visual_line_move(inner_width, 1);
+    }
+
+    /// Visual-line Up.
+    pub fn visual_line_up(&mut self, inner_width: u16) {
+        self.visual_line_move(inner_width, -1);
+    }
+
+    fn visual_line_move(&mut self, inner_width: u16, delta: i32) {
+        if inner_width == 0 {
+            return;
+        }
+        let lines: Vec<String> = self.textarea.lines().to_vec();
+        let layout = crate::components::input_bar_wrap::wrap(&lines, inner_width);
+
+        let (row, ccol) = self.textarea.cursor();
+        let byte = self.char_col_to_byte(row, ccol);
+        let (vr, vc) = layout.logical_to_visual(row, byte);
+
+        let target_vr = (vr as i32 + delta).clamp(0, layout.rows.len() as i32 - 1) as usize;
+        if target_vr == vr {
+            return;
+        }
+        // Sticky goal: use the stored goal if any, else the current vcol.
+        // Persist it so subsequent consecutive verticals can restore.
+        let goal = self.goal_vcol.unwrap_or(vc as u16);
+        let max_vc = layout.rows[target_vr].used_cells as usize;
+        let target_vc = (goal as usize).min(max_vc);
+        self.goal_vcol = Some(goal);
+        let (target_row, target_byte) = layout.visual_to_logical(target_vr, target_vc);
+        self.move_cursor_to_byte(target_byte_abs(&lines, target_row, target_byte));
+    }
+}
+
+#[cfg(test)]
+mod required_height_tests {
+    use super::*;
+
+    #[test]
+    fn required_height_empty_is_3() {
+        // 1 visual row + 2 border rows.
+        let bar = InputBar::new();
+        assert_eq!(bar.required_height(80), 3);
+    }
+
+    #[test]
+    fn required_height_wraps_long_ascii_line() {
+        let mut bar = InputBar::new();
+        bar.set_text("a".repeat(200), 200);
+        // 200 / 80 = 3 visual rows (200 = 2*80 + 40) = ceil → 3.
+        // Plus 2 border rows = 5. Clamp max is 5.
+        assert_eq!(bar.required_height(82), 5); // inner width = 80
+    }
+
+    #[test]
+    fn required_height_clamps_at_max_5_plus_borders() {
+        let mut bar = InputBar::new();
+        bar.set_text("a".repeat(10_000), 0);
+        assert_eq!(bar.required_height(82), 7); // clamp(inner, 1, 5) + 2
+    }
+
+    #[test]
+    fn required_height_cjk_counts_cells() {
+        let mut bar = InputBar::new();
+        // 10 CJK chars = 20 cells → fits in inner width 20 on one row.
+        bar.set_text("你好世界你好世界你好".to_string(), 0);
+        assert_eq!(bar.required_height(22), 3); // inner width = 20 → 1 row
+    }
+
+    #[test]
+    fn visual_down_crosses_wrap_boundary() {
+        let mut bar = InputBar::new();
+        // 16 ASCII chars, wrapped at width 5 (inner) → 4 vrows of 5,5,5,1.
+        bar.set_text("abcdefghijklmnop".to_string(), 3);
+        // width arg to visual nav reflects the inner width of the render area.
+        bar.visual_line_down(5);
+        // Cursor moves from byte 3 (vrow 0, vcol 3) to vrow 1, vcol 3 → byte 8.
+        assert_eq!(bar.cursor(), 8);
+    }
+
+    #[test]
+    fn visual_up_inverse_of_down() {
+        let mut bar = InputBar::new();
+        bar.set_text("abcdefghijklmnop".to_string(), 3);
+        bar.visual_line_down(5);
+        bar.visual_line_up(5);
+        assert_eq!(bar.cursor(), 3);
+    }
+
+    #[test]
+    fn visual_down_at_last_vrow_is_noop() {
+        let mut bar = InputBar::new();
+        bar.set_text("abc".to_string(), 3);
+        bar.visual_line_down(80);
+        assert_eq!(bar.cursor(), 3);
+    }
+
+    #[test]
+    fn vim_normal_arrow_down_moves_visual_line() {
+        let mut bar = InputBar::new();
+        bar.set_text("abcdefghijklmnop".to_string(), 3);
+        bar.set_mode(EditMode::Vim(VimMode::Normal));
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        bar.handle_key(key);
+        // At default width 80 the line fits on one vrow, so Down is a noop.
+        // The assertion proves the key was HANDLED (didn't panic, didn't
+        // mutate unexpectedly) rather than falling through the match-all.
+        assert_eq!(bar.cursor(), 3);
+    }
+
+    #[test]
+    fn goal_vcol_restores_column_across_short_intermediate_row() {
+        // Three logical lines:
+        //   line 0: "hello world!"     (12 cells at width 12 → 1 vrow full)
+        //   line 1: "short"            (5 cells)
+        //   line 2: "another long"     (12 cells at width 12 → 1 vrow full)
+        let mut bar = InputBar::new();
+        bar.set_text(
+            "hello world!\nshort\nanother long".to_string(),
+            "hello world".len(), // cursor at vcol 11 on vrow 0
+        );
+        // First Down onto "short" — without goal, cursor would snap to vcol 5.
+        // Second Down onto "another long" — with goal, cursor must restore to vcol 11.
+        bar.visual_line_down(12);
+        bar.visual_line_down(12);
+        // Expected: cursor at 11th char of "another long" → 'g'.
+        let expected = "hello world!".len() + 1 + "short".len() + 1 + 11;
+        assert_eq!(bar.cursor(), expected);
+    }
+
+    #[test]
+    fn render_sets_last_inner_width_without_view_setter() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::layout::Rect;
+
+        let mut bar = InputBar::new();
+        bar.set_text("hello".to_string(), 0);
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| bar.render(f, Rect::new(0, 0, 20, 3)))
+            .unwrap();
+        assert_eq!(bar.last_inner_width_for_test(), 18);
+    }
+}
+
+/// Convert per-line byte offset to absolute byte offset across all lines.
+fn target_byte_abs(lines: &[String], row: usize, byte_col: usize) -> usize {
+    let mut acc = 0usize;
+    for (i, l) in lines.iter().enumerate() {
+        if i == row {
+            return acc + byte_col;
+        }
+        acc += l.len() + 1; // +1 for '\n'
+    }
+    acc
 }
 
 impl Default for InputBar {
