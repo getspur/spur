@@ -781,6 +781,14 @@ impl ReactTrace {
     pub fn entries_for_tests(&self) -> &[TraceEntry] {
         &self.entries
     }
+
+    pub fn build_display_lines_for_tests(
+        &self,
+        spinner_frame: &str,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+    ) -> Vec<ratatui::text::Line<'static>> {
+        self.build_display_lines(spinner_frame, lineage)
+    }
 }
 
 #[cfg(all(test, feature = "markdown"))]
