@@ -154,13 +154,15 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
 /// it calls `pm.update_issue`, so concurrent readers are not blocked by network
 /// latency.
 ///
-/// Mechanism: a `SleepyPm` suspends inside `update_issue`. With
-/// `current_thread + start_paused`, the sleep suspends the approve task but
-/// does NOT advance virtual time until all tasks are waiting. After two
-/// `yield_now`s the approve task has had a chance to either (a) drop the lock
-/// before sleeping (fixed) or (b) still be holding the lock during the sleep
-/// (unfixed). We use `try_lock` to observe which case we are in — it must
-/// succeed with the fix in place.
+/// Mechanism: `SleepyPm` fires a oneshot signal the instant `update_issue` is
+/// entered (before the virtual sleep).  The test awaits that signal, which
+/// proves the approve task has genuinely reached the beads-I/O await point —
+/// ruling out a false-pass from an early-error exit that never held the lock in
+/// the first place.  Only then does it call `try_lock`.
+///
+/// With the fix the lock is dropped before `update_issue` is called, so
+/// `try_lock` succeeds.  Without the fix the lock is still held at that point,
+/// so `try_lock` would return `Err`.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn review_approve_releases_plan_lock_before_beads_io() {
     use std::sync::Arc;
@@ -189,12 +191,13 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
     };
     let plan_arc: Arc<Mutex<spur_mcp::plan::PlanState>> = Arc::new(Mutex::new(state));
 
-    // SleepyPm sleeps 1 s (virtual) inside update_issue.
-    let sleepy_pm = spur_mcp::test_support::make_sleepy_pm(Duration::from_secs(1));
+    // SleepyPm sleeps 1 s (virtual) inside update_issue and fires `entered_rx`
+    // the moment update_issue is entered — before the sleep.
+    let (sleepy_pm, entered_rx) =
+        spur_mcp::test_support::make_sleepy_pm_with_signal(Duration::from_secs(1));
 
     // Start approve in the background.
     let plan_ref = Arc::clone(&plan_arc);
-    let pm_ref = sleepy_pm.clone();
     let approve = tokio::spawn(async move {
         spur_mcp::plan::handle_review_task(
             plan_ref,
@@ -202,7 +205,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             "t1",
             "approve",
             Some("ok"),
-            Some(pm_ref.as_ref()),
+            Some(sleepy_pm.as_ref()),
             None,
             None,
             None,
@@ -210,15 +213,15 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
         .await
     });
 
-    // Yield twice so the approve task can run:
-    //   1st yield: approve acquires lock, runs apply_decision_and_extract, drops lock, enters
-    //              update_issue → tokio::time::sleep(1s) → task suspends.
-    //   2nd yield: (belt-and-suspenders, in case scheduler needs another round)
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    // Wait until approve has provably entered update_issue's await point.
+    // This guarantees we are NOT racing against an early-error path and that
+    // the plan lock has been held and (with the fix) released.
+    entered_rx
+        .await
+        .expect("approve must reach update_issue before the test can proceed");
 
-    // With the fix the lock must be available now — approve dropped it before sleeping.
-    // Without the fix it is still held, and try_lock returns Err.
+    // The lock must be available: approve dropped it before calling update_issue.
+    // Without the fix it would still be held here, and try_lock would fail.
     let guard = plan_arc.try_lock();
     assert!(
         guard.is_ok(),
