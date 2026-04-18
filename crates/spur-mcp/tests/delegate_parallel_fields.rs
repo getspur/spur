@@ -123,4 +123,12 @@ fn parse_parallel_tasks_requires_brain_session_id() {
         "brain-xyz",
         "brain_session_id must be threaded through, not defaulted to SessionId::new()"
     );
+    // Negative intent: prior to INV-2, parse_parallel_tasks stamped a
+    // fresh random UUID. If anyone re-introduces that fallback, this
+    // assertion catches the value diverging from what the caller passed.
+    assert_ne!(
+        parsed[0].brain_session_id.as_session_id().0,
+        spur_acp::SessionId::new().0,
+        "brain_session_id must equal the caller-supplied value, not a fresh UUID"
+    );
 }
