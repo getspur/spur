@@ -370,14 +370,26 @@ fn render_agent_message_body(
     mut emit_line: impl FnMut(ratatui::text::Line<'static>),
     mut emit_fence_image: impl FnMut(MermaidId, u16),
 ) {
-    use ratatui::{
-        style::{Color, Style},
-        text::{Line, Span},
+    use ratatui::text::{Line, Span};
+
+    use std::collections::HashSet;
+    let mut errors: HashSet<crate::components::mermaid::MermaidId> = HashSet::new();
+    let mut pending: HashSet<crate::components::mermaid::MermaidId> = HashSet::new();
+    for (id, render) in fence_state {
+        match render {
+            crate::components::mermaid::FenceRender::Error => { errors.insert(*id); }
+            crate::components::mermaid::FenceRender::Pending => { pending.insert(*id); }
+            crate::components::mermaid::FenceRender::Ready(_) => {}
+        }
+    }
+    let state_lookup = crate::components::markdown_stream::StateLookup {
+        errors: &errors,
+        pending: &pending,
     };
 
-    let (items, tail) = stream.items_and_tail();
+    let items = stream.preview_items(&state_lookup);
 
-    for item in items {
+    for item in &items {
         match item {
             StreamItem::Text(text_lines) => {
                 for line in text_lines {
@@ -408,17 +420,6 @@ fn render_agent_message_body(
                 }
             },
         }
-    }
-
-    // Plain-text tail, indented, white.
-    for text_line in tail.lines() {
-        emit_line(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(
-                text_line.to_string(),
-                Style::default().fg(Color::White),
-            ),
-        ]));
     }
 }
 

@@ -907,7 +907,10 @@ mod virtual_row_tests {
     #[test]
     fn virtual_rows_text_only_match_line_count() {
         let mut trace = ReactTrace::new();
-        trace.append_message("Line 1\nLine 2\nLine 3", "claude", "10:00".to_string());
+        // Use hard line breaks (two trailing spaces) so markdown renders each
+        // as its own line within a single paragraph — no inter-paragraph blank
+        // lines, giving exactly 3 body rows.
+        trace.append_message("Line 1  \nLine 2  \nLine 3", "claude", "10:00".to_string());
         use crate::components::markdown_stream::StateLookup;
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
