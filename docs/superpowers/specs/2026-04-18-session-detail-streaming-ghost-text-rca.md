@@ -300,3 +300,16 @@ Phase 0 (RC1), Phase 1 (F1+F2+RC2), and Phase 2 (F3) are implemented on
 branch `feat/ghost-text-fix`. SIM-1, SIM-2, SIM-3 are active regression
 guards. Final test count: 153 lib tests pass, 1 ignored (informational
 diagnostic only).
+
+### Phase 3 Resolution (2026-04-18)
+
+The Phase 1+2 ship introduced `ScrollAnchor::Byte`, which audit revealed
+was entry-coarse (always `byte_offset=0`) and incompatible with the
+empty mermaid registry passed to `shift_anchor_by`. Phase 3 replaced
+`Byte` with `ScrollAnchor::Row { entry_idx, row_within_entry }` and
+routed `shift_anchor_by` through `self.line_cache`. SIMs 9, 10, 11, 13
+now pass; four new regression guards (EDGE-3, EDGE-7, COUNTER-2,
+COUNTER-3) lock the fix in.
+
+Plan: `docs/superpowers/plans/2026-04-18-session-detail-scroll-anchor-phase3.md`
+Design: `docs/superpowers/specs/2026-04-18-session-detail-scroll-anchor-phase3-design.md`

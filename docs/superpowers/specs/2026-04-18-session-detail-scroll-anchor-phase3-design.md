@@ -1,6 +1,6 @@
 # Session Detail Scroll-Anchor Phase 3 Design
 
-**Status:** approved (2026-04-18)
+**Status:** shipped (2026-04-18)
 **Supersedes:** byte-anchor portion of `2026-04-18-session-detail-streaming-ghost-text-fix-design.md` (F3)
 **Related RCAs:** `f91af27` post-merge audit (P1 sub-entry scroll, P2 mermaid-state mismatch)
 
