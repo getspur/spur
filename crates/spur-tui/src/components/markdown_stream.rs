@@ -246,13 +246,39 @@ impl MarkdownStream {
         self.dirty_since.get_or_insert_with(Instant::now);
     }
 
-    /// Flush if the debounce window has elapsed. Returns any newly-detected
-    /// mermaid fences. Pass `states` so the placeholder can reflect errors.
+    /// Flush if conditions warrant. Priority order:
+    /// 1. Not dirty → no-op (load-bearing: prevents busy-looping when
+    ///    cursor fails to advance under the heuristic).
+    /// 2. Empty raw_text → no-op.
+    /// 3. Tail > SAFETY_CAP_BYTES without boundary → suppress rebuild,
+    ///    clear dirty_since, let plain-text tail render until TurnComplete.
+    /// 4. Tail contains authoritative closure pattern → flush immediately.
+    /// 5. DEBOUNCE elapsed → flush.
+    /// 6. Otherwise → no-op.
     pub fn maybe_flush(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
-        match self.dirty_since {
-            Some(t) if t.elapsed() >= DEBOUNCE => self.flush_now(states),
-            _ => Vec::new(),
+        let Some(dirty_at) = self.dirty_since else { return Vec::new(); };
+        if self.raw_text.is_empty() { return Vec::new(); }
+
+        let tail = &self.raw_text[self.flushed_byte_len..];
+        let tail_len = tail.len();
+
+        // Safety valve: large boundary-free tail.
+        if tail_len > SAFETY_CAP_BYTES && !has_authoritative_closure_pattern(tail) {
+            self.dirty_since = None;
+            return Vec::new();
         }
+
+        // Fast path: authoritative closure pattern present.
+        if has_authoritative_closure_pattern(tail) {
+            return self.flush_now(states);
+        }
+
+        // Debounce.
+        if dirty_at.elapsed() >= DEBOUNCE {
+            return self.flush_now(states);
+        }
+
+        Vec::new()
     }
 
     /// Force a flush immediately.
