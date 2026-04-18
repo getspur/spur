@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>spur-context Architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  body { background: #0d1117; color: #c9d1d9; font-family: system-ui; margin: 0; padding: 2rem; }
+  h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 0.5rem; }
+  h2 { color: #8b949e; margin-top: 3rem; }
+  .mermaid { background: #161b22; border-radius: 8px; padding: 2rem; margin: 1rem 0 3rem; }
+</style>
+</head>
+<body>
+<script>mermaid.initialize({ theme: 'dark', startOnLoad: true });</script>
+
+<h1>spur-context: Unified Context Engine Architecture</h1>
+
+<h2>1. System Overview</h2>
+<pre class="mermaid">
+graph TB
+    O[Orchestrator] -->|"prompt + context"| B[Brain Agent]
+    B -->|"DelegationRequest"| M[spur-mcp]
+    M -->|"DelegationResult"| O
+    O -->|"spawn"| W[Workers]
+    W -->|"results via ACP"| O
+    O -->|"record_decision\nrecord_observation\nassemble_context"| CE[ContextEngine]
+    O -->|"start_session\nend_session"| CT[CostTracker]
+
+    subgraph "spur-context"
+        CE --- DK[(DuckDB)]
+        DK --- DEC[decisions]
+        DK --- OBS[observations]
+        DK --- ENT[entities]
+        DK --- REL[relationships]
+        ENT & REL --- KG[knowledge_graph]
+        KG --- GA[PageRank\nClustering]
+        DK --- LX[Lance Extension]
+        LR[lancedb crate] --> DE[decision.lance]
+        LR --> OE[observation.lance]
+        LR --> EE[entity.lance]
+        LX --> DE & OE & EE
+    end
+
+    subgraph "spur-cost"
+        CT --- SQ[(SQLite)]
+        SQ --- SE[sessions]
+        SQ --- DL[delegation_log]
+    end
+
+    DEC -.->|"session_id"| SE
+    OBS -.->|"decision_id"| DEC
+    REL -.->|"FK"| ENT
+</pre>
+
+<h2>2. Write Path</h2>
+<pre class="mermaid">
+sequenceDiagram
+    participant B as Brain Agent
+    participant O as Orchestrator
+    participant CE as ContextEngine
+    participant CT as CostTracker
+    participant W as Worker
+
+    Note over O: Session starts
+    O->>CT: start_session(id, agent, task)
+    O->>CE: assemble_context(project, keywords, 5)
+    CE-->>O: Vec ContextItem
+    O->>B: PromptRequest (task + historical context)
+
+    Note over B: Brain reasons, decides to delegate
+    B->>O: DelegationRequest(task, agent)
+    O->>CE: record_decision(session_id, agent, action)
+    CE-->>O: decision_id
+    O->>CT: log_delegation(brain, worker, task)
+
+    O->>W: Spawn in worktree
+    Note over W: Worker executes task
+
+    W-->>O: DelegationResult(status, artifacts)
+    O->>CE: record_observation(session_id, decision_id, content, artifacts)
+    O->>CE: update_decision_outcome(decision_id, success)
+    O->>CT: update_delegation_end(id, status, diff_stats)
+
+    Note over O: Session ends
+    O->>CT: end_session(id, status, duration, cost)
+</pre>
+
+<h2>3. Data Model</h2>
+<pre class="mermaid">
+erDiagram
+    decisions ||--o{ observations : produces
+    entities ||--o{ relationships : source
+    entities ||--o{ relationships : target
+    observations }o..o{ entities : extracted_from
+
+    decisions {
+        TEXT id PK
+        TEXT session_id FK
+        TEXT agent
+        TEXT action
+        TEXT reasoning
+        TEXT created_at
+        TEXT outcome
+    }
+    observations {
+        TEXT id PK
+        TEXT session_id FK
+        TEXT decision_id FK
+        TEXT agent
+        TEXT content
+        TEXT artifacts_json
+        TEXT created_at
+    }
+    entities {
+        TEXT id PK
+        TEXT name
+        TEXT entity_type
+        TEXT valid_at
+        TEXT invalid_at
+        INTEGER mention_count
+    }
+    relationships {
+        TEXT id PK
+        TEXT source_entity FK
+        TEXT target_entity FK
+        TEXT rel_type
+        REAL weight
+        TEXT valid_at
+        TEXT invalid_at
+    }
+</pre>
+
+<h2>4. Context Assembly (Read Path)</h2>
+<pre class="mermaid">
+flowchart LR
+    T[Current Task] --> KW[Extract Keywords]
+    P[Project ID] --> Q1
+
+    KW --> Q1[DuckDB\nILIKE + recency]
+    Q1 --> J[JOIN observations]
+    J --> OUT[Top 5\nContextItems]
+
+    J --> GR[GRAPH_TABLE\ntraversal]
+    GR --> OUT
+
+    T --> EM[Embed task]
+    EM --> VS[lance_vector_search]
+    VS --> RRF[Reciprocal\nRank Fusion]
+    GR --> RRF --> OUT
+
+    OUT --> PR[Inject into\nbrain prompt]
+</pre>
+
+<h2>5. Module Structure</h2>
+<pre class="mermaid">
+graph TD
+    subgraph "spur-context crate"
+        LIB[lib.rs]
+        ENGINE[engine.rs\nContextEngine]
+        DB[db.rs\nSchema + Queries]
+        TYPES[types.rs\nDecision, Observation]
+        GRAPH[graph.rs\nPhase 2: Property Graph]
+        VECTOR[vector.rs\nPhase 3: Lance + Hybrid]
+    end
+
+    subgraph Dependencies
+        DUCKDB[duckdb crate\nbundled C FFI]
+        LANCEDB[lancedb crate\nnative Rust]
+        ARROW[arrow crate]
+    end
+
+    subgraph Consumers
+        CORE[spur-core\nOrchestrator]
+        MCPC[spur-mcp\nPhase 2+ tools]
+    end
+
+    LIB --> ENGINE & DB & TYPES & GRAPH & VECTOR
+    ENGINE --> DUCKDB
+    VECTOR --> LANCEDB & ARROW
+    CORE --> LIB
+    MCPC --> LIB
+</pre>
+
+</body>
+</html>
