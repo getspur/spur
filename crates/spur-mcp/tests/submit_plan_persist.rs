@@ -182,29 +182,26 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
         epic_id: None,
     };
 
-    /// A test sink that captures emitted event bodies.
-    struct CaptureSink(Arc<Mutex<Vec<SpurEvent>>>);
+    /// A test sink that captures emitted event bodies synchronously.
+    struct CaptureSink {
+        events: std::sync::Mutex<Vec<SpurEvent>>,
+    }
     impl McpEventSink for CaptureSink {
         fn emit(&self, body: SpurEventBody) {
-            let events = Arc::clone(&self.0);
-            // `emit` is sync; use blocking spawn to push.
-            tokio::spawn(async move {
-                events.lock().await.push(SpurEvent::now(body));
-            });
+            self.events.lock().unwrap().push(SpurEvent::now(body));
         }
     }
 
-    let captured: Arc<Mutex<Vec<SpurEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink: Arc<dyn McpEventSink> = Arc::new(CaptureSink(Arc::clone(&captured)));
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
 
     let (dtx, _drx) = mpsc::channel(8);
 
-    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink)).await;
+    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref)).await;
 
-    // Give any spawned tasks a moment to complete.
-    tokio::task::yield_now().await;
-
-    let events = captured.lock().await;
+    let events = sink.events.lock().unwrap();
     let saw_completed = events.iter().any(|e| {
         matches!(
             &e.body,
