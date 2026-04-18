@@ -589,3 +589,46 @@ mod fence_state_hash_tests {
             "iteration order must not affect hash (must sort by id)");
     }
 }
+
+#[cfg(all(test, feature = "markdown"))]
+mod resolve_anchor_tests {
+    use super::*;
+    use crate::components::react_trace::types::ScrollAnchor;
+    use std::ops::Range;
+
+    fn ranges(slices: &[Option<Range<usize>>]) -> Vec<Option<Range<usize>>> {
+        slices.to_vec()
+    }
+
+    #[test]
+    fn following_resolves_to_max_offset() {
+        let ranges = ranges(&[Some(0..10), Some(0..10), Some(0..10)]);
+        let entry_starts = vec![0, 1, 2];
+        let row = resolve_anchor(
+            &ScrollAnchor::Following, &ranges, &entry_starts, 3, 1);
+        assert_eq!(row, 2, "Following clamps to total - visible_height");
+    }
+
+    #[test]
+    fn byte_anchor_resolves_to_containing_row() {
+        // Two entries: entry 0 spans rows 0..2 with bytes 0..50; entry 1
+        // spans rows 2..4 with bytes 0..30.
+        let ranges = ranges(&[
+            Some(0..50), Some(0..50),
+            Some(0..30), Some(0..30),
+        ]);
+        let entry_starts = vec![0, 2];
+        let anchor = ScrollAnchor::Byte { entry_idx: 1, byte_offset: 15 };
+        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 4, 2);
+        assert_eq!(row, 2, "byte 15 in entry 1 lands on its first row");
+    }
+
+    #[test]
+    fn evicted_entry_snaps_to_zero() {
+        let ranges = ranges(&[Some(0..10)]);
+        let entry_starts = vec![0];
+        let anchor = ScrollAnchor::Byte { entry_idx: 99, byte_offset: 0 };
+        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 1, 1);
+        assert_eq!(row, 0, "anchor pointing at evicted entry snaps to 0");
+    }
+}
