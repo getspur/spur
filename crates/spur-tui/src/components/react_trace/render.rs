@@ -44,6 +44,10 @@ pub(in crate::components) struct VirtualRowCacheEntry {
 /// `Row` returns `entry_row_starts[entry_idx] + min(row_within_entry, entry_height - 1)`,
 /// guaranteeing the result lies within the entry's row range. If the entry
 /// was evicted (entry_idx out of range), snaps to 0.
+///
+/// `_byte_ranges` is retained for caller compatibility (`render_with_ctx`
+/// still threads it) but is not consulted by the Row arm. It can be
+/// dropped in a follow-up cleanup once callers stop passing it.
 #[cfg(feature = "markdown")]
 pub(crate) fn resolve_anchor(
     anchor: &crate::components::react_trace::types::ScrollAnchor,

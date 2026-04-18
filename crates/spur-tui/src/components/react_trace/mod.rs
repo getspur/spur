@@ -63,8 +63,6 @@ pub struct ReactTrace {
 /// values smaller than `entry_row_starts[0]`, `within` would underflow
 /// in release mode; callers must clamp inputs.
 ///
-/// Used by `shift_anchor_by` in Task 4.
-#[allow(dead_code)]
 #[cfg(feature = "markdown")]
 fn row_to_anchor(row: usize, entry_row_starts: &[usize]) -> (usize, usize) {
     if entry_row_starts.is_empty() {
@@ -355,8 +353,7 @@ impl ReactTrace {
         )
     }
 
-    /// Move viewport up by one row by re-anchoring to the byte position
-    /// of the previous row.
+    /// Move viewport up by one row by re-anchoring to the previous row.
     pub fn scroll_up(&mut self) {
         self.shift_anchor_by(-1);
     }
