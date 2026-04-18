@@ -331,6 +331,14 @@ impl MarkdownStream {
         &self.raw_text
     }
 
+    /// Look up the state-aware placeholder line for a previously-registered
+    /// fence id. Returns `None` for ids not in `fence_placeholders`.
+    /// Used by `build_display_lines` (secondary render path) to render a
+    /// placeholder line without constructing a `FenceRender` HashMap.
+    pub fn fence_placeholder_for(&self, id: MermaidId) -> Option<Line<'static>> {
+        self.fence_placeholders.get(&id).cloned()
+    }
+
     /// Rebuild `cached_lines` from `raw_text`.
     fn rebuild(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         // ── Stage 1: pre-scan raw_text for closed ```mermaid fences ───────
