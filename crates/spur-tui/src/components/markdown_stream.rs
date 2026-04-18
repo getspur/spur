@@ -339,6 +339,120 @@ impl MarkdownStream {
         self.fence_placeholders.get(&id).cloned()
     }
 
+    /// Stages 2-5 of rebuild: given a prefix of raw_text and the closed
+    /// mermaid fences discovered within that prefix, produce cached_items,
+    /// fence_placeholders, and the list of NEW fences (not previously
+    /// known). Caller is responsible for passing a consistent (prefix,
+    /// discovered_fences) pair — `scan_authoritative(&self.raw_text[..X])`
+    /// semantics, with X = prefix.len().
+    fn build_items_for(
+        &mut self,
+        prefix: &str,
+        discovered_fences: Vec<(std::ops::Range<usize>, String)>,
+        states: &StateLookup<'_>,
+    ) -> (
+        Vec<StreamItem>,
+        std::collections::HashMap<MermaidId, Line<'static>>,
+        Vec<FenceRef>,
+        Vec<FenceRef>, // refreshed (to be stored as self.known_fences)
+    ) {
+        let mut new_fences: Vec<FenceRef> = Vec::new();
+        let mut refreshed: Vec<FenceRef> = Vec::with_capacity(discovered_fences.len());
+        for (range, code) in discovered_fences {
+            let existing = self
+                .known_fences
+                .iter()
+                .find(|f| f.byte_range == range)
+                .cloned();
+            match existing {
+                Some(f) => refreshed.push(f),
+                None => {
+                    let id = MermaidId(self.next_fence_id);
+                    self.next_fence_id += 1;
+                    let f = FenceRef { id, byte_range: range, code };
+                    new_fences.push(f.clone());
+                    refreshed.push(f);
+                }
+            }
+        }
+
+        // Build transformed input from the prefix + sentinels.
+        let transformed = {
+            let mut out = String::with_capacity(prefix.len());
+            let mut cursor = 0usize;
+            for f in &refreshed {
+                if f.byte_range.start > cursor {
+                    out.push_str(&prefix[cursor..f.byte_range.start]);
+                }
+                out.push_str(&format!("\n\u{0000}MERMAID:{}\u{0000}\n", f.id.0));
+                cursor = f.byte_range.end;
+            }
+            if cursor < prefix.len() {
+                out.push_str(&prefix[cursor..]);
+            }
+            out
+        };
+
+        let transformed = inject_hard_breaks_in_tables(&transformed);
+
+        if transformed.is_empty() {
+            return (Vec::new(), std::collections::HashMap::new(), new_fences, refreshed);
+        }
+
+        let text = tui_markdown::from_str(&transformed);
+        let parsed_lines: Vec<ratatui::text::Line<'static>> = text
+            .lines
+            .into_iter()
+            .map(|line| {
+                let spans: Vec<ratatui::text::Span<'static>> =
+                    line.spans.into_iter().map(convert_span).collect();
+                let mut out = ratatui::text::Line::from(spans);
+                out.style = convert_style(line.style);
+                out.alignment = line.alignment.map(convert_alignment);
+                out
+            })
+            .collect();
+
+        let mut items: Vec<StreamItem> = Vec::new();
+        let mut current_text: Vec<ratatui::text::Line<'static>> = Vec::new();
+        let mut placeholders: std::collections::HashMap<MermaidId, Line<'static>> =
+            std::collections::HashMap::new();
+
+        for line in parsed_lines {
+            let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let trimmed = raw.trim();
+            if let Some(rest) = trimmed
+                .strip_prefix('\u{0000}')
+                .and_then(|s| s.strip_suffix('\u{0000}'))
+                .and_then(|s| s.strip_prefix("MERMAID:"))
+            {
+                if !current_text.is_empty() {
+                    items.push(StreamItem::Text(std::mem::take(&mut current_text)));
+                }
+                let id_num: u64 = rest.parse().unwrap_or(0);
+                let id = MermaidId(id_num);
+
+                use super::mermaid::FenceRender;
+                let render = if states.is_err(id) {
+                    FenceRender::Error
+                } else if states.is_pending(id) {
+                    FenceRender::Pending
+                } else {
+                    FenceRender::Ready(1)
+                };
+                placeholders.insert(id, super::mermaid::fence_placeholder_line(id, render));
+                items.push(StreamItem::Fence(id));
+            } else {
+                current_text.push(line);
+            }
+        }
+        if !current_text.is_empty() {
+            items.push(StreamItem::Text(current_text));
+        }
+
+        (items, placeholders, new_fences, refreshed)
+    }
+
     /// Rebuild `cached_lines` from `raw_text`.
     fn rebuild(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         // ── Stage 1: pre-scan raw_text for closed ```mermaid fences ───────
