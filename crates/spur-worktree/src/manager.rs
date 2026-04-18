@@ -201,20 +201,40 @@ impl WorktreeManager {
         })
     }
 
-    /// Collect the diff of uncommitted changes in a worker's worktree.
-    /// Returns `None` if there are no changes.
-    pub async fn collect_diff(&self, session_id: &SessionId) -> Result<Option<String>> {
+    /// Collect the diff of the worker's task. Returns:
+    /// - `(Some(diff), "HEAD")` if the worker left uncommitted changes.
+    /// - `(Some(diff), "base_commit..HEAD")` if the worker already committed
+    ///   (HEAD-relative diff is empty, but base..HEAD has content).
+    /// - `(None, "base_commit..HEAD")` if the worker produced no changes at
+    ///   all. Caller distinguishes "no changes" from "collection failed" via
+    ///   the returned basis.
+    pub async fn collect_diff(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(Option<String>, &'static str)> {
         let info = self.lookup(session_id)?;
 
-        let diff = self
+        // First: HEAD-relative (uncommitted changes).
+        let head_diff = self
             .run_git(&["diff", "HEAD"], Some(&info.path))
             .await
-            .context("failed to collect diff")?;
+            .context("failed to collect HEAD-relative diff")?;
 
-        if diff.is_empty() {
-            Ok(None)
+        if !head_diff.is_empty() {
+            return Ok((Some(head_diff), "HEAD"));
+        }
+
+        // Fallback: base_commit..HEAD (worker self-committed).
+        let base_spec = format!("{}..HEAD", info.base_commit);
+        let base_diff = self
+            .run_git(&["diff", &base_spec], Some(&info.path))
+            .await
+            .context("failed to collect base..HEAD diff")?;
+
+        if base_diff.is_empty() {
+            Ok((None, "base_commit..HEAD"))
         } else {
-            Ok(Some(diff))
+            Ok((Some(base_diff), "base_commit..HEAD"))
         }
     }
 
@@ -452,5 +472,145 @@ impl WorktreeManager {
         }
 
         Ok(removed)
+    }
+}
+
+#[cfg(test)]
+impl WorktreeManager {
+    pub fn new_for_test(repo_root: std::path::PathBuf) -> Self {
+        Self {
+            repo_root,
+            active: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn register_for_test(
+        &mut self,
+        session_id: SessionId,
+        path: std::path::PathBuf,
+        branch: String,
+        base_commit: String,
+        agent: String,
+    ) {
+        let key = session_id.to_string();
+        self.active.insert(
+            key,
+            WorktreeInfo {
+                session_id,
+                path,
+                branch,
+                base_commit,
+                agent,
+                created_at: std::time::Instant::now(),
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_option_e {
+    use super::*;
+
+    /// Run a sequence of git commands in a dir. Panics on first error —
+    /// test scaffolding only.
+    async fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .await
+            .expect("git command failed to spawn");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Build a minimal repo with one "base" commit, return base_sha.
+    async fn seed_base_repo(tmp: &std::path::Path) -> String {
+        git(tmp, &["init", "-q", "-b", "main"]).await;
+        git(tmp, &["config", "user.email", "test@example.com"]).await;
+        git(tmp, &["config", "user.name", "Test"]).await;
+        tokio::fs::write(tmp.join("a.txt"), "base\n").await.unwrap();
+        git(tmp, &["add", "a.txt"]).await;
+        git(tmp, &["commit", "-q", "-m", "base"]).await;
+        git(tmp, &["rev-parse", "HEAD"]).await
+    }
+
+    #[tokio::test]
+    async fn collect_diff_falls_back_to_base_when_head_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base_sha = seed_base_repo(tmp.path()).await;
+
+        // Worker commits their change (the scenario that broke bd-1mh.2).
+        tokio::fs::write(tmp.path().join("a.txt"), "worker change\n").await.unwrap();
+        git(tmp.path(), &["add", "a.txt"]).await;
+        git(tmp.path(), &["commit", "-q", "-m", "worker commit"]).await;
+
+        // Working tree is clean; `git diff HEAD` is empty.
+        // Fallback to base_commit..HEAD should capture the worker's commit.
+        let sid = SessionId("s1".to_string());
+        let mut manager = WorktreeManager::new_for_test(tmp.path().to_path_buf());
+        manager.register_for_test(
+            sid.clone(),
+            tmp.path().to_path_buf(),
+            "main".to_string(),
+            base_sha.clone(),
+            "test-agent".to_string(),
+        );
+
+        let (diff, basis) = manager.collect_diff(&sid).await.expect("collect_diff ok");
+        let diff = diff.expect("expected Some(diff) via fallback, got None");
+        assert!(diff.contains("worker change"), "diff should contain worker's change, got: {diff}");
+        assert_eq!(basis, "base_commit..HEAD");
+    }
+
+    #[tokio::test]
+    async fn collect_diff_returns_head_basis_when_uncommitted_changes_exist() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base_sha = seed_base_repo(tmp.path()).await;
+
+        // Worker leaves uncommitted changes (NOT the self-commit scenario).
+        tokio::fs::write(tmp.path().join("a.txt"), "uncommitted\n").await.unwrap();
+
+        let sid = SessionId("s2".to_string());
+        let mut manager = WorktreeManager::new_for_test(tmp.path().to_path_buf());
+        manager.register_for_test(
+            sid.clone(),
+            tmp.path().to_path_buf(),
+            "main".to_string(),
+            base_sha.clone(),
+            "test-agent".to_string(),
+        );
+
+        let (diff, basis) = manager.collect_diff(&sid).await.expect("collect_diff ok");
+        let diff = diff.expect("expected Some(diff) from HEAD path");
+        assert!(diff.contains("uncommitted"), "diff should capture uncommitted, got: {diff}");
+        assert_eq!(basis, "HEAD");
+    }
+
+    #[tokio::test]
+    async fn collect_diff_returns_none_when_no_changes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base_sha = seed_base_repo(tmp.path()).await;
+
+        // No changes.
+        let sid = SessionId("s3".to_string());
+        let mut manager = WorktreeManager::new_for_test(tmp.path().to_path_buf());
+        manager.register_for_test(
+            sid.clone(),
+            tmp.path().to_path_buf(),
+            "main".to_string(),
+            base_sha.clone(),
+            "test-agent".to_string(),
+        );
+
+        let (diff, basis) = manager.collect_diff(&sid).await.expect("collect_diff ok");
+        assert!(diff.is_none(), "expected None for no-change scenario");
+        // Basis is still the attempted fallback.
+        assert_eq!(basis, "base_commit..HEAD");
     }
 }

@@ -3684,11 +3684,14 @@ async fn run_one_worker_attempt(
 
     let _ = connection.shutdown().await;
 
-    // 4. Collect diff.
-    let diff = worktrees
+    // 4. Collect diff. `basis` is either "HEAD" (uncommitted) or
+    // "<base>..HEAD" (worker self-committed). We need it to compute the
+    // matching diff_summary with the SAME git range — otherwise stats and
+    // raw text disagree.
+    let (diff, diff_basis) = worktrees
         .collect_diff(&worker_session)
         .await
-        .unwrap_or(None);
+        .unwrap_or((None, "HEAD"));
 
     // 5. Capture worktree path for execute_delegation's post-gate cleanup.
     // Commit and removal are deferred — see function doc.
@@ -3698,11 +3701,21 @@ async fn run_one_worker_attempt(
         .map(|i| i.path.clone())
         .unwrap_or_default();
 
-    // Compute structured diff stats alongside the raw diff text.
-    // `None` if numstat errors OR reports zero files — non-fatal,
-    // we still return the raw diff.
+    // Compute structured diff stats on the SAME basis as the raw diff.
+    // When collect_diff returned base..HEAD, we need to resolve the placeholder
+    // to the real spec — fetch the base_commit from worktrees.
     let diff_summary = if diff.is_some() {
-        build_diff_summary(&worktree_path)
+        let basis_spec = if diff_basis == "base_commit..HEAD" {
+            // Resolve the placeholder with the actual base SHA.
+            worktrees
+                .active
+                .get(&worker_session.to_string())
+                .map(|i| format!("{}..HEAD", i.base_commit))
+                .unwrap_or_else(|| "HEAD".to_string())
+        } else {
+            "HEAD".to_string()
+        };
+        build_diff_summary(&worktree_path, &basis_spec)
             .await
             .ok()
             .filter(|s| s.files_changed > 0)
@@ -3812,7 +3825,11 @@ fn truncate_summary_env_default(text: &str) -> String {
     truncate_summary(text, cap)
 }
 
-/// Compute a `DiffSummary` for a worktree via `git diff --numstat`.
+/// Compute a `DiffSummary` for a worktree via `git diff --numstat <basis>`.
+///
+/// `basis` must match what `collect_diff` used for the raw diff — either
+/// "HEAD" or "<base_commit>..HEAD" (rendered with the actual SHA). Otherwise
+/// the raw diff text and the structured summary disagree.
 ///
 /// Preferred over regex-parsing the unified diff text because numstat
 /// emits tab-separated stats directly and handles binary files (`-\t-\tpath`),
@@ -3821,13 +3838,14 @@ fn truncate_summary_env_default(text: &str) -> String {
 /// Cost: ~10-100ms. Same budget as `collect_diff`.
 async fn build_diff_summary(
     worktree_path: &std::path::Path,
+    basis: &str,
 ) -> anyhow::Result<spur_acp::DiffSummary> {
     use tokio::process::Command;
 
     let output = Command::new("git")
         .arg("diff")
         .arg("--numstat")
-        .arg("HEAD")
+        .arg(basis)
         .current_dir(worktree_path)
         .output()
         .await?;
@@ -4432,7 +4450,7 @@ mod build_diff_summary_tests {
     #[tokio::test]
     async fn clean_worktree_returns_zero_summary() {
         let dir = init_repo();
-        let summary: DiffSummary = build_diff_summary(dir.path()).await.unwrap();
+        let summary: DiffSummary = build_diff_summary(dir.path(), "HEAD").await.unwrap();
         assert_eq!(summary.files_changed, 0);
         assert_eq!(summary.insertions, 0);
         assert_eq!(summary.deletions, 0);
@@ -4443,7 +4461,7 @@ mod build_diff_summary_tests {
     async fn modified_file_produces_expected_stats() {
         let dir = init_repo();
         std::fs::write(dir.path().join("a.txt"), "hello\nworld\nnew line\n").unwrap();
-        let summary = build_diff_summary(dir.path()).await.unwrap();
+        let summary = build_diff_summary(dir.path(), "HEAD").await.unwrap();
         assert_eq!(summary.files_changed, 1);
         assert_eq!(summary.insertions, 1);
         assert_eq!(summary.deletions, 0);
@@ -4466,7 +4484,7 @@ mod build_diff_summary_tests {
             .output()
             .unwrap();
         std::fs::write(dir.path().join("b.bin"), [9u8, 8, 7]).unwrap();
-        let summary = build_diff_summary(dir.path()).await.unwrap();
+        let summary = build_diff_summary(dir.path(), "HEAD").await.unwrap();
         assert_eq!(summary.files_changed, 1);
         assert_eq!(
             summary.insertions, 0,
@@ -4501,7 +4519,7 @@ mod build_diff_summary_tests {
             .output()
             .unwrap();
 
-        let summary = build_diff_summary(path).await.unwrap();
+        let summary = build_diff_summary(path, "HEAD").await.unwrap();
         // Either git reports a rename (1 entry, path=b.txt) OR a delete+add pair
         // (2 entries, both a.txt and b.txt). Both are acceptable — the key
         // invariant is: no path contains " => " after our rename-stripping.
