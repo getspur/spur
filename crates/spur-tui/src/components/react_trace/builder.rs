@@ -548,21 +548,6 @@ impl ReactTrace {
         };
 
         let mut i = from;
-        // When starting mid-trace in collapsed mode, skip an Observe that
-        // was consumed by the preceding Act.
-        if collapsed && i > 0 {
-            if matches!(
-                &self.entries.get(i).map(|e| &e.kind),
-                Some(TraceKind::Observe { payload: Some(_) })
-            ) {
-                if matches!(
-                    &self.entries.get(i - 1).map(|e| &e.kind),
-                    Some(TraceKind::Act { .. })
-                ) {
-                    i += 1;
-                }
-            }
-        }
         while i < self.entries.len() {
             entry_row_starts[i - from] = rows.len();
             let entry = &self.entries[i];
@@ -577,6 +562,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
                     ..
                 } = &entry.kind
                 {
@@ -590,26 +576,46 @@ impl ReactTrace {
                         ),
                         Span::raw("  "),
                     ];
-                    let consumed = if let Some(TraceKind::Observe { payload: Some(p) }) =
-                        self.entries.get(i + 1).map(|e| &e.kind)
-                    {
-                        let (obs_glyph, obs_color, stats) = observe_compact(p);
-                        spans.push(Span::styled(
-                            obs_glyph.to_string(),
-                            Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
-                        ));
-                        if !stats.is_empty() {
-                            spans.push(Span::raw(" "));
-                            spans.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+                    match status {
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {
+                            spans.push(Span::styled(
+                                spinner_frame.to_string(),
+                                Style::default().fg(Color::Yellow),
+                            ));
                         }
-                        2
-                    } else {
-                        spans.push(Span::styled(
-                            spinner_frame.to_string(),
-                            Style::default().fg(Color::Yellow),
-                        ));
-                        1
-                    };
+                        ActStatus::Completed(Some(p)) => {
+                            let (obs_glyph, obs_color, stats) = observe_compact(p);
+                            spans.push(Span::styled(
+                                obs_glyph.to_string(),
+                                Style::default()
+                                    .fg(obs_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                            if !stats.is_empty() {
+                                spans.push(Span::raw(" "));
+                                spans.push(Span::styled(
+                                    stats,
+                                    Style::default().fg(Color::DarkGray),
+                                ));
+                            }
+                        }
+                        ActStatus::Completed(None) => {
+                            spans.push(Span::styled(
+                                "✓".to_string(),
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                        ActStatus::Failed(_) => {
+                            spans.push(Span::styled(
+                                "✗".to_string(),
+                                Style::default()
+                                    .fg(Color::Red)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                    }
                     push_wrapped(
                         &mut rows,
                         &mut byte_ranges,
@@ -617,10 +623,7 @@ impl ReactTrace {
                         Line::from(spans),
                     );
                     push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
-                    if consumed == 2 && i + 1 >= from {
-                        entry_row_starts[i + 1 - from] = rows.len();
-                    }
-                    i += consumed;
+                    i += 1;
                     continue;
                 }
             }
@@ -741,6 +744,7 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
                     ..
                 } => {
                     let (glyph, glyph_color) = family_glyph(*family);
@@ -777,6 +781,82 @@ impl ReactTrace {
                         for line in input_display_lines(input) {
                             push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line);
                         }
+                    }
+                    match status {
+                        ActStatus::Completed(Some(p)) => {
+                            let (og, oc) = outcome_glyph(p);
+                            let verb = observe_verb(p);
+                            push_wrapped(
+                                &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
+                                Line::from(vec![
+                                    ts_span.clone(),
+                                    Span::styled(
+                                        format!("{} {}", og, verb),
+                                        Style::default()
+                                            .fg(oc)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ]),
+                            );
+                            for l in observe_payload_lines(p, collapsed) {
+                                push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), l);
+                            }
+                        }
+                        ActStatus::Failed(Some(p)) => {
+                            let verb = observe_verb(p);
+                            push_wrapped(
+                                &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
+                                Line::from(vec![
+                                    ts_span.clone(),
+                                    Span::styled(
+                                        format!("✗ {}", verb),
+                                        Style::default()
+                                            .fg(Color::Red)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ]),
+                            );
+                            for l in observe_payload_lines(p, collapsed) {
+                                push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), l);
+                            }
+                        }
+                        ActStatus::Completed(None) => {
+                            push_wrapped(
+                                &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
+                                Line::from(vec![
+                                    ts_span.clone(),
+                                    Span::styled(
+                                        "✓ done".to_string(),
+                                        Style::default()
+                                            .fg(Color::Green)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ]),
+                            );
+                        }
+                        ActStatus::Failed(None) => {
+                            push_wrapped(
+                                &mut rows,
+                                &mut byte_ranges,
+                                content_range.clone(),
+                                Line::from(vec![
+                                    ts_span.clone(),
+                                    Span::styled(
+                                        "✗ failed".to_string(),
+                                        Style::default()
+                                            .fg(Color::Red)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ]),
+                            );
+                        }
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
                     }
                 }
 
