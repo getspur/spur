@@ -291,23 +291,6 @@ fn create_pr_def() -> ToolDefinition {
     }
 }
 
-fn report_progress_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "report_progress".into(),
-        description: "Report progress to the orchestrator (fire-and-forget).".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "Progress message"
-                }
-            },
-            "required": ["message"]
-        }),
-    }
-}
-
 fn get_session_cost_def() -> ToolDefinition {
     ToolDefinition {
         name: "get_session_cost".into(),
@@ -803,7 +786,6 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         create_issue_def(),
         add_dependency_def(),
         create_pr_def(),
-        report_progress_def(),
         get_session_cost_def(),
         graph_triage_def(),
         graph_plan_def(),
