@@ -1289,6 +1289,40 @@ impl McpCallbackServer {
             return JsonRpcResponse::invalid_params(id, e);
         }
 
+        // ─── Persist-as-epic extraction (T2.1) ─────────────────────────
+        let persist_as_epic = args
+            .get("persist_as_epic")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let epic_title = args
+            .get("epic_title")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let epic_body = args
+            .get("epic_body")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        if persist_as_epic {
+            if epic_title.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    "submit_plan: epic_title is required when persist_as_epic is true",
+                );
+            }
+            let pm_source = self.pm_service.as_deref().map(|p| p.source_str());
+            if pm_source != Some("beads") {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!(
+                        "submit_plan: persist_as_epic requires a beads PM backend (configured backend: {})",
+                        pm_source.unwrap_or("none"),
+                    ),
+                );
+            }
+        }
+
         let plan_id = uuid::Uuid::new_v4().to_string();
         let entries: Vec<crate::plan::PlanTaskEntry> = tasks
             .into_iter()
