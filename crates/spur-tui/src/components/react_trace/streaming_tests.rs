@@ -1027,7 +1027,6 @@ fn phase2_f3_anchor_survives_eviction() {
 /// actually advanced. With sub-entry byte granularity broken, the
 /// rendered offset will be 0 (entry start) regardless of scroll input.
 #[test]
-#[ignore = "L9 audit: confirmed production bug, awaiting sub-entry byte granularity fix"]
 fn sim_render_offset_reflects_scroll_input() {
     let mut trace = ReactTrace::new_for_tests();
     let mut payload = String::new();
@@ -1083,7 +1082,6 @@ fn sim_render_offset_reflects_scroll_input() {
 /// Concretely: scrolling up by 1 from the middle of a long single
 /// AgentMessage entry should move the viewport up by exactly 1 row.
 /// With entry-level granularity, it instead snaps to the entry's start.
-#[ignore = "L9 audit: confirmed production bug, awaiting sub-entry byte granularity fix"]
 #[test]
 fn sim_sub_entry_scroll_resolution() {
     use crate::components::react_trace::types::ScrollAnchor;
@@ -1161,7 +1159,6 @@ fn sim_sub_entry_scroll_resolution() {
 /// (Ready fences expand to many ImageRows). The two row counts differ,
 /// so scroll computations are based on a different layout than painted.
 #[test]
-#[ignore = "L9 audit: confirmed production bug, awaiting fence-state-aware shift_anchor_by"]
 fn sim_mermaid_state_mismatch_in_shift() {
     use crate::components::mermaid::{FenceRender, MermaidId};
 
@@ -1215,7 +1212,6 @@ fn sim_mermaid_state_mismatch_in_shift() {
 /// byte anchoring, every page_up snaps to the entry's start, so two
 /// consecutive page_ups produce the same anchor.
 #[test]
-#[ignore = "L9 audit: confirmed production bug, awaiting sub-entry byte granularity fix"]
 fn sim_page_up_walks_within_long_message() {
     use crate::components::react_trace::types::ScrollAnchor;
     let mut trace = ReactTrace::new_for_tests();
