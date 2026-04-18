@@ -862,3 +862,248 @@ fn phase2_f3_anchor_survives_eviction() {
         }
     }
 }
+
+// ─── L9 POST-MERGE PRODUCTION-PATH AUDITS ────────────────────────────
+//
+// SIM-9..12 exercise the REAL ScrollAnchor + resolve_anchor +
+// shift_anchor_by code paths (not the SIM-3/SIM-7 text-match proxy).
+// They test invariants the design claims but the v1 implementation may
+// not actually achieve.
+
+/// SIM-13 — Round-trip: shift_anchor_by sets target row, render reads it back.
+///
+/// In a 50-paragraph single AgentMessage, scroll down by 5, then read
+/// the resolved row index from the render path. Verify the row index
+/// actually advanced. With sub-entry byte granularity broken, the
+/// rendered offset will be 0 (entry start) regardless of scroll input.
+#[test]
+#[ignore = "L9 audit: confirmed production bug, awaiting sub-entry byte granularity fix"]
+fn sim_render_offset_reflects_scroll_input() {
+    let mut trace = ReactTrace::new_for_tests();
+    let mut payload = String::new();
+    for i in 0..50 {
+        payload.push_str(&format!("Para {}.\n\n", i));
+    }
+    trace.append_message(&payload, "claude", "10:00".into());
+    trace.force_flush_all(&StateLookup::empty());
+
+    let (rows_initial, entry_row_starts, byte_ranges) =
+        trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    trace.set_visible_height_for_tests(5);
+    let total = rows_initial.len();
+
+    trace.scroll_to_top();
+    let row0 = crate::components::react_trace::render::resolve_anchor(
+        &trace.anchor_for_tests(), &byte_ranges, &entry_row_starts, total, 5);
+    trace.scroll_down_by(5);
+    let row5 = crate::components::react_trace::render::resolve_anchor(
+        &trace.anchor_for_tests(), &byte_ranges, &entry_row_starts, total, 5);
+    eprintln!("SIM-13: rendered row at top={}, after scroll_down_by(5)={}", row0, row5);
+
+    assert!(row5 > row0,
+        "SIM-13: scroll_down_by(5) did not advance the rendered row index. \
+         row0={}, row5={}. Scroll within an entry is non-functional.", row0, row5);
+}
+
+/// SIM-9 — Sub-entry scroll resolution.
+///
+/// Hypothesis (production bug): v1 byte_ranges use entry-level granularity
+/// (every row in entry N has range `Some(0..entry_byte_len)`).
+/// Therefore `row_to_byte_anchor(target_row)` always returns
+/// `(entry_idx, 0)`. Storing this as the anchor and then resolving it
+/// snaps back to the FIRST row of the entry — losing the target row.
+///
+/// Concretely: scrolling up by 1 from the middle of a long single
+/// AgentMessage entry should move the viewport up by exactly 1 row.
+/// With entry-level granularity, it instead snaps to the entry's start.
+#[ignore = "L9 audit: confirmed production bug, awaiting sub-entry byte granularity fix"]
+#[test]
+fn sim_sub_entry_scroll_resolution() {
+    use crate::components::react_trace::types::ScrollAnchor;
+    let mut trace = ReactTrace::new_for_tests();
+
+    // Build a single AgentMessage with many lines of plain prose so it
+    // wraps to many rows at width 80. No paragraph boundaries — just
+    // newlines so each becomes one row after preview_items renders.
+    let mut payload = String::new();
+    for i in 0..30 {
+        payload.push_str(&format!("Paragraph {} content here.\n\n", i));
+    }
+    trace.append_message(&payload, "claude", "10:00".into());
+    trace.force_flush_all(&StateLookup::empty());
+
+    // Set a known visible height and width via a render snapshot.
+    let (rows_initial, _, _) = trace.build_virtual_rows_for_tests(
+        0, 80, &std::collections::HashMap::new(), None);
+    trace.set_visible_height_for_tests(5);
+
+    // Position viewport via scroll_to_top + scroll_down_by(N) so the
+    // anchor sits in the MIDDLE of the (single) AgentMessage entry.
+    trace.scroll_to_top();
+    let middle_target_row = rows_initial.len() / 2;
+    trace.scroll_down_by(middle_target_row);
+
+    let anchor_after_scroll_down = trace.anchor_for_tests();
+    eprintln!("SIM-9 after scroll_down_by({}): anchor = {:?}",
+        middle_target_row, anchor_after_scroll_down);
+
+    // Now scroll_up by 1. Expectation: viewport moves up exactly 1 row.
+    // Bug expectation: anchor snaps to entry start (entry_idx=0, byte_offset=0)
+    // because row_to_byte_anchor always returns byte_offset=0 in v1.
+    trace.scroll_up();
+    let anchor_after_scroll_up = trace.anchor_for_tests();
+    eprintln!("SIM-9 after scroll_up: anchor = {:?}", anchor_after_scroll_up);
+
+    // The two anchors should differ. If both are Byte{0,0}, the bug is real.
+    match (anchor_after_scroll_down, anchor_after_scroll_up) {
+        (ScrollAnchor::Byte { entry_idx: e1, byte_offset: b1 },
+         ScrollAnchor::Byte { entry_idx: e2, byte_offset: b2 }) => {
+            assert!(
+                e1 != e2 || b1 != b2,
+                "SIM-9: scroll_up did not change the anchor — sub-entry \
+                 scroll is broken. Both anchors are Byte{{{}, {}}}.",
+                e1, b1
+            );
+        }
+        _ => {
+            // Following or transition — that's a different (acceptable) outcome.
+        }
+    }
+}
+
+/// SIM-10 — Mermaid-state mismatch in shift_anchor_by.
+///
+/// Hypothesis (production bug): `shift_anchor_by` calls
+/// `build_virtual_rows(0, width, &HashMap::new(), None)` — the empty
+/// HashMap means all fences are treated as Pending (1 row per fence).
+/// But the actual render uses the registry's real FenceRender states
+/// (Ready fences expand to many ImageRows). The two row counts differ,
+/// so scroll computations are based on a different layout than painted.
+#[test]
+#[ignore = "L9 audit: confirmed production bug, awaiting fence-state-aware shift_anchor_by"]
+fn sim_mermaid_state_mismatch_in_shift() {
+    use crate::components::mermaid::{MermaidId, FenceRender};
+
+    let mut trace = ReactTrace::new_for_tests();
+    trace.append_message(
+        "Intro paragraph.\n\n```mermaid\ngraph LR\nA --> B\n```\n\nOutro paragraph.",
+        "claude", "10:00".into());
+    trace.force_flush_all(&StateLookup::empty());
+
+    // Real render-path fence states: Ready with explicit row height.
+    // FenceRender::Ready(6) means the image will render as 6 ImageRows.
+    let mut ready_states = std::collections::HashMap::new();
+    ready_states.insert(MermaidId(0), FenceRender::Ready(6));
+
+    let (rows_real, _, _) = trace.build_virtual_rows_for_tests(
+        0, 80, &ready_states, None);
+    eprintln!("SIM-10 real (Ready(6) state) row count: {}", rows_real.len());
+
+    // shift_anchor_by's computation: empty fence states (all Pending → 1 row each).
+    let (rows_shift, _, _) = trace.build_virtual_rows_for_tests(
+        0, 80, &std::collections::HashMap::new(), None);
+    eprintln!("SIM-10 shift (empty states) row count: {}", rows_shift.len());
+
+    let delta = (rows_real.len() as i64) - (rows_shift.len() as i64);
+    eprintln!("SIM-10 delta (real - shift): {}", delta);
+
+    // Non-zero delta confirms the layout mismatch hypothesis.
+    assert_eq!(
+        rows_real.len(), rows_shift.len(),
+        "SIM-10: shift_anchor_by computes row count using empty fence \
+         registry; the real render uses the actual registry. When fences \
+         are Ready, the layouts diverge and scroll math is wrong. \
+         delta = {} rows.", delta
+    );
+}
+
+/// SIM-11 — Page-up walking through a long single message.
+///
+/// Hypothesis (consequence of SIM-9): pressing page_up multiple times
+/// inside a long single AgentMessage entry should walk the viewport
+/// upward by `last_visible_height - 2` rows each time. With entry-level
+/// byte anchoring, every page_up snaps to the entry's start, so two
+/// consecutive page_ups produce the same anchor.
+#[test]
+#[ignore = "L9 audit: confirmed production bug, awaiting sub-entry byte granularity fix"]
+fn sim_page_up_walks_within_long_message() {
+    use crate::components::react_trace::types::ScrollAnchor;
+    let mut trace = ReactTrace::new_for_tests();
+
+    let mut payload = String::new();
+    for i in 0..50 {
+        payload.push_str(&format!("Paragraph {} content here.\n\n", i));
+    }
+    trace.append_message(&payload, "claude", "10:00".into());
+    trace.force_flush_all(&StateLookup::empty());
+
+    let _ = trace.build_virtual_rows_for_tests(
+        0, 80, &std::collections::HashMap::new(), None);
+    trace.set_visible_height_for_tests(10);
+
+    // Start from bottom (Following), page_up once to leave Following.
+    trace.scroll_to_bottom();
+    trace.page_up();
+    let anchor_after_first_pageup = trace.anchor_for_tests();
+    eprintln!("SIM-11 after 1st page_up: {:?}", anchor_after_first_pageup);
+
+    // Page_up again. Expectation: anchor moves further up.
+    // Bug: anchor stays the same (snapped to entry start).
+    trace.page_up();
+    let anchor_after_second_pageup = trace.anchor_for_tests();
+    eprintln!("SIM-11 after 2nd page_up: {:?}", anchor_after_second_pageup);
+
+    assert_ne!(
+        anchor_after_first_pageup, anchor_after_second_pageup,
+        "SIM-11: two consecutive page_ups within a long single entry \
+         produced the same anchor — sub-entry scroll is broken. \
+         Both anchors are {:?}", anchor_after_first_pageup
+    );
+}
+
+/// SIM-12 — Anchor preservation across appends to OTHER entries.
+///
+/// User scrolls up to entry 3 and pins their viewport there. New chunks
+/// arrive on entry 5 (the latest). The anchor must still point to
+/// entry 3's content after the new chunks land.
+#[test]
+fn sim_anchor_preserved_across_appends_to_later_entries() {
+    use crate::components::react_trace::types::ScrollAnchor;
+    let mut trace = ReactTrace::new_for_tests();
+
+    // Five entries from different agents (so each pushes a new entry).
+    for i in 0..5 {
+        trace.append_message(
+            &format!("Entry {} content.\n\nMore text.", i),
+            &format!("agent{}", i),
+            "10:00".into());
+    }
+    trace.force_flush_all(&StateLookup::empty());
+
+    // Anchor at entry 3, byte 0.
+    trace.set_visible_height_for_tests(3);
+    trace.scroll_to_top();
+    // We can't reliably scroll directly to entry 3 without knowing entry
+    // row starts, so set anchor manually via set_anchor_for_tests if it
+    // exists, or scroll_down_by some amount.
+    // Most tractable: scroll_down_by 6 (rough guess to land in entry 2 or 3).
+    trace.scroll_down_by(6);
+    let anchor_before = trace.anchor_for_tests();
+    eprintln!("SIM-12 anchor before new appends: {:?}", anchor_before);
+
+    // Append more content to entry 5's continuation (or push a new entry).
+    trace.append_message(
+        "More content arrives on the latest entry.",
+        "agent5", "10:00".into());
+
+    let anchor_after = trace.anchor_for_tests();
+    eprintln!("SIM-12 anchor after new appends: {:?}", anchor_after);
+
+    // Anchor should be unchanged — appending to LATER entries must not
+    // shift the user's reading position.
+    assert_eq!(
+        anchor_before, anchor_after,
+        "SIM-12: appending to a later entry shifted the anchor. \
+         User's reading position is not preserved."
+    );
+}
