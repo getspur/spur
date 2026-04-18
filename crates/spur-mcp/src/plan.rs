@@ -2420,10 +2420,9 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("warnings array");
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.as_str().is_some_and(|s| s.contains("auto-rejected")
-                    && s.contains("MAX_ATTEMPTS"))),
+            warnings.iter().any(|w| w
+                .as_str()
+                .is_some_and(|s| s.contains("auto-rejected") && s.contains("MAX_ATTEMPTS"))),
             "expected auto-reject warning, got {warnings:?}"
         );
 

@@ -1190,16 +1190,14 @@ impl View for SessionDetailView {
                         use spur_acp::adapter::{self, ToolInputDisplay};
                         let kind = self.agent_kind();
                         let meta = spur_acp::adapter::extract_tool_meta(tc, kind);
-                        let display_name =
-                            meta.tool_name.as_deref().unwrap_or(tc.title.as_str());
+                        let display_name = meta.tool_name.as_deref().unwrap_or(tc.title.as_str());
                         let depth = meta
                             .parent_tool_use_id
                             .as_ref()
                             .and_then(|pid| self.tool_depth.get(pid).copied())
                             .map(|d| d.saturating_add(1).min(8))
                             .unwrap_or(0);
-                        self.tool_depth
-                            .insert(tc.tool_call_id.0.to_string(), depth);
+                        self.tool_depth.insert(tc.tool_call_id.0.to_string(), depth);
                         let indent = "  ".repeat(depth as usize);
                         let tool = format!("{}{}", indent, display_name);
                         let family = adapter::classify_tool(tc, kind);
@@ -1235,8 +1233,7 @@ impl View for SessionDetailView {
                         if let Some((idx, act_entry)) =
                             self.react_trace.find_act_by_id_mut(&tcu.tool_call_id)
                         {
-                            let new_status = if let TraceKind::Act { status, .. } =
-                                &act_entry.kind
+                            let new_status = if let TraceKind::Act { status, .. } = &act_entry.kind
                             {
                                 crate::components::react_trace::merge_status(
                                     status,
@@ -1257,15 +1254,13 @@ impl View for SessionDetailView {
                                 id = ?tcu.tool_call_id,
                                 "ToolCallUpdate before ToolCall; synthesizing Act"
                             );
-                            let tool = tcu
-                                .fields
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| "unknown".into());
+                            let tool = tcu.fields.title.clone().unwrap_or_else(|| "unknown".into());
                             let family = spur_acp::adapter::ToolFamily::Unknown;
                             let input = spur_acp::adapter::ToolInputDisplay::Empty;
                             let status = crate::components::react_trace::map_initial_status(
-                                tcu.fields.status.unwrap_or(spur_acp::ToolCallStatus::Pending),
+                                tcu.fields
+                                    .status
+                                    .unwrap_or(spur_acp::ToolCallStatus::Pending),
                                 tcu.fields.raw_output.as_ref(),
                                 kind,
                             );
@@ -1885,7 +1880,6 @@ fn format_tool_args(input: &serde_json::Value) -> String {
     truncate_str(&s, 80)
 }
 
-
 /// Truncate a string to max_len chars, respecting UTF-8 boundaries.
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
@@ -1897,7 +1891,6 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
     format!("{}...", &s[..end])
 }
-
 
 #[cfg(all(test, feature = "markdown"))]
 mod invalidate_protocols_tests {

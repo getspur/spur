@@ -14,11 +14,11 @@ pub fn spawn_license_runtime(license: SpurLicense, funnel: FunnelHandle) -> Join
         emit_snapshot(&funnel, license.current_state());
 
         let policy = license.refresh_policy();
-        
+
         // Track the current delays, allowing them to exponentially backoff
         let mut current_validate_delay = policy.validate_interval;
         let mut current_heartbeat_delay = policy.heartbeat_interval;
-        
+
         let mut validate_sleep = Box::pin(tokio::time::sleep(current_validate_delay));
         let mut heartbeat_sleep = Box::pin(tokio::time::sleep(current_heartbeat_delay));
         let mut updates = license.subscribe();

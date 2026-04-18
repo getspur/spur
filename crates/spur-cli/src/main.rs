@@ -450,7 +450,8 @@ async fn main() -> Result<()> {
             };
             let config_arc = std::sync::Arc::new(config.clone());
             let license = SpurLicense::from_env_or_disabled();
-            let initial_license_state = spur_core::license_runtime::to_event_state(license.current_state());
+            let initial_license_state =
+                spur_core::license_runtime::to_event_state(license.current_state());
 
             // Create PmService (optional — returns None if no backend available)
             let pm_service = spur_pm::PmService::try_new(

@@ -64,9 +64,7 @@ impl ReactTrace {
                             let (obs_glyph, obs_color, stats) = observe_compact(p);
                             spans.push(Span::styled(
                                 obs_glyph.to_string(),
-                                Style::default()
-                                    .fg(obs_color)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
                             ));
                             if !stats.is_empty() {
                                 spans.push(Span::raw(" "));
@@ -87,9 +85,7 @@ impl ReactTrace {
                         ActStatus::Failed(_) => {
                             spans.push(Span::styled(
                                 "✗".to_string(),
-                                Style::default()
-                                    .fg(Color::Red)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                             ));
                         }
                     }
@@ -208,9 +204,7 @@ impl ReactTrace {
                                 ts_span.clone(),
                                 Span::styled(
                                     format!("{} {}", og, verb),
-                                    Style::default()
-                                        .fg(oc)
-                                        .add_modifier(Modifier::BOLD),
+                                    Style::default().fg(oc).add_modifier(Modifier::BOLD),
                                 ),
                             ]));
                             lines.extend(observe_payload_lines(p, collapsed));
@@ -221,9 +215,7 @@ impl ReactTrace {
                                 ts_span.clone(),
                                 Span::styled(
                                     format!("✗ {}", verb),
-                                    Style::default()
-                                        .fg(Color::Red)
-                                        .add_modifier(Modifier::BOLD),
+                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                                 ),
                             ]));
                             lines.extend(observe_payload_lines(p, collapsed));
@@ -244,9 +236,7 @@ impl ReactTrace {
                                 ts_span.clone(),
                                 Span::styled(
                                     "✗ failed".to_string(),
-                                    Style::default()
-                                        .fg(Color::Red)
-                                        .add_modifier(Modifier::BOLD),
+                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                                 ),
                             ]));
                         }
@@ -587,9 +577,7 @@ impl ReactTrace {
                             let (obs_glyph, obs_color, stats) = observe_compact(p);
                             spans.push(Span::styled(
                                 obs_glyph.to_string(),
-                                Style::default()
-                                    .fg(obs_color)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
                             ));
                             if !stats.is_empty() {
                                 spans.push(Span::raw(" "));
@@ -610,9 +598,7 @@ impl ReactTrace {
                         ActStatus::Failed(_) => {
                             spans.push(Span::styled(
                                 "✗".to_string(),
-                                Style::default()
-                                    .fg(Color::Red)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                             ));
                         }
                     }
@@ -794,9 +780,7 @@ impl ReactTrace {
                                     ts_span.clone(),
                                     Span::styled(
                                         format!("{} {}", og, verb),
-                                        Style::default()
-                                            .fg(oc)
-                                            .add_modifier(Modifier::BOLD),
+                                        Style::default().fg(oc).add_modifier(Modifier::BOLD),
                                     ),
                                 ]),
                             );

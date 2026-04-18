@@ -1087,8 +1087,8 @@ fn sim_render_offset_reflects_scroll_input() {
 /// With entry-level granularity, it instead snaps to the entry's start.
 #[test]
 fn sim_sub_entry_scroll_resolution() {
-    use crate::components::react_trace::types::ScrollAnchor;
     use crate::components::markdown_stream::StateLookup;
+    use crate::components::react_trace::types::ScrollAnchor;
     let mut trace = ReactTrace::new_for_tests();
 
     let mut payload = String::new();
@@ -1178,10 +1178,14 @@ fn sim_mermaid_state_mismatch_in_shift() {
     let mut ready_states = std::collections::HashMap::new();
     ready_states.insert(MermaidId(0), FenceRender::Ready(6));
     let (rows_real, _, _) = trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
-    let (rows_pending, _, _) = trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
-    assert!(rows_real.len() > rows_pending.len(),
+    let (rows_pending, _, _) =
+        trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    assert!(
+        rows_real.len() > rows_pending.len(),
         "pre-condition: Ready layout must be taller than Pending; got real={} pending={}",
-        rows_real.len(), rows_pending.len());
+        rows_real.len(),
+        rows_pending.len()
+    );
 
     // Seed cache with REAL Ready states (this is what render does).
     trace.seed_line_cache_for_tests(80, &ready_states);
@@ -1192,7 +1196,11 @@ fn sim_mermaid_state_mismatch_in_shift() {
     trace.scroll_to_top();
     trace.scroll_down_by(rows_pending.len());
     let anchor = trace.anchor_for_tests();
-    eprintln!("SIM-10 anchor after scroll_down_by({}): {:?}", rows_pending.len(), anchor);
+    eprintln!(
+        "SIM-10 anchor after scroll_down_by({}): {:?}",
+        rows_pending.len(),
+        anchor
+    );
 
     // The anchor must resolve to a row >= rows_pending.len() in the REAL layout.
     // If shift_anchor_by were using the buggy empty-states layout, it would
@@ -1450,8 +1458,8 @@ fn phase3_edge_stale_cache_safe() {
     eprintln!("EDGE-3 stale-shift anchor: {:?}", anchor_after_stale_shift);
 
     // Now build the FRESH layout (this is what the next real render would do).
-    let (rows, starts, byte_ranges) = trace
-        .build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    let (rows, starts, byte_ranges) =
+        trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let resolved = crate::components::react_trace::render::resolve_anchor(
         &trace.anchor_for_tests(),
         &byte_ranges,
@@ -1493,14 +1501,12 @@ fn phase3_edge_mermaid_pending_to_ready_stable() {
     // Pending state: empty FenceRender registry → 1 row for the fence.
     let pending: std::collections::HashMap<MermaidId, FenceRender> =
         std::collections::HashMap::new();
-    let (rows_p, starts_p, ranges_p) =
-        trace.build_virtual_rows_for_tests(0, 80, &pending, None);
+    let (rows_p, starts_p, ranges_p) = trace.build_virtual_rows_for_tests(0, 80, &pending, None);
 
     // Ready state: registry has Ready(6) → 6 rows for the fence.
     let mut ready = std::collections::HashMap::new();
     ready.insert(MermaidId(0), FenceRender::Ready(6));
-    let (rows_r, starts_r, ranges_r) =
-        trace.build_virtual_rows_for_tests(0, 80, &ready, None);
+    let (rows_r, starts_r, ranges_r) = trace.build_virtual_rows_for_tests(0, 80, &ready, None);
 
     assert!(
         rows_r.len() > rows_p.len(),
@@ -1516,13 +1522,31 @@ fn phase3_edge_mermaid_pending_to_ready_stable() {
         row_within_entry: 1,
     };
     let row_p = crate::components::react_trace::render::resolve_anchor(
-        &anchor, &ranges_p, &starts_p, rows_p.len(), 5,
+        &anchor,
+        &ranges_p,
+        &starts_p,
+        rows_p.len(),
+        5,
     );
     let row_r = crate::components::react_trace::render::resolve_anchor(
-        &anchor, &ranges_r, &starts_r, rows_r.len(), 5,
+        &anchor,
+        &ranges_r,
+        &starts_r,
+        rows_r.len(),
+        5,
     );
-    assert!(row_p < rows_p.len(), "Pending: in-bounds row {} of {}", row_p, rows_p.len());
-    assert!(row_r < rows_r.len(), "Ready: in-bounds row {} of {}", row_r, rows_r.len());
+    assert!(
+        row_p < rows_p.len(),
+        "Pending: in-bounds row {} of {}",
+        row_p,
+        rows_p.len()
+    );
+    assert!(
+        row_r < rows_r.len(),
+        "Ready: in-bounds row {} of {}",
+        row_r,
+        rows_r.len()
+    );
 }
 
 /// COUNTER-3 (Phase 3): Row anchor at entry N renumbers correctly when
@@ -1554,7 +1578,11 @@ fn phase3_counter_eviction_renumbers_row_anchor() {
 
     // Force eviction of entry 0 by appending until MAX_LOG_ENTRIES is exceeded.
     for i in 0..2000 {
-        trace.append_message(&format!("filler {}", i), &format!("agent{}", i), "10:00".into());
+        trace.append_message(
+            &format!("filler {}", i),
+            &format!("agent{}", i),
+            "10:00".into(),
+        );
     }
 
     let after = trace.anchor_for_tests();
@@ -1648,7 +1676,10 @@ fn virtual_rows_collapsed_completed_act_shows_outcome_no_spinner() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(txt.contains("✓"), "virtual rows must contain outcome: {txt}");
+    assert!(
+        txt.contains("✓"),
+        "virtual rows must contain outcome: {txt}"
+    );
 }
 
 #[cfg(feature = "markdown")]
@@ -1828,7 +1859,9 @@ fn multiple_updates_mutate_in_place_keep_entries_len_stable() {
             ..
         }
     ));
-    let _ = ObservePayload::Text { body: String::new() };
+    let _ = ObservePayload::Text {
+        body: String::new(),
+    };
 }
 
 #[cfg(feature = "markdown")]
@@ -1860,7 +1893,10 @@ fn interleaved_observe_note_does_not_break_lookup() {
     });
     // Terminal update still finds the original Act.
     let found = trace.find_act_by_id_mut(&id);
-    assert!(found.is_some(), "note interleaving must not break id lookup");
+    assert!(
+        found.is_some(),
+        "note interleaving must not break id lookup"
+    );
 }
 
 #[cfg(feature = "markdown")]
@@ -1876,14 +1912,15 @@ fn failed_status_renders_failure_glyph_even_with_non_error_payload() {
             tool_call_id: None,
             // Failed with a Text payload (NOT Error variant) — must still
             // render as failure.
-            status: super::ActStatus::Failed(Some(ObservePayload::Text {
-                body: "meh".into(),
-            })),
+            status: super::ActStatus::Failed(Some(ObservePayload::Text { body: "meh".into() })),
         },
         text: String::new(),
         timestamp: "10:00".into(),
         markdown: None,
     });
     let joined = trace.render_to_strings().join("\n");
-    assert!(joined.contains("✗"), "Failed must use ✗ regardless of payload shape: {joined}");
+    assert!(
+        joined.contains("✗"),
+        "Failed must use ✗ regardless of payload shape: {joined}"
+    );
 }

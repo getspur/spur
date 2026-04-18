@@ -17,7 +17,10 @@ fn per_task_context_files_survive_to_delegation_requests() {
 
     let parsed = spur_mcp::parse_parallel_tasks(&args).expect("parse ok");
     assert_eq!(parsed.len(), 2);
-    assert_eq!(parsed[0].context_files, vec!["src/a1.rs".to_string(), "src/a2.rs".to_string()]);
+    assert_eq!(
+        parsed[0].context_files,
+        vec!["src/a1.rs".to_string(), "src/a2.rs".to_string()]
+    );
     assert_eq!(parsed[1].context_files, vec!["src/b1.rs".to_string()]);
 }
 
@@ -69,8 +72,8 @@ fn duplicate_non_none_issue_id_is_rejected() {
             { "agent": "x", "task": "B", "issue_id": "bd-1" }
         ]
     });
-    let err = spur_mcp::validate_parallel_args(&args)
-        .expect_err("duplicate issue_id must be rejected");
+    let err =
+        spur_mcp::validate_parallel_args(&args).expect_err("duplicate issue_id must be rejected");
     assert!(
         err.contains("issue_id"),
         "error should mention issue_id: {err}",
