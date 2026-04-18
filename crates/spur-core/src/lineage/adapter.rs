@@ -91,32 +91,62 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             from: _,
             to_agent,
             task,
-            request_id: _,
+            request_id,
             delegation_plan: _,
             issue_id,
         } => {
-            // Populate the task_spec of the most recent Executor owned by the
-            // worker name, if empty.
-            //
-            // Known v1 limitation: `DelegationRequested` carries `from` (brain
-            // session) and `to_agent` (agent name) but not the worker session
-            // id. If two workers share an agent name with empty task_specs,
-            // the most-recent one wins. Acceptable for v1 because (a) the
-            // assignment is not destructive (empty-only), and (b) follow-up
-            // spec will switch the orchestrator to emit `ExecutorSpawned`
-            // directly with task_spec populated, removing this path.
-            let id = lineage
+            // Buffer (task, issue_id) under request_id.  The matching
+            // `DelegationDispatched` event carries the concrete executor_id
+            // and drains this buffer, ensuring correct per-request attribution
+            // even when multiple workers of the same agent run concurrently.
+            lineage
+                .pending_task_by_request_id_mut()
+                .entry(request_id.clone())
+                .or_insert_with(|| (task.clone(), issue_id.clone()));
+
+            // Eager-stamp fallback for environments that never emit
+            // `DelegationDispatched` (e.g. older orchestrators / test streams).
+            // Only applies when exactly one executor matches `to_agent` with
+            // an empty task_spec — ambiguous cases are left to
+            // `DelegationDispatched`.
+            let candidates: Vec<ExecutorId> = lineage
                 .nodes_mut_vec()
                 .into_iter()
-                .rev()
-                .find(|n| {
+                .filter(|n| {
                     n.role == Role::Executor && n.agent == *to_agent && n.task_spec.is_empty()
                 })
-                .map(|n| n.id.clone());
-            if let Some(id) = id {
-                if let Some(n) = lineage.node_mut_public(&id) {
-                    n.task_spec = task.clone();
-                    n.issue_id = issue_id.clone();
+                .map(|n| n.id.clone())
+                .collect();
+            if candidates.len() == 1 {
+                let eid = candidates.into_iter().next().unwrap();
+                // Also drain the buffer so DelegationDispatched is a no-op.
+                if let Some((t, iid)) = lineage.pending_task_by_request_id_mut().remove(request_id)
+                {
+                    if let Some(n) = lineage.node_mut_public(&eid) {
+                        n.task_spec = t;
+                        n.issue_id = iid;
+                    }
+                }
+            }
+        }
+
+        SpurEventBody::DelegationDispatched {
+            from: _,
+            request_id,
+            executor_id,
+        } => {
+            // Drain the pending-task buffer for this request and stamp the
+            // named executor.  Idempotent: subsequent dispatches for the same
+            // request_id are no-ops (entry already removed).
+            if let Some((task, issue_id)) =
+                lineage.pending_task_by_request_id_mut().remove(request_id)
+            {
+                let eid = ExecutorId::new(executor_id.clone());
+                if let Some(n) = lineage.node_mut_public(&eid) {
+                    if n.task_spec.is_empty() {
+                        n.task_spec = task;
+                        n.issue_id = issue_id;
+                    }
                 }
             }
         }

@@ -450,3 +450,69 @@ fn delegation_completed_timed_out_renders_as_failed_with_timeout_detail() {
         a.error
     );
 }
+
+#[test]
+fn concurrent_same_agent_workers_attribute_tasks_correctly() {
+    // Two coder workers dispatched near-simultaneously. DelegationDispatched
+    // carries (request_id -> executor_id) mapping. task_spec MUST land on
+    // the executor matched by request_id, not by agent name.
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+    use spur_core::lineage::{ExecutorId, ExecutorLineage};
+
+    let mut l = ExecutorLineage::default();
+
+    // Spawn both executors (WorkerSpawned path creates them with empty task_spec).
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "coder".into(),
+        session: SessionId("worker-A".into()),
+        worktree: std::path::PathBuf::from("/tmp/wA"),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "coder".into(),
+        session: SessionId("worker-B".into()),
+        worktree: std::path::PathBuf::from("/tmp/wB"),
+    }));
+
+    // DelegationRequested for task A arrives first (buffered by request_id).
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("brain-1".into()),
+        to_agent: "coder".into(),
+        task: "TASK-A: fix login CSS".into(),
+        request_id: "req-A".into(),
+        delegation_plan: None,
+        issue_id: None,
+    }));
+    // DelegationRequested for task B arrives.
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("brain-1".into()),
+        to_agent: "coder".into(),
+        task: "TASK-B: add rate limiter".into(),
+        request_id: "req-B".into(),
+        delegation_plan: None,
+        issue_id: None,
+    }));
+
+    // Dispatch events arrive out of order — B before A.
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+        from: SessionId("brain-1".into()),
+        request_id: "req-B".into(),
+        executor_id: "worker-B".into(),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+        from: SessionId("brain-1".into()),
+        request_id: "req-A".into(),
+        executor_id: "worker-A".into(),
+    }));
+
+    // Assertions: each node carries the task matched by request_id.
+    let node_a = l.node(&ExecutorId::new("worker-A")).expect("worker-A");
+    let node_b = l.node(&ExecutorId::new("worker-B")).expect("worker-B");
+    assert_eq!(
+        node_a.task_spec, "TASK-A: fix login CSS",
+        "worker-A must carry task A (matched by request_id req-A)"
+    );
+    assert_eq!(
+        node_b.task_spec, "TASK-B: add rate limiter",
+        "worker-B must carry task B (matched by request_id req-B)"
+    );
+}
