@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use spur_acp::*;
 use spur_pm::{IssueFilter, IssueUpdate, PmService, PrParams};
@@ -424,7 +424,6 @@ impl McpCallbackServer {
             "create_issue" => self.handle_create_issue(id, arguments).await,
             "add_dependency" => self.handle_add_dependency(id, arguments).await,
             "create_pr" => self.handle_create_pr(id, arguments).await,
-            "report_progress" => self.handle_report_progress(id, arguments).await,
             "get_session_cost" => self.handle_get_session_cost(id).await,
             "graph_triage" => self.handle_graph_triage(id, arguments).await,
             "graph_plan" => self.handle_graph_plan(id, arguments).await,
@@ -1091,36 +1090,6 @@ impl McpCallbackServer {
             ),
             Err(e) => JsonRpcResponse::internal_error(id, format!("create_pr failed: {e}")),
         }
-    }
-
-    async fn handle_report_progress(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let message = match args.get("message").and_then(|v| v.as_str()) {
-            Some(m) => m.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'message'"),
-        };
-
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let delegation = DelegationRequest {
-            id: request_id,
-            agent: "__progress".into(),
-            task: message.clone(),
-            context_files: Vec::new(),
-            respond_to: tx,
-            brain_session_id: self.brain_session_id.clone(),
-            delegation_plan: None,
-            issue_id: None,
-        };
-
-        if let Err(_e) = self.delegation_tx.send(delegation).await {
-            warn!("Failed to send progress report");
-        }
-
-        info!(message = %message, "Progress reported");
-        JsonRpcResponse::success(
-            id,
-            json!({ "content": [{ "type": "text", "text": "Progress reported." }] }),
-        )
     }
 
     async fn handle_get_session_cost(&self, id: Value) -> JsonRpcResponse {
