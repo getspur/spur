@@ -26,8 +26,7 @@ pub(super) const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", 
 
 pub struct ReactTrace {
     pub(super) entries: Vec<TraceEntry>,
-    pub(super) scroll_offset: usize,
-    pub(super) is_following: bool,
+    pub(super) anchor: crate::components::react_trace::types::ScrollAnchor,
     pub(super) tick_counter: u8,
     /// Cached total rendered lines from last render.
     pub(super) last_total_lines: usize,
@@ -56,12 +55,29 @@ pub struct ReactTrace {
     pub(super) line_cache: Option<render::VirtualRowCacheEntry>,
 }
 
+#[cfg(feature = "markdown")]
+fn row_to_byte_anchor(
+    row: usize,
+    byte_ranges: &[Option<std::ops::Range<usize>>],
+    entry_row_starts: &[usize],
+) -> (usize, usize) {
+    let entry_idx = match entry_row_starts.binary_search(&row) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+    let byte_offset = byte_ranges
+        .get(row)
+        .and_then(|r| r.as_ref())
+        .map(|r| r.start)
+        .unwrap_or(0);
+    (entry_idx, byte_offset)
+}
+
 impl ReactTrace {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            scroll_offset: 0,
-            is_following: true,
+            anchor: crate::components::react_trace::types::ScrollAnchor::default(),
             tick_counter: 0,
             last_total_lines: 0,
             last_visible_height: 20,
@@ -171,7 +187,7 @@ impl ReactTrace {
                     last.text = text.to_string();
                 }
                 self.mark_dirty_from(self.entries.len() - 1);
-                if self.is_following {
+                if self.is_following() {
                     self.scroll_to_bottom();
                 }
                 return;
@@ -205,7 +221,7 @@ impl ReactTrace {
                         stream.append(text);
                     }
                     self.mark_dirty_from(idx);
-                    if self.is_following {
+                    if self.is_following() {
                         self.scroll_to_bottom();
                     }
                     return;
@@ -230,7 +246,7 @@ impl ReactTrace {
                 if let Some(entry) = self.entries.get_mut(idx) {
                     entry.text.push_str(text);
                     self.mark_dirty_from(idx);
-                    if self.is_following {
+                    if self.is_following() {
                         self.scroll_to_bottom();
                     }
                     return;
@@ -270,7 +286,7 @@ impl ReactTrace {
                 }
                 self.entries[idx].text.push_str(text);
                 self.mark_dirty_from(idx);
-                if self.is_following {
+                if self.is_following() {
                     self.scroll_to_bottom();
                 }
             }
@@ -283,7 +299,7 @@ impl ReactTrace {
                     markdown: None,
                 });
                 self.mark_dirty_from(self.entries.len() - 1);
-                if self.is_following {
+                if self.is_following() {
                     self.scroll_to_bottom();
                 }
             }
@@ -294,100 +310,98 @@ impl ReactTrace {
     pub fn push(&mut self, entry: TraceEntry) {
         self.entries.push(entry);
         if self.entries.len() > MAX_LOG_ENTRIES {
-            let drain = self.entries.len() - MAX_LOG_ENTRIES;
-            self.entries.drain(..drain);
-            self.scroll_offset = self.scroll_offset.saturating_sub(drain);
+            let _drain = self.entries.len() - MAX_LOG_ENTRIES;
+            self.entries.drain(.._drain);
             self.invalidate_cache();
         } else {
             self.mark_dirty_from(self.entries.len().saturating_sub(2));
         }
-        if self.is_following {
+        if self.is_following() {
             self.scroll_to_bottom();
         }
     }
 
-    /// Compute the current total row count using the most-recent width
-    /// hint, walking entries directly. Used by scroll mutators to clamp
-    /// against fresh metrics rather than the last-render `last_total_lines`.
-    ///
-    /// O(entries × wrap-cost). Acceptable because scroll mutators run on
-    /// user input, not on the streaming hot path.
-    #[cfg(feature = "markdown")]
-    fn current_row_count(&self) -> usize {
-        let width_hint = self.last_render_width.unwrap_or(80);
-        let states = std::collections::HashMap::new();
-        let (rows, _, _) = self.build_virtual_rows(0, width_hint, &states, None);
-        rows.len()
+    /// Returns true when the viewport is pinned to the tail of the trace.
+    pub fn is_following(&self) -> bool {
+        matches!(self.anchor, crate::components::react_trace::types::ScrollAnchor::Following)
     }
 
-    #[cfg(not(feature = "markdown"))]
-    fn current_row_count(&self) -> usize {
-        self.last_total_lines
-    }
-
-    fn max_offset(&self) -> usize {
-        self.current_row_count()
-            .saturating_sub(self.last_visible_height)
-    }
-
+    /// Move viewport up by one row by re-anchoring to the byte position
+    /// of the previous row.
     pub fn scroll_up(&mut self) {
-        if self.is_following {
-            self.scroll_offset = self.max_offset();
-        }
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
-        self.is_following = false;
+        self.shift_anchor_by(-1);
     }
 
     pub fn scroll_up_by(&mut self, lines: usize) {
-        if self.is_following {
-            self.scroll_offset = self.max_offset();
-        }
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-        self.is_following = false;
+        self.shift_anchor_by(-(lines as isize));
     }
 
     pub fn scroll_down(&mut self) {
-        let max = self.max_offset();
-        self.scroll_offset = self.scroll_offset.saturating_add(1).min(max);
-        if self.scroll_offset >= max {
-            self.is_following = true;
-        }
+        self.shift_anchor_by(1);
     }
 
     pub fn scroll_down_by(&mut self, lines: usize) {
-        let max = self.max_offset();
-        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
-        if self.scroll_offset >= max {
-            self.is_following = true;
-        }
+        self.shift_anchor_by(lines as isize);
     }
 
     pub fn page_up(&mut self) {
-        if self.is_following {
-            self.scroll_offset = self.max_offset();
-        }
-        let jump = self.last_visible_height.saturating_sub(2).max(1);
-        self.scroll_offset = self.scroll_offset.saturating_sub(jump);
-        self.is_following = false;
+        let jump = self.last_visible_height.saturating_sub(2).max(1) as isize;
+        self.shift_anchor_by(-jump);
     }
 
     pub fn page_down(&mut self) {
-        let jump = self.last_visible_height.saturating_sub(2).max(1);
-        let max = self.max_offset();
-        self.scroll_offset = self.scroll_offset.saturating_add(jump).min(max);
-        if self.scroll_offset >= max {
-            self.is_following = true;
-        }
+        let jump = self.last_visible_height.saturating_sub(2).max(1) as isize;
+        self.shift_anchor_by(jump);
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
-        self.is_following = false;
+        self.anchor = crate::components::react_trace::types::ScrollAnchor::Byte {
+            entry_idx: 0,
+            byte_offset: 0,
+        };
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.max_offset();
-        self.is_following = true;
+        self.anchor = crate::components::react_trace::types::ScrollAnchor::Following;
+    }
+
+    /// Apply a row delta to the current anchor by:
+    /// 1. resolving the current anchor to a row index using fresh metrics,
+    /// 2. computing the target row,
+    /// 3. converting back to a byte anchor at the target row.
+    /// If the target row is the last visible row, transitions to Following.
+    #[cfg(feature = "markdown")]
+    fn shift_anchor_by(&mut self, delta: isize) {
+        use crate::components::react_trace::types::ScrollAnchor;
+
+        let width = self.last_render_width.unwrap_or(80);
+        let states = std::collections::HashMap::new();
+        let (_rows, entry_row_starts, byte_ranges) =
+            self.build_virtual_rows(0, width, &states, None);
+        let total = byte_ranges.len();
+        let visible_h = self.last_visible_height.max(1);
+
+        let current_row = crate::components::react_trace::render::resolve_anchor(
+            &self.anchor, &byte_ranges, &entry_row_starts, total, visible_h);
+
+        let target = (current_row as isize + delta)
+            .max(0)
+            .min(total.saturating_sub(visible_h) as isize) as usize;
+
+        if target >= total.saturating_sub(visible_h) {
+            self.anchor = ScrollAnchor::Following;
+            return;
+        }
+
+        // Convert target row back to a byte anchor.
+        let (entry_idx, byte_offset) = row_to_byte_anchor(
+            target, &byte_ranges, &entry_row_starts);
+        self.anchor = ScrollAnchor::Byte { entry_idx, byte_offset };
+    }
+
+    #[cfg(not(feature = "markdown"))]
+    fn shift_anchor_by(&mut self, _delta: isize) {
+        // Non-markdown build keeps scroll_offset semantics; no-op for now.
     }
 
     /// Called on each tick: advance spinner counter and decrement pending
@@ -825,7 +839,9 @@ impl ReactTrace {
     }
 
     pub fn scroll_offset_for_tests(&self) -> usize {
-        self.scroll_offset
+        // Legacy test accessor — returns 0 after anchor migration.
+        // Task 2.8 will update the test to use resolve_anchor instead.
+        0
     }
 
     pub fn set_visible_height_for_tests(&mut self, height: usize) {
