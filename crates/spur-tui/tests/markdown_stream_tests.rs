@@ -427,3 +427,22 @@ fn maybe_flush_safety_cap_suppresses_rebuild() {
     assert!(!s.is_dirty(),
         "safety valve must clear dirty_since to prevent tight looping");
 }
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "append after flush_final")]
+fn append_after_flush_final_debug_asserts() {
+    let mut s = MarkdownStream::new();
+    s.append("hello");
+    s.flush_final(&StateLookup::empty());
+    // Contract violation:
+    s.append("more");
+}
+
+#[test]
+fn append_before_flush_final_never_panics() {
+    let mut s = MarkdownStream::new();
+    s.append("hello");
+    s.append(" world");
+    assert_eq!(s.raw_text(), "hello world");
+}

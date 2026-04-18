@@ -241,7 +241,15 @@ impl MarkdownStream {
     }
 
     /// Append a chunk of text. Cheap — does not reparse.
+    ///
+    /// Contract: callers must not append after `flush_final`. Enforced via
+    /// `debug_assert!` in debug builds; in release the state self-heals
+    /// (next rebuild runs under normal cursor rule).
     pub fn append(&mut self, text: &str) {
+        debug_assert!(
+            !self.finalized,
+            "append after flush_final is a contract violation (MarkdownStream finalized)"
+        );
         self.raw_text.push_str(text);
         self.dirty_since.get_or_insert_with(Instant::now);
     }
