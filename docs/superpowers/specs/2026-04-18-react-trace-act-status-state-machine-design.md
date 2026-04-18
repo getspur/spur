@@ -28,7 +28,15 @@ wrong. The design below reflects what is actually true:
    - `status: Completed` with `raw_output: None` never stops the spinner.
    - `status: InProgress` with streamed `raw_output: Some(partial)` would stop
      the spinner prematurely.
-2. **`ToolCallId` is `Arc<str>`**, not `String`. Cheap to clone.
+2. **`ToolCallId` is `agent_client_protocol::ToolCallId`**, a newtype
+   `pub struct ToolCallId(pub Arc<str>)` defined in the upstream schema
+   crate. `spur_acp` does **not** currently re-export it at its crate root
+   (only `ToolCallStatus` is re-exported, `ToolCall` is re-aliased as
+   `AcpToolCall` — see `crates/spur-acp/src/lib.rs:46`). This spec adds a
+   one-line `pub use agent_client_protocol::ToolCallId;` to
+   `spur_acp/src/lib.rs` so TUI code can refer to it as
+   `spur_acp::ToolCallId`, keeping the dependency boundary consistent with
+   the rest of the crate.
 3. **`spur_acp::HistoryEntry`** at `crates/spur-acp/src/domain/events.rs:509`
    is `{ role: String, text: String }` only. It does not preserve
    `tool_call_id`. This is **not** a constraint because
@@ -131,13 +139,18 @@ Rationale:
 
 ### Push-side mapping
 
-At `session_detail.rs:1189` (`SessionUpdate::ToolCall`):
+At `session_detail.rs:1189` (`SessionUpdate::ToolCall`). This handler must
+**preserve** the existing `self.tool_depth.insert(tc.tool_call_id.0.to_string(), depth)`
+side-effect at `session_detail.rs:1200` — it drives sub-agent indentation
+and is cleared on `TurnComplete` at `session_detail.rs:1345`. The refactor
+only changes what is pushed to the trace, not this bookkeeping.
 
 ```text
+self.tool_depth.insert(tc.tool_call_id.0.to_string(), depth); // unchanged
 push Act {
   tool, family, input,
   tool_call_id: Some(tc.tool_call_id.clone()),
-  status: map_initial_status(tc.status, tc.raw_output),
+  status: map_initial_status(tc.status, tc.raw_output.as_ref(), kind),
 }
 ```
 
@@ -161,53 +174,99 @@ At `session_detail.rs:1226` (`SessionUpdate::ToolCallUpdate`):
 
 ```text
 if let Some((idx, act_entry)) = react_trace.find_act_by_id_mut(&tcu.tool_call_id):
-    let new_status = merge_status(current_status, tcu.fields.status, tcu.fields.raw_output)
-    set act_entry.status = new_status
+    if let TraceKind::Act { status, .. } = &mut act_entry.kind:
+        *status = merge_status(&*status, tcu.fields.status, tcu.fields.raw_output.as_ref(), kind)
     react_trace.mark_dirty_from(idx)
 else:
-    tracing::debug!("ToolCallUpdate for unknown tool_call_id {id}");
-    if tcu.fields.title.is_some():
+    tracing::debug!(id = ?tcu.tool_call_id, "ToolCallUpdate for unknown tool_call_id");
+    if tcu.fields.title.is_some() || tcu.fields.kind.is_some():
         synthesize a new Act entry from the update
-        (status mapped from tcu.fields; tool_call_id preserved)
+        (status mapped from tcu.fields; tool_call_id = Some(tcu.tool_call_id.clone()))
     else:
         drop
 ```
 
-Merge rules for `merge_status(prev, incoming_status, incoming_raw_output)`:
+Explicit Rust signature for the merge:
 
-- If `incoming_status` is `None`, keep the variant of `prev` but refresh its
-  embedded payload when `incoming_raw_output` is `Some(v)` and `prev` is
-  non-terminal (`InProgress.partial` is replaced).
-- If `incoming_status` is `Some(s)`, map `(s, incoming_raw_output)` via the
-  table above to produce the new variant. An incoming terminal
-  (`Completed` / `Failed`) always replaces a non-terminal `prev`.
+```rust
+fn merge_status(
+    prev: &ActStatus,
+    incoming_status: Option<ToolCallStatus>,
+    incoming_raw_output: Option<&serde_json::Value>,
+    kind: AgentKind,
+) -> ActStatus
+```
+
+Merge rules:
+
 - If `prev` is already terminal (`Completed(_)` / `Failed(_)`),
-  `debug_assert!` that the incoming status, if present, matches the terminal
-  variant; in release builds log via `tracing::debug!` and keep `prev`
-  unchanged. This prevents a late `InProgress` update from reopening a
-  closed tool call.
+  `debug_assert!` that `incoming_status`, when present, matches the terminal
+  variant. In release builds log via `tracing::debug!` and return `prev.clone()`
+  unchanged. This prevents a late `InProgress` update from reopening a closed
+  tool call.
+- Else if `incoming_status` is `None`, keep the variant of `prev` and refresh
+  `InProgress.partial` only when `prev` is `InProgress` and
+  `incoming_raw_output` is `Some(v)`.
+- Else map `(incoming_status.unwrap(), incoming_raw_output)` via the table
+  above to produce the new variant. An incoming terminal
+  (`Completed` / `Failed`) always replaces a non-terminal `prev`.
+- Any future `ToolCallStatus` variant not in the table (the enum may become
+  `#[non_exhaustive]` upstream) is absorbed at the boundary: log via
+  `tracing::debug!` and return `prev.clone()` unchanged. `ActStatus` stays
+  exhaustive internally so every renderer is forced to handle every state.
 
 ### Renderer change
 
 Spinner-vs-outcome is now a single match on `status`:
 
 ```rust
-let active = matches!(status, ActStatus::Pending | ActStatus::InProgress { .. });
-if active {
-    // draw SPINNER_FRAMES[tick]
-} else {
-    // draw outcome glyph from Completed(_) / Failed(_)
-    // body (if any) from the embedded payload
+match status {
+    ActStatus::Pending | ActStatus::InProgress { .. } => {
+        // draw SPINNER_FRAMES[tick]
+        // NOTE Phase 1: InProgress.partial is STORED but NOT rendered.
+        //      Partial-output streaming is deferred to Phase 2.
+    }
+    ActStatus::Completed(Some(p)) => {
+        // outcome glyph from outcome_glyph(p); body from p
+    }
+    ActStatus::Completed(None) => {
+        // success fallback glyph (✓), no body
+    }
+    ActStatus::Failed(p_opt) => {
+        // fixed failure glyph (⚠ or ✗) — do NOT derive from payload,
+        // because a buggy agent could emit Failed with a non-Error payload
+        // variant and we'd show a success glyph. Failed ALWAYS renders
+        // as failure. Body is rendered from p_opt when Some.
+    }
 }
 ```
 
 All three render paths change symmetrically:
-`builder.rs:37-78` (markdown build),
-`mod.rs:650-683` (plain-text `render_to_strings`),
-`mod.rs:819-843` (plain-text Act with payload path).
+`builder.rs:37-78` (markdown-build collapsed Act),
+`builder.rs:503-538` (markdown-build expanded Act — reads payload from the
+next Observe today; must switch to reading from `status`),
+`mod.rs:650-683` (plain-text `render_to_strings` collapsed),
+`mod.rs:753-771` (plain-text `render_to_strings` expanded Act input block),
+`mod.rs:819-843` (plain-text fallthrough with neighbour-Observe).
 
 The `consumed = 2` bookkeeping disappears — one entry represents one tool
 call.
+
+**Expanded-mode (`observe_collapsed == false`) rewrite.** Today, expanded mode
+renders the Act header + input block, then the NEXT `Observe` entry renders
+its own header + payload block. After the refactor there is no paired
+Observe. The expanded renderer must, for a terminal Act, emit the input
+block **and** the outcome header + payload block from the same entry. The
+output must be byte-equivalent to today's "Act followed by Observe" output
+for all terminal states, so that `crates/spur-tui/tests/render_golden.rs`
+snapshots change only where the bug-fix intentionally changes the visual.
+
+**Blank-line invariant.** Today `mod.rs:836-843` suppresses the trailing
+blank line when an Act is followed by `Observe { payload: Some(_) }`. After
+the refactor, each terminal Act emits exactly one trailing blank line in
+both collapsed and expanded modes (preserving the current visual spacing
+of Act + Observe + blank). In-flight Acts (Pending / InProgress) also emit
+one trailing blank line, matching current behaviour.
 
 ### Tick animator
 
@@ -230,12 +289,30 @@ driven entirely by `ActStatus`.
 ### Helper on `ReactTrace`
 
 ```rust
-pub(crate) fn find_act_by_id_mut(&mut self, id: &ToolCallId) -> Option<(usize, &mut TraceEntry)>
+pub(crate) fn find_act_by_id_mut(
+    &mut self,
+    id: &ToolCallId,
+) -> Option<(usize, &mut TraceEntry)>;
 ```
 
 Scans `self.entries` in reverse — O(N), bounded by `MAX_LOG_ENTRIES = 500`.
-Returns the newest matching `Act`. Caller mutates `status` and invokes
-`self.mark_dirty_from(idx)`. Mirrors `attach_executor_id`'s pattern.
+Returns the newest matching `Act`. Match is on the inner `Arc<str>`:
+
+```rust
+for (idx, e) in self.entries.iter_mut().enumerate().rev() {
+    if let TraceKind::Act { tool_call_id: Some(existing), .. } = &e.kind {
+        if existing.0.as_ref() == id.0.as_ref() {
+            return Some((idx, e));
+        }
+    }
+}
+None
+```
+
+The `.0.as_ref()` comparison bypasses any `PartialEq` surprises on the
+`ToolCallId` newtype — we're comparing string content, not Arc identity.
+Caller mutates `status` and invokes `self.mark_dirty_from(idx)`. Mirrors
+`attach_executor_id`'s pattern at `mod.rs:615-635`.
 
 ### What stays the same
 
@@ -289,25 +366,63 @@ New or updated tests in
 9. History replay unaffected — existing `replay_history` tests stay green
    because replay does not produce `Act` entries.
 
-Existing tests that construct `TraceKind::Act { ... }` literals (roughly
-`mod.rs:1193-1232` and `streaming_tests.rs`) get updated with the new fields.
-Tests that assert adjacency-based rendering of the collapsed Act+Observe
-pair are updated to assert status-based rendering of a single `Act`.
+Existing tests that construct `TraceKind::Act { ... }` literals get updated
+with the new fields. The complete blast radius across the repo is 14 match
+sites (verified by grep) plus uncommitted benchmark scaffolding:
+
+| File | Line(s) | Nature |
+|------|---------|--------|
+| `crates/spur-tui/src/views/session_detail.rs` | 1215 | Production push site — rewritten to use `ActStatus`. |
+| `crates/spur-tui/src/components/react_trace/builder.rs` | 38, 149, 323, 487, 503, 666, 912 | Renderer match arms — collapsed + expanded paths rewritten. |
+| `crates/spur-tui/src/components/react_trace/mod.rs` | 174, 472, 655, 753, 836, 1195, 1407, 1435 | Kind-name helper, tick animator, renderers, tests. |
+| `crates/spur-tui/tests/render_golden.rs` | 26 | Golden snapshot — regenerate after renderer rewrite once manual visual review confirms equivalence for terminal states. |
+| `crates/spur-tui/benches/*` (uncommitted per `git status`) | — | Check for `Act` constructions; update to new shape. |
+| `crates/spur-tui/examples/react_trace_bench_sim.rs` (uncommitted) | — | Same as above. |
+
+**Test-helper migration default.** Every existing `TraceKind::Act { ... }`
+construction adds `tool_call_id: None, status: ActStatus::Pending` unless the
+test explicitly exercises a terminal state, in which case
+`status: ActStatus::Completed(Some(payload))` or
+`ActStatus::Failed(Some(payload))` replaces the neighbour `Observe` entry
+the test previously pushed.
+
+**Specific test transformation to call out.** The test
+`entry_row_starts_remain_indexed_by_absolute_entry_after_collapsed_pairs` at
+`mod.rs:1193-1232` pushes `Act` then `Observe{Some(Text)}` to verify that
+the `entry_row_starts` vector stays aligned with absolute entry indices
+across the collapsed-pair render. After the refactor there is ONE entry
+(`Act { status: Completed(Some(Text)) }`) instead of two; the test still
+verifies the alignment invariant but reads more cleanly because the
+"pair" goes away entirely. The invariant itself is reinforced, not
+weakened.
 
 ## Risks and Mitigations
 
-- **Test-surface churn** — bounded: the affected sites are the ones that
-  already construct `Act` or assert the collapsed-render shape. Estimated
-  low double-digit count. Required anyway because the model is changing.
+- **Test-surface churn** — bounded: 14 match sites across 4 files plus the
+  uncommitted benches/examples. Golden snapshot requires regeneration with
+  manual visual review for terminal states.
 - **`TraceKind::Observe` dual purpose during the transition** — tolerable.
   Tool-call producers stop pushing Observe on Day 1; informational
   producers continue. Future rename is a pure cosmetic follow-up.
 - **Out-of-order ToolCallUpdate** — handled explicitly: log and drop, with
-  an optional synthesize path when `title` is present in the update.
-- **ACP schema evolution adding a new `ToolCallStatus` variant** —
-  `ActStatus` is non-`#[non_exhaustive]` today; if ACP adds `Cancelled` or
-  similar, the mapping function must be updated in one place. Compiler
-  catches this because the match on `ToolCallStatus` is exhaustive.
+  an optional synthesize path when `title` or `kind` is present in the
+  update.
+- **ACP schema evolution adding a new `ToolCallStatus` variant** — absorbed
+  at the boundary: unknown variants leave `prev` unchanged and emit a
+  `tracing::debug!` message. `ActStatus` stays exhaustive internally so
+  every renderer is forced by the compiler to handle every state.
+- **`ObservePayload` Clone cost under streaming updates** —
+  `ObservePayload::CommandOutput` can carry large `stdout`/`stderr`
+  `String`s. Each `merge_status` call that replaces `InProgress.partial`
+  clones the new payload in. Under high-frequency streaming (e.g. 10 Hz
+  bash output) this is O(N·bytes) churn. Acceptable for v1 since Phase 1
+  does not RENDER partial and therefore does not stress this path. A
+  zero-copy ring-buffer for streamed partial output is a Phase 2
+  optimization if Phase 2 lands.
+- **Upstream crate boundary** — adding
+  `pub use agent_client_protocol::ToolCallId;` to
+  `crates/spur-acp/src/lib.rs` is a semver-minor re-export. No behavioural
+  change, just makes the type reachable as `spur_acp::ToolCallId`.
 
 ## Success Criteria
 
