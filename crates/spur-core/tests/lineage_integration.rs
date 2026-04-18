@@ -30,6 +30,11 @@ fn full_flow_brain_to_review_to_resolved() {
         delegation_plan: None,
         issue_id: None,
     }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+        from: SessionId("b".into()),
+        request_id: "req-1".into(),
+        executor_id: "w1".into(),
+    }));
     // Executor produces an artifact
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorArtifact {
         id: "w1".into(),
@@ -514,5 +519,75 @@ fn concurrent_same_agent_workers_attribute_tasks_correctly() {
     assert_eq!(
         node_b.task_spec, "TASK-B: add rate limiter",
         "worker-B must carry task B (matched by request_id req-B)"
+    );
+}
+
+#[test]
+fn eager_stamp_cannot_misattribute_when_dispatch_order_differs() {
+    // Adversarial order: one executor exists when DelegationRequested arrives,
+    // so any agent-name eager-stamp would fire. When DelegationDispatched
+    // finally arrives pairing req-B → Worker-A (not Worker-B), the event
+    // must be authoritative — NOT blocked by a non-empty task_spec guard.
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+    use spur_core::lineage::{ExecutorId, ExecutorLineage};
+
+    let mut l = ExecutorLineage::default();
+
+    // Step 1: Worker-A spawns alone.
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "coder".into(),
+        session: SessionId("worker-A".into()),
+        worktree: std::path::PathBuf::from("/tmp/wA"),
+    }));
+
+    // Step 2: DelegationRequested for req-A. If eager-stamp exists, it fires now.
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("b".into()),
+        to_agent: "coder".into(),
+        task: "TASK-A".into(),
+        request_id: "req-A".into(),
+        delegation_plan: None,
+        issue_id: None,
+    }));
+
+    // Step 3: Worker-B spawns.
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "coder".into(),
+        session: SessionId("worker-B".into()),
+        worktree: std::path::PathBuf::from("/tmp/wB"),
+    }));
+
+    // Step 4: DelegationRequested for req-B.
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("b".into()),
+        to_agent: "coder".into(),
+        task: "TASK-B".into(),
+        request_id: "req-B".into(),
+        delegation_plan: None,
+        issue_id: None,
+    }));
+
+    // Step 5: Authoritative dispatch — req-B is actually for Worker-A.
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+        from: SessionId("b".into()),
+        request_id: "req-B".into(),
+        executor_id: "worker-A".into(),
+    }));
+    // And req-A is for Worker-B.
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+        from: SessionId("b".into()),
+        request_id: "req-A".into(),
+        executor_id: "worker-B".into(),
+    }));
+
+    let a = l.node(&ExecutorId::new("worker-A")).expect("A");
+    let b = l.node(&ExecutorId::new("worker-B")).expect("B");
+    assert_eq!(
+        a.task_spec, "TASK-B",
+        "Worker-A owns req-B per authoritative dispatch"
+    );
+    assert_eq!(
+        b.task_spec, "TASK-A",
+        "Worker-B owns req-A per authoritative dispatch"
     );
 }

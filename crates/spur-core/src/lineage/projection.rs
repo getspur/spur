@@ -416,10 +416,6 @@ impl ExecutorLineage {
         self.nodes.get_mut(id)
     }
 
-    pub(crate) fn nodes_mut_vec(&mut self) -> Vec<&mut ExecutorNode> {
-        self.nodes.values_mut().collect()
-    }
-
     /// Mutable access to the pending-task buffer, keyed by `request_id`.
     /// Used by the legacy adapter to buffer `DelegationRequested` until the
     /// matching `DelegationDispatched` arrives with the concrete executor id.
