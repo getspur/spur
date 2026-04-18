@@ -150,6 +150,86 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
     assert!(required.contains(&"tasks"));
 }
 
+/// INV-7: verify that `run_plan` emits `PlanCompleted` and `PlanReadyToMerge`
+/// when all tasks are already in a terminal Approved state on entry (so the
+/// executor loop exits immediately without dispatching).
+#[tokio::test]
+async fn run_plan_emits_plan_completed_on_terminal_state() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+    use spur_mcp::plan::{run_plan, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+    use spur_mcp::McpEventSink;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    let state = PlanState {
+        plan_id: "p1".into(),
+        tasks: vec![PlanTaskEntry {
+            spec: PlanTask {
+                task_id: "t1".into(),
+                agent: "a".into(),
+                task: "T".into(),
+                depends_on: vec![],
+                issue_id: None,
+                context_files: vec![],
+            },
+            status: PlanTaskStatus::Approved { summary: None },
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+        }],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
+        epic_id: None,
+    };
+
+    /// A test sink that captures emitted event bodies.
+    struct CaptureSink(Arc<Mutex<Vec<SpurEvent>>>);
+    impl McpEventSink for CaptureSink {
+        fn emit(&self, body: SpurEventBody) {
+            let events = Arc::clone(&self.0);
+            // `emit` is sync; use blocking spawn to push.
+            tokio::spawn(async move {
+                events.lock().await.push(SpurEvent::now(body));
+            });
+        }
+    }
+
+    let captured: Arc<Mutex<Vec<SpurEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink: Arc<dyn McpEventSink> = Arc::new(CaptureSink(Arc::clone(&captured)));
+
+    let (dtx, _drx) = mpsc::channel(8);
+
+    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink)).await;
+
+    // Give any spawned tasks a moment to complete.
+    tokio::task::yield_now().await;
+
+    let events = captured.lock().await;
+    let saw_completed = events.iter().any(|e| {
+        matches!(
+            &e.body,
+            SpurEventBody::PlanCompleted { plan_id, approved, .. }
+                if plan_id == "p1" && *approved == 1
+        )
+    });
+    let saw_ready = events.iter().any(|e| {
+        matches!(
+            &e.body,
+            SpurEventBody::PlanReadyToMerge { plan_id } if plan_id == "p1"
+        )
+    });
+    assert!(
+        saw_completed,
+        "PlanCompleted must be emitted; got: {:?}",
+        events.iter().map(|e| &e.body).collect::<Vec<_>>()
+    );
+    assert!(
+        saw_ready,
+        "PlanReadyToMerge must be emitted (all Approved); got: {:?}",
+        events.iter().map(|e| &e.body).collect::<Vec<_>>()
+    );
+}
+
 /// INV-5: verify that `handle_review_task` releases the plan-state lock BEFORE
 /// it calls `pm.update_issue`, so concurrent readers are not blocked by network
 /// latency.

@@ -535,7 +535,11 @@ fn has_cycle(tasks: &[PlanTask]) -> bool {
 ///
 /// Spawned as a tokio task by `handle_submit_plan`. The plan state is
 /// updated in-place; `get_plan_status` reads it concurrently.
-pub async fn run_plan(plan: Arc<Mutex<PlanState>>, delegation_tx: mpsc::Sender<DelegationRequest>) {
+pub async fn run_plan(
+    plan: Arc<Mutex<PlanState>>,
+    delegation_tx: mpsc::Sender<DelegationRequest>,
+    event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+) {
     let plan_id = plan.lock().await.plan_id.clone();
     info!(plan_id = %plan_id, "Plan executor started");
 
@@ -705,30 +709,60 @@ pub async fn run_plan(plan: Arc<Mutex<PlanState>>, delegation_tx: mpsc::Sender<D
         }
     }
 
-    let p = plan.lock().await;
-    let awaiting_review = p
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, PlanTaskStatus::AwaitingReview { .. }))
-        .count();
-    let approved = p
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, PlanTaskStatus::Approved { .. }))
-        .count();
-    let failed = p
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, PlanTaskStatus::Failed { .. }))
-        .count();
+    // INV-7: Compute terminal counts and emit lifecycle events OUTSIDE the lock.
+    let (approved_count, rejected_count, failed_count, awaiting_review_count, all_approved) = {
+        let p = plan.lock().await;
+        let mut a = 0u32;
+        let mut r = 0u32;
+        let mut f = 0u32;
+        let mut ar = 0u32;
+        let non_empty = !p.tasks.is_empty();
+        let mut all_a = non_empty;
+        for t in &p.tasks {
+            match &t.status {
+                PlanTaskStatus::Approved { .. } => a += 1,
+                PlanTaskStatus::Rejected { .. } => {
+                    r += 1;
+                    all_a = false;
+                }
+                PlanTaskStatus::Failed { .. } => {
+                    f += 1;
+                    all_a = false;
+                }
+                PlanTaskStatus::AwaitingReview { .. } => {
+                    ar += 1;
+                    all_a = false;
+                }
+                // Pending / Ready / Dispatched / Iterating: not terminal, not all_approved.
+                _ => {
+                    all_a = false;
+                }
+            }
+        }
+        (a, r, f, ar, all_a)
+    }; // Lock released before emitting.
+
     info!(
         plan_id = %plan_id,
-        total = p.tasks.len(),
-        awaiting_review = awaiting_review,
-        approved = approved,
-        failed = failed,
+        awaiting_review = awaiting_review_count,
+        approved = approved_count,
+        failed = failed_count,
         "Plan executor finished"
     );
+
+    if let Some(sink) = &event_sink {
+        sink.emit(spur_acp::SpurEventBody::PlanCompleted {
+            plan_id: plan_id.clone(),
+            approved: approved_count,
+            rejected: rejected_count,
+            failed: failed_count,
+        });
+        if all_approved {
+            sink.emit(spur_acp::SpurEventBody::PlanReadyToMerge {
+                plan_id: plan_id.clone(),
+            });
+        }
+    }
 }
 
 // ─── Status rendering ────────────────────────────────────────────────
