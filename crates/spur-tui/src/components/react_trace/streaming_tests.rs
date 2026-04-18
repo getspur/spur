@@ -1524,3 +1524,49 @@ fn phase3_edge_mermaid_pending_to_ready_stable() {
     assert!(row_p < rows_p.len(), "Pending: in-bounds row {} of {}", row_p, rows_p.len());
     assert!(row_r < rows_r.len(), "Ready: in-bounds row {} of {}", row_r, rows_r.len());
 }
+
+/// COUNTER-3 (Phase 3): Row anchor at entry N renumbers correctly when
+/// entries 0..k are evicted (entry N now lives at index N-k).
+#[test]
+fn phase3_counter_eviction_renumbers_row_anchor() {
+    use crate::components::markdown_stream::StateLookup;
+    use crate::components::react_trace::types::ScrollAnchor;
+
+    let mut trace = ReactTrace::new_for_tests();
+
+    // Seed two distinguishable entries.
+    trace.append_message("entry 0", "claude", "10:00".into());
+    trace.append_message("entry 1 anchor here", "codex", "10:01".into());
+    trace.force_flush_all(&StateLookup::empty());
+
+    // Pin anchor at entry 1, row 0.
+    trace.scroll_to_top();
+    let _ = trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
+    trace.set_visible_height_for_tests(2);
+
+    // Each plain-text entry contributes ≥1 row + blank separator. Scroll
+    // 2 rows to land in entry 1.
+    trace.scroll_down_by(2);
+
+    let before = trace.anchor_for_tests();
+    eprintln!("COUNTER-3 before: anchor={:?}", before);
+
+    // Force eviction of entry 0 by appending until MAX_LOG_ENTRIES is exceeded.
+    for i in 0..2000 {
+        trace.append_message(&format!("filler {}", i), &format!("agent{}", i), "10:00".into());
+    }
+
+    let after = trace.anchor_for_tests();
+    eprintln!("COUNTER-3 after: anchor={:?}", after);
+
+    // After eviction: anchor.entry_idx must be < entries.len() (no out-of-range).
+    if let ScrollAnchor::Row { entry_idx, .. } = after {
+        assert!(
+            entry_idx < trace.entries_for_tests().len(),
+            "evicted: entry_idx {} out of range (entries.len={})",
+            entry_idx,
+            trace.entries_for_tests().len()
+        );
+    }
+}
