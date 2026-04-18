@@ -93,6 +93,10 @@ pub struct PlanState {
     pub plan_id: String,
     pub tasks: Vec<PlanTaskEntry>,
     pub brain_session_id: SessionId,
+    /// beads epic ID when the plan was submitted with `persist_as_epic=true`.
+    /// None for ephemeral plans. Used by review_task's auto-close path to
+    /// resolve the child beads issue from the task's `spur.plan_id` label.
+    pub epic_id: Option<String>,
 }
 
 /// Maximum number of iterations per plan task. After this many attempts,
@@ -2247,6 +2251,7 @@ mod tests {
                 })
                 .collect(),
             brain_session_id: SessionId("brain".to_string()),
+            epic_id: None,
         };
         let mut warnings = Vec::new();
         super::mark_descendants_failed("A", &mut state, &mut warnings);
@@ -2368,6 +2373,7 @@ mod tests {
             plan_id: "p1".into(),
             tasks: vec![entry],
             brain_session_id: spur_acp::SessionId::new(),
+            epic_id: None,
         };
 
         let resp = review_task(
