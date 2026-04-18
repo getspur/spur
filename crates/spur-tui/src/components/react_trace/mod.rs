@@ -443,6 +443,10 @@ impl ReactTrace {
     }
 
     /// Force an immediate rebuild of every markdown stream.
+    ///
+    /// Used on TurnComplete — uses `flush_final` so trailing content
+    /// (paragraphs / fence closes at EOF) gets committed and styled
+    /// instead of rendering as plain tail.
     #[cfg(feature = "markdown")]
     pub fn force_flush_all(
         &mut self,
@@ -451,7 +455,7 @@ impl ReactTrace {
         let mut out = Vec::new();
         for (idx, entry) in self.entries.iter_mut().enumerate() {
             if let Some(stream) = entry.markdown.as_mut() {
-                for fence in stream.flush_now(states) {
+                for fence in stream.flush_final(states) {
                     out.push((idx, fence));
                 }
             }
@@ -751,11 +755,6 @@ impl ReactTrace {
 
 #[cfg(test)]
 impl ReactTrace {
-    /// Test-only helper: mutable access to the entry list.
-    pub(crate) fn entries_mut_for_test(&mut self) -> &mut [TraceEntry] {
-        &mut self.entries
-    }
-
     /// Test-only helper: returns each line as a joined `String` of span text.
     pub(crate) fn render_lines_for_test(&self, _width: u16) -> Vec<String> {
         self.render_to_strings()
@@ -860,10 +859,10 @@ mod markdown_integration_tests {
         let states = StateLookup::empty();
         let _ = trace.force_flush_all(&states);
 
-        let entries = trace.entries_mut_for_test();
+        let entries = trace.entries_for_test();
         assert!(!entries.is_empty(), "expected at least one entry");
         for entry in entries {
-            if let Some(stream) = entry.markdown.as_mut() {
+            if let Some(stream) = entry.markdown.as_ref() {
                 let has_fence = stream
                     .items()
                     .iter()
