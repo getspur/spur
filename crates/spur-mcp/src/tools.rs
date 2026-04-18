@@ -619,6 +619,18 @@ fn submit_plan_def() -> ToolDefinition {
                 "delegation_plan": {
                     "type": "object",
                     "description": "Structured reasoning for the overall plan."
+                },
+                "persist_as_epic": {
+                    "type": "boolean",
+                    "description": "When true, mirror the plan into beads as an epic with child issues + dependency edges. Each child is labeled `spur.plan_id=<plan_id>` so review_task(approve) can auto-close the matching beads issue. Requires `epic_title` and a beads PM backend. Defaults to false (ephemeral in-memory plan only)."
+                },
+                "epic_title": {
+                    "type": "string",
+                    "description": "Epic title. Required when `persist_as_epic` is true. Ignored otherwise."
+                },
+                "epic_body": {
+                    "type": "string",
+                    "description": "Epic description / rationale. Optional when `persist_as_epic` is true. Ignored otherwise."
                 }
             },
             "required": ["tasks"]
