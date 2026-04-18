@@ -336,22 +336,6 @@ impl ReactTrace {
                         }
                     };
                 }
-                crate::components::react_trace::types::ScrollAnchor::Byte {
-                    entry_idx,
-                    byte_offset,
-                } => {
-                    self.anchor = if entry_idx < drain {
-                        crate::components::react_trace::types::ScrollAnchor::Byte {
-                            entry_idx: 0,
-                            byte_offset: 0,
-                        }
-                    } else {
-                        crate::components::react_trace::types::ScrollAnchor::Byte {
-                            entry_idx: entry_idx - drain,
-                            byte_offset,
-                        }
-                    };
-                }
                 crate::components::react_trace::types::ScrollAnchor::Following => {}
             }
             self.invalidate_cache();

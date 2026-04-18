@@ -44,15 +44,10 @@ pub(in crate::components) struct VirtualRowCacheEntry {
 /// `Row` returns `entry_row_starts[entry_idx] + min(row_within_entry, entry_height - 1)`,
 /// guaranteeing the result lies within the entry's row range. If the entry
 /// was evicted (entry_idx out of range), snaps to 0.
-/// `Byte` walks `entry_row_starts` to the entry, then finds the first
-/// row whose `byte_ranges[i]` contains `byte_offset`. If the anchor's
-/// entry was evicted (entry_idx >= entry_row_starts.len()), snaps to 0.
-/// If the byte position falls in a gap (consolidated by reflow), snaps
-/// to the nearest preceding row whose range covers a byte ≤ byte_offset.
 #[cfg(feature = "markdown")]
 pub(crate) fn resolve_anchor(
     anchor: &crate::components::react_trace::types::ScrollAnchor,
-    byte_ranges: &[Option<std::ops::Range<usize>>],
+    _byte_ranges: &[Option<std::ops::Range<usize>>],
     entry_row_starts: &[usize],
     total_rows: usize,
     visible_height: usize,
@@ -80,38 +75,6 @@ pub(crate) fn resolve_anchor(
             }
             let clamped = (*row_within_entry).min(entry_height - 1);
             row_start + clamped
-        }
-        ScrollAnchor::Byte {
-            entry_idx,
-            byte_offset,
-        } => {
-            if *entry_idx >= entry_row_starts.len() {
-                return 0;
-            }
-            let row_start = entry_row_starts[*entry_idx];
-            let row_end = entry_row_starts
-                .get(*entry_idx + 1)
-                .copied()
-                .unwrap_or(total_rows);
-
-            // First row whose range contains byte_offset.
-            for i in row_start..row_end.min(byte_ranges.len()) {
-                if let Some(r) = &byte_ranges[i] {
-                    if r.contains(byte_offset) {
-                        return i;
-                    }
-                }
-            }
-            // Snap to last preceding row with range start <= byte_offset.
-            let mut snap = row_start;
-            for i in row_start..row_end.min(byte_ranges.len()) {
-                if let Some(r) = &byte_ranges[i] {
-                    if r.start <= *byte_offset {
-                        snap = i;
-                    }
-                }
-            }
-            snap
         }
     }
 }
@@ -701,32 +664,6 @@ mod resolve_anchor_tests {
         let entry_starts = vec![0, 1, 2];
         let row = resolve_anchor(&ScrollAnchor::Following, &ranges, &entry_starts, 3, 1);
         assert_eq!(row, 2, "Following clamps to total - visible_height");
-    }
-
-    #[test]
-    fn byte_anchor_resolves_to_containing_row() {
-        // Two entries: entry 0 spans rows 0..2 with bytes 0..50; entry 1
-        // spans rows 2..4 with bytes 0..30.
-        let ranges = ranges(&[Some(0..50), Some(0..50), Some(0..30), Some(0..30)]);
-        let entry_starts = vec![0, 2];
-        let anchor = ScrollAnchor::Byte {
-            entry_idx: 1,
-            byte_offset: 15,
-        };
-        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 4, 2);
-        assert_eq!(row, 2, "byte 15 in entry 1 lands on its first row");
-    }
-
-    #[test]
-    fn evicted_entry_snaps_to_zero() {
-        let ranges = ranges(&[Some(0..10)]);
-        let entry_starts = vec![0];
-        let anchor = ScrollAnchor::Byte {
-            entry_idx: 99,
-            byte_offset: 0,
-        };
-        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 1, 1);
-        assert_eq!(row, 0, "anchor pointing at evicted entry snaps to 0");
     }
 
     #[test]
