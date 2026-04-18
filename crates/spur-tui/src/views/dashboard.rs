@@ -375,6 +375,7 @@ impl DashboardView {
             frame.render_widget(paragraph, content_area);
             let input_bar_area = chunks[1];
             self.render_input_hint(frame, area, input_bar_area);
+            self.input_bar.set_last_inner_width(input_bar_area.width.saturating_sub(2));
             self.input_bar.render(frame, input_bar_area);
             StatusBar::render(
                 frame,
@@ -462,6 +463,7 @@ impl DashboardView {
         }
         let input_bar_area = chunks[input_chunk];
         self.render_input_hint(frame, area, input_bar_area);
+        self.input_bar.set_last_inner_width(input_bar_area.width.saturating_sub(2));
         self.input_bar.render(frame, input_bar_area);
         StatusBar::render(
             frame,
