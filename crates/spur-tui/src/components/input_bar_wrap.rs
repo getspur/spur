@@ -462,4 +462,52 @@ mod tests {
         assert_eq!(vr, 0);
         assert_eq!(vc, 5);
     }
+
+    #[test]
+    fn atom_cells_conserved_across_wrap_boundary() {
+        let text = "text before @resource/long-name.txt text after";
+        let lines = v(&[text]);
+        let layout = wrap(&lines, 20);
+
+        let atom_start = text.find('@').unwrap();
+        let atom_end = atom_start + "@resource/long-name.txt".len();
+
+        let mut counted_cells: u16 = 0;
+        for vr in &layout.rows {
+            for g in &vr.graphemes {
+                if g.byte_start >= atom_start && g.byte_end <= atom_end {
+                    counted_cells += g.width as u16;
+                }
+            }
+        }
+
+        let expected: u16 = text[atom_start..atom_end]
+            .graphemes(true)
+            .map(|g| grapheme_cells(g) as u16)
+            .sum();
+        assert_eq!(counted_cells, expected, "atom cells must be conserved across wrap");
+    }
+
+    #[test]
+    fn visual_height_80w_empty_is_1() {
+        assert_eq!(wrap(&v(&[""]), 80).visual_height(), 1);
+    }
+
+    #[test]
+    fn visual_height_80w_80chars_is_1() {
+        let s = "a".repeat(80);
+        assert_eq!(wrap(&v(&[&s]), 80).visual_height(), 1);
+    }
+
+    #[test]
+    fn visual_height_80w_81chars_is_2() {
+        let s = "a".repeat(81);
+        assert_eq!(wrap(&v(&[&s]), 80).visual_height(), 2);
+    }
+
+    #[test]
+    fn visual_height_40w_200chars_is_5() {
+        let s = "a".repeat(200);
+        assert_eq!(wrap(&v(&[&s]), 40).visual_height(), 5);
+    }
 }
