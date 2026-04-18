@@ -192,6 +192,11 @@ pub struct MarkdownStream {
     /// Invariant (C1): cached_items, known_fences, fence_placeholders
     /// jointly represent the parsed-decorated form of raw_text[..flushed_byte_len].
     flushed_byte_len: usize,
+
+    /// Set by `flush_final` when the stream is finalized (TurnComplete).
+    /// `append` after finalize is a contract violation; enforced via
+    /// debug_assert (see Task 11).
+    finalized: bool,
 }
 
 impl Default for MarkdownStream {
@@ -205,6 +210,7 @@ impl Default for MarkdownStream {
             next_fence_id: 0,
             mermaid_enabled: true,
             flushed_byte_len: 0,
+            finalized: false,
         }
     }
 }
@@ -227,6 +233,10 @@ impl MarkdownStream {
     /// Test-only accessor: returns the current flushed_byte_len cursor value.
     pub fn flushed_byte_len_for_tests(&self) -> usize {
         self.flushed_byte_len
+    }
+
+    pub fn is_finalized(&self) -> bool {
+        self.finalized
     }
 
     /// Append a chunk of text. Cheap — does not reparse.
