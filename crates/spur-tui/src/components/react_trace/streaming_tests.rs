@@ -1611,6 +1611,48 @@ fn build_display_lines_completed_shows_outcome_glyph() {
 
 #[cfg(feature = "markdown")]
 #[test]
+fn virtual_rows_collapsed_completed_act_shows_outcome_no_spinner() {
+    use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+    let mut trace = super::ReactTrace::new();
+    trace.push(super::TraceEntry {
+        kind: super::TraceKind::Act {
+            tool: "shell".into(),
+            family: ToolFamily::Execute,
+            input: ToolInputDisplay::Command {
+                cmd: "echo".into(),
+                cwd: None,
+            },
+            tool_call_id: None,
+            status: super::ActStatus::Completed(Some(ObservePayload::CommandOutput {
+                exit_code: Some(0),
+                stdout: "hi".into(),
+                stderr: String::new(),
+            })),
+        },
+        text: String::new(),
+        timestamp: "10:00".into(),
+        markdown: None,
+    });
+    let (rows, _, _) =
+        trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    let txt: String = rows
+        .iter()
+        .filter_map(|r| match r {
+            super::VirtualRow::Text(l) => Some(
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(txt.contains("✓"), "virtual rows must contain outcome: {txt}");
+}
+
+#[cfg(feature = "markdown")]
+#[test]
 fn build_display_lines_expanded_completed_renders_outcome_body() {
     use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
     let mut trace = super::ReactTrace::new();
