@@ -62,6 +62,9 @@ pub struct InputBar {
     history_cursor: Option<usize>,
     /// Stashed live input when the user enters history-browsing mode.
     draft: String,
+    /// Last inner width observed in `render()`; used by visual-line nav when
+    /// arrow keys fire before a fresh render.
+    last_inner_width: u16,
 }
 
 impl InputBar {
@@ -82,6 +85,7 @@ impl InputBar {
             history: Vec::new(),
             history_cursor: None,
             draft: String::new(),
+            last_inner_width: 80,
         }
     }
 
@@ -176,6 +180,14 @@ impl InputBar {
     fn handle_emacs_input(&mut self, key: KeyEvent, input: Input) -> Option<(String, bool)> {
         // Handle protected range logic for special keys
         match key.code {
+            KeyCode::Up => {
+                self.visual_line_up(self.last_inner_width());
+                return None;
+            }
+            KeyCode::Down => {
+                self.visual_line_down(self.last_inner_width());
+                return None;
+            }
             KeyCode::Left => {
                 self.move_cursor_back();
                 return None;
@@ -574,6 +586,14 @@ impl InputBar {
                 self.rebuild_line_cache();
                 return None;
             }
+            KeyCode::Up => {
+                self.visual_line_up(self.last_inner_width());
+                return None;
+            }
+            KeyCode::Down => {
+                self.visual_line_down(self.last_inner_width());
+                return None;
+            }
             KeyCode::Left => {
                 self.move_cursor_back();
                 return None;
@@ -886,10 +906,12 @@ impl InputBar {
     /// Reset text and cursor.
     pub fn clear(&mut self) {
         let mode = self.mode;
+        let last_w = self.last_inner_width;
         self.textarea = TextArea::default();
         self.textarea.set_cursor_line_style(Style::default());
         self.line_cache = vec![0];
         self.protected_ranges.clear();
+        self.last_inner_width = last_w;
         self.set_mode(mode);
     }
 
@@ -906,13 +928,25 @@ impl InputBar {
     /// Replace text and cursor wholesale.
     pub fn set_text(&mut self, text: String, cursor: usize) {
         let mode = self.mode;
+        let last_w = self.last_inner_width;
         let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
         self.textarea = TextArea::new(lines);
         self.textarea.set_cursor_line_style(Style::default());
         self.rebuild_line_cache();
         self.move_cursor_to_byte(cursor);
         self.protected_ranges.clear();
+        self.last_inner_width = last_w;
         self.set_mode(mode);
+    }
+
+    /// Record the last rendered inner width so arrow-key nav can compute
+    /// visual rows before the next render.
+    pub fn set_last_inner_width(&mut self, width: u16) {
+        self.last_inner_width = width;
+    }
+
+    fn last_inner_width(&self) -> u16 {
+        self.last_inner_width
     }
 
     /// Set the status label.
@@ -1158,6 +1192,37 @@ impl InputBar {
             frame.set_cursor_position((cx, cy));
         }
     }
+
+    /// Visual-line Down: move cursor one visual row down, preserving vcol.
+    pub fn visual_line_down(&mut self, inner_width: u16) {
+        self.visual_line_move(inner_width, 1);
+    }
+
+    /// Visual-line Up.
+    pub fn visual_line_up(&mut self, inner_width: u16) {
+        self.visual_line_move(inner_width, -1);
+    }
+
+    fn visual_line_move(&mut self, inner_width: u16, delta: i32) {
+        if inner_width == 0 {
+            return;
+        }
+        let lines: Vec<String> = self.textarea.lines().to_vec();
+        let layout = crate::components::input_bar_wrap::wrap(&lines, inner_width);
+
+        let (row, ccol) = self.textarea.cursor();
+        let byte = self.char_col_to_byte(row, ccol);
+        let (vr, vc) = layout.logical_to_visual(row, byte);
+
+        let target_vr = (vr as i32 + delta).clamp(0, layout.rows.len() as i32 - 1) as usize;
+        if target_vr == vr {
+            return;
+        }
+        let max_vc = layout.rows[target_vr].used_cells as usize;
+        let target_vc = vc.min(max_vc);
+        let (target_row, target_byte) = layout.visual_to_logical(target_vr, target_vc);
+        self.move_cursor_to_byte(target_byte_abs(&lines, target_row, target_byte));
+    }
 }
 
 #[cfg(test)]
@@ -1194,6 +1259,46 @@ mod required_height_tests {
         bar.set_text("你好世界你好世界你好".to_string(), 0);
         assert_eq!(bar.required_height(22), 3); // inner width = 20 → 1 row
     }
+
+    #[test]
+    fn visual_down_crosses_wrap_boundary() {
+        let mut bar = InputBar::new();
+        // 16 ASCII chars, wrapped at width 5 (inner) → 4 vrows of 5,5,5,1.
+        bar.set_text("abcdefghijklmnop".to_string(), 3);
+        // width arg to visual nav reflects the inner width of the render area.
+        bar.visual_line_down(5);
+        // Cursor moves from byte 3 (vrow 0, vcol 3) to vrow 1, vcol 3 → byte 8.
+        assert_eq!(bar.cursor(), 8);
+    }
+
+    #[test]
+    fn visual_up_inverse_of_down() {
+        let mut bar = InputBar::new();
+        bar.set_text("abcdefghijklmnop".to_string(), 3);
+        bar.visual_line_down(5);
+        bar.visual_line_up(5);
+        assert_eq!(bar.cursor(), 3);
+    }
+
+    #[test]
+    fn visual_down_at_last_vrow_is_noop() {
+        let mut bar = InputBar::new();
+        bar.set_text("abc".to_string(), 3);
+        bar.visual_line_down(80);
+        assert_eq!(bar.cursor(), 3);
+    }
+}
+
+/// Convert per-line byte offset to absolute byte offset across all lines.
+fn target_byte_abs(lines: &[String], row: usize, byte_col: usize) -> usize {
+    let mut acc = 0usize;
+    for (i, l) in lines.iter().enumerate() {
+        if i == row {
+            return acc + byte_col;
+        }
+        acc += l.len() + 1; // +1 for '\n'
+    }
+    acc
 }
 
 impl Default for InputBar {

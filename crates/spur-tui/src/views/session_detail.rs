@@ -1638,6 +1638,7 @@ impl SessionDetailView {
         }
 
         // ── Input bar ───────────────────────────────────────────────────
+        self.input_bar.set_last_inner_width(chunks[3].width.saturating_sub(2));
         self.input_bar.render(frame, chunks[3]);
 
         // ── Completion popup (overlay above the InputBar) ──────────────
