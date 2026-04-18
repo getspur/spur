@@ -5,7 +5,8 @@ use spur_tui::views::session_picker::SessionPickerView;
 use spur_tui::views::View;
 
 fn test_ctx() -> spur_tui::views::ViewContext<'static> {
-    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+        std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
     spur_tui::test_support::test_view_ctx(&LINEAGE)
 }
 
@@ -37,7 +38,10 @@ fn enter_on_new_session_row_emits_new_session_requested() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("test-agent".into(), vec![]);
     // Cursor defaults to [+ New session] row at index 0.
-    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
+    let action = picker.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     assert!(matches!(action, Some(Action::NewSessionRequested)));
 }
 
@@ -116,7 +120,10 @@ fn p_key_emits_toggle_pin_for_highlighted_session() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x"), session("a2", "y")]);
     // Move cursor to first real session (index 1, [+ New] is at 0).
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     let action = picker.handle_key(key('p'), &test_ctx());
     match action {
         Some(Action::ToggleSessionPin { session_id }) => {
@@ -138,7 +145,10 @@ fn p_key_on_new_session_row_is_noop() {
 fn d_key_emits_toggle_archive_for_highlighted_session() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x")]);
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     let action = picker.handle_key(key('d'), &test_ctx());
     match action {
         Some(Action::ToggleSessionArchive { session_id }) => assert_eq!(session_id, "a1"),
@@ -166,17 +176,29 @@ fn a_key_toggles_show_archived() {
 fn capital_r_enters_rename_mode_and_enter_commits() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "old title")]);
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+        &test_ctx(),
+    );
     assert!(picker.is_rename_active());
     // Clear old title by sending backspaces (the prompt pre-fills "old title" — 9 chars).
     for _ in 0..20 {
-        let _ = picker.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &test_ctx());
+        let _ = picker.handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &test_ctx(),
+        );
     }
     for c in "new name".chars() {
         let _ = picker.handle_key(key(c), &test_ctx());
     }
-    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
+    let action = picker.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     match action {
         Some(Action::RenameSession {
             session_id,
@@ -194,8 +216,14 @@ fn capital_r_enters_rename_mode_and_enter_commits() {
 fn esc_in_rename_cancels_without_action() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "old")]);
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+        &test_ctx(),
+    );
     let _ = picker.handle_key(key('z'), &test_ctx());
     let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(action.is_none());
@@ -207,9 +235,15 @@ fn capital_p_toggles_preview_visible() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x")]);
     assert!(!picker.is_preview_visible());
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+        &test_ctx(),
+    );
     assert!(picker.is_preview_visible());
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+        &test_ctx(),
+    );
     assert!(!picker.is_preview_visible());
 }
 
@@ -229,8 +263,14 @@ fn picker_preserves_cursor_and_filter_across_set_sessions() {
         vec![session("a1", "alpha"), session("a2", "beta")],
     );
     // Navigate to cursor=2 and set filter to "b".
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     let _ = picker.handle_key(key('/'), &test_ctx());
     let _ = picker.handle_key(key('b'), &test_ctx());
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
@@ -261,11 +301,20 @@ fn enter_switching_session_with_current_draft_shows_confirm() {
     picker.set_current_session_has_draft(Some("a1".to_string()));
 
     // Move cursor to a2 (cursor 2 in virtual layout: [+ New]=0, a1=1, a2=2).
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
 
     // Enter should NOT immediately emit ResumeSession — it should open the confirm.
-    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
+    let action = picker.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     assert!(action.is_none());
     assert!(picker.is_confirm_switch_visible());
 
@@ -286,9 +335,18 @@ fn esc_cancels_confirm_switch() {
         vec![session("a1", "alpha"), session("a2", "beta")],
     );
     picker.set_current_session_has_draft(Some("a1".to_string()));
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(action.is_none());
     assert!(!picker.is_confirm_switch_visible());
@@ -304,8 +362,14 @@ fn enter_on_same_session_id_does_not_show_confirm() {
     );
     picker.set_current_session_has_draft(Some("a1".to_string()));
     // Cursor on a1 (cursor=1).
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
-    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let action = picker.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     // Should emit ResumeSession directly (same session, no switch).
     assert!(matches!(action, Some(Action::ResumeSession { session_id }) if session_id == "a1"));
     assert!(!picker.is_confirm_switch_visible());
@@ -317,7 +381,10 @@ fn enter_on_new_session_row_with_draft_shows_confirm() {
     picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
     picker.set_current_session_has_draft(Some("a1".to_string()));
     // Cursor is at [+ New session] (cursor=0).
-    let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
+    let action = picker.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
     // [+ New] with a current draft should also show confirm.
     assert!(action.is_none());
     assert!(picker.is_confirm_switch_visible());

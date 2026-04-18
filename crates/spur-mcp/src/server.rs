@@ -101,15 +101,15 @@ impl JsonRpcResponse {
 /// See design spec section C.1.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkerInfo {
-    pub name:         String,
-    pub tier:         Option<String>,
-    pub description:  Option<String>,
+    pub name: String,
+    pub tier: Option<String>,
+    pub description: Option<String>,
     #[serde(default)]
-    pub good_for:     Vec<String>,
+    pub good_for: Vec<String>,
     #[serde(default)]
-    pub avoid_for:    Vec<String>,
+    pub avoid_for: Vec<String>,
     pub output_shape: Option<String>,
-    pub cost_tier:    Option<String>,
+    pub cost_tier: Option<String>,
 }
 
 /// Build the public `WorkerInfo` from a merged `AgentConfig`.
@@ -117,16 +117,16 @@ pub struct WorkerInfo {
 pub fn build_worker_info(cfg: &spur_acp::config::AgentConfig) -> WorkerInfo {
     use spur_acp::config::Tier;
     WorkerInfo {
-        name:         cfg.name.clone(),
-        tier:         cfg.delegation.tier.map(|t| match t {
+        name: cfg.name.clone(),
+        tier: cfg.delegation.tier.map(|t| match t {
             Tier::Specialist => "specialist".into(),
             Tier::Generalist => "generalist".into(),
         }),
-        description:  cfg.delegation.description.clone(),
-        good_for:     cfg.delegation.good_for.clone(),
-        avoid_for:    cfg.delegation.avoid_for.clone(),
+        description: cfg.delegation.description.clone(),
+        good_for: cfg.delegation.good_for.clone(),
+        avoid_for: cfg.delegation.avoid_for.clone(),
         output_shape: cfg.delegation.output_shape.clone(),
-        cost_tier:    Some(format!("{:?}", cfg.cost_tier).to_lowercase()),
+        cost_tier: Some(format!("{:?}", cfg.cost_tier).to_lowercase()),
     }
 }
 
@@ -148,7 +148,8 @@ pub struct McpCallbackServer {
     /// Results that a background collector has received but the brain has
     /// not yet polled via `check_delegation_status` / `wait_delegation`.
     /// Stored with insertion timestamp for TTL-based lazy eviction.
-    completed_delegations: Arc<tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>>,
+    completed_delegations:
+        Arc<tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>>,
     /// Tracks spawned result-collector tasks for graceful shutdown.
     task_tracker: TaskTracker,
     /// Optional PM service for direct issue/PR operations.
@@ -156,7 +157,8 @@ pub struct McpCallbackServer {
     /// Optional event sink for emitting MCP lifecycle events.
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     /// Active execution plans submitted via `submit_plan`.
-    active_plans: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
+    active_plans:
+        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
     /// Phase 2.5 idempotency guard: maps `epic_id → plan_id` for the
     /// currently-active plan (if any). A sentinel `"__pending__"` value is
     /// used briefly during the PmService fetch to prevent concurrent
@@ -201,7 +203,9 @@ impl McpCallbackServer {
         delegation_id: String,
         rx: tokio::sync::oneshot::Receiver<DelegationResult>,
         active: Arc<tokio::sync::Mutex<HashSet<String>>>,
-        completed: Arc<tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>>,
+        completed: Arc<
+            tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>,
+        >,
     ) {
         tracker.spawn(async move {
             let result = match rx.await {
@@ -218,7 +222,10 @@ impl McpCallbackServer {
                 },
             };
             active.lock().await.remove(&delegation_id);
-            completed.lock().await.insert(delegation_id, (result, tokio::time::Instant::now()));
+            completed
+                .lock()
+                .await
+                .insert(delegation_id, (result, tokio::time::Instant::now()));
         });
     }
 
@@ -408,9 +415,7 @@ impl McpCallbackServer {
             "delegate_parallel" => self.handle_delegate_parallel(id, arguments).await,
             "delegate_async" => self.handle_delegate_async(id, arguments).await,
             "wait_delegation" => self.handle_wait_delegation(id, arguments).await,
-            "check_delegation_status" => {
-                self.handle_check_delegation_status(id, arguments).await
-            }
+            "check_delegation_status" => self.handle_check_delegation_status(id, arguments).await,
             "cancel_delegation" => self.handle_cancel_delegation(id, arguments).await,
             "list_available_workers" => self.handle_list_available_workers(id).await,
             "get_issue" => self.handle_get_issue(id, arguments).await,
@@ -465,7 +470,10 @@ impl McpCallbackServer {
         let delegation_plan: Option<spur_acp::DelegationPlan> = args
             .get("delegation_plan")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let issue_id = args.get("issue_id").and_then(|v| v.as_str()).map(String::from);
+        let issue_id = args
+            .get("issue_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -507,7 +515,8 @@ impl McpCallbackServer {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-            if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&request_id) {
+            if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&request_id)
+            {
                 let result_json = match serde_json::to_value(&result) {
                     Ok(v) => v,
                     Err(e) => {
@@ -565,7 +574,10 @@ impl McpCallbackServer {
         let shared_plan: Option<spur_acp::DelegationPlan> = args
             .get("delegation_plan")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let shared_issue_id = args.get("issue_id").and_then(|v| v.as_str()).map(String::from);
+        let shared_issue_id = args
+            .get("issue_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let mut receivers = Vec::with_capacity(tasks.len());
 
@@ -666,11 +678,7 @@ impl McpCallbackServer {
         )
     }
 
-    async fn handle_check_delegation_status(
-        &self,
-        id: Value,
-        args: Value,
-    ) -> JsonRpcResponse {
+    async fn handle_check_delegation_status(&self, id: Value, args: Value) -> JsonRpcResponse {
         let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
             Some(d) => d.to_string(),
             None => {
@@ -704,7 +712,12 @@ impl McpCallbackServer {
         }
 
         // Still running.
-        if self.active_delegations.lock().await.contains(&delegation_id) {
+        if self
+            .active_delegations
+            .lock()
+            .await
+            .contains(&delegation_id)
+        {
             return JsonRpcResponse::success(
                 id,
                 json!({
@@ -716,11 +729,7 @@ impl McpCallbackServer {
             );
         }
 
-        JsonRpcResponse::error(
-            id,
-            -32602,
-            format!("Unknown delegation: {delegation_id}"),
-        )
+        JsonRpcResponse::error(id, -32602, format!("Unknown delegation: {delegation_id}"))
     }
 
     async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -735,7 +744,12 @@ impl McpCallbackServer {
         };
 
         // Already completed — return the result directly.
-        if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&delegation_id) {
+        if let Some((result, _ts)) = self
+            .completed_delegations
+            .lock()
+            .await
+            .remove(&delegation_id)
+        {
             let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
             return JsonRpcResponse::success(
                 id,
@@ -750,7 +764,12 @@ impl McpCallbackServer {
         }
 
         // Active — send cancellation sentinel to orchestrator and await response.
-        if self.active_delegations.lock().await.contains(&delegation_id) {
+        if self
+            .active_delegations
+            .lock()
+            .await
+            .contains(&delegation_id)
+        {
             let request_id = uuid::Uuid::new_v4().to_string();
             let (tx, rx) = tokio::sync::oneshot::channel();
             let delegation = DelegationRequest {
@@ -775,11 +794,9 @@ impl McpCallbackServer {
             // will return the actual cancellation result.
             match rx.await {
                 Ok(result) => {
-                    let text = result.summary.unwrap_or_else(|| {
-                        match &result.status {
-                            DelegationStatus::Failed { error } => error.clone(),
-                            other => format!("{:?}", other),
-                        }
+                    let text = result.summary.unwrap_or_else(|| match &result.status {
+                        DelegationStatus::Failed { error } => error.clone(),
+                        other => format!("{:?}", other),
                     });
                     return JsonRpcResponse::success(
                         id,
@@ -795,11 +812,7 @@ impl McpCallbackServer {
             }
         }
 
-        JsonRpcResponse::error(
-            id,
-            -32602,
-            format!("Unknown delegation: {delegation_id}"),
-        )
+        JsonRpcResponse::error(id, -32602, format!("Unknown delegation: {delegation_id}"))
     }
 
     async fn handle_list_available_workers(&self, id: Value) -> JsonRpcResponse {
@@ -828,8 +841,8 @@ impl McpCallbackServer {
 
         match pm.get_issue(&issue_id).await {
             Ok(issue) => {
-                let text = serde_json::to_string_pretty(&issue)
-                    .unwrap_or_else(|_| format!("{issue:?}"));
+                let text =
+                    serde_json::to_string_pretty(&issue).unwrap_or_else(|_| format!("{issue:?}"));
                 JsonRpcResponse::success(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }] }),
@@ -851,21 +864,44 @@ impl McpCallbackServer {
             .unwrap_or_default();
 
         let filter = IssueFilter {
-            status: args.get("status").and_then(|v| v.as_str()).map(String::from),
-            assignee: args.get("assignee").and_then(|v| v.as_str()).map(String::from),
-            priority_min: args.get("priority_min").and_then(|v| v.as_i64()).map(|n| n as i32),
-            priority_max: args.get("priority_max").and_then(|v| v.as_i64()).map(|n| n as i32),
-            issue_type: args.get("issue_type").and_then(|v| v.as_str()).map(String::from),
-            text_search: args.get("text_search").and_then(|v| v.as_str()).map(String::from),
-            limit: Some(args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).min(100) as usize),
+            status: args
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            assignee: args
+                .get("assignee")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            priority_min: args
+                .get("priority_min")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            priority_max: args
+                .get("priority_max")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            issue_type: args
+                .get("issue_type")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            text_search: args
+                .get("text_search")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            limit: Some(
+                args.get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20)
+                    .min(100) as usize,
+            ),
             labels,
             since: None,
         };
 
         match pm.list_issues(filter).await {
             Ok(issues) => {
-                let text = serde_json::to_string_pretty(&issues)
-                    .unwrap_or_else(|_| format!("{issues:?}"));
+                let text =
+                    serde_json::to_string_pretty(&issues).unwrap_or_else(|_| format!("{issues:?}"));
                 JsonRpcResponse::success(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }] }),
@@ -895,10 +931,22 @@ impl McpCallbackServer {
             .unwrap_or_default();
 
         let update = IssueUpdate {
-            status: args.get("status").and_then(|v| v.as_str()).map(String::from),
-            comment: args.get("comment").and_then(|v| v.as_str()).map(String::from),
-            priority: args.get("priority").and_then(|v| v.as_i64()).map(|n| n as i32),
-            assignee: args.get("assignee").and_then(|v| v.as_str()).map(String::from),
+            status: args
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            comment: args
+                .get("comment")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            priority: args
+                .get("priority")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            assignee: args
+                .get("assignee")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             add_labels,
             remove_labels,
         };
@@ -933,13 +981,28 @@ impl McpCallbackServer {
 
         let params = spur_pm::IssueCreate {
             title,
-            description: args.get("description").and_then(|v| v.as_str()).map(String::from),
+            description: args
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             issue_type: args.get("type").and_then(|v| v.as_str()).map(String::from),
-            priority: args.get("priority").and_then(|v| v.as_i64()).map(|n| n as i32),
+            priority: args
+                .get("priority")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
             labels,
-            parent: args.get("parent").and_then(|v| v.as_str()).map(String::from),
-            assignee: args.get("assignee").and_then(|v| v.as_str()).map(String::from),
-            estimate_minutes: args.get("estimate").and_then(|v| v.as_u64()).map(|n| n as u32),
+            parent: args
+                .get("parent")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            assignee: args
+                .get("assignee")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            estimate_minutes: args
+                .get("estimate")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32),
             depends_on,
         };
 
@@ -1014,7 +1077,10 @@ impl McpCallbackServer {
             title,
             body,
             head_branch,
-            base_branch: args.get("base_branch").and_then(|v| v.as_str()).map(String::from),
+            base_branch: args
+                .get("base_branch")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             repo: args.get("repo").and_then(|v| v.as_str()).map(String::from),
         };
 
@@ -1190,9 +1256,7 @@ impl McpCallbackServer {
         };
         let root_id = match args.get("root_id").and_then(|v| v.as_str()) {
             Some(r) => r,
-            None => {
-                return JsonRpcResponse::invalid_params(id, "Missing required field 'root_id'")
-            }
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'root_id'"),
         };
         let depth = args.get("depth").and_then(|v| v.as_u64()).map(|d| d as u32);
         let format = args.get("format").and_then(|v| v.as_str());
@@ -1224,10 +1288,7 @@ impl McpCallbackServer {
         {
             Ok(t) => t,
             Err(e) => {
-                return JsonRpcResponse::invalid_params(
-                    id,
-                    format!("Invalid task format: {e}"),
-                )
+                return JsonRpcResponse::invalid_params(id, format!("Invalid task format: {e}"))
             }
         };
 
@@ -1263,7 +1324,8 @@ impl McpCallbackServer {
 
         // Spawn the plan executor.
         let delegation_tx = self.delegation_tx.clone();
-        self.task_tracker.spawn(crate::plan::run_plan(state, delegation_tx));
+        self.task_tracker
+            .spawn(crate::plan::run_plan(state, delegation_tx));
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
@@ -1285,9 +1347,7 @@ impl McpCallbackServer {
         // 1. Extract required epic_id.
         let epic_id = match args.get("epic_id").and_then(|v| v.as_str()) {
             Some(e) => e.to_string(),
-            None => {
-                return JsonRpcResponse::invalid_params(id, "missing required field: epic_id")
-            }
+            None => return JsonRpcResponse::invalid_params(id, "missing required field: epic_id"),
         };
         let default_agent = args
             .get("default_agent")
@@ -1345,8 +1405,7 @@ impl McpCallbackServer {
                     };
                     if let Some(arc) = plan_arc {
                         let state = arc.lock().await;
-                        let status_val =
-                            crate::plan::build_plan_status(&existing_plan_id, &state);
+                        let status_val = crate::plan::build_plan_status(&existing_plan_id, &state);
                         let overall = status_val
                             .get("status")
                             .and_then(|v| v.as_str())
@@ -1392,10 +1451,8 @@ impl McpCallbackServer {
         }
 
         // 4. Derive the plan from the epic subgraph via PmService.
-        let known_agent_names: Vec<String> =
-            self.workers.iter().map(|w| w.name.clone()).collect();
-        let known_agents_refs: Vec<&str> =
-            known_agent_names.iter().map(String::as_str).collect();
+        let known_agent_names: Vec<String> = self.workers.iter().map(|w| w.name.clone()).collect();
+        let known_agents_refs: Vec<&str> = known_agent_names.iter().map(String::as_str).collect();
 
         let derived = match crate::plan::derive_epic_plan(
             pm,
@@ -1506,21 +1563,15 @@ impl McpCallbackServer {
             m.insert("derived".into(), derived_info);
         }
 
-        let text = serde_json::to_string_pretty(&resp_val)
-            .unwrap_or_else(|_| resp_val.to_string());
+        let text = serde_json::to_string_pretty(&resp_val).unwrap_or_else(|_| resp_val.to_string());
 
-        JsonRpcResponse::success(
-            id,
-            json!({ "content": [{ "type": "text", "text": text }] }),
-        )
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
 
     async fn handle_get_plan_status(&self, id: Value, args: Value) -> JsonRpcResponse {
         let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
-            None => {
-                return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'")
-            }
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
         };
 
         // Clone the Arc before releasing the outer lock so we don't hold
@@ -1534,37 +1585,41 @@ impl McpCallbackServer {
         let plan_state = match plan_arc {
             Some(s) => s,
             None => {
-                return JsonRpcResponse::invalid_params(
-                    id,
-                    format!("Unknown plan_id: '{plan_id}'"),
-                )
+                return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"))
             }
         };
 
         let state = plan_state.lock().await;
         let status = crate::plan::build_plan_status(&plan_id, &state);
-        let text =
-            serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+        let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
 
-        JsonRpcResponse::success(
-            id,
-            json!({ "content": [{ "type": "text", "text": text }] }),
-        )
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
 
     async fn handle_get_task_diff(&self, args: &serde_json::Value) -> Result<String, String> {
-        let plan_id = args["plan_id"].as_str().ok_or("missing plan_id")?.to_string();
-        let task_id = args["task_id"].as_str().ok_or("missing task_id")?.to_string();
+        let plan_id = args["plan_id"]
+            .as_str()
+            .ok_or("missing plan_id")?
+            .to_string();
+        let task_id = args["task_id"]
+            .as_str()
+            .ok_or("missing task_id")?
+            .to_string();
         let attempt = args["attempt"].as_u64().map(|n| n as u32);
 
         let plan_arc = {
             let plans = self.active_plans.lock().await;
-            plans.get(&plan_id).cloned()
+            plans
+                .get(&plan_id)
+                .cloned()
                 .ok_or_else(|| format!("unknown plan '{plan_id}'"))?
         };
 
         let state = plan_arc.lock().await;
-        let entry = state.tasks.iter().find(|t| t.spec.task_id == task_id)
+        let entry = state
+            .tasks
+            .iter()
+            .find(|t| t.spec.task_id == task_id)
             .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
 
         match &entry.status {
@@ -1572,7 +1627,9 @@ impl McpCallbackServer {
                 return Err(format!("task '{task_id}' has not been dispatched yet"));
             }
             crate::plan::PlanTaskStatus::Dispatched { .. } => {
-                return Err(format!("task '{task_id}' is still running — diff not available yet"));
+                return Err(format!(
+                    "task '{task_id}' is still running — diff not available yet"
+                ));
             }
             _ => {}
         }
@@ -1603,7 +1660,10 @@ impl McpCallbackServer {
                     resp.insert("summary".into(), json!(s));
                 }
                 if let Some(ref d) = rec.diff_summary {
-                    resp.insert("diff_summary".into(), serde_json::to_value(d).unwrap_or_default());
+                    resp.insert(
+                        "diff_summary".into(),
+                        serde_json::to_value(d).unwrap_or_default(),
+                    );
                 }
                 resp.insert("feedback".into(), json!(rec.feedback));
                 resp.insert(
@@ -1645,14 +1705,22 @@ impl McpCallbackServer {
     }
 
     async fn handle_review_task(&self, args: &serde_json::Value) -> Result<String, String> {
-        let plan_id = args["plan_id"].as_str().ok_or("missing plan_id")?.to_string();
-        let task_id = args["task_id"].as_str().ok_or("missing task_id")?.to_string();
+        let plan_id = args["plan_id"]
+            .as_str()
+            .ok_or("missing plan_id")?
+            .to_string();
+        let task_id = args["task_id"]
+            .as_str()
+            .ok_or("missing task_id")?
+            .to_string();
         let decision = args["decision"].as_str().ok_or("missing decision")?;
         let feedback = args["feedback"].as_str();
 
         let plan_arc = {
             let plans = self.active_plans.lock().await;
-            plans.get(&plan_id).cloned()
+            plans
+                .get(&plan_id)
+                .cloned()
                 .ok_or_else(|| format!("unknown plan '{plan_id}'"))?
         };
 
@@ -1694,7 +1762,10 @@ impl McpCallbackServer {
         let delegation_plan: Option<spur_acp::DelegationPlan> = args
             .get("delegation_plan")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let issue_id = args.get("issue_id").and_then(|v| v.as_str()).map(String::from);
+        let issue_id = args
+            .get("issue_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1744,14 +1815,22 @@ impl McpCallbackServer {
         let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
             Some(d) => d.to_string(),
             None => {
-                return JsonRpcResponse::invalid_params(id, "Missing required field 'delegation_id'")
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    "Missing required field 'delegation_id'",
+                )
             }
         };
 
         self.evict_stale_completions().await;
 
         // Already completed — return immediately.
-        if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&delegation_id) {
+        if let Some((result, _ts)) = self
+            .completed_delegations
+            .lock()
+            .await
+            .remove(&delegation_id)
+        {
             let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
             return JsonRpcResponse::success(
                 id,
@@ -1766,7 +1845,12 @@ impl McpCallbackServer {
         }
 
         // Unknown delegation.
-        if !self.active_delegations.lock().await.contains(&delegation_id) {
+        if !self
+            .active_delegations
+            .lock()
+            .await
+            .contains(&delegation_id)
+        {
             return JsonRpcResponse::error(
                 id,
                 -32602,
@@ -1779,7 +1863,12 @@ impl McpCallbackServer {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&delegation_id) {
+            if let Some((result, _ts)) = self
+                .completed_delegations
+                .lock()
+                .await
+                .remove(&delegation_id)
+            {
                 let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
                 return JsonRpcResponse::success(
                     id,

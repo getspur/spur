@@ -179,9 +179,10 @@ impl BeadsAdapter {
         tracing::info!(version = %version.version, "connected to beads_rust (br)");
 
         // Verify .beads/ database is readable by running `br stats --format json`
-        adapter.run_br(vec!["stats".into()]).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read .beads/ database (`br stats`): {e}")
-        })?;
+        adapter
+            .run_br(vec!["stats".into()])
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read .beads/ database (`br stats`): {e}"))?;
 
         Ok(adapter)
     }
@@ -275,7 +276,8 @@ impl IssueTracker for BeadsAdapter {
         let output = self.run_br(vec!["show".into(), id.to_string()]).await?;
         let mut items: Vec<BrIssueDetails> = serde_json::from_str(&output)
             .map_err(|e| anyhow::anyhow!("Failed to parse `br show` output: {e}\nRaw: {output}"))?;
-        let details = items.pop()
+        let details = items
+            .pop()
             .ok_or_else(|| anyhow::anyhow!("`br show {id}` returned empty result"))?;
         Ok(Issue::from(details))
     }

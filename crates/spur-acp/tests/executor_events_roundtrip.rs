@@ -130,7 +130,8 @@ fn worker_notification_roundtrips() {
         ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
     };
     let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new("thinking...")));
-    let notification = SessionNotification::new("acp-sess", SessionUpdate::AgentThoughtChunk(chunk));
+    let notification =
+        SessionNotification::new("acp-sess", SessionUpdate::AgentThoughtChunk(chunk));
     let ev = SpurEvent::now(SpurEventBody::WorkerNotification {
         brain_session_id: SessionId("brain-1".into()),
         executor_id: "exec-1".into(),

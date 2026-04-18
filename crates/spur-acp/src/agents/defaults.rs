@@ -49,12 +49,24 @@ pub fn apply_builtin_defaults(cfg: &mut AgentConfig) {
     match builtin_descriptor(&cfg.name) {
         Some(default) => {
             let user = &mut cfg.delegation;
-            if user.description.is_none() { user.description = default.description; }
-            if user.tier.is_none() { user.tier = default.tier; }
-            if user.good_for.is_empty() { user.good_for = default.good_for; }
-            if user.avoid_for.is_empty() { user.avoid_for = default.avoid_for; }
-            if user.strengths.is_empty() { user.strengths = default.strengths; }
-            if user.limitations.is_empty() { user.limitations = default.limitations; }
+            if user.description.is_none() {
+                user.description = default.description;
+            }
+            if user.tier.is_none() {
+                user.tier = default.tier;
+            }
+            if user.good_for.is_empty() {
+                user.good_for = default.good_for;
+            }
+            if user.avoid_for.is_empty() {
+                user.avoid_for = default.avoid_for;
+            }
+            if user.strengths.is_empty() {
+                user.strengths = default.strengths;
+            }
+            if user.limitations.is_empty() {
+                user.limitations = default.limitations;
+            }
             if user.input_expectations.is_none() {
                 user.input_expectations = default.input_expectations;
             }
@@ -73,9 +85,8 @@ pub fn apply_builtin_defaults(cfg: &mut AgentConfig) {
                 && user.good_for.is_empty()
                 && user.avoid_for.is_empty();
             if is_empty {
-                cfg.delegation.description = Some(
-                    format!("{} agent (no descriptor configured)", cfg.name)
-                );
+                cfg.delegation.description =
+                    Some(format!("{} agent (no descriptor configured)", cfg.name));
                 cfg.delegation.tier = Some(Tier::Generalist);
                 tracing::info!(agent = %cfg.name, "synthesized thin delegation descriptor");
             }
@@ -89,20 +100,23 @@ pub fn apply_builtin_defaults(cfg: &mut AgentConfig) {
 /// add the corresponding trigger keywords here so the lint flags
 /// good_for entries that reference the capability without declaring it.
 const CAPABILITY_KEYWORDS: &[(&str, &[&str])] = &[
-    ("plan_mode",      &["plan mode", "plan-mode", "planning"]),
-    ("usage",          &["usage tracking", "token counting"]),
-    ("load_session",   &["session resume", "load_session"]),
-    ("list_sessions",  &["list_sessions"]),
+    ("plan_mode", &["plan mode", "plan-mode", "planning"]),
+    ("usage", &["usage tracking", "token counting"]),
+    ("load_session", &["session resume", "load_session"]),
+    ("list_sessions", &["list_sessions"]),
     ("session_resume", &["session_resume"]),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LintLevel { Warn, Error }
+pub enum LintLevel {
+    Warn,
+    Error,
+}
 
 #[derive(Debug, Clone)]
 pub struct LintMessage {
-    pub level:   LintLevel,
-    pub agent:   String,
+    pub level: LintLevel,
+    pub agent: String,
     pub message: String,
 }
 
@@ -124,8 +138,8 @@ fn lint_length(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
     for (i, entry) in cfg.delegation.good_for.iter().enumerate() {
         if entry.chars().count() > 80 {
             out.push(LintMessage {
-                level:   LintLevel::Warn,
-                agent:   cfg.name.clone(),
+                level: LintLevel::Warn,
+                agent: cfg.name.clone(),
                 message: format!(
                     "good_for[{}] exceeds 80 chars; use a short task pattern, not a sentence",
                     i
@@ -136,8 +150,8 @@ fn lint_length(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
     for (i, entry) in cfg.delegation.avoid_for.iter().enumerate() {
         if entry.chars().count() > 80 {
             out.push(LintMessage {
-                level:   LintLevel::Warn,
-                agent:   cfg.name.clone(),
+                level: LintLevel::Warn,
+                agent: cfg.name.clone(),
                 message: format!(
                     "avoid_for[{}] exceeds 80 chars; use a short task pattern, not a sentence",
                     i
@@ -150,9 +164,10 @@ fn lint_length(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
 fn lint_worker_without_description(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
     if cfg.role.is_worker_capable() && cfg.delegation.description.is_none() {
         out.push(LintMessage {
-            level:   LintLevel::Warn,
-            agent:   cfg.name.clone(),
-            message: "worker-capable but has no delegation.description — routing will be weak".into(),
+            level: LintLevel::Warn,
+            agent: cfg.name.clone(),
+            message: "worker-capable but has no delegation.description — routing will be weak"
+                .into(),
         });
     }
 }
@@ -171,11 +186,10 @@ fn lint_capability_mismatch(cfg: &AgentConfig, out: &mut Vec<LintMessage>) {
     let joined = cfg.delegation.good_for.join(" ").to_lowercase();
     for (token, keywords) in CAPABILITY_KEYWORDS {
         for kw in keywords.iter() {
-            if joined.contains(&kw.to_lowercase())
-                && !cfg.capabilities.iter().any(|c| c == token) {
+            if joined.contains(&kw.to_lowercase()) && !cfg.capabilities.iter().any(|c| c == token) {
                 out.push(LintMessage {
-                    level:   LintLevel::Warn,
-                    agent:   cfg.name.clone(),
+                    level: LintLevel::Warn,
+                    agent: cfg.name.clone(),
                     message: format!(
                         "delegation.good_for references {} but capabilities does not declare {}",
                         kw, token
@@ -195,9 +209,12 @@ mod tests {
     fn minimal_agent(name: &str) -> AgentConfig {
         // Constructs a minimum-shape AgentConfig; relies on serde for
         // default values we don't care about here.
-        let toml = format!(r#"name = "{}"
+        let toml = format!(
+            r#"name = "{}"
 command = "x"
-transport = "acp""#, name);
+transport = "acp""#,
+            name
+        );
         toml::from_str(&toml).unwrap()
     }
 
@@ -242,7 +259,12 @@ transport = "acp""#, name);
         let mut cfg = minimal_agent("my-custom-agent");
         apply_builtin_defaults(&mut cfg);
         assert!(cfg.delegation.description.is_some());
-        assert!(cfg.delegation.description.as_ref().unwrap().contains("my-custom-agent"));
+        assert!(cfg
+            .delegation
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("my-custom-agent"));
         assert!(cfg.delegation.good_for.is_empty());
         assert!(matches!(cfg.delegation.tier, Some(Tier::Generalist)));
     }
@@ -292,7 +314,7 @@ transport = "acp""#, name);
     fn lint_flags_oversized_good_for_entry() {
         let mut cfg = minimal_agent("my-agent");
         cfg.delegation.good_for = vec![
-            "a".repeat(90),  // over 80 chars
+            "a".repeat(90), // over 80 chars
             "ok short entry".into(),
         ];
         let msgs = validate_delegation_config(&[cfg]);
@@ -344,19 +366,24 @@ transport = "acp""#, name);
         let mut cfg = minimal_agent("claude-code-acp");
         apply_builtin_defaults(&mut cfg);
         let msgs = validate_delegation_config(&[cfg]);
-        assert!(msgs.is_empty(), "expected no warnings, got: {:?}",
-                msgs.iter().map(|m| &m.message).collect::<Vec<_>>());
+        assert!(
+            msgs.is_empty(),
+            "expected no warnings, got: {:?}",
+            msgs.iter().map(|m| &m.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn lint_counts_chars_not_bytes() {
         // Non-ASCII: each char is multi-byte but counts as 1 char.
         let mut cfg = minimal_agent("my-agent");
-        cfg.delegation.good_for = vec!["日".repeat(50)];  // 50 chars, 150 bytes
+        cfg.delegation.good_for = vec!["日".repeat(50)]; // 50 chars, 150 bytes
         let msgs = validate_delegation_config(&[cfg]);
         // Should NOT flag — 50 chars is under 80.
-        assert!(!msgs.iter().any(|m| m.message.contains("exceeds 80")),
-                "should not flag 50-char entry even though it's 150 bytes");
+        assert!(
+            !msgs.iter().any(|m| m.message.contains("exceeds 80")),
+            "should not flag 50-char entry even though it's 150 bytes"
+        );
     }
 
     #[test]

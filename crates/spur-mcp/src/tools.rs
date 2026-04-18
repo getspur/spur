@@ -183,7 +183,9 @@ fn get_issue_def() -> ToolDefinition {
 fn list_issues_def() -> ToolDefinition {
     ToolDefinition {
         name: "list_issues".into(),
-        description: "List issues from the configured project management backend with optional filters.".into(),
+        description:
+            "List issues from the configured project management backend with optional filters."
+                .into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -743,7 +745,8 @@ fn execute_epic_def() -> ToolDefinition {
             under the normal review engine — use get_plan_status / \
             get_task_diff / review_task. Re-calling while a plan is active \
             for the same epic returns the existing plan_id (idempotent). \
-            After terminal state, a new call starts a fresh plan.".into(),
+            After terminal state, a new call starts a fresh plan."
+            .into(),
         input_schema: json!({
             "type": "object",
             "properties": {

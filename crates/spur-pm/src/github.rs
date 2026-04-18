@@ -1,5 +1,7 @@
 use crate::adapter::{IssueTracker, PrService};
-use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams};
+use crate::types::{
+    Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource, PrParams,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::Path;
@@ -41,14 +43,11 @@ impl GitHubAdapter {
         };
 
         // 1. Verify authentication
-        adapter
-            .run_gh(&["auth", "status"])
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "GitHub CLI is not authenticated. Run `gh auth login` first.\nDetails: {e}"
-                )
-            })?;
+        adapter.run_gh(&["auth", "status"]).await.map_err(|e| {
+            anyhow::anyhow!(
+                "GitHub CLI is not authenticated. Run `gh auth login` first.\nDetails: {e}"
+            )
+        })?;
 
         // 2. Auto-detect repo if not set
         if adapter.repo.is_none() {
@@ -294,9 +293,7 @@ impl IssueTracker for GitHubAdapter {
 
     async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
         let repo = self.repo()?;
-        let mut args = vec![
-            "issue", "create", "-R", &repo, "--title", &params.title,
-        ];
+        let mut args = vec!["issue", "create", "-R", &repo, "--title", &params.title];
         let body = params.description.unwrap_or_default();
         if !body.is_empty() {
             args.push("--body");
@@ -317,11 +314,7 @@ impl IssueTracker for GitHubAdapter {
         let output = self.run_gh(&args).await?;
         // gh issue create outputs the URL, extract issue number from it
         let url = output.trim();
-        let number = url
-            .rsplit('/')
-            .next()
-            .unwrap_or(url)
-            .to_string();
+        let number = url.rsplit('/').next().unwrap_or(url).to_string();
         Ok(number)
     }
 

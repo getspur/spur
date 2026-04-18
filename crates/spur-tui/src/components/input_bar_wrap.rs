@@ -229,14 +229,17 @@ pub fn wrap(lines: &[String], width: u16) -> WrapLayout {
         line_to_vrows.push((vstart, rows.len()));
     }
 
-    WrapLayout { rows, line_to_vrows, width }
+    WrapLayout {
+        rows,
+        line_to_vrows,
+        width,
+    }
 }
 
 /// A position we can legally break after.
 fn is_break_opportunity(line: &str, byte_start: usize, byte_end: usize) -> bool {
     let s = &line[byte_start..byte_end];
-    s.chars().any(|c| c.is_ascii_whitespace())
-        || matches!(s, "、" | "。" | "，" | "．" | "　")
+    s.chars().any(|c| c.is_ascii_whitespace()) || matches!(s, "、" | "。" | "，" | "．" | "　")
 }
 
 #[cfg(test)]
@@ -312,7 +315,10 @@ mod tests {
 
     #[test]
     fn wrap_multiple_logical_lines_including_empty() {
-        let layout = wrap(&v(&["first line here", "second", "", "fourth line long enough"]), 12);
+        let layout = wrap(
+            &v(&["first line here", "second", "", "fourth line long enough"]),
+            12,
+        );
         // Empty line still occupies one visual row.
         assert!(layout.visual_height() >= 4);
         // line_to_vrows must cover all 4 logical lines.
@@ -326,8 +332,11 @@ mod tests {
         let first = &layout.rows[0];
         let last_g = first.graphemes.last().unwrap();
         let txt = &"hello world foo"[last_g.byte_start..last_g.byte_end];
-        assert!(txt == " " || first.byte_end <= "hello".len() + 1,
-                "expected word-boundary break, got {:?}", txt);
+        assert!(
+            txt == " " || first.byte_end <= "hello".len() + 1,
+            "expected word-boundary break, got {:?}",
+            txt
+        );
     }
 
     #[test]
@@ -382,8 +391,7 @@ mod tests {
     /// the legal vrow-boundary aliasing (end of vrow N ≡ start of vrow N+1).
     fn assert_roundtrip(lines: &[String], layout: &WrapLayout, case: &str) {
         for (row, line) in lines.iter().enumerate() {
-            let mut positions: Vec<usize> =
-                line.grapheme_indices(true).map(|(i, _)| i).collect();
+            let mut positions: Vec<usize> = line.grapheme_indices(true).map(|(i, _)| i).collect();
             positions.push(line.len());
 
             for &bc in &positions {
@@ -485,7 +493,10 @@ mod tests {
             .graphemes(true)
             .map(|g| grapheme_cells(g) as u16)
             .sum();
-        assert_eq!(counted_cells, expected, "atom cells must be conserved across wrap");
+        assert_eq!(
+            counted_cells, expected,
+            "atom cells must be conserved across wrap"
+        );
     }
 
     #[test]

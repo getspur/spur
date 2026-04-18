@@ -295,9 +295,10 @@ impl App {
                             None
                         }
                     }
-                    ViewId::SessionPicker => {
-                        self.session_picker.as_mut().and_then(|p| p.handle_key(key, &ctx))
-                    }
+                    ViewId::SessionPicker => self
+                        .session_picker
+                        .as_mut()
+                        .and_then(|p| p.handle_key(key, &ctx)),
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {
                         if let Some(viewer) = self.mermaid_viewer.as_mut() {
@@ -515,9 +516,7 @@ impl App {
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
                     // Seed global input history so Ctrl-P/N works across sessions.
-                    view.seed_input_history(
-                        self.metadata_store.metadata().input_history.clone(),
-                    );
+                    view.seed_input_history(self.metadata_store.metadata().input_history.clone());
                     // Restore draft from metadata, if any.
                     if let Some(entry) = self.metadata_store.entry(&session.0) {
                         view.restore_draft(&entry.draft);
@@ -1184,8 +1183,13 @@ impl App {
                     }
                     crate::action::IssueAction::WorkOn { id } => {
                         // Construct issue prompt from cached summary
-                        let prompt = if let Some(issue) = self.dashboard.tracked_issues().iter().find(|i| i.id == id) {
-                            let pri = issue.priority.map(|p| format!("P{}", p)).unwrap_or_default();
+                        let prompt = if let Some(issue) =
+                            self.dashboard.tracked_issues().iter().find(|i| i.id == id)
+                        {
+                            let pri = issue
+                                .priority
+                                .map(|p| format!("P{}", p))
+                                .unwrap_or_default();
                             let itype = issue.issue_type.as_deref().unwrap_or("task");
                             format!(
                                 "Work on this issue:\n\n\

@@ -36,8 +36,13 @@ pub enum Panel {
 /// State machine for issue detail focus. Invalid states are unrepresentable.
 pub enum IssueFocus {
     None,
-    Loading { id: String },
-    Loaded { id: String, issue: Box<spur_pm::Issue> },
+    Loading {
+        id: String,
+    },
+    Loaded {
+        id: String,
+        issue: Box<spur_pm::Issue>,
+    },
 }
 
 /// The main dashboard view composing AgentsTree + ActivityLog + StatusBar.
@@ -108,7 +113,10 @@ fn detail_event_to_issue(e: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
 fn format_issue_badge(issue_id: &str, issues: &[spur_pm::IssueSummary]) -> String {
     let short_id: String = issue_id.chars().take(8).collect();
     if let Some(issue) = issues.iter().find(|i| i.id == *issue_id) {
-        let pri = issue.priority.map(|p| format!("P{}", p)).unwrap_or_default();
+        let pri = issue
+            .priority
+            .map(|p| format!("P{}", p))
+            .unwrap_or_default();
         let max_title = 25;
         let title = if issue.title.len() > max_title {
             let mut end = max_title;
@@ -433,14 +441,18 @@ impl DashboardView {
         if issues_height > 0 {
             constraints.push(Constraint::Length(issues_height)); // issues panel
         }
-        constraints.push(Constraint::Min(4));               // activity log (fills)
+        constraints.push(Constraint::Min(4)); // activity log (fills)
         constraints.push(Constraint::Length(input_height)); // input bar
-        constraints.push(Constraint::Length(1));            // status bar
+        constraints.push(Constraint::Length(1)); // status bar
 
         let chunks = Layout::vertical(constraints).split(area);
 
         // Chunk indices depend on whether issues panel is present
-        let issues_chunk = if issues_height > 0 { Some(1usize) } else { None };
+        let issues_chunk = if issues_height > 0 {
+            Some(1usize)
+        } else {
+            None
+        };
         let log_chunk = if issues_height > 0 { 2 } else { 1 };
         let input_chunk = log_chunk + 1;
         let status_chunk = input_chunk + 1;
@@ -448,7 +460,8 @@ impl DashboardView {
         self.agents_tree.render(frame, chunks[0], lineage);
 
         if let Some(ic) = issues_chunk {
-            self.issues_panel.render(&self.tracked_issues, frame, chunks[ic]);
+            self.issues_panel
+                .render(&self.tracked_issues, frame, chunks[ic]);
         }
 
         match &self.issue_focus {
@@ -456,25 +469,26 @@ impl DashboardView {
                 IssueDetailPane::render_loading(id, frame, chunks[log_chunk]);
             }
             IssueFocus::Loaded { issue, .. } => {
-                self.issue_detail_pane.render(issue, frame, chunks[log_chunk]);
+                self.issue_detail_pane
+                    .render(issue, frame, chunks[log_chunk]);
             }
-            IssueFocus::None => {
-                match &self.focused_node {
-                    Some(id) => {
-                        if let Some(node) = lineage.node(id) {
-                            let badge = node.issue_id.as_ref().map(|iid| {
-                                format_issue_badge(iid, &self.tracked_issues)
-                            });
-                            self.detail_pane.render(frame, chunks[log_chunk], node, badge.as_deref());
-                        } else {
-                            self.activity_log.render(frame, chunks[log_chunk]);
-                        }
-                    }
-                    None => {
+            IssueFocus::None => match &self.focused_node {
+                Some(id) => {
+                    if let Some(node) = lineage.node(id) {
+                        let badge = node
+                            .issue_id
+                            .as_ref()
+                            .map(|iid| format_issue_badge(iid, &self.tracked_issues));
+                        self.detail_pane
+                            .render(frame, chunks[log_chunk], node, badge.as_deref());
+                    } else {
                         self.activity_log.render(frame, chunks[log_chunk]);
                     }
                 }
-            }
+                None => {
+                    self.activity_log.render(frame, chunks[log_chunk]);
+                }
+            },
         }
         let input_bar_area = chunks[input_chunk];
         self.render_input_hint(frame, area, input_bar_area);
@@ -576,33 +590,45 @@ impl DashboardView {
                         // Quick status keys when issue detail is loaded
                         'o' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
                             if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
-                                return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
-                                    id: id.clone(), status: "open".into(),
-                                }));
+                                return Some(Action::Issue(
+                                    crate::action::IssueAction::UpdateStatus {
+                                        id: id.clone(),
+                                        status: "open".into(),
+                                    },
+                                ));
                             }
                             return None;
                         }
                         'w' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
                             if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
-                                return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
-                                    id: id.clone(), status: "in_progress".into(),
-                                }));
+                                return Some(Action::Issue(
+                                    crate::action::IssueAction::UpdateStatus {
+                                        id: id.clone(),
+                                        status: "in_progress".into(),
+                                    },
+                                ));
                             }
                             return None;
                         }
                         'b' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
                             if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
-                                return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
-                                    id: id.clone(), status: "blocked".into(),
-                                }));
+                                return Some(Action::Issue(
+                                    crate::action::IssueAction::UpdateStatus {
+                                        id: id.clone(),
+                                        status: "blocked".into(),
+                                    },
+                                ));
                             }
                             return None;
                         }
                         'd' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
                             if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
-                                return Some(Action::Issue(crate::action::IssueAction::UpdateStatus {
-                                    id: id.clone(), status: "closed".into(),
-                                }));
+                                return Some(Action::Issue(
+                                    crate::action::IssueAction::UpdateStatus {
+                                        id: id.clone(),
+                                        status: "closed".into(),
+                                    },
+                                ));
                             }
                             return None;
                         }
@@ -614,7 +640,9 @@ impl DashboardView {
                                         self.issue_focus = IssueFocus::Loading { id: iid.clone() };
                                         self.issue_detail_pane.reset();
                                         return Some(Action::Issue(
-                                            crate::action::IssueAction::ViewDetail { id: iid.clone() },
+                                            crate::action::IssueAction::ViewDetail {
+                                                id: iid.clone(),
+                                            },
                                         ));
                                     } else {
                                         self.activity_log.push(LogEntry {
@@ -663,13 +691,20 @@ impl DashboardView {
                             }
                             Some(Action::ScrollUp)
                         }
-                        'W' if self.focused_panel == Panel::Issues || matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
+                        'W' if self.focused_panel == Panel::Issues
+                            || matches!(self.issue_focus, IssueFocus::Loaded { .. }) =>
+                        {
                             let id = match &self.issue_focus {
                                 IssueFocus::Loaded { id, .. } => Some(id.clone()),
-                                _ => self.issues_panel.selected_id(&self.tracked_issues).map(String::from),
+                                _ => self
+                                    .issues_panel
+                                    .selected_id(&self.tracked_issues)
+                                    .map(String::from),
                             };
                             if let Some(id) = id {
-                                return Some(Action::Issue(crate::action::IssueAction::WorkOn { id }));
+                                return Some(Action::Issue(crate::action::IssueAction::WorkOn {
+                                    id,
+                                }));
                             }
                             return None;
                         }
@@ -867,7 +902,9 @@ impl DashboardView {
                     if let Some(id) = self.issues_panel.selected_id(&self.tracked_issues) {
                         self.issue_focus = IssueFocus::Loading { id: id.to_string() };
                         self.issue_detail_pane.reset();
-                        return Some(Action::Issue(crate::action::IssueAction::ViewDetail { id: id.to_string() }));
+                        return Some(Action::Issue(crate::action::IssueAction::ViewDetail {
+                            id: id.to_string(),
+                        }));
                     }
                     return None;
                 }
@@ -1165,7 +1202,12 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEventBody::IssueUpdated { source, id, status, assignee } => {
+            SpurEventBody::IssueUpdated {
+                source,
+                id,
+                status,
+                assignee,
+            } => {
                 if let Some(issue) = self.tracked_issues.iter_mut().find(|i| i.id == *id) {
                     if let Some(ref s) = status {
                         issue.status = s.clone();
@@ -1174,7 +1216,11 @@ impl View for DashboardView {
                         issue.assignee = Some(a.clone());
                     }
                 }
-                if let IssueFocus::Loaded { id: ref focus_id, ref mut issue } = self.issue_focus {
+                if let IssueFocus::Loaded {
+                    id: ref focus_id,
+                    ref mut issue,
+                } = self.issue_focus
+                {
                     if focus_id == id {
                         if let Some(ref s) = status {
                             issue.status = s.clone();
@@ -1184,7 +1230,8 @@ impl View for DashboardView {
                         }
                     }
                 }
-                let status_suffix = status.as_ref()
+                let status_suffix = status
+                    .as_ref()
                     .map(|s| format!(": {}", s))
                     .unwrap_or_default();
                 self.activity_log.push(LogEntry {
@@ -1196,26 +1243,28 @@ impl View for DashboardView {
             }
 
             SpurEventBody::IssuesLoaded { issues } => {
-                self.tracked_issues = issues.iter().map(|i| spur_pm::IssueSummary {
-                    id: i.id.clone(),
-                    source: match i.source.as_str() {
-                        "github" => spur_pm::PmSource::GitHub,
-                        "linear" => spur_pm::PmSource::Linear,
-                        "plane" => spur_pm::PmSource::Plane,
-                        _ => spur_pm::PmSource::Beads,
-                    },
-                    title: i.title.clone(),
-                    status: i.status.clone(),
-                    labels: Vec::new(),
-                    url: String::new(),
-                    priority: i.priority,
-                    issue_type: i.issue_type.clone(),
-                    assignee: i.assignee.clone(),
-                }).collect();
+                self.tracked_issues = issues
+                    .iter()
+                    .map(|i| spur_pm::IssueSummary {
+                        id: i.id.clone(),
+                        source: match i.source.as_str() {
+                            "github" => spur_pm::PmSource::GitHub,
+                            "linear" => spur_pm::PmSource::Linear,
+                            "plane" => spur_pm::PmSource::Plane,
+                            _ => spur_pm::PmSource::Beads,
+                        },
+                        title: i.title.clone(),
+                        status: i.status.clone(),
+                        labels: Vec::new(),
+                        url: String::new(),
+                        priority: i.priority,
+                        issue_type: i.issue_type.clone(),
+                        assignee: i.assignee.clone(),
+                    })
+                    .collect();
                 // Sort by priority ascending (critical first)
-                self.tracked_issues.sort_by(|a, b| {
-                    a.priority.unwrap_or(99).cmp(&b.priority.unwrap_or(99))
-                });
+                self.tracked_issues
+                    .sort_by(|a, b| a.priority.unwrap_or(99).cmp(&b.priority.unwrap_or(99)));
                 if !self.tracked_issues.is_empty() {
                     self.issues_panel.select_first();
                 }
@@ -1338,7 +1387,10 @@ impl View for DashboardView {
                 });
             }
 
-            SpurEventBody::IssueDetailFetched { requested_id, issue } => {
+            SpurEventBody::IssueDetailFetched {
+                requested_id,
+                issue,
+            } => {
                 if let IssueFocus::Loading { id } = &self.issue_focus {
                     if id == requested_id {
                         let pm_issue = detail_event_to_issue(issue);
@@ -1374,7 +1426,11 @@ impl View for DashboardView {
                         timestamp: Self::now_stamp(),
                         prefix: "[graph]".into(),
                         message: msg.clone(),
-                        kind: if *critical > 0 { LogEntryKind::Error } else { LogEntryKind::Info },
+                        kind: if *critical > 0 {
+                            LogEntryKind::Error
+                        } else {
+                            LogEntryKind::Info
+                        },
                     });
                 }
             }
@@ -1391,9 +1447,7 @@ impl View for DashboardView {
                 let (icon, label, kind) = match decision.as_str() {
                     "approve" => ("✓", "approved", LogEntryKind::Complete),
                     "reject" => ("✗", "rejected", LogEntryKind::Error),
-                    "request_changes" => {
-                        ("↻", "requested changes on", LogEntryKind::Act)
-                    }
+                    "request_changes" => ("↻", "requested changes on", LogEntryKind::Act),
                     _ => ("?", "reviewed", LogEntryKind::Info),
                 };
                 let display = task_name
@@ -1410,9 +1464,8 @@ impl View for DashboardView {
                     .map(|f| format!(": \"{}\"", truncate_display(f, 60)))
                     .unwrap_or_default();
                 // Distinct entry when attempt budget is exhausted by a reject.
-                let exhausted = decision == "reject"
-                    && *max_attempts > 0
-                    && *attempt >= *max_attempts;
+                let exhausted =
+                    decision == "reject" && *max_attempts > 0 && *attempt >= *max_attempts;
                 let message = if exhausted {
                     format!(
                         "✗ Task \"{display}\" failed — max attempts ({max_attempts}) reached{fb_suffix}"

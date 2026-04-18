@@ -86,7 +86,13 @@ impl DetailPane {
         self.is_following = true;
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, node: &ExecutorNode, issue_badge: Option<&str>) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        node: &ExecutorNode,
+        issue_badge: Option<&str>,
+    ) {
         let following_indicator = if self.is_following {
             " ▼ following "
         } else {
@@ -99,12 +105,8 @@ impl DetailPane {
             .title_bottom(following_indicator);
 
         if let Some(badge) = issue_badge {
-            block = block.title_top(
-                Line::from(format!(" {} ", badge)).alignment(Alignment::Right),
-            );
-            block = block.title_bottom(
-                Line::from(" [I]ssue detail ").alignment(Alignment::Right),
-            );
+            block = block.title_top(Line::from(format!(" {} ", badge)).alignment(Alignment::Right));
+            block = block.title_bottom(Line::from(" [I]ssue detail ").alignment(Alignment::Right));
         }
 
         let inner = block.inner(area);
@@ -187,9 +189,7 @@ impl DetailPane {
             let should_merge = matches!(
                 entry.kind,
                 WorkerStreamKind::Thought | WorkerStreamKind::Message
-            ) && blocks
-                .last()
-                .is_some_and(|(k, _, _)| *k == entry.kind);
+            ) && blocks.last().is_some_and(|(k, _, _)| *k == entry.kind);
 
             if should_merge {
                 let last = blocks.last_mut().unwrap();

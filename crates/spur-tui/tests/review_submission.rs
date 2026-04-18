@@ -3,7 +3,9 @@
 use spur_core::ReviewDecision;
 use spur_tui::components::review_card::decision_for_key;
 
-fn test_ctx_with_lineage(lineage: &spur_core::lineage::projection::ExecutorLineage) -> spur_tui::views::ViewContext<'_> {
+fn test_ctx_with_lineage(
+    lineage: &spur_core::lineage::projection::ExecutorLineage,
+) -> spur_tui::views::ViewContext<'_> {
     spur_tui::test_support::test_view_ctx(lineage)
 }
 

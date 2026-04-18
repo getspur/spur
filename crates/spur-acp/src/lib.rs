@@ -34,6 +34,7 @@ pub use domain::{
 pub use types::*;
 
 // Re-export ACP SDK types for consumer crates (TUI, orchestrator).
+pub use adapter::{extract_tool_meta, SpurToolMeta};
 pub use agent_client_protocol::{
     AuthMethodId, AuthenticateRequest, AuthenticateResponse, AvailableCommand,
     AvailableCommandInput, AvailableCommandsUpdate, ContentBlock, ContentChunk, CurrentModeUpdate,
@@ -45,4 +46,3 @@ pub use agent_client_protocol::{
     ToolCall as AcpToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
     ToolCallUpdate as AcpToolCallUpdate, ToolKind, UnstructuredCommandInput, UsageUpdate,
 };
-pub use adapter::{extract_tool_meta, SpurToolMeta};

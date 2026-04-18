@@ -149,9 +149,14 @@ pub enum InteractiveInput {
     /// Refresh the issue list and re-emit IssuesLoaded.
     RefreshIssues,
     /// Fetch full issue detail and emit IssueDetailFetched.
-    GetIssueDetail { id: String },
+    GetIssueDetail {
+        id: String,
+    },
     /// Update an issue and emit IssueUpdated.
-    UpdateIssue { id: String, update: spur_pm::IssueUpdate },
+    UpdateIssue {
+        id: String,
+        update: spur_pm::IssueUpdate,
+    },
 }
 
 /// Convert spur_pm::IssueSummary to the spur_acp mirror type for event bus transmission.
@@ -275,8 +280,14 @@ async fn refresh_pm_state(
                 .iter()
                 .map(|i| to_summary_event(i, pm.source_str()))
                 .collect();
-            tracing::info!(count = issues.len(), "Loaded open issues from {}", pm.source_str());
-            funnel.emit(SpurEventBody::IssuesLoaded { issues: event_issues });
+            tracing::info!(
+                count = issues.len(),
+                "Loaded open issues from {}",
+                pm.source_str()
+            );
+            funnel.emit(SpurEventBody::IssuesLoaded {
+                issues: event_issues,
+            });
         }
         Err(e) => tracing::warn!("Failed to load issues: {e}"),
     }
@@ -512,8 +523,12 @@ impl Orchestrator {
             Some(summary) => format!("{summary}\n\n{task}"),
             None => task.to_string(),
         };
-        let prompt_text =
-            self.build_brain_prompt(&enriched_task, issue_context.as_ref(), &session_id, &brain_name);
+        let prompt_text = self.build_brain_prompt(
+            &enriched_task,
+            issue_context.as_ref(),
+            &session_id,
+            &brain_name,
+        );
 
         // 4. Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
@@ -2302,7 +2317,9 @@ impl Orchestrator {
     }
 
     async fn fetch_issue_context(&self, issue_ref: &str) -> Result<Issue> {
-        let pm = self.pm_service.as_ref()
+        let pm = self
+            .pm_service
+            .as_ref()
             .ok_or_else(|| anyhow!("No issue tracker configured"))?;
 
         // Strip prefix if present (e.g., "github:owner/repo#42" → "42")
@@ -2394,11 +2411,17 @@ impl Orchestrator {
                 // Claim issue on delegation start (10f).
                 if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
                     let worker_name = format!("spur-worker-{}", request_id);
-                    if let Err(e) = pm.update_issue(issue_id, spur_pm::IssueUpdate {
-                        status: Some("in_progress".into()),
-                        assignee: Some(worker_name.clone()),
-                        ..Default::default()
-                    }).await {
+                    if let Err(e) = pm
+                        .update_issue(
+                            issue_id,
+                            spur_pm::IssueUpdate {
+                                status: Some("in_progress".into()),
+                                assignee: Some(worker_name.clone()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                    {
                         tracing::warn!(issue = %issue_id, "Failed to claim issue: {e}");
                     } else {
                         funnel.emit(SpurEventBody::IssueUpdated {
@@ -2442,22 +2465,17 @@ impl Orchestrator {
                 if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
                     let (new_status, comment) = match &result.status {
                         // Success — DON'T close, just comment. Brain decides when to close.
-                        DelegationStatus::Success => (
-                            None,
-                            format!("Completed by SPUR delegation {}", request_id),
-                        ),
-                        DelegationStatus::Rejected { .. } => (
-                            Some("open"),
-                            format!("Delegation {} rejected", request_id),
-                        ),
+                        DelegationStatus::Success => {
+                            (None, format!("Completed by SPUR delegation {}", request_id))
+                        }
+                        DelegationStatus::Rejected { .. } => {
+                            (Some("open"), format!("Delegation {} rejected", request_id))
+                        }
                         DelegationStatus::Failed { error } => (
                             Some("open"),
                             format!("Delegation {} failed: {}", request_id, error),
                         ),
-                        _ => (
-                            Some("open"),
-                            format!("Delegation {} ended", request_id),
-                        ),
+                        _ => (Some("open"), format!("Delegation {} ended", request_id)),
                     };
 
                     let update = spur_pm::IssueUpdate {
@@ -3014,10 +3032,8 @@ impl Orchestrator {
                     }
 
                     // Exponential backoff: 1s, 2s, 4s, 8s, … capped at 30s.
-                    let backoff_secs = std::cmp::min(
-                        1u64 << (attempt_n.saturating_sub(1) as u64),
-                        30,
-                    );
+                    let backoff_secs =
+                        std::cmp::min(1u64 << (attempt_n.saturating_sub(1) as u64), 30);
                     tracing::info!(
                         attempt_n = attempt_n,
                         backoff_secs = backoff_secs,

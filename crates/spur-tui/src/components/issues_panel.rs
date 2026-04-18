@@ -114,11 +114,7 @@ impl IssuesPanel {
 
         let table = Table::new(rows, widths)
             .header(header)
-            .block(
-                Block::bordered()
-                    .title(title)
-                    .border_style(border_style),
-            )
+            .block(Block::bordered().title(title).border_style(border_style))
             .row_highlight_style(
                 Style::default()
                     .bg(Color::DarkGray)

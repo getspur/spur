@@ -1190,10 +1190,7 @@ impl View for SessionDetailView {
                         use spur_acp::adapter::{self, ToolInputDisplay};
                         let kind = self.agent_kind();
                         let meta = spur_acp::adapter::extract_tool_meta(tc, kind);
-                        let display_name = meta
-                            .tool_name
-                            .as_deref()
-                            .unwrap_or(tc.title.as_str());
+                        let display_name = meta.tool_name.as_deref().unwrap_or(tc.title.as_str());
                         let depth = meta
                             .parent_tool_use_id
                             .as_ref()
@@ -1212,9 +1209,7 @@ impl View for SessionDetailView {
                         // Prefer structured content (Diff, Terminal) over raw_input for
                         // the fallback text, so diff bodies and terminal placeholders render.
                         let fallback_text = extract_tool_call_text(&tc.content)
-                            .or_else(|| {
-                                tc.raw_input.as_ref().map(format_tool_args)
-                            })
+                            .or_else(|| tc.raw_input.as_ref().map(format_tool_args))
                             .unwrap_or_default();
                         self.react_trace.push(TraceEntry {
                             kind: TraceKind::Act {
@@ -2307,13 +2302,16 @@ mod extract_tool_call_text_tests {
     #[test]
     fn extract_tool_call_text_renders_diff_content() {
         use agent_client_protocol::{Diff, ToolCallContent};
-        let diff = Diff::new("src/foo.rs", "fn new_name() {}\n")
-            .old_text("fn old() {}\n".to_string());
+        let diff =
+            Diff::new("src/foo.rs", "fn new_name() {}\n").old_text("fn old() {}\n".to_string());
         let content = vec![ToolCallContent::Diff(diff)];
         let out = extract_tool_call_text(&content).expect("should return Some");
         assert!(out.contains("src/foo.rs"), "diff must include path");
         assert!(out.contains("-fn old"), "diff must include old-line prefix");
-        assert!(out.contains("+fn new_name"), "diff must include new-line prefix");
+        assert!(
+            out.contains("+fn new_name"),
+            "diff must include new-line prefix"
+        );
     }
 
     #[test]
@@ -2349,15 +2347,16 @@ mod extract_tool_call_text_tests {
     #[test]
     fn extract_tool_call_text_concatenates_multiple_entries() {
         use agent_client_protocol::{Diff, Terminal, TerminalId, ToolCallContent};
-        let diff_entry = ToolCallContent::Diff(
-            Diff::new("a.rs", "y\n").old_text("x\n".to_string()),
-        );
+        let diff_entry =
+            ToolCallContent::Diff(Diff::new("a.rs", "y\n").old_text("x\n".to_string()));
         let term_entry = ToolCallContent::Terminal(Terminal::new(TerminalId::new("t-1")));
-        let out = extract_tool_call_text(&[diff_entry, term_entry])
-            .expect("should return Some");
+        let out = extract_tool_call_text(&[diff_entry, term_entry]).expect("should return Some");
         assert!(out.contains("a.rs"), "diff section must render");
         assert!(out.contains("+y"), "diff + line must render");
-        assert!(out.contains("[terminal: t-1]"), "terminal placeholder must render after diff");
+        assert!(
+            out.contains("[terminal: t-1]"),
+            "terminal placeholder must render after diff"
+        );
     }
 
     #[test]

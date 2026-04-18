@@ -519,7 +519,9 @@ mod reconnect_event_tests {
     #[test]
     fn load_outcome_variants_construct() {
         let _ = LoadOutcome::Restored;
-        let _ = LoadOutcome::FellBackToNew { reason: "session/load returned error".into() };
+        let _ = LoadOutcome::FellBackToNew {
+            reason: "session/load returned error".into(),
+        };
     }
 
     #[test]
@@ -593,7 +595,10 @@ mod review_payload_tests {
             ..Default::default()
         };
         let p = ReviewPayload {
-            summary: "".into(), diff_summary: None, pr_url: None, error: None,
+            summary: "".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
             delegation_plan: Some(plan),
             chosen_matches_dispatched: Some(true),
         };
@@ -641,7 +646,9 @@ mod delegation_requested_tests {
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
         match back {
-            SpurEventBody::DelegationRequested { delegation_plan, .. } => {
+            SpurEventBody::DelegationRequested {
+                delegation_plan, ..
+            } => {
                 assert!(delegation_plan.is_none());
             }
             _ => panic!("wrong variant"),

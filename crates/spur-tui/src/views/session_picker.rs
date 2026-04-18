@@ -711,7 +711,7 @@ impl SessionPickerView {
                     context_size: None,
                     stream_in_flight: false,
                     issue_count: 0,
-                alert_summary: None,
+                    alert_summary: None,
                 },
             );
         }
@@ -1067,8 +1067,12 @@ mod current_session_shortcut_tests {
     use std::path::PathBuf;
 
     fn test_ctx() -> crate::views::ViewContext<'static> {
-        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> = std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
-        crate::views::ViewContext { lineage: &LINEAGE, brain_status: &crate::app::BrainStatus::Idle }
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+            std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+        crate::views::ViewContext {
+            lineage: &LINEAGE,
+            brain_status: &crate::app::BrainStatus::Idle,
+        }
     }
 
     fn make_session(id: &str) -> SessionInfo {
@@ -1082,9 +1086,15 @@ mod current_session_shortcut_tests {
         picker.set_current_session_id(Some("A".into()));
 
         // Cursor starts at 0 ([+ New session]); move to 1 (the A row).
-        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &test_ctx(),
+        );
 
-        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
+        let action = picker.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &test_ctx(),
+        );
         match action {
             Some(Action::NavigateTo(ViewId::SessionDetail(sid))) => {
                 assert_eq!(sid.0, "A");
@@ -1103,10 +1113,19 @@ mod current_session_shortcut_tests {
         picker.set_current_session_id(Some("A".into()));
 
         // Move cursor to row index 2 = session B.
-        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
-        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &test_ctx());
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &test_ctx(),
+        );
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &test_ctx(),
+        );
 
-        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &test_ctx());
+        let action = picker.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &test_ctx(),
+        );
         match action {
             Some(Action::ResumeSession { session_id }) => {
                 assert_eq!(session_id, "B");
