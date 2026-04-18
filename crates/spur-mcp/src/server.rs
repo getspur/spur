@@ -1322,6 +1322,11 @@ impl McpCallbackServer {
                 );
             }
         }
+        // epic_body is consumed by Task 5 (build_epic_subgraph) — keep
+        // it bound as Option<String> here so the follow-up handler wiring
+        // doesn't need to re-extract or rename. Silence the unused-binding
+        // warning for this interim commit.
+        let _ = &epic_body;
 
         let plan_id = uuid::Uuid::new_v4().to_string();
         let entries: Vec<crate::plan::PlanTaskEntry> = tasks
