@@ -237,3 +237,61 @@ fn fence_placeholder_for_unknown_id_returns_none() {
     let s = MarkdownStream::new();
     assert!(s.fence_placeholder_for(MermaidId(999)).is_none());
 }
+
+#[test]
+fn scan_authoritative_empty_input() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let (end, fences) = scan_authoritative_for_tests("", /*mermaid*/ true, /*permit_eof*/ false);
+    assert_eq!(end, 0);
+    assert!(fences.is_empty());
+}
+
+#[test]
+fn scan_authoritative_paragraph_at_eof_not_authoritative() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let (end, _) = scan_authoritative_for_tests("Hello", true, false);
+    assert_eq!(end, 0, "paragraph at EOF must not advance");
+}
+
+#[test]
+fn scan_authoritative_paragraph_with_content_after_advances() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let input = "Hello\n\nworld";
+    let (end, _) = scan_authoritative_for_tests(input, true, false);
+    assert!(end > 0 && end < input.len(),
+        "end={} len={}", end, input.len());
+}
+
+#[test]
+fn scan_authoritative_open_list_not_authoritative() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    // Depth-gate test: open list at EOF must not leak End(Item) authority.
+    let (end, _) = scan_authoritative_for_tests("- item1\n- item2\n", true, false);
+    assert_eq!(end, 0);
+}
+
+#[test]
+fn scan_authoritative_eof_permissive_commits_final_paragraph() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let input = "Hello";
+    let (end, _) = scan_authoritative_for_tests(input, true, /*permit_eof*/ true);
+    assert_eq!(end, input.len());
+}
+
+#[test]
+fn scan_authoritative_registers_closed_mermaid_fence() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    let input = "```mermaid\nflowchart LR\nA-->B\n```\nmore\n";
+    let (_, fences) = scan_authoritative_for_tests(input, true, false);
+    assert_eq!(fences.len(), 1);
+    assert!(fences[0].1.contains("flowchart LR"));
+}
+
+#[test]
+fn scan_authoritative_does_not_register_fence_at_eof() {
+    use spur_tui::components::markdown_stream::scan_authoritative_for_tests;
+    // Fence close is the last byte; coherence fix must not register it.
+    let input = "```mermaid\nflowchart LR\nA-->B\n```";
+    let (_, fences) = scan_authoritative_for_tests(input, true, false);
+    assert_eq!(fences.len(), 0, "fence ending at EOF must not register");
+}
