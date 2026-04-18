@@ -6,7 +6,10 @@ use ratatui::Frame;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 
-use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+use spur_acp::{
+    LicenseBindingMode, LicensePlan as EventLicensePlan, LicenseStateEvent, LicenseStatusEvent,
+    LicenseSubjectKind, SessionId, SpurEvent, SpurEventBody,
+};
 use spur_core::ExecutorLineage;
 
 #[cfg(feature = "markdown")]
@@ -16,6 +19,7 @@ use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
 use crate::components::input_bar::EditMode;
 use crate::components::quit_confirm::QuitConfirmDialog;
+use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
 use crate::session_metadata::SessionMetadataStore;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
@@ -90,6 +94,44 @@ pub enum BrainStatus {
     Error(String),
 }
 
+fn format_plan(plan: EventLicensePlan) -> &'static str {
+    match plan {
+        EventLicensePlan::Community => "community",
+        EventLicensePlan::StarterLtd => "starter-ltd",
+        EventLicensePlan::BuilderLtd => "builder-ltd",
+        EventLicensePlan::FounderLtd => "founder-ltd",
+        EventLicensePlan::Pro => "pro",
+        EventLicensePlan::Team => "team",
+        EventLicensePlan::Enterprise => "enterprise",
+        EventLicensePlan::Unknown => "unknown",
+    }
+}
+
+fn license_badge_from_state(state: &LicenseStateEvent) -> Option<LicenseBadge> {
+    use LicenseStatusEvent::*;
+
+    match state.status {
+        ConfigError => Some(LicenseBadge::new(
+            "license config",
+            LicenseBadgeTone::Danger,
+        )),
+        Inactive => Some(LicenseBadge::new("community", LicenseBadgeTone::Neutral)),
+        Invalid => Some(LicenseBadge::new("invalid", LicenseBadgeTone::Danger)),
+        Degraded => {
+            let label = format!("{} degraded", format_plan(state.plan));
+            Some(LicenseBadge::new(label, LicenseBadgeTone::Warning))
+        }
+        Active => {
+            let label = if matches!(state.plan, EventLicensePlan::Unknown) {
+                "licensed".to_string()
+            } else {
+                format_plan(state.plan).to_string()
+            };
+            Some(LicenseBadge::new(label, LicenseBadgeTone::Success))
+        }
+    }
+}
+
 // ─── App state ─────────────────────────────────────────────────────────
 
 pub struct App {
@@ -109,6 +151,8 @@ pub struct App {
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
     /// Event-sourced projection of brain → executor lineage.
     lineage: ExecutorLineage,
+    license_state: LicenseStateEvent,
+    license_badge: Option<LicenseBadge>,
     #[cfg(feature = "markdown")]
     pub(crate) mermaid_picker: Option<Picker>,
     #[cfg(feature = "markdown")]
@@ -135,10 +179,46 @@ impl App {
         )
     }
 
+    fn default_license_state(message: &str) -> LicenseStateEvent {
+        LicenseStateEvent {
+            status: LicenseStatusEvent::Inactive,
+            subject_kind: LicenseSubjectKind::Unknown,
+            plan: EventLicensePlan::Unknown,
+            features: Default::default(),
+            expires_at: None,
+            binding_mode: LicenseBindingMode::Unknown,
+            offline_ok: false,
+            status_text: message.to_string(),
+        }
+    }
+
+    pub fn new_with_license(
+        user_input_tx: Option<mpsc::Sender<UserInput>>,
+        start_in_picker: bool,
+        config: std::sync::Arc<spur_acp::SpurConfig>,
+        license_state: LicenseStateEvent,
+    ) -> Self {
+        Self::build_with_license_state(user_input_tx, start_in_picker, config, license_state)
+    }
+
     pub fn new_with_config(
         user_input_tx: Option<mpsc::Sender<UserInput>>,
         start_in_picker: bool,
         config: std::sync::Arc<spur_acp::SpurConfig>,
+    ) -> Self {
+        Self::new_with_license(
+            user_input_tx,
+            start_in_picker,
+            config,
+            Self::default_license_state("licensing not configured"),
+        )
+    }
+
+    fn build_with_license_state(
+        user_input_tx: Option<mpsc::Sender<UserInput>>,
+        start_in_picker: bool,
+        config: std::sync::Arc<spur_acp::SpurConfig>,
+        license_state: LicenseStateEvent,
     ) -> Self {
         let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
         let metadata_store = SessionMetadataStore::load(&metadata_path);
@@ -178,10 +258,14 @@ impl App {
             mermaid_tx,
             #[cfg(feature = "markdown")]
             mermaid_viewer: None,
+            license_state,
+            license_badge: None,
             metadata_store,
             edit_mode: EditMode::default(),
             config,
         };
+
+        app.license_badge = license_badge_from_state(&app.license_state);
 
         // Validate every agent entry. Fatal errors abort the agent (but we don't
         // crash the whole TUI — other agents may still work). Warnings are logged
@@ -220,6 +304,24 @@ impl App {
         &self,
     ) -> Option<&crate::views::session_detail::SessionDetailView> {
         self.session_detail.as_ref()
+    }
+
+    /// Test-only accessor: borrow the current licensing snapshot.
+    #[doc(hidden)]
+    pub fn license_state_for_test(&self) -> &LicenseStateEvent {
+        &self.license_state
+    }
+
+    /// Test-only accessor: borrow the current licensing badge projection.
+    #[doc(hidden)]
+    pub fn license_badge_for_test(&self) -> Option<&LicenseBadge> {
+        self.license_badge.as_ref()
+    }
+
+    fn update_license_state(&mut self, license_state: LicenseStateEvent) {
+        self.license_badge = license_badge_from_state(&license_state);
+        self.license_state = license_state;
+        self.dirty = true;
     }
 
     /// Look up the `AgentConfig` for an agent by name (`AgentConfig::name`)
@@ -285,6 +387,7 @@ impl App {
                 let ctx = crate::views::ViewContext {
                     lineage: &self.lineage,
                     brain_status: &self.brain_status,
+                    license_badge: self.license_badge.as_ref(),
                 };
                 let action = match self.current_view {
                     ViewId::Dashboard => self.dashboard.handle_key(key, &ctx),
@@ -605,6 +708,9 @@ impl App {
             SpurEventBody::SessionCompleted { .. } => {
                 self.brain_status = BrainStatus::Idle;
             }
+            SpurEventBody::LicenseUpdated { state } => {
+                self.update_license_state(state.clone());
+            }
             // Variants that don't affect brain status — handled by views.
             SpurEventBody::DelegationRequested { .. }
             | SpurEventBody::DelegationCompleted { .. }
@@ -638,6 +744,7 @@ impl App {
         let ctx = crate::views::ViewContext {
             lineage: &self.lineage,
             brain_status: &self.brain_status,
+            license_badge: self.license_badge.as_ref(),
         };
         self.dashboard.handle_spur_event(&event, &ctx);
         if let Some(ref mut detail) = self.session_detail {
@@ -1476,6 +1583,7 @@ impl App {
         let ctx = crate::views::ViewContext {
             lineage: &self.lineage,
             brain_status: &self.brain_status,
+            license_badge: self.license_badge.as_ref(),
         };
 
         match self.current_view.clone() {
@@ -1541,25 +1649,27 @@ pub async fn run_tui(
     perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
     start_in_picker: bool,
 ) -> anyhow::Result<()> {
-    run_tui_with_config(
+    run_tui_with_license(
         event_rx,
         user_input_tx,
         perm_rx,
         start_in_picker,
         std::sync::Arc::new(spur_acp::SpurConfig::default()),
+        App::default_license_state("licensing not configured"),
     )
     .await
 }
 
-pub async fn run_tui_with_config(
+pub async fn run_tui_with_license(
     event_rx: broadcast::Receiver<SpurEvent>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     mut perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
     start_in_picker: bool,
     config: std::sync::Arc<spur_acp::SpurConfig>,
+    license_state: LicenseStateEvent,
 ) -> anyhow::Result<()> {
     let mut terminal = tui::setup()?;
-    let mut app = App::new_with_config(user_input_tx, start_in_picker, config);
+    let mut app = App::new_with_license(user_input_tx, start_in_picker, config, license_state);
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
     let mut event_rx = event_rx;
@@ -1675,6 +1785,24 @@ pub async fn run_tui_with_config(
 
     tui::teardown(&mut terminal)?;
     Ok(())
+}
+
+pub async fn run_tui_with_config(
+    event_rx: broadcast::Receiver<SpurEvent>,
+    user_input_tx: Option<mpsc::Sender<UserInput>>,
+    perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
+    start_in_picker: bool,
+    config: std::sync::Arc<spur_acp::SpurConfig>,
+) -> anyhow::Result<()> {
+    run_tui_with_license(
+        event_rx,
+        user_input_tx,
+        perm_rx,
+        start_in_picker,
+        config,
+        App::default_license_state("licensing not configured"),
+    )
+    .await
 }
 
 // ─── Free helpers ──────────────────────────────────────────────────────
