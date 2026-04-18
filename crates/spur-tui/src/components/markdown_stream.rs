@@ -187,6 +187,11 @@ pub struct MarkdownStream {
     /// to tui-markdown as ordinary code blocks. Set at construction time
     /// from the terminal's image-protocol capability.
     mermaid_enabled: bool,
+
+    /// Byte offset up to which `cached_items` is authoritative.
+    /// Invariant (C1): cached_items, known_fences, fence_placeholders
+    /// jointly represent the parsed-decorated form of raw_text[..flushed_byte_len].
+    flushed_byte_len: usize,
 }
 
 impl Default for MarkdownStream {
@@ -199,6 +204,7 @@ impl Default for MarkdownStream {
             known_fences: Vec::new(),
             next_fence_id: 0,
             mermaid_enabled: true,
+            flushed_byte_len: 0,
         }
     }
 }
@@ -216,6 +222,11 @@ impl MarkdownStream {
             mermaid_enabled,
             ..Self::default()
         }
+    }
+
+    /// Test-only accessor: returns the current flushed_byte_len cursor value.
+    pub fn flushed_byte_len_for_tests(&self) -> usize {
+        self.flushed_byte_len
     }
 
     /// Append a chunk of text. Cheap — does not reparse.
