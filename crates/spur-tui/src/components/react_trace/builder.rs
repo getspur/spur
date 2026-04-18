@@ -112,45 +112,42 @@ impl ReactTrace {
                     ]));
 
                     #[cfg(feature = "markdown")]
-                    let used_markdown = entry
-                        .markdown
-                        .as_ref()
-                        .filter(|stream| !stream.items().is_empty())
-                        .map(|stream| {
-                            for line in stream.lines() {
-                                let mut spans = vec![Span::raw("   ")];
-                                spans.extend(line.spans.iter().cloned());
-                                let mut new_line = Line::from(spans);
-                                new_line.style = line.style;
-                                new_line.alignment = line.alignment;
-                                lines.push(new_line);
+                    {
+                        if let Some(stream) = entry.markdown.as_ref() {
+                            let empty_state: std::collections::HashMap<
+                                crate::components::mermaid::MermaidId,
+                                crate::components::mermaid::FenceRender,
+                            > = std::collections::HashMap::new();
+                            render_agent_message_body(
+                                stream,
+                                &empty_state,
+                                |line| lines.push(line),
+                                |_id, _h| {
+                                    unreachable!("secondary path passes empty fence_state")
+                                },
+                            );
+                        } else {
+                            for text_line in entry.text.lines() {
+                                lines.push(Line::from(vec![
+                                    Span::raw("   "),
+                                    Span::styled(
+                                        text_line.to_string(),
+                                        Style::default().fg(Color::White),
+                                    ),
+                                ]));
                             }
-                            true
-                        })
-                        .unwrap_or(false);
+                        }
+                    }
 
                     #[cfg(not(feature = "markdown"))]
-                    let used_markdown = false;
-
-                    if !used_markdown {
-                        #[cfg(feature = "markdown")]
-                        let source: &str = entry
-                            .markdown
-                            .as_ref()
-                            .map(|s| s.raw_text())
-                            .unwrap_or(entry.text.as_str());
-                        #[cfg(not(feature = "markdown"))]
-                        let source: &str = entry.text.as_str();
-
-                        for text_line in source.lines() {
-                            lines.push(Line::from(vec![
-                                Span::raw("   "),
-                                Span::styled(
-                                    text_line.to_string(),
-                                    Style::default().fg(Color::White),
-                                ),
-                            ]));
-                        }
+                    for text_line in entry.text.lines() {
+                        lines.push(Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(
+                                text_line.to_string(),
+                                Style::default().fg(Color::White),
+                            ),
+                        ]));
                     }
                 }
 
@@ -350,6 +347,82 @@ use crate::components::line_wrap::wrap_line_to_width;
 use super::types::VirtualRow;
 
 #[cfg(feature = "markdown")]
+use crate::components::markdown_stream::{MarkdownStream, StreamItem};
+
+#[cfg(feature = "markdown")]
+use crate::components::mermaid::{FenceRender, MermaidId, fence_placeholder_line};
+
+/// Render an AgentMessage body via the cursor-split contract.
+///
+/// Emits:
+/// 1. Committed items from `stream.items_and_tail().0` — styled text and
+///    fence rows (image via `emit_fence_image`, placeholder via `emit_line`).
+/// 2. The uncommitted tail from `stream.items_and_tail().1` — plain white
+///    lines with the 3-space indent.
+///
+/// The two-closure split lets the primary render path emit multiple
+/// `VirtualRow::ImageRow` entries per mermaid fence while the secondary
+/// path renders a single placeholder line (no ImageRow concept).
+#[cfg(feature = "markdown")]
+fn render_agent_message_body(
+    stream: &MarkdownStream,
+    fence_state: &std::collections::HashMap<MermaidId, FenceRender>,
+    mut emit_line: impl FnMut(ratatui::text::Line<'static>),
+    mut emit_fence_image: impl FnMut(MermaidId, u16),
+) {
+    use ratatui::{
+        style::{Color, Style},
+        text::{Line, Span},
+    };
+
+    let (items, tail) = stream.items_and_tail();
+
+    for item in items {
+        match item {
+            StreamItem::Text(text_lines) => {
+                for line in text_lines {
+                    let mut spans = vec![Span::raw("   ")];
+                    spans.extend(line.spans.iter().cloned());
+                    let mut new_line = Line::from(spans);
+                    new_line.style = line.style;
+                    new_line.alignment = line.alignment;
+                    emit_line(new_line);
+                }
+            }
+            StreamItem::Fence(id) => match fence_state.get(id).copied() {
+                Some(FenceRender::Ready(h)) if h > 0 => {
+                    emit_fence_image(*id, h);
+                }
+                other => {
+                    let render = match other {
+                        Some(FenceRender::Error) => FenceRender::Error,
+                        _ => FenceRender::Pending,
+                    };
+                    let placeholder = fence_placeholder_line(*id, render);
+                    let mut spans = vec![Span::raw("   ")];
+                    spans.extend(placeholder.spans.iter().cloned());
+                    let mut line = Line::from(spans);
+                    line.style = placeholder.style;
+                    line.alignment = placeholder.alignment;
+                    emit_line(line);
+                }
+            },
+        }
+    }
+
+    // Plain-text tail, indented, white.
+    for text_line in tail.lines() {
+        emit_line(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                text_line.to_string(),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+}
+
+#[cfg(feature = "markdown")]
 impl ReactTrace {
     /// Items-aware virtual row builder. Walks entries directly, and for
     /// `AgentMessage` entries iterates the markdown stream's items so
@@ -369,8 +442,6 @@ impl ReactTrace {
         >,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) -> (Vec<VirtualRow>, Vec<usize>) {
-        use crate::components::markdown_stream::StreamItem;
-
         let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
         let collapsed = self.observe_collapsed;
 
@@ -501,66 +572,37 @@ impl ReactTrace {
                         ]),
                     );
 
-                    let items_rendered = entry
-                        .markdown
-                        .as_ref()
-                        .filter(|stream| !stream.items().is_empty())
-                        .map(|stream| {
-                            for item in stream.items() {
-                                match item {
-                                    StreamItem::Text(text_lines) => {
-                                        for line in text_lines {
-                                            let mut spans = vec![Span::raw("   ")];
-                                            spans.extend(line.spans.iter().cloned());
-                                            let mut new_line = Line::from(spans);
-                                            new_line.style = line.style;
-                                            new_line.alignment = line.alignment;
-                                            push_wrapped(&mut rows, new_line);
-                                        }
-                                    }
-                                    StreamItem::Fence(id) => {
-                                        use crate::components::mermaid::FenceRender;
-                                        match states.get(id).copied() {
-                                            Some(FenceRender::Ready(h)) if h > 0 => {
-                                                for r in 0..h {
-                                                    rows.push(VirtualRow::ImageRow {
-                                                        id: *id,
-                                                        row_within: r,
-                                                        total_rows: h,
-                                                    });
-                                                }
-                                            }
-                                            other => {
-                                                let render = match other {
-                                                    Some(FenceRender::Error) => FenceRender::Error,
-                                                    _ => FenceRender::Pending,
-                                                };
-                                                let placeholder =
-                                                    crate::components::mermaid::fence_placeholder_line(
-                                                        *id, render,
-                                                    );
-                                                let mut spans = vec![Span::raw("   ")];
-                                                spans.extend(placeholder.spans.iter().cloned());
-                                                let mut line = Line::from(spans);
-                                                line.style = placeholder.style;
-                                                line.alignment = placeholder.alignment;
-                                                push_wrapped(&mut rows, line);
-                                            }
-                                        }
+                    if let Some(stream) = entry.markdown.as_ref() {
+                        // Collect body output into a staging area to avoid
+                        // simultaneous mutable borrows of `rows` across the
+                        // two emit closures required by render_agent_message_body.
+                        enum BodyRow {
+                            Line(Line<'static>),
+                            Image { id: MermaidId, h: u16 },
+                        }
+                        let staged = std::cell::RefCell::new(Vec::<BodyRow>::new());
+                        render_agent_message_body(
+                            stream,
+                            states,
+                            |line| staged.borrow_mut().push(BodyRow::Line(line)),
+                            |id, h| staged.borrow_mut().push(BodyRow::Image { id, h }),
+                        );
+                        for item in staged.into_inner() {
+                            match item {
+                                BodyRow::Line(line) => push_wrapped(&mut rows, line),
+                                BodyRow::Image { id, h } => {
+                                    for r in 0..h {
+                                        rows.push(VirtualRow::ImageRow {
+                                            id,
+                                            row_within: r,
+                                            total_rows: h,
+                                        });
                                     }
                                 }
                             }
-                            true
-                        })
-                        .unwrap_or(false);
-
-                    if !items_rendered {
-                        let source: &str = entry
-                            .markdown
-                            .as_ref()
-                            .map(|s| s.raw_text())
-                            .unwrap_or(entry.text.as_str());
-                        for text_line in source.lines() {
+                        }
+                    } else {
+                        for text_line in entry.text.lines() {
                             push_wrapped(
                                 &mut rows,
                                 Line::from(vec![

@@ -12,6 +12,7 @@ use ratatui::text::Line;
 use super::mermaid::MermaidId;
 
 pub const DEBOUNCE: Duration = Duration::from_millis(50);
+pub const SAFETY_CAP_BYTES: usize = 64 * 1024;
 
 /// Read-only view of mermaid fence state, passed to rebuild so the
 /// placeholder can reflect error/pending distinctions.
@@ -187,6 +188,19 @@ pub struct MarkdownStream {
     /// to tui-markdown as ordinary code blocks. Set at construction time
     /// from the terminal's image-protocol capability.
     mermaid_enabled: bool,
+
+    /// Byte offset up to which `cached_items` is authoritative.
+    /// Invariant (C1): cached_items, known_fences, fence_placeholders
+    /// jointly represent the parsed-decorated form of raw_text[..flushed_byte_len].
+    flushed_byte_len: usize,
+
+    /// Set by `flush_final` when the stream is finalized (TurnComplete).
+    /// `append` after finalize is a contract violation; enforced via
+    /// debug_assert (see Task 11).
+    finalized: bool,
+
+    /// Production-unused; instrumented for test verification only.
+    rebuild_count: std::cell::Cell<u64>,
 }
 
 impl Default for MarkdownStream {
@@ -199,6 +213,9 @@ impl Default for MarkdownStream {
             known_fences: Vec::new(),
             next_fence_id: 0,
             mermaid_enabled: true,
+            flushed_byte_len: 0,
+            finalized: false,
+            rebuild_count: std::cell::Cell::new(0),
         }
     }
 }
@@ -218,25 +235,85 @@ impl MarkdownStream {
         }
     }
 
+    /// Test-only accessor: returns the current flushed_byte_len cursor value.
+    pub fn flushed_byte_len_for_tests(&self) -> usize {
+        self.flushed_byte_len
+    }
+
+    /// Test-only hook: how many times has `rebuild()` been called?
+    /// Used by busy-loop regression tests.
+    pub fn rebuild_count_for_tests(&self) -> u64 {
+        self.rebuild_count.get()
+    }
+
+    pub fn is_finalized(&self) -> bool {
+        self.finalized
+    }
+
     /// Append a chunk of text. Cheap — does not reparse.
+    ///
+    /// Contract: callers must not append after `flush_final`. Enforced via
+    /// `debug_assert!` in debug builds; in release the state self-heals
+    /// (next rebuild runs under normal cursor rule).
     pub fn append(&mut self, text: &str) {
+        debug_assert!(
+            !self.finalized,
+            "append after flush_final is a contract violation (MarkdownStream finalized)"
+        );
         self.raw_text.push_str(text);
         self.dirty_since.get_or_insert_with(Instant::now);
     }
 
-    /// Flush if the debounce window has elapsed. Returns any newly-detected
-    /// mermaid fences. Pass `states` so the placeholder can reflect errors.
+    /// Flush if conditions warrant. Priority order:
+    /// 1. Not dirty → no-op (load-bearing: prevents busy-looping when
+    ///    cursor fails to advance under the heuristic).
+    /// 2. Empty raw_text → no-op.
+    /// 3. Tail > SAFETY_CAP_BYTES without boundary → suppress rebuild,
+    ///    clear dirty_since, let plain-text tail render until TurnComplete.
+    /// 4. Tail contains authoritative closure pattern → flush immediately.
+    /// 5. DEBOUNCE elapsed → flush.
+    /// 6. Otherwise → no-op.
     pub fn maybe_flush(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
-        match self.dirty_since {
-            Some(t) if t.elapsed() >= DEBOUNCE => self.flush_now(states),
-            _ => Vec::new(),
+        let Some(dirty_at) = self.dirty_since else { return Vec::new(); };
+        if self.raw_text.is_empty() { return Vec::new(); }
+
+        let tail = &self.raw_text[self.flushed_byte_len..];
+        let tail_len = tail.len();
+
+        // Safety valve: large boundary-free tail.
+        if tail_len > SAFETY_CAP_BYTES && !has_authoritative_closure_pattern(tail) {
+            self.dirty_since = None;
+            return Vec::new();
         }
+
+        // Fast path: authoritative closure pattern present.
+        if has_authoritative_closure_pattern(tail) {
+            return self.flush_now(states);
+        }
+
+        // Debounce.
+        if dirty_at.elapsed() >= DEBOUNCE {
+            return self.flush_now(states);
+        }
+
+        Vec::new()
     }
 
     /// Force a flush immediately.
     pub fn flush_now(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         self.dirty_since = None;
-        self.rebuild(states)
+        self.rebuild(states, /* permit_eof_closure */ false)
+    }
+
+    /// TurnComplete flush. Permits cursor advance past events at EOF
+    /// (`range.end == raw_text.len()`) since no more bytes will arrive.
+    /// Sets `finalized = true`; subsequent `append` is a contract
+    /// violation (debug_assert'd, self-heals in release).
+    pub fn flush_final(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
+        self.dirty_since = None;
+        let out = self.rebuild(states, /* permit_eof_closure */ true);
+        self.finalized = true;
+        out
     }
 
     /// Force the next `maybe_flush`/`flush_now` to rebuild even if not yet
@@ -248,6 +325,16 @@ impl MarkdownStream {
 
     pub fn items(&self) -> &[StreamItem] {
         &self.cached_items
+    }
+
+    /// Split view of committed parsed items + uncommitted tail text.
+    ///
+    /// - `items`: parsed StreamItems covering `raw_text[..flushed_byte_len]`.
+    /// - `tail`: `raw_text[flushed_byte_len..]`, to be rendered as plain text.
+    ///
+    /// Renderers must emit both: items styled, tail plain.
+    pub fn items_and_tail(&self) -> (&[StreamItem], &str) {
+        (&self.cached_items, &self.raw_text[self.flushed_byte_len..])
     }
 
     /// Whether the stream has pending changes awaiting flush.
@@ -300,50 +387,34 @@ impl MarkdownStream {
         &self.raw_text
     }
 
-    /// Rebuild `cached_lines` from `raw_text`.
-    fn rebuild(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
-        // ── Stage 1: pre-scan raw_text for closed ```mermaid fences ───────
-        // Skipped entirely when the terminal has no image-protocol support —
-        // mermaid fences then flow through tui-markdown as ordinary code.
-        let mut discovered: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-        if self.mermaid_enabled {
-            use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-            let parser = Parser::new_ext(&self.raw_text, Options::empty()).into_offset_iter();
-            let mut open_fence_start: Option<usize> = None;
-            let mut buf = String::new();
-            for (ev, range) in parser {
-                match ev {
-                    Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
-                        if info.as_ref().trim().eq_ignore_ascii_case("mermaid") {
-                            open_fence_start = Some(range.start);
-                            buf.clear();
-                        }
-                    }
-                    Event::Text(t) if open_fence_start.is_some() => {
-                        buf.push_str(&t);
-                    }
-                    Event::End(TagEnd::CodeBlock) => {
-                        if let Some(start) = open_fence_start.take() {
-                            // pulldown-cmark auto-closes open fences at EOF.
-                            // Distinguish a truly closed fence by checking
-                            // that the slice just before range.end ends with
-                            // a closing ``` (3+ backticks after trimming ws).
-                            let slice = self.raw_text[..range.end]
-                                .trim_end_matches(['\n', '\r', ' ', '\t']);
-                            if slice.ends_with("```") {
-                                discovered.push((start..range.end, std::mem::take(&mut buf)));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+    /// Look up the state-aware placeholder line for a previously-registered
+    /// fence id. Returns `None` for ids not in `fence_placeholders`.
+    /// Used by `build_display_lines` (secondary render path) to render a
+    /// placeholder line without constructing a `FenceRender` HashMap.
+    pub fn fence_placeholder_for(&self, id: MermaidId) -> Option<Line<'static>> {
+        self.fence_placeholders.get(&id).cloned()
+    }
 
-        // ── Stage 2: match against known_fences; assign ids to new ones ───
+    /// Stages 2-5 of rebuild: given a prefix of raw_text and the closed
+    /// mermaid fences discovered within that prefix, produce cached_items,
+    /// fence_placeholders, and the list of NEW fences (not previously
+    /// known). Caller is responsible for passing a consistent (prefix,
+    /// discovered_fences) pair — `scan_authoritative(&self.raw_text[..X])`
+    /// semantics, with X = prefix.len().
+    fn build_items_for(
+        &mut self,
+        prefix: &str,
+        discovered_fences: Vec<(std::ops::Range<usize>, String)>,
+        states: &StateLookup<'_>,
+    ) -> (
+        Vec<StreamItem>,
+        std::collections::HashMap<MermaidId, Line<'static>>,
+        Vec<FenceRef>,
+        Vec<FenceRef>, // refreshed (to be stored as self.known_fences)
+    ) {
         let mut new_fences: Vec<FenceRef> = Vec::new();
-        let mut refreshed: Vec<FenceRef> = Vec::with_capacity(discovered.len());
-        for (range, code) in discovered {
+        let mut refreshed: Vec<FenceRef> = Vec::with_capacity(discovered_fences.len());
+        for (range, code) in discovered_fences {
             let existing = self
                 .known_fences
                 .iter()
@@ -354,50 +425,36 @@ impl MarkdownStream {
                 None => {
                     let id = MermaidId(self.next_fence_id);
                     self.next_fence_id += 1;
-                    let f = FenceRef {
-                        id,
-                        byte_range: range,
-                        code,
-                    };
+                    let f = FenceRef { id, byte_range: range, code };
                     new_fences.push(f.clone());
                     refreshed.push(f);
                 }
             }
         }
-        self.known_fences = refreshed.clone();
 
-        // ── Stage 3: build transformed input with sentinel lines ──────────
+        // Build transformed input from the prefix + sentinels.
         let transformed = {
-            let mut out = String::with_capacity(self.raw_text.len());
+            let mut out = String::with_capacity(prefix.len());
             let mut cursor = 0usize;
             for f in &refreshed {
                 if f.byte_range.start > cursor {
-                    out.push_str(&self.raw_text[cursor..f.byte_range.start]);
+                    out.push_str(&prefix[cursor..f.byte_range.start]);
                 }
-                // Surrounding blank lines ensure pulldown-cmark treats the
-                // sentinel as its own paragraph, not a continuation.
                 out.push_str(&format!("\n\u{0000}MERMAID:{}\u{0000}\n", f.id.0));
                 cursor = f.byte_range.end;
             }
-            if cursor < self.raw_text.len() {
-                out.push_str(&self.raw_text[cursor..]);
+            if cursor < prefix.len() {
+                out.push_str(&prefix[cursor..]);
             }
             out
         };
 
-        // ── Stage 3.5: force table-like rows onto their own lines ────────
-        // `tui-markdown` does not yet render GFM tables; without this,
-        // rows are reflowed into a single paragraph line. Injecting
-        // CommonMark hard breaks preserves line boundaries without
-        // producing any visible markers in the output.
         let transformed = inject_hard_breaks_in_tables(&transformed);
 
-        // ── Stage 4: parse transformed text via tui-markdown ──────────────
         if transformed.is_empty() {
-            self.cached_items.clear();
-            self.fence_placeholders.clear();
-            return new_fences;
+            return (Vec::new(), std::collections::HashMap::new(), new_fences, refreshed);
         }
+
         let text = tui_markdown::from_str(&transformed);
         let parsed_lines: Vec<ratatui::text::Line<'static>> = text
             .lines
@@ -412,7 +469,6 @@ impl MarkdownStream {
             })
             .collect();
 
-        // ── Stage 5 (revised): split lines into StreamItems by fence sentinels ──
         let mut items: Vec<StreamItem> = Vec::new();
         let mut current_text: Vec<ratatui::text::Line<'static>> = Vec::new();
         let mut placeholders: std::collections::HashMap<MermaidId, Line<'static>> =
@@ -432,16 +488,13 @@ impl MarkdownStream {
                 let id_num: u64 = rest.parse().unwrap_or(0);
                 let id = MermaidId(id_num);
 
-                // State-aware placeholder for the back-compat `lines()`
-                // view. The shared helper keeps this text in sync with the
-                // inline render path in react_trace.rs.
                 use super::mermaid::FenceRender;
                 let render = if states.is_err(id) {
                     FenceRender::Error
                 } else if states.is_pending(id) {
                     FenceRender::Pending
                 } else {
-                    FenceRender::Ready(1) // height unused in the 📊 fallback
+                    FenceRender::Ready(1)
                 };
                 placeholders.insert(id, super::mermaid::fence_placeholder_line(id, render));
                 items.push(StreamItem::Fence(id));
@@ -453,11 +506,160 @@ impl MarkdownStream {
             items.push(StreamItem::Text(current_text));
         }
 
+        (items, placeholders, new_fences, refreshed)
+    }
+
+    /// Rebuild `cached_items` from raw_text. Two stages:
+    /// Stage 0: pulldown scan for offsets + mermaid fences.
+    /// Stage 1: tui_markdown parse of raw_text[..authoritative_end].
+    ///
+    /// `permit_eof_closure = true` relaxes the cursor rule to allow events
+    /// at EOF; used by `flush_final` on TurnComplete.
+    ///
+    /// Panic safety: mutations to cached_items / fence_placeholders /
+    /// known_fences happen before flushed_byte_len is assigned. If any
+    /// stage panics, flushed_byte_len retains its prior value; the next
+    /// successful rebuild restores consistency (C1).
+    fn rebuild(
+        &mut self,
+        states: &StateLookup<'_>,
+        permit_eof_closure: bool,
+    ) -> Vec<FenceRef> {
+        self.rebuild_count.set(self.rebuild_count.get() + 1);
+
+        // Stage 0: pulldown scan.
+        let (new_flushed, discovered_fences) =
+            scan_authoritative(&self.raw_text, self.mermaid_enabled, permit_eof_closure);
+
+        // Stage 1: build items for the committed prefix.
+        // `.to_owned()` decouples the borrow on self.raw_text so we can
+        // then mutate self inside build_items_for without overlapping
+        // borrows.
+        let prefix_owned = self.raw_text[..new_flushed].to_owned();
+        let (items, placeholders, new_fences, refreshed) =
+            self.build_items_for(&prefix_owned, discovered_fences, states);
+
+        // Stage 2: commit. flushed_byte_len assigned LAST (panic discipline).
         self.cached_items = items;
         self.fence_placeholders = placeholders;
+        self.known_fences = refreshed;
+        self.flushed_byte_len = new_flushed;
 
         new_fences
     }
+}
+
+/// Pulldown scan over `raw_text`, gathering:
+/// - `authoritative_end`: max byte offset where an Event::End brings
+///   nesting depth back to 0 AND `range.end < raw_text.len()` (or
+///   `<= len` when `permit_eof_closure` is true for flush_final).
+/// - `discovered_fences`: closed mermaid fences whose End range is also
+///   before EOF (coherence with cursor advance, per Section 5.9).
+///
+/// Pure over `(&str, bool, bool)`. Does no `tui_markdown` work.
+pub(crate) fn scan_authoritative(
+    raw_text: &str,
+    mermaid_enabled: bool,
+    permit_eof_closure: bool,
+) -> (usize, Vec<(std::ops::Range<usize>, String)>) {
+    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+    let mut max_end: usize = 0;
+    let mut depth: i32 = 0;
+    let mut discovered: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+
+    let mut open_fence_start: Option<usize> = None;
+    let mut fence_buf = String::new();
+
+    for (ev, range) in Parser::new_ext(raw_text, Options::empty()).into_offset_iter() {
+        match &ev {
+            Event::Start(tag) => {
+                depth += 1;
+                if mermaid_enabled {
+                    if let Tag::CodeBlock(CodeBlockKind::Fenced(info)) = tag {
+                        if info.as_ref().trim().eq_ignore_ascii_case("mermaid") {
+                            open_fence_start = Some(range.start);
+                            fence_buf.clear();
+                        }
+                    }
+                }
+            }
+            Event::Text(t) if open_fence_start.is_some() => {
+                fence_buf.push_str(t);
+            }
+            Event::End(tag_end) => {
+                depth -= 1;
+                // Authoritative cursor advance: top-level block close.
+                let permitted = if permit_eof_closure {
+                    range.end <= raw_text.len()
+                } else {
+                    range.end < raw_text.len()
+                };
+                if depth == 0 && permitted {
+                    max_end = max_end.max(range.end);
+                }
+                // Mermaid fence coherence: register only truly-closed fences
+                // whose End range is before EOF (or permitted at finalize).
+                if matches!(tag_end, TagEnd::CodeBlock) {
+                    if let Some(start) = open_fence_start.take() {
+                        let slice_trimmed = raw_text[..range.end]
+                            .trim_end_matches(['\n', '\r', ' ', '\t']);
+                        let closed_by_fence = slice_trimmed.ends_with("```");
+                        let fence_permitted = if permit_eof_closure {
+                            range.end <= raw_text.len()
+                        } else {
+                            range.end < raw_text.len()
+                        };
+                        if closed_by_fence && fence_permitted {
+                            discovered.push((start..range.end, std::mem::take(&mut fence_buf)));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (max_end, discovered)
+}
+
+/// Public test accessor (plain `pub fn`, not `#[cfg(test)]` gated — the
+/// existing convention in this module per `cached_lines_debug()`).
+pub fn scan_authoritative_for_tests(
+    raw_text: &str,
+    mermaid_enabled: bool,
+    permit_eof_closure: bool,
+) -> (usize, Vec<(std::ops::Range<usize>, String)>) {
+    scan_authoritative(raw_text, mermaid_enabled, permit_eof_closure)
+}
+
+/// Cheap stateless scan for patterns that typically indicate an
+/// authoritative block close. False positives allowed (wasted rebuild);
+/// false negatives bounded by DEBOUNCE.
+pub(crate) fn has_authoritative_closure_pattern(tail: &str) -> bool {
+    // (a) Paragraph / block close: `\n\n` with content after the last
+    //     occurrence. Content-after required so we don't waste a rebuild
+    //     on a tail whose trailing `\n\n` is at EOF (where pulldown
+    //     emits End at range.end == len — non-authoritative).
+    if let Some(idx) = tail.rfind("\n\n") {
+        if idx + 2 < tail.len() {
+            return true;
+        }
+    }
+    // (b) Fence close on its own line with content after.
+    if let Some(idx) = tail.find("\n```") {
+        let after = idx + 4;
+        if tail.as_bytes().get(after) == Some(&b'\n') && after + 1 < tail.len() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Public test accessor (plain `pub fn`, following the module's existing
+/// convention for test-only helpers).
+pub fn has_authoritative_closure_pattern_for_tests(tail: &str) -> bool {
+    has_authoritative_closure_pattern(tail)
 }
 
 // ───────── ratatui-core 0.1 → ratatui 0.29 type conversions ─────────
@@ -530,7 +732,9 @@ mod stream_item_tests {
     #[test]
     fn items_splits_text_and_fences() {
         let mut s = MarkdownStream::new();
-        s.append("Intro prose\n\n```mermaid\nflowchart LR\nA-->B\n```\n\nOutro prose\n");
+        // "Outro prose\n\n" followed by more content ensures the cursor
+        // advances past "Outro prose" (End(Paragraph) at range.end < len).
+        s.append("Intro prose\n\n```mermaid\nflowchart LR\nA-->B\n```\n\nOutro prose\n\nMore\n");
         let _ = s.flush_now(&StateLookup::empty());
 
         let items = s.items();
@@ -607,8 +811,9 @@ mod stream_item_tests {
     fn gfm_table_is_wrapped_and_preserves_line_boundaries() {
         // Without the wrap, tui-markdown flows these rows into one paragraph
         // line. With the wrap, they must render as separate lines.
+        // Trailing paragraph ensures the cursor advances past the table block.
         let mut s = MarkdownStream::new();
-        s.append("| Key | Action |\n|---|---|\n| Esc | cancel |\n| Enter | submit |\n");
+        s.append("| Key | Action |\n|---|---|\n| Esc | cancel |\n| Enter | submit |\n\nEnd\n");
         let _ = s.flush_now(&StateLookup::empty());
 
         let joined = s.cached_lines_debug().join("\n");
@@ -706,6 +911,7 @@ mod stream_item_tests {
         // Realistic LLM output: prose, table, more prose, no blank-line
         // separators. Must render every row on its own line, separated
         // from surrounding prose, with no visible ``` markers.
+        // Trailing paragraph ensures cursor advances past "That's it." block.
         let mut s = MarkdownStream::new();
         s.append(
             "Here are the keybindings:\n\
@@ -713,7 +919,8 @@ mod stream_item_tests {
              |---|---|\n\
              | Esc | cancel |\n\
              | Enter | submit |\n\
-             That's it.\n",
+             That's it.\n\
+             \nDone\n",
         );
         let _ = s.flush_now(&StateLookup::empty());
         let joined = s.cached_lines_debug().join("\n");
