@@ -65,6 +65,10 @@ pub struct InputBar {
     /// Last inner width observed in `render()`; updated via interior mutation
     /// so `render(&self, ...)` can record the width without requiring `&mut self`.
     last_inner_width: std::cell::Cell<u16>,
+    /// Sticky goal column for vertical nav. Set on first vertical move,
+    /// preserved across consecutive verticals, reset on any horizontal move
+    /// or edit. Matches vim/emacs "remembered column" behavior.
+    goal_vcol: Option<u16>,
 }
 
 impl InputBar {
@@ -86,6 +90,7 @@ impl InputBar {
             history_cursor: None,
             draft: String::new(),
             last_inner_width: std::cell::Cell::new(80),
+            goal_vcol: None,
         }
     }
 
@@ -763,6 +768,7 @@ impl InputBar {
                 self.move_cursor_to_byte(r.start + 1);
             }
         }
+        self.goal_vcol = None;
     }
 
     /// Move cursor forward, skipping protected ranges atomically.
@@ -776,6 +782,7 @@ impl InputBar {
         } else {
             self.textarea.move_cursor(CursorMove::Forward);
         }
+        self.goal_vcol = None;
     }
 
     /// Delete character before cursor, handling protected ranges.
@@ -793,6 +800,7 @@ impl InputBar {
             self.shift_ranges(cursor, -1);
         }
         self.history_cursor = None;
+        self.goal_vcol = None;
     }
 
     /// Delete character after cursor, handling protected ranges.
@@ -809,6 +817,7 @@ impl InputBar {
             self.shift_ranges(cursor, -1);
         }
         self.history_cursor = None;
+        self.goal_vcol = None;
     }
 
     /// Insert a character, replacing protected range if inside one.
@@ -822,10 +831,12 @@ impl InputBar {
         self.rebuild_line_cache();
         self.shift_ranges(cursor, c.len_utf8() as isize);
         self.history_cursor = None;
+        self.goal_vcol = None;
     }
 
     /// Submit the current text.
     fn submit(&mut self) -> Option<(String, bool)> {
+        self.goal_vcol = None;
         let text = self.textarea.lines().join("\n");
         if text.is_empty() {
             return None;
@@ -896,6 +907,7 @@ impl InputBar {
             self.shift_ranges(cursor, delta);
         }
         self.history_cursor = None;
+        self.goal_vcol = None;
     }
 
     /// The current text content.
@@ -922,6 +934,7 @@ impl InputBar {
         self.line_cache = vec![0];
         self.protected_ranges.clear();
         self.last_inner_width.set(last_w);
+        self.goal_vcol = None;
         self.set_mode(mode);
     }
 
@@ -946,6 +959,7 @@ impl InputBar {
         self.move_cursor_to_byte(cursor);
         self.protected_ranges.clear();
         self.last_inner_width.set(last_w);
+        self.goal_vcol = None;
         self.set_mode(mode);
     }
 
@@ -1233,8 +1247,12 @@ impl InputBar {
         if target_vr == vr {
             return;
         }
+        // Sticky goal: use the stored goal if any, else the current vcol.
+        // Persist it so subsequent consecutive verticals can restore.
+        let goal = self.goal_vcol.unwrap_or(vc as u16);
         let max_vc = layout.rows[target_vr].used_cells as usize;
-        let target_vc = vc.min(max_vc);
+        let target_vc = (goal as usize).min(max_vc);
+        self.goal_vcol = Some(goal);
         let (target_row, target_byte) = layout.visual_to_logical(target_vr, target_vc);
         self.move_cursor_to_byte(target_byte_abs(&lines, target_row, target_byte));
     }
@@ -1317,6 +1335,26 @@ mod required_height_tests {
         // The assertion proves the key was HANDLED (didn't panic, didn't
         // mutate unexpectedly) rather than falling through the match-all.
         assert_eq!(bar.cursor(), 3);
+    }
+
+    #[test]
+    fn goal_vcol_restores_column_across_short_intermediate_row() {
+        // Three logical lines:
+        //   line 0: "hello world!"     (12 cells at width 12 → 1 vrow full)
+        //   line 1: "short"            (5 cells)
+        //   line 2: "another long"     (12 cells at width 12 → 1 vrow full)
+        let mut bar = InputBar::new();
+        bar.set_text(
+            "hello world!\nshort\nanother long".to_string(),
+            "hello world".len(), // cursor at vcol 11 on vrow 0
+        );
+        // First Down onto "short" — without goal, cursor would snap to vcol 5.
+        // Second Down onto "another long" — with goal, cursor must restore to vcol 11.
+        bar.visual_line_down(12);
+        bar.visual_line_down(12);
+        // Expected: cursor at 11th char of "another long" → 'g'.
+        let expected = "hello world!".len() + 1 + "short".len() + 1 + 11;
+        assert_eq!(bar.cursor(), expected);
     }
 
     #[test]
