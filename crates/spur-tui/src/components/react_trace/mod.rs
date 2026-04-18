@@ -310,8 +310,27 @@ impl ReactTrace {
     pub fn push(&mut self, entry: TraceEntry) {
         self.entries.push(entry);
         if self.entries.len() > MAX_LOG_ENTRIES {
-            let _drain = self.entries.len() - MAX_LOG_ENTRIES;
-            self.entries.drain(.._drain);
+            let drain = self.entries.len() - MAX_LOG_ENTRIES;
+            self.entries.drain(..drain);
+            // Adjust anchor's entry_idx; if anchor pointed at evicted entry,
+            // snap to (0, 0).
+            if let crate::components::react_trace::types::ScrollAnchor::Byte {
+                entry_idx,
+                byte_offset,
+            } = self.anchor
+            {
+                if entry_idx < drain {
+                    self.anchor = crate::components::react_trace::types::ScrollAnchor::Byte {
+                        entry_idx: 0,
+                        byte_offset: 0,
+                    };
+                } else {
+                    self.anchor = crate::components::react_trace::types::ScrollAnchor::Byte {
+                        entry_idx: entry_idx - drain,
+                        byte_offset,
+                    };
+                }
+            }
             self.invalidate_cache();
         } else {
             self.mark_dirty_from(self.entries.len().saturating_sub(2));
