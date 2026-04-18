@@ -12,6 +12,7 @@ use ratatui::text::Line;
 use super::mermaid::MermaidId;
 
 pub const DEBOUNCE: Duration = Duration::from_millis(50);
+pub const SAFETY_CAP_BYTES: usize = 64 * 1024;
 
 /// Read-only view of mermaid fence state, passed to rebuild so the
 /// placeholder can reflect error/pending distinctions.
@@ -584,6 +585,35 @@ pub fn scan_authoritative_for_tests(
     permit_eof_closure: bool,
 ) -> (usize, Vec<(std::ops::Range<usize>, String)>) {
     scan_authoritative(raw_text, mermaid_enabled, permit_eof_closure)
+}
+
+/// Cheap stateless scan for patterns that typically indicate an
+/// authoritative block close. False positives allowed (wasted rebuild);
+/// false negatives bounded by DEBOUNCE.
+pub(crate) fn has_authoritative_closure_pattern(tail: &str) -> bool {
+    // (a) Paragraph / block close: `\n\n` with content after the last
+    //     occurrence. Content-after required so we don't waste a rebuild
+    //     on a tail whose trailing `\n\n` is at EOF (where pulldown
+    //     emits End at range.end == len — non-authoritative).
+    if let Some(idx) = tail.rfind("\n\n") {
+        if idx + 2 < tail.len() {
+            return true;
+        }
+    }
+    // (b) Fence close on its own line with content after.
+    if let Some(idx) = tail.find("\n```") {
+        let after = idx + 4;
+        if tail.as_bytes().get(after) == Some(&b'\n') && after + 1 < tail.len() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Public test accessor (plain `pub fn`, following the module's existing
+/// convention for test-only helpers).
+pub fn has_authoritative_closure_pattern_for_tests(tail: &str) -> bool {
+    has_authoritative_closure_pattern(tail)
 }
 
 // ───────── ratatui-core 0.1 → ratatui 0.29 type conversions ─────────
