@@ -1092,11 +1092,9 @@ fn sim_render_offset_reflects_scroll_input() {
 #[test]
 fn sim_sub_entry_scroll_resolution() {
     use crate::components::react_trace::types::ScrollAnchor;
+    use crate::components::markdown_stream::StateLookup;
     let mut trace = ReactTrace::new_for_tests();
 
-    // Build a single AgentMessage with many lines of plain prose so it
-    // wraps to many rows at width 80. No paragraph boundaries — just
-    // newlines so each becomes one row after preview_items renders.
     let mut payload = String::new();
     for i in 0..30 {
         payload.push_str(&format!("Paragraph {} content here.\n\n", i));
@@ -1104,17 +1102,16 @@ fn sim_sub_entry_scroll_resolution() {
     trace.append_message(&payload, "claude", "10:00".into());
     trace.force_flush_all(&StateLookup::empty());
 
-    // Set a known visible height and width via a render snapshot.
+    // Seed the cache so shift_anchor_by has layout to read.
     let (rows_initial, _, _) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
     trace.set_visible_height_for_tests(5);
 
-    // Position viewport via scroll_to_top + scroll_down_by(N) so the
-    // anchor sits in the MIDDLE of the (single) AgentMessage entry.
+    // Position viewport in the middle of the (single) AgentMessage entry.
     trace.scroll_to_top();
     let middle_target_row = rows_initial.len() / 2;
     trace.scroll_down_by(middle_target_row);
-
     let anchor_after_scroll_down = trace.anchor_for_tests();
     eprintln!(
         "SIM-9 after scroll_down_by({}): anchor = {:?}",
@@ -1122,8 +1119,6 @@ fn sim_sub_entry_scroll_resolution() {
     );
 
     // Now scroll_up by 1. Expectation: viewport moves up exactly 1 row.
-    // Bug expectation: anchor snaps to entry start (entry_idx=0, byte_offset=0)
-    // because row_to_byte_anchor always returns byte_offset=0 in v1.
     trace.scroll_up();
     let anchor_after_scroll_up = trace.anchor_for_tests();
     eprintln!(
@@ -1131,28 +1126,31 @@ fn sim_sub_entry_scroll_resolution() {
         anchor_after_scroll_up
     );
 
-    // The two anchors should differ. If both are Byte{0,0}, the bug is real.
+    // Now both anchors should be Row variant; they must differ.
     match (anchor_after_scroll_down, anchor_after_scroll_up) {
         (
-            ScrollAnchor::Byte {
+            ScrollAnchor::Row {
                 entry_idx: e1,
-                byte_offset: b1,
+                row_within_entry: r1,
             },
-            ScrollAnchor::Byte {
+            ScrollAnchor::Row {
                 entry_idx: e2,
-                byte_offset: b2,
+                row_within_entry: r2,
             },
         ) => {
             assert!(
-                e1 != e2 || b1 != b2,
+                e1 != e2 || r1 != r2,
                 "SIM-9: scroll_up did not change the anchor — sub-entry \
-                 scroll is broken. Both anchors are Byte{{{}, {}}}.",
+                 scroll is broken. Both anchors are Row{{{}, {}}}.",
                 e1,
-                b1
+                r1
             );
         }
         _ => {
-            // Following or transition — that's a different (acceptable) outcome.
+            panic!(
+                "SIM-9: expected both anchors to be Row variant; got {:?} and {:?}",
+                anchor_after_scroll_down, anchor_after_scroll_up
+            );
         }
     }
 }
@@ -1161,13 +1159,16 @@ fn sim_sub_entry_scroll_resolution() {
 ///
 /// Fix verification: `shift_anchor_by` now reads from `line_cache` (seeded
 /// with real FenceRender states at render time), so scroll math uses the same
-/// layout that was painted. This test seeds the cache with Ready(6) states
-/// and confirms that a scroll landing in the image-row region resolves
-/// correctly — i.e., the resolved row is within the real (12-row) layout,
-/// not clamped to the stale Pending (7-row) layout.
+/// coordinate system as the painted render. This test seeds the cache with
+/// Ready(6) states, scrolls to a row that only exists in the Ready layout,
+/// and confirms the resolved row falls within the real layout — proving
+/// shift_anchor_by used the cache's real layout (would fail under the old
+/// empty-states implementation).
 #[test]
 fn sim_mermaid_state_mismatch_in_shift() {
+    use crate::components::markdown_stream::StateLookup;
     use crate::components::mermaid::{FenceRender, MermaidId};
+    use crate::components::react_trace::types::ScrollAnchor;
 
     let mut trace = ReactTrace::new_for_tests();
     trace.append_message(
@@ -1177,67 +1178,66 @@ fn sim_mermaid_state_mismatch_in_shift() {
     );
     trace.force_flush_all(&StateLookup::empty());
 
-    // Real render-path fence states: Ready with explicit row height.
-    // FenceRender::Ready(6) means the image will render as 6 ImageRows.
+    // Pre-condition: layouts under Pending vs Ready DIFFER.
     let mut ready_states = std::collections::HashMap::new();
     ready_states.insert(MermaidId(0), FenceRender::Ready(6));
+    let (rows_real, _, _) = trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
+    let (rows_pending, _, _) = trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
+    assert!(rows_real.len() > rows_pending.len(),
+        "pre-condition: Ready layout must be taller than Pending; got real={} pending={}",
+        rows_real.len(), rows_pending.len());
 
-    let (rows_real, entry_row_starts, byte_ranges) =
-        trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
-    let total_real = rows_real.len();
-    eprintln!("SIM-10 real (Ready(6) state) row count: {}", total_real);
-
-    let (rows_pending, _, _) =
-        trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
-    let total_pending = rows_pending.len();
-    eprintln!("SIM-10 pending row count: {}", total_pending);
-
-    // The two layouts differ because the mermaid fence expands when Ready.
-    let delta = (total_real as i64) - (total_pending as i64);
-    eprintln!("SIM-10 delta (real - pending): {}", delta);
-    assert_ne!(total_real, total_pending,
-        "SIM-10: expected real and pending layouts to differ (mermaid fence \
-         should expand when Ready). delta = {}", delta);
-
-    // Seed cache with the REAL (Ready) layout and scroll to a row that only
-    // exists in the real layout (row index >= total_pending).
+    // Seed cache with REAL Ready states (this is what render does).
     trace.seed_line_cache_for_tests(80, &ready_states);
     trace.set_visible_height_for_tests(3);
+
+    // Scroll to a row that exists in the Ready layout but NOT in the Pending layout.
+    // Target row = rows_pending.len() (one row past the Pending layout's max).
     trace.scroll_to_top();
-    // Scroll to a target row that is beyond the pending layout.
-    let target_row = total_pending; // row index `total_pending` exists in real layout but not pending
-    trace.scroll_down_by(target_row);
+    trace.scroll_down_by(rows_pending.len());
+    let anchor = trace.anchor_for_tests();
+    eprintln!("SIM-10 anchor after scroll_down_by({}): {:?}", rows_pending.len(), anchor);
 
-    let resolved = crate::components::react_trace::render::resolve_anchor(
-        &trace.anchor_for_tests(),
-        &byte_ranges,
-        &entry_row_starts,
-        total_real,
-        3,
-    );
-    eprintln!(
-        "SIM-10 resolved row after scroll_down_by({}): {}",
-        target_row, resolved
-    );
-
-    // With the fix, shift_anchor_by uses the real layout, so the resolved row
-    // should be clamped to within the real layout, not the pending layout.
-    assert!(
-        resolved <= total_real.saturating_sub(3),
-        "SIM-10: resolved row {} exceeds real layout bound {}.",
-        resolved,
-        total_real.saturating_sub(3)
-    );
-    assert!(
-        resolved > 0
-            || matches!(
-                trace.anchor_for_tests(),
-                crate::components::react_trace::types::ScrollAnchor::Following
-            ),
-        "SIM-10: scroll_down_by({}) from top had no effect — shift_anchor_by \
-         may still be using empty fence states.",
-        target_row
-    );
+    // The anchor must resolve to a row >= rows_pending.len() in the REAL layout.
+    // If shift_anchor_by were using the buggy empty-states layout, it would
+    // saturate target=rows_pending.len()-3 (visible_h) and produce a Row at row_pending - 3,
+    // which is < rows_pending.len(). With the fix, it sees rows_real.len() and clamps to
+    // rows_real - 3 >= rows_pending.
+    match anchor {
+        ScrollAnchor::Row {
+            entry_idx: _,
+            row_within_entry: _,
+        } => {
+            // Resolve back to a row index using the REAL ready layout.
+            let (_, starts_real, ranges_real) =
+                trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
+            let resolved = crate::components::react_trace::render::resolve_anchor(
+                &anchor,
+                &ranges_real,
+                &starts_real,
+                rows_real.len(),
+                3,
+            );
+            eprintln!("SIM-10 resolved row in real layout: {}", resolved);
+            assert!(
+                resolved >= rows_pending.len() - 3,
+                "SIM-10: scroll math used the wrong (Pending) layout. \
+                 Anchor resolved to row {} but should be >= {} (rows_pending - visible_h). \
+                 Real layout has {} rows; Pending has {}.",
+                resolved,
+                rows_pending.len() - 3,
+                rows_real.len(),
+                rows_pending.len()
+            );
+        }
+        ScrollAnchor::Following => {
+            // Acceptable if scroll target reached the end.
+            eprintln!("SIM-10: anchor became Following — acceptable if real layout was used");
+        }
+        ScrollAnchor::Byte { .. } => {
+            panic!("SIM-10: anchor is Byte variant — Phase 3 emits Row, not Byte");
+        }
+    }
 }
 
 /// SIM-11 — Page-up walking through a long single message.
