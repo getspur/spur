@@ -954,6 +954,7 @@ impl InputBar {
     }
 
     /// Test-only: read the cached last inner width.
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn last_inner_width_for_test(&self) -> u16 {
         self.last_inner_width.get()
@@ -1026,6 +1027,7 @@ impl InputBar {
     }
 
     /// Test-only: set cursor position.
+    #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
     pub fn set_text_cursor_for_test(&mut self, cursor: usize) {
         self.move_cursor_to_byte(cursor);
