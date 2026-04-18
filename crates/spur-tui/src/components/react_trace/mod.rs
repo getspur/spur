@@ -6,11 +6,11 @@ mod types;
 pub use types::RenderContext;
 #[cfg(all(test, feature = "markdown"))]
 pub(crate) use types::{Segment, VirtualRow};
-pub use types::{TraceEntry, TraceKind};
+pub use types::{ActStatus, TraceEntry, TraceKind};
 
 use spur_acp::{
     adapter::{mode_badge, ToolInputDisplay},
-    AgentKind,
+    AgentKind, ToolCallId,
 };
 
 use ratatui::style::Color;
@@ -74,6 +74,102 @@ fn row_to_anchor(row: usize, entry_row_starts: &[usize]) -> (usize, usize) {
     };
     let within = row - entry_row_starts[entry_idx];
     (entry_idx, within)
+}
+
+/// Merge an incoming `ToolCallUpdate.fields` into the previous `ActStatus`.
+///
+/// Rules:
+///   - Terminal `prev` (Completed / Failed): `debug_assert!` that the
+///     incoming status, if present, matches; return `prev.clone()` unchanged.
+///     Prevents a late `InProgress` update from reopening a closed tool call.
+///   - `incoming_status == None`: keep `prev` variant; refresh
+///     `InProgress.partial` only when `prev` is `InProgress` AND
+///     `incoming_raw_output` is `Some(v)`.
+///   - `incoming_status == Some(s)`: map `(s, incoming_raw_output)` to a
+///     new `ActStatus`. An incoming terminal always replaces non-terminal.
+///   - Any future `ToolCallStatus` variant not listed here (the enum may
+///     become `#[non_exhaustive]` upstream) is absorbed: log via
+///     `tracing::debug!` and return `prev.clone()`.
+pub(crate) fn merge_status(
+    prev: &types::ActStatus,
+    incoming_status: Option<spur_acp::ToolCallStatus>,
+    incoming_raw_output: Option<&serde_json::Value>,
+    kind: spur_acp::AgentKind,
+) -> types::ActStatus {
+    use spur_acp::adapter::extract_observe;
+    use spur_acp::ToolCallStatus;
+    use types::ActStatus;
+
+    let parse = |v: &serde_json::Value| extract_observe(v, kind);
+
+    // Terminal prev wins.
+    if matches!(prev, ActStatus::Completed(_) | ActStatus::Failed(_)) {
+        if let Some(s) = incoming_status {
+            let prev_is_completed = matches!(prev, ActStatus::Completed(_));
+            let prev_is_failed = matches!(prev, ActStatus::Failed(_));
+            let ok = (prev_is_completed && matches!(s, ToolCallStatus::Completed))
+                || (prev_is_failed && matches!(s, ToolCallStatus::Failed));
+            if !ok {
+                tracing::warn!(
+                    ?prev,
+                    incoming = ?s,
+                    "ignoring late ToolCallUpdate on terminal ActStatus"
+                );
+            }
+        }
+        return prev.clone();
+    }
+
+    let Some(s) = incoming_status else {
+        // No status change. Possibly refresh partial on InProgress.
+        return match (prev, incoming_raw_output) {
+            (ActStatus::InProgress { .. }, Some(v)) => ActStatus::InProgress {
+                partial: Some(parse(v)),
+            },
+            _ => prev.clone(),
+        };
+    };
+
+    match s {
+        ToolCallStatus::Pending => ActStatus::Pending,
+        ToolCallStatus::InProgress => ActStatus::InProgress {
+            partial: incoming_raw_output.map(parse),
+        },
+        ToolCallStatus::Completed => ActStatus::Completed(incoming_raw_output.map(parse)),
+        ToolCallStatus::Failed => ActStatus::Failed(incoming_raw_output.map(parse)),
+        _ => {
+            tracing::debug!(
+                ?prev,
+                incoming = ?s,
+                "unknown ToolCallStatus variant; preserving prev"
+            );
+            prev.clone()
+        }
+    }
+}
+
+/// Map an ACP `ToolCallStatus` + optional `raw_output` to an `ActStatus`
+/// for a newly-created Act entry. Honours the incoming status — an agent
+/// may stream an already-completed tool call on the first event.
+pub(crate) fn map_initial_status(
+    status: spur_acp::ToolCallStatus,
+    raw_output: Option<&serde_json::Value>,
+    kind: spur_acp::AgentKind,
+) -> types::ActStatus {
+    use spur_acp::adapter::extract_observe;
+    use spur_acp::ToolCallStatus;
+    use types::ActStatus;
+
+    let parse = |v: &serde_json::Value| extract_observe(v, kind);
+    match status {
+        ToolCallStatus::Pending => ActStatus::Pending,
+        ToolCallStatus::InProgress => ActStatus::InProgress {
+            partial: raw_output.map(parse),
+        },
+        ToolCallStatus::Completed => ActStatus::Completed(raw_output.map(parse)),
+        ToolCallStatus::Failed => ActStatus::Failed(raw_output.map(parse)),
+        _ => ActStatus::Pending,
+    }
 }
 
 impl ReactTrace {
@@ -165,6 +261,13 @@ impl ReactTrace {
         self.generation = self.generation.wrapping_add(1);
         let prev = self.dirty_from;
         self.dirty_from = Some(prev.map_or(idx, |d| d.min(idx)));
+    }
+
+    /// Public wrapper for external callers that legitimately mutate an
+    /// entry in-place (e.g. `SessionUpdate::ToolCallUpdate` merging into
+    /// an existing `Act`). Bumps generation + marks cache dirty from idx.
+    pub(crate) fn mark_dirty_from_for_update(&mut self, idx: usize) {
+        self.mark_dirty_from(idx);
     }
 
     /// Return a short kind name for the most recent entry, or `None` if empty.
@@ -466,24 +569,16 @@ impl ReactTrace {
         }
     }
 
-    /// Returns the index of the first entry showing an animated spinner.
-    fn first_active_spinner(&self) -> Option<usize> {
-        let len = self.entries.len();
-        for (i, entry) in self.entries.iter().enumerate() {
-            if let TraceKind::Act { .. } = &entry.kind {
-                if self.observe_collapsed {
-                    let has_observe = i + 1 < len
-                        && matches!(
-                            &self.entries[i + 1].kind,
-                            TraceKind::Observe { payload: Some(_) }
-                        );
-                    if !has_observe {
-                        return Some(i);
-                    }
-                }
-            }
-        }
-        None
+    /// Returns the index of the first entry whose tool call is still
+    /// animating (Pending or InProgress). Caller uses this to drive cache
+    /// invalidation in `tick`.
+    pub(crate) fn first_active_spinner(&self) -> Option<usize> {
+        self.entries.iter().position(|e| {
+            matches!(
+                &e.kind,
+                TraceKind::Act { status, .. } if status.is_active()
+            )
+        })
     }
 
     /// Drain any mermaid fences detected during the last debounce window.
@@ -605,6 +700,13 @@ impl ReactTrace {
         &self.entries
     }
 
+    /// Test-only mutable accessor.
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub(crate) fn entries_mut_for_test(&mut self) -> &mut Vec<TraceEntry> {
+        &mut self.entries
+    }
+
     /// Return the text of the most recent entry, or `None` if the trace is empty.
     #[cfg(test)]
     pub fn last_text(&self) -> Option<String> {
@@ -634,6 +736,30 @@ impl ReactTrace {
             "DelegationDispatched arrived but no matching Delegate entry"
         );
     }
+
+    /// Locate the newest `TraceKind::Act` entry whose `tool_call_id` matches.
+    /// Returns the absolute entry index and a mutable reference, or `None`.
+    ///
+    /// Compares the inner `Arc<str>` content rather than `Arc` identity, so
+    /// ids produced by separate protocol round trips still compare equal.
+    pub(crate) fn find_act_by_id_mut(
+        &mut self,
+        id: &ToolCallId,
+    ) -> Option<(usize, &mut TraceEntry)> {
+        let needle: &str = id.0.as_ref();
+        for (idx, entry) in self.entries.iter_mut().enumerate().rev() {
+            if let TraceKind::Act {
+                tool_call_id: Some(existing),
+                ..
+            } = &entry.kind
+            {
+                if existing.0.as_ref() == needle {
+                    return Some((idx, entry));
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Default for ReactTrace {
@@ -657,29 +783,33 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
+                    ..
                 } = &entry.kind
                 {
                     let (act_glyph, _) = family_glyph(*family);
                     let id_str = input_summary(input, tool);
-                    let (tail, consumed) = if let Some(TraceKind::Observe { payload: Some(p) }) =
-                        self.entries.get(i + 1).map(|e| &e.kind)
-                    {
-                        let (obs_glyph, _, stats) = observe_compact(p);
-                        let mut t = obs_glyph.to_string();
-                        if !stats.is_empty() {
-                            t.push(' ');
-                            t.push_str(&stats);
+                    let tail = match status {
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {
+                            "\u{2026}".to_string()
                         }
-                        (t, 2)
-                    } else {
-                        ("\u{2026}".to_string(), 1)
+                        ActStatus::Completed(Some(p)) => {
+                            let (glyph, _, stats) = observe_compact(p);
+                            if stats.is_empty() {
+                                glyph.to_string()
+                            } else {
+                                format!("{} {}", glyph, stats)
+                            }
+                        }
+                        ActStatus::Completed(None) => "✓".to_string(),
+                        ActStatus::Failed(_) => "✗".to_string(),
                     };
                     lines.push(format!(
                         "{} {} {}  {}",
                         entry.timestamp, act_glyph, id_str, tail
                     ));
                     lines.push(String::new());
-                    i += consumed;
+                    i += 1;
                     continue;
                 }
             }
@@ -755,6 +885,8 @@ impl ReactTrace {
                     tool,
                     family,
                     input,
+                    status,
+                    ..
                 } => {
                     let (glyph, _) = family_glyph(*family);
                     lines.push(format!("{} {} {}", entry.timestamp, glyph, tool));
@@ -768,6 +900,36 @@ impl ReactTrace {
                                 l.spans.iter().map(|s| s.content.as_ref()).collect();
                             lines.push(joined);
                         }
+                    }
+                    // Terminal states in expanded mode also render the outcome
+                    // body inline from `status` (there is no paired Observe).
+                    match status {
+                        ActStatus::Completed(Some(p)) => {
+                            let verb = observe_verb(p);
+                            let (glyph, _) = outcome_glyph(p);
+                            lines.push(format!("{} {} {}", entry.timestamp, glyph, verb));
+                            for l in observe_payload_lines(p, self.observe_collapsed) {
+                                let joined: String =
+                                    l.spans.iter().map(|s| s.content.as_ref()).collect();
+                                lines.push(joined);
+                            }
+                        }
+                        ActStatus::Failed(Some(p)) => {
+                            let verb = observe_verb(p);
+                            lines.push(format!("{} ✗ {}", entry.timestamp, verb));
+                            for l in observe_payload_lines(p, self.observe_collapsed) {
+                                let joined: String =
+                                    l.spans.iter().map(|s| s.content.as_ref()).collect();
+                                lines.push(joined);
+                            }
+                        }
+                        ActStatus::Completed(None) => {
+                            lines.push(format!("{} ✓ done", entry.timestamp));
+                        }
+                        ActStatus::Failed(None) => {
+                            lines.push(format!("{} ✗ failed", entry.timestamp));
+                        }
+                        ActStatus::Pending | ActStatus::InProgress { .. } => {}
                     }
                 }
 
@@ -834,14 +996,9 @@ impl ReactTrace {
                 }
             }
 
-            let skip_blank = matches!(&entry.kind, TraceKind::Act { .. })
-                && matches!(
-                    self.entries.get(i + 1).map(|e| &e.kind),
-                    Some(TraceKind::Observe { payload: Some(_) })
-                );
-            if !skip_blank {
-                lines.push(String::new());
-            }
+            // Blank separator between entries. No adjacency skip needed: Act outcome
+            // is now rendered from `status` inline, not from a neighbouring Observe entry.
+            lines.push(String::new());
             i += 1;
         }
 
@@ -1201,6 +1358,8 @@ mod virtual_row_tests {
                     cmd: "echo hi".to_string(),
                     cwd: None,
                 },
+                tool_call_id: None,
+                status: ActStatus::Pending,
             },
             text: String::new(),
             timestamp: "10:00".to_string(),
@@ -1410,6 +1569,8 @@ mod tests {
                 tool: "read_file".to_string(),
                 family: ToolFamily::Unknown,
                 input: ToolInputDisplay::Empty,
+                tool_call_id: None,
+                status: ActStatus::Pending,
             },
             text: "read_file(path=...)".to_string(),
             timestamp: "10:00:02".to_string(),
@@ -1520,6 +1681,212 @@ mod tests {
         assert_eq!(
             user[0].text, "list the files in src/",
             "must not double the seeded text"
+        );
+    }
+
+    #[test]
+    fn merge_status_pending_to_completed_with_payload() {
+        use spur_acp::adapter::ObservePayload;
+        use spur_acp::{AgentKind, ToolCallStatus};
+        let payload_json = serde_json::json!("ok");
+        let new = super::merge_status(
+            &ActStatus::Pending,
+            Some(ToolCallStatus::Completed),
+            Some(&payload_json),
+            AgentKind::Generic,
+        );
+        match new {
+            ActStatus::Completed(Some(ObservePayload::Text { .. })) => {}
+            other => panic!("expected Completed(Some(Text)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn merge_status_completed_is_terminal_ignores_late_in_progress() {
+        use spur_acp::adapter::ObservePayload;
+        use spur_acp::{AgentKind, ToolCallStatus};
+        let prev = ActStatus::Completed(Some(ObservePayload::Text {
+            body: "done".into(),
+        }));
+        let new = super::merge_status(
+            &prev,
+            Some(ToolCallStatus::InProgress),
+            None,
+            AgentKind::Generic,
+        );
+        // Terminal state must not be reopened.
+        assert!(
+            matches!(new, ActStatus::Completed(Some(_))),
+            "terminal Completed must not regress to InProgress, got {:?}",
+            new
+        );
+    }
+
+    #[test]
+    fn merge_status_none_incoming_status_preserves_variant() {
+        use spur_acp::AgentKind;
+        let prev = ActStatus::Pending;
+        let new = super::merge_status(&prev, None, None, AgentKind::Generic);
+        assert!(matches!(new, ActStatus::Pending));
+    }
+
+    #[test]
+    fn map_initial_status_pending_yields_pending() {
+        use spur_acp::{AgentKind, ToolCallStatus};
+        let got = super::map_initial_status(ToolCallStatus::Pending, None, AgentKind::Generic);
+        assert!(matches!(got, ActStatus::Pending));
+    }
+
+    #[test]
+    fn map_initial_status_completed_with_output_yields_completed_some() {
+        use spur_acp::{AgentKind, ToolCallStatus};
+        let out = serde_json::json!({"text": "hi"});
+        let got = super::map_initial_status(
+            ToolCallStatus::Completed,
+            Some(&out),
+            AgentKind::Generic,
+        );
+        assert!(matches!(got, ActStatus::Completed(Some(_))));
+    }
+
+    #[test]
+    fn find_act_by_id_mut_returns_newest_matching_act() {
+        use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+        use spur_acp::ToolCallId;
+        use std::sync::Arc;
+
+        let mut trace = ReactTrace::new();
+        let id_a: ToolCallId = ToolCallId::new(Arc::from("call-A"));
+        let id_b: ToolCallId = ToolCallId::new(Arc::from("call-B"));
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "first".into(),
+                family: ToolFamily::Unknown,
+                input: ToolInputDisplay::Empty,
+                tool_call_id: Some(id_a.clone()),
+                status: ActStatus::Pending,
+            },
+            text: String::new(),
+            timestamp: "t0".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "second".into(),
+                family: ToolFamily::Unknown,
+                input: ToolInputDisplay::Empty,
+                tool_call_id: Some(id_b.clone()),
+                status: ActStatus::Pending,
+            },
+            text: String::new(),
+            timestamp: "t1".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+
+        let found = trace.find_act_by_id_mut(&id_a);
+        assert!(found.is_some(), "should find act by id");
+        let (idx, entry) = found.unwrap();
+        assert_eq!(idx, 0, "should return the matching entry's absolute index");
+        assert!(
+            matches!(&entry.kind, TraceKind::Act { tool, .. } if tool == "first"),
+            "should return a mutable reference to the matching entry"
+        );
+
+        let id_missing: ToolCallId = ToolCallId::new(Arc::from("nope"));
+        assert!(trace.find_act_by_id_mut(&id_missing).is_none());
+    }
+
+    #[test]
+    fn first_active_spinner_returns_pending_act_index() {
+        use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "t".into(),
+                family: ToolFamily::Unknown,
+                input: ToolInputDisplay::Empty,
+                tool_call_id: None,
+                status: ActStatus::Pending,
+            },
+            text: String::new(),
+            timestamp: "t0".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        assert_eq!(trace.first_active_spinner(), Some(0));
+
+        // Transition to Completed: spinner should stop.
+        if let TraceKind::Act { status, .. } = &mut trace.entries[0].kind {
+            *status = ActStatus::Completed(None);
+        }
+        assert_eq!(trace.first_active_spinner(), None);
+    }
+
+    #[test]
+    fn render_to_strings_completed_act_shows_outcome_glyph_not_spinner() {
+        use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "shell".into(),
+                family: ToolFamily::Execute,
+                input: ToolInputDisplay::Command {
+                    cmd: "echo hi".into(),
+                    cwd: None,
+                },
+                tool_call_id: None,
+                status: ActStatus::Completed(Some(ObservePayload::CommandOutput {
+                    exit_code: Some(0),
+                    stdout: "hi".into(),
+                    stderr: String::new(),
+                })),
+            },
+            text: String::new(),
+            timestamp: "10:00".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        let lines = trace.render_to_strings().join("\n");
+        assert!(
+            lines.contains("✓"),
+            "expected success glyph in collapsed render, got:\n{lines}"
+        );
+        for frame in SPINNER_FRAMES {
+            assert!(
+                !lines.contains(frame),
+                "completed Act must not render a spinner frame ({frame}) in:\n{lines}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_to_strings_pending_act_shows_spinner_placeholder() {
+        use spur_acp::adapter::{ToolFamily, ToolInputDisplay};
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Act {
+                tool: "shell".into(),
+                family: ToolFamily::Execute,
+                input: ToolInputDisplay::Command {
+                    cmd: "sleep 5".into(),
+                    cwd: None,
+                },
+                tool_call_id: None,
+                status: ActStatus::Pending,
+            },
+            text: String::new(),
+            timestamp: "10:00".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        let joined = trace.render_to_strings().join("\n");
+        // render_to_strings emits the Unicode ellipsis placeholder for the
+        // plain-text path's spinner slot (not a real animated frame).
+        assert!(
+            joined.contains("\u{2026}") || SPINNER_FRAMES.iter().any(|f| joined.contains(f)),
+            "pending Act must render a spinner placeholder, got:\n{joined}"
         );
     }
 }

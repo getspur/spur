@@ -44,6 +44,6 @@ pub use agent_client_protocol::{
     PlanEntry, PlanEntryPriority, PlanEntryStatus, RequestPermissionOutcome,
     RequestPermissionRequest, ResourceLink, SelectedPermissionOutcome, SessionInfo, SessionModeId,
     SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse, TextContent,
-    ToolCall as AcpToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
+    ToolCall as AcpToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
     ToolCallUpdate as AcpToolCallUpdate, ToolKind, UnstructuredCommandInput, UsageUpdate,
 };
