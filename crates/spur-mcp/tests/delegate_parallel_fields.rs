@@ -15,7 +15,8 @@ fn per_task_context_files_survive_to_delegation_requests() {
         ]
     });
 
-    let parsed = spur_mcp::parse_parallel_tasks(&args).expect("parse ok");
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("test-brain".into()));
+    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
     assert_eq!(parsed.len(), 2);
     assert_eq!(
         parsed[0].context_files,
@@ -44,7 +45,8 @@ fn per_task_issue_id_and_delegation_plan_survive_unshared() {
         "delegation_plan": { "chosen": "batch-top-level", "rationale": "SHOULD NOT propagate" }
     });
 
-    let parsed = spur_mcp::parse_parallel_tasks(&args).expect("parse ok");
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("test-brain".into()));
+    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
     assert_eq!(parsed.len(), 2);
 
     assert_eq!(parsed[0].issue_id.as_deref(), Some("bd-1"));
@@ -100,4 +102,25 @@ fn distinct_issue_ids_pass() {
         ]
     });
     spur_mcp::validate_parallel_args(&args).expect("distinct ids pass");
+}
+
+#[test]
+fn parse_parallel_tasks_requires_brain_session_id() {
+    use spur_acp::{BrainSessionId, SessionId};
+
+    let args = json!({
+        "tasks": [
+            { "agent": "claude-code-acp", "task": "T" }
+        ]
+    });
+    let brain_sid = BrainSessionId::new(SessionId("brain-xyz".into()));
+
+    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(
+        parsed[0].brain_session_id.as_session_id().0,
+        "brain-xyz",
+        "brain_session_id must be threaded through, not defaulted to SessionId::new()"
+    );
 }
