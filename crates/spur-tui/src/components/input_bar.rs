@@ -623,6 +623,19 @@ impl InputBar {
         self.line_cache.get(row).copied().unwrap_or(0) + byte_offset
     }
 
+    /// Logical (row, char_col) → byte offset within `lines()[row]`.
+    fn char_col_to_byte(&self, row: usize, char_col: usize) -> usize {
+        let lines = self.textarea.lines();
+        if row >= lines.len() {
+            return 0;
+        }
+        let line = &lines[row];
+        line.char_indices()
+            .nth(char_col)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len())
+    }
+
     /// Rebuild the line cache after text modification.
     fn rebuild_line_cache(&mut self) {
         self.line_cache.clear();
@@ -1024,7 +1037,106 @@ impl InputBar {
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        frame.render_widget(&self.textarea, inner);
+
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        // Compute wrap layout for the buffer against the inner width.
+        let lines: Vec<String> = self.textarea.lines().to_vec();
+        let layout =
+            crate::components::input_bar_wrap::wrap(&lines, inner.width);
+
+        // Cursor in visual coordinates.
+        let (cursor_row, cursor_ccol) = self.textarea.cursor();
+        let cursor_byte = self.char_col_to_byte(cursor_row, cursor_ccol);
+        let (cursor_vr, cursor_vc) =
+            layout.logical_to_visual(cursor_row, cursor_byte);
+
+        // Vertical scroll: keep the cursor within the visible window.
+        let visible = inner.height as usize;
+        let total = layout.visual_height() as usize;
+        let view_top = if total <= visible {
+            0
+        } else if cursor_vr >= visible {
+            cursor_vr + 1 - visible
+        } else {
+            0
+        };
+
+        // Selection range in bytes (once, for quick intersection per grapheme).
+        let selection =
+            self.textarea.selection_range().map(|((sr, sc), (er, ec))| {
+                let sb = self.char_col_to_byte(sr, sc);
+                let eb = self.char_col_to_byte(er, ec);
+                (sr, sb, er, eb)
+            });
+
+        // Build visible lines.
+        let last_vr = (view_top + visible).min(total);
+        let mut out_lines: Vec<ratatui::text::Line<'static>> =
+            Vec::with_capacity(last_vr - view_top);
+
+        for vi in view_top..last_vr {
+            let vr = &layout.rows[vi];
+            let logical = &lines[vr.logical_row];
+
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(vr.graphemes.len());
+            for g in &vr.graphemes {
+                let piece_slice = &logical[g.byte_start..g.byte_end];
+                // Substitute visual expansions for special graphemes.
+                let piece: String = if piece_slice == "\t" {
+                    " ".repeat(crate::components::input_bar_wrap::TAB_WIDTH)
+                } else {
+                    piece_slice.to_string()
+                };
+
+                let mut style = Style::default();
+
+                // Atom styling: light-blue + underline for graphemes inside
+                // any protected range that lives on this logical line.
+                for atom in &self.protected_ranges {
+                    if vr.logical_row == 0
+                        && g.byte_start >= atom.start
+                        && g.byte_end <= atom.end
+                    {
+                        style = style
+                            .fg(Color::LightBlue)
+                            .add_modifier(Modifier::UNDERLINED);
+                    }
+                }
+
+                // Selection styling.
+                if let Some((sr, sb, er, eb)) = selection {
+                    let in_sel = if sr == er && vr.logical_row == sr {
+                        g.byte_start >= sb && g.byte_end <= eb
+                    } else if vr.logical_row == sr {
+                        g.byte_start >= sb
+                    } else if vr.logical_row == er {
+                        g.byte_end <= eb
+                    } else {
+                        vr.logical_row > sr && vr.logical_row < er
+                    };
+                    if in_sel {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+                }
+
+                spans.push(Span::styled(piece, style));
+            }
+
+            out_lines.push(ratatui::text::Line::from(spans));
+        }
+
+        let paragraph = ratatui::widgets::Paragraph::new(out_lines);
+        frame.render_widget(paragraph, inner);
+
+        // Place the cursor cell if it is within the visible window.
+        if cursor_vr >= view_top && cursor_vr < last_vr {
+            let cx = inner.x + cursor_vc as u16;
+            let cy = inner.y + (cursor_vr - view_top) as u16;
+            frame.set_cursor_position((cx, cy));
+        }
     }
 }
 
