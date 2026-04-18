@@ -446,3 +446,61 @@ fn append_before_flush_final_never_panics() {
     s.append(" world");
     assert_eq!(s.raw_text(), "hello world");
 }
+
+#[test]
+fn setext_promotion_retroactively_restyles_at_boundary() {
+    let mut s = MarkdownStream::new();
+    s.append("Hello\n");
+    s.flush_now(&StateLookup::empty());
+    assert_eq!(s.flushed_byte_len_for_tests(), 0);
+
+    s.append("===\n\nbody");
+    s.flush_now(&StateLookup::empty());
+    assert!(s.flushed_byte_len_for_tests() > 0,
+        "setext + trailing content should advance cursor");
+
+    let rendered = s.cached_lines_debug().join("\n");
+    assert!(rendered.to_lowercase().contains("hello"),
+        "committed prefix should contain the heading text");
+}
+
+#[test]
+fn list_in_progress_renders_markers_as_plain_tail() {
+    let mut s = MarkdownStream::new();
+    s.append("- item1\n- item2\n");
+    s.flush_now(&StateLookup::empty());
+    let (items, tail) = s.items_and_tail();
+    assert_eq!(items.len(), 0, "open list: nothing committed");
+    assert_eq!(tail, "- item1\n- item2\n");
+}
+
+#[test]
+fn list_promotes_on_close() {
+    let mut s = MarkdownStream::new();
+    s.append("- item1\n- item2\n\nafter");
+    s.flush_now(&StateLookup::empty());
+    let (items, _) = s.items_and_tail();
+    assert!(!items.is_empty(), "closed list should produce committed items");
+}
+
+#[test]
+fn unicode_content_cursor_advances_on_char_boundary() {
+    let mut s = MarkdownStream::new();
+    s.append("# 漢字 🎉\n\nmore content");
+    s.flush_now(&StateLookup::empty());
+    let flushed = s.flushed_byte_len_for_tests();
+    assert!(s.raw_text().is_char_boundary(flushed),
+        "flushed_byte_len {} must be on UTF-8 char boundary", flushed);
+}
+
+#[test]
+fn no_fence_registered_with_range_end_at_eof() {
+    let mut s = MarkdownStream::new();
+    s.append("```mermaid\nflowchart LR\nA-->B\n```");
+    let fences = s.flush_now(&StateLookup::empty());
+    assert_eq!(fences.len(), 0, "fence at EOF must not register");
+
+    s.append("\n\ntrailing");
+    let fences2 = s.flush_now(&StateLookup::empty());
+    assert_eq!(fences2.len(), 1, "once trailing content arrives, fence registers");
+}
