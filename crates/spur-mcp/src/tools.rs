@@ -291,17 +291,6 @@ fn create_pr_def() -> ToolDefinition {
     }
 }
 
-fn get_session_cost_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "get_session_cost".into(),
-        description: "Get the current cost breakdown for this session.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {}
-        }),
-    }
-}
-
 fn delegate_async_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_async".into(),
@@ -786,7 +775,6 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         create_issue_def(),
         add_dependency_def(),
         create_pr_def(),
-        get_session_cost_def(),
         graph_triage_def(),
         graph_plan_def(),
         graph_insights_def(),

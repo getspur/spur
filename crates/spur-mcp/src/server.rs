@@ -424,7 +424,6 @@ impl McpCallbackServer {
             "create_issue" => self.handle_create_issue(id, arguments).await,
             "add_dependency" => self.handle_add_dependency(id, arguments).await,
             "create_pr" => self.handle_create_pr(id, arguments).await,
-            "get_session_cost" => self.handle_get_session_cost(id).await,
             "graph_triage" => self.handle_graph_triage(id, arguments).await,
             "graph_plan" => self.handle_graph_plan(id, arguments).await,
             "graph_insights" => self.handle_graph_insights(id, arguments).await,
@@ -1089,41 +1088,6 @@ impl McpCallbackServer {
                 json!({ "content": [{ "type": "text", "text": format!("PR created: {url}") }] }),
             ),
             Err(e) => JsonRpcResponse::internal_error(id, format!("create_pr failed: {e}")),
-        }
-    }
-
-    async fn handle_get_session_cost(&self, id: Value) -> JsonRpcResponse {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let delegation = DelegationRequest {
-            id: request_id,
-            agent: "__session_cost".into(),
-            task: String::new(),
-            context_files: Vec::new(),
-            respond_to: tx,
-            brain_session_id: self.brain_session_id.clone(),
-            delegation_plan: None,
-            issue_id: None,
-        };
-
-        if let Err(_e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, "Failed to forward request");
-        }
-
-        match rx.await {
-            Ok(result) => {
-                let text = result.summary.clone().unwrap_or_else(|| {
-                    json!({ "estimated_cost_usd": result.estimated_cost_usd }).to_string()
-                });
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
-            }
-            Err(_) => JsonRpcResponse::internal_error(
-                id,
-                "get_session_cost failed: orchestrator disconnected",
-            ),
         }
     }
 
