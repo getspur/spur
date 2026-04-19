@@ -3044,28 +3044,21 @@ impl Orchestrator {
                     );
                 }
                 Some(ReviewDecision::Retry { new_constraints }) => {
-                    // NOTE: this retry logic is duplicated in
-                    // run_gate_with_retries (the test helper). Keep
-                    // the following invariants in sync if either site
-                    // changes:
-                    //   - Bound: attempt_n > max_review_retries
-                    //   - Error message: "retry limit exceeded after N attempts"
-                    //     where N == attempt_n (the actual count of
-                    //     attempts that ran), NOT max_review_retries.
-                    //     Example: max_review_retries=3 fires the bound at
-                    //     attempt_n=4 (1 original + 3 retries), so the
-                    //     message reports "4 attempts".
-                    //   - Decision mapping: Approve→candidate,
-                    //     Reject→Rejected, Modify→Modified
+                    // DN-2: bound check + exhaustion status live in
+                    // `crate::retry_loop::RetryLoop` — shared with
+                    // `test_support::run_gate_with_retries`. Both sites
+                    // share the strict `>` semantic and the exact error
+                    // string format. Changes to retry semantics should
+                    // touch `retry_loop.rs`, not this site.
                     //
                     // `>` (not `>=`): spec's "Retry × 4 when
                     // max_review_retries = 3 produces Failed" means 3
                     // retries are allowed (attempts bump 1→2→3→4), and
                     // the 4th Retry decision fails.
-                    if attempt_n > agent_config.review.max_review_retries {
-                        let final_status = DelegationStatus::Failed {
-                            error: format!("retry limit exceeded after {} attempts", attempt_n),
-                        };
+                    if let Some(final_status) = crate::retry_loop::RetryLoop::check_exceeded(
+                        attempt_n,
+                        agent_config.review.max_review_retries,
+                    ) {
                         // Retry limit → Failed (remove, no commit).
                         let preserved_branch = apply_worktree_cleanup(
                             &mut worktrees,
@@ -4259,8 +4252,9 @@ pub mod test_support {
     /// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
     /// `max_review_retries`.
     ///
-    /// NOTE: mirrors execute_delegation's production retry loop — drift
-    /// hazard. Changes to retry semantics should touch both.
+    /// Uses `crate::retry_loop::RetryLoop` for the bound check and
+    /// exhaustion status — shares invariants with the production retry
+    /// gate in `execute_delegation`.
     ///
     /// **Test-only** — production code uses `ReviewSink::register_handle` (INV-4).
     pub async fn run_gate_with_retries(
@@ -4271,58 +4265,59 @@ pub mod test_support {
         max_review_retries: u32,
         review_sink: ReviewSink,
     ) -> DelegationStatus {
-        let mut attempt_n: u32 = 1;
-        loop {
-            let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
-                Ok(rx) => rx,
-                Err(e) => {
-                    return DelegationStatus::Failed {
-                        error: format!("review registration failed: {e}"),
-                    };
-                }
-            };
+        use crate::retry_loop::{RetryLoop, RetryOutcome};
+        use spur_acp::ReviewDecision;
 
-            use spur_acp::ReviewDecision;
-            let decision_result = tokio::select! {
-                r = rx => r.ok(),
-                _ = tokio::time::sleep(review_timeout) => {
-                    review_sink.remove(&executor_id).await;
-                    return DelegationStatus::TimedOut {
-                        waited_for: review_timeout,
-                        fallback: timeout_fallback,
+        RetryLoop::new(max_review_retries)
+            .run(|attempt_n| {
+                let executor_id = executor_id.clone();
+                let review_sink = review_sink.clone();
+                let candidate_status = candidate_status.clone();
+                let timeout_fallback = timeout_fallback.clone();
+                async move {
+                    let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await
+                    {
+                        Ok(rx) => rx,
+                        Err(e) => {
+                            return RetryOutcome::Terminal(DelegationStatus::Failed {
+                                error: format!("review registration failed: {e}"),
+                            });
+                        }
                     };
-                }
-            };
 
-            match decision_result {
-                Some(ReviewDecision::Approve) => return candidate_status,
-                Some(ReviewDecision::Reject { reason }) => {
-                    return DelegationStatus::Rejected { reason }
-                }
-                Some(ReviewDecision::Modify { note }) => {
-                    return DelegationStatus::Modified {
-                        reviewer_note: note,
+                    let decision = tokio::select! {
+                        r = rx => r.ok(),
+                        _ = tokio::time::sleep(review_timeout) => {
+                            review_sink.remove(&executor_id).await;
+                            return RetryOutcome::Terminal(DelegationStatus::TimedOut {
+                                waited_for: review_timeout,
+                                fallback: timeout_fallback,
+                            });
+                        }
+                    };
+
+                    match decision {
+                        Some(ReviewDecision::Approve) => RetryOutcome::Terminal(candidate_status),
+                        Some(ReviewDecision::Reject { reason }) => {
+                            RetryOutcome::Terminal(DelegationStatus::Rejected { reason })
+                        }
+                        Some(ReviewDecision::Modify { note }) => {
+                            RetryOutcome::Terminal(DelegationStatus::Modified {
+                                reviewer_note: note,
+                            })
+                        }
+                        Some(ReviewDecision::Retry { .. }) => RetryOutcome::Retry,
+                        None => {
+                            review_sink.remove(&executor_id).await;
+                            RetryOutcome::Terminal(DelegationStatus::TimedOut {
+                                waited_for: review_timeout,
+                                fallback: timeout_fallback,
+                            })
+                        }
                     }
                 }
-                Some(ReviewDecision::Retry { .. }) => {
-                    // `>` (not `>=`): see execute_delegation for rationale.
-                    if attempt_n > max_review_retries {
-                        return DelegationStatus::Failed {
-                            error: format!("retry limit exceeded after {} attempts", attempt_n),
-                        };
-                    }
-                    attempt_n += 1;
-                    continue;
-                }
-                None => {
-                    review_sink.remove(&executor_id).await;
-                    return DelegationStatus::TimedOut {
-                        waited_for: review_timeout,
-                        fallback: timeout_fallback,
-                    };
-                }
-            }
-        }
+            })
+            .await
     }
 }
 
