@@ -2023,3 +2023,50 @@ fn render_compact_incremental_rebuild_on_new_entry() {
     // (plus possibly a separator line for the kind transition).
     assert!(t.last_total_lines > lines_before, "expected at least {} lines, got {}", lines_before + 1, t.last_total_lines);
 }
+
+#[test]
+fn dispatch_agent_message_chunk_appends_message_entry() {
+    use crate::components::react_trace::dispatch::{dispatch_session_update, DispatchCtx};
+    use crate::components::react_trace::{ReactTrace, TraceKind};
+    use spur_acp::{AgentKind, ContentBlock, ContentChunk, SessionUpdate, TextContent};
+
+    let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+    let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+        TextContent::new("hello"),
+    )));
+    let mut depths = std::collections::HashMap::new();
+    let mut ctx = DispatchCtx {
+        agent_name: "claude",
+        agent_kind: AgentKind::ClaudeCodeAcp,
+        now_stamp: || "12:00".to_string(),
+        tool_depth: &mut depths,
+    };
+    dispatch_session_update(&mut trace, &update, &mut ctx);
+
+    assert_eq!(trace.entry_count(), 1);
+    let entries = trace.entries();
+    assert!(matches!(&entries[0].kind, TraceKind::AgentMessage { .. }));
+}
+
+#[test]
+fn dispatch_thought_chunk_appends_think_entry() {
+    use crate::components::react_trace::dispatch::{dispatch_session_update, DispatchCtx};
+    use crate::components::react_trace::{ReactTrace, TraceKind};
+    use spur_acp::{AgentKind, ContentBlock, ContentChunk, SessionUpdate, TextContent};
+
+    let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+    let update = SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
+        TextContent::new("considering options"),
+    )));
+    let mut depths = std::collections::HashMap::new();
+    let mut ctx = DispatchCtx {
+        agent_name: "claude",
+        agent_kind: AgentKind::ClaudeCodeAcp,
+        now_stamp: || "12:00".to_string(),
+        tool_depth: &mut depths,
+    };
+    dispatch_session_update(&mut trace, &update, &mut ctx);
+
+    assert_eq!(trace.entry_count(), 1);
+    assert!(matches!(&trace.entries()[0].kind, TraceKind::Think));
+}

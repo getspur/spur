@@ -1,5 +1,6 @@
 mod builder;
 mod compact_render;
+pub mod dispatch;
 mod render;
 mod types;
 
