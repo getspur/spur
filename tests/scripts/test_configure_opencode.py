@@ -17,3 +17,24 @@ def test_update_opencode_config_creates_new_file(tmp_path):
     assert config.get("defaultProvider") == "openrouter"
     assert "openrouter" in config.get("providers", {})
     assert config["providers"]["openrouter"]["type"] == "openai"
+
+def test_update_opencode_config_retains_existing_providers(tmp_path):
+    mock_config_path = tmp_path / "opencode.json"
+    existing_data = {
+        "providers": {
+            "openai": {
+                "type": "openai",
+                "apiKey": "test"
+            }
+        }
+    }
+    with open(mock_config_path, 'w') as f:
+        json.dump(existing_data, f)
+        
+    update_opencode_config(str(mock_config_path))
+    
+    with open(mock_config_path, 'r') as f:
+        config = json.load(f)
+        
+    assert "openai" in config["providers"]
+    assert config["providers"]["openai"]["apiKey"] == "test"
