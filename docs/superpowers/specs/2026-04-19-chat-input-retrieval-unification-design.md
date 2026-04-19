@@ -4,6 +4,7 @@
 **Scope:** `crates/spur-tui/src/input_history.rs`, `crates/spur-tui/src/components/input_bar.rs`, `crates/spur-tui/src/views/session_detail.rs`, `crates/spur-tui/src/views/dashboard.rs`, `crates/spur-tui/src/session_metadata.rs`, `crates/spur-tui/src/app.rs`
 **Status:** Draft - stage 1 implemented; review pass 2026-04-19 added defects, missing contracts, and pruned alternatives
 **Related docs:** `docs/superpowers/specs/2026-04-13-chat-input-commands-mentions-design.md`, `docs/superpowers/specs/2026-04-18-input-bar-soft-wrap-design.md`
+**Stage 2:** `docs/superpowers/specs/2026-04-19-picker-shell-retrieval-unification-design.md`
 
 ## Problem
 
@@ -357,27 +358,27 @@ The implemented stage is covered by focused tests:
 These tests validate both the local `InputBar` invariants and the end-to-end
 submit path.
 
-## Known Defects (P0 — fix before stage 2)
+## Closed defects (resolved in-code; historical record)
 
-These were found in the stage-1 implementation during the 2026-04-19 review
-and are listed here so subsequent work cannot lose track of them.
+These defects were enumerated during the 2026-04-19 review and have
+all been fixed in the shipped Stage 1 code. Line references point to
+the fix sites.
 
-1. **Undo/redo silently re-enabled on history restore.** `InputBar::new()`
-   calls `set_max_histories(0)` at `input_bar.rs:82` "to prevent protected
-   range desync". `restore_snapshot` at `input_bar.rs:1001-1013` rebuilds the
-   `TextArea` from scratch and does **not** re-disable history. Outcome:
-   after the first `Ctrl+P` or `Ctrl+R` accept, undo/redo is on, violating
-   the exact invariant the original author called out. Fix: re-apply
-   `set_max_histories(0)` inside `restore_snapshot`.
+1. **Undo/redo silently re-enabled on history restore** — resolved at
+   `input_bar.rs:1004`: `restore_snapshot` now re-calls
+   `set_max_histories(0)` after rebuilding the `TextArea`. Guarded by
+   `max_histories_for_test` at `input_bar.rs:1155-1159`.
 
-2. **`HISTORY_CAP` magic number was duplicated.** The cap lived as
-   `HISTORY_CAP = 100` at `input_bar.rs:44` and as a hardcoded `100` at
-   `app.rs:1417`. The two could drift independently, causing the in-memory
-   and persisted caps to disagree. The 2026-04-19 review's earlier framing
-   ("persisted history is unbounded") was inaccurate — every writer to
-   `metadata.input_history` already routed through `merge_input_history_entry`
-   which truncates on every push. Fix: lift `HISTORY_CAP` to
-   `crate::input_history` and reference it from both sites.
+2. **`HISTORY_CAP` magic number duplicated** — resolved: the cap lives
+   as `pub const HISTORY_CAP: usize = 100;` at `input_history.rs:9`
+   and is imported by both cap sites (`input_bar.rs:1031`,
+   `app.rs:1417`).
+
+3. **`ProtectedRange` validation on deserialize** — resolved:
+   `InputStateSnapshot::sanitized` (`input_history.rs:45-66`) enforces
+   `start <= end <= text.len()`, UTF-8 char boundaries, sorted, and
+   non-overlapping. A custom `Deserialize` impl
+   (`input_history.rs:26-34`) funnels all load paths through it.
 
 ## Risks
 
