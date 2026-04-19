@@ -447,7 +447,7 @@ async fn main() -> Result<()> {
             let pm_arc = pm_service.map(std::sync::Arc::new);
 
             let orch = Orchestrator::new(repo_root.clone(), config)?;
-            let orch = if let Some(pm) = pm_arc {
+            let mut orch = if let Some(pm) = pm_arc {
                 orch.with_pm_service(pm)
             } else {
                 orch
@@ -482,6 +482,12 @@ async fn main() -> Result<()> {
             // Spawn interactive orchestrator (moves orch). `mut` so we can
             // `&mut orch_handle` inside a timeout for graceful shutdown below.
             let overflow_continuations = spur_core::continuation_bridge::new_overflow_buf();
+
+            // Wire the ingress sender + overflow into the orchestrator so that
+            // `McpCallbackServer` can route detached delegation completions back
+            // through `report_detached_completion`.
+            orch.set_continuation_tx(user_tx.clone(), overflow_continuations.clone());
+
             let mut orch_handle = tokio::spawn(async move {
                 if let Err(e) = orch.run_interactive(user_rx, brain, Some(perm_tx), overflow_continuations).await {
                     tracing::error!(error = %e, "Interactive session error");

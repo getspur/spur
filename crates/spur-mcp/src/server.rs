@@ -136,6 +136,49 @@ pub fn build_worker_info(cfg: &spur_acp::config::AgentConfig) -> WorkerInfo {
     }
 }
 
+// ─── Detached continuation types ─────────────────────────────────────
+
+/// Bundle of handles required to funnel detached delegation completions back
+/// into the orchestrator's ingress channel.
+///
+/// Uses a boxed async callback so that `spur-mcp` does not need to depend on
+/// `spur-core` (which would create a circular dependency).  `spur-core` wires
+/// the real `report_detached_completion` implementation in
+/// `Orchestrator::build_continuation_ctx`.
+pub struct DetachedContinuationCtx {
+    /// Called by `spawn_result_collector` when a detached delegation finishes.
+    ///
+    /// Arguments:
+    /// - `BrainContinuation` — the completed delegation result.
+    /// - `String` — worker-session identifier (delegation UUID used as proxy
+    ///   for the `DelegationCompleted` UI event; unique per delegation).
+    ///
+    /// Implementer routes the continuation back to the orchestrator ingress
+    /// (emit UI event first, then try_send / overflow — INV-C3).
+    pub on_complete: Arc<
+        dyn Fn(
+                spur_acp::domain::BrainContinuation,
+                String, // worker_session proxy
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = ()> + Send>,
+            > + Send
+            + Sync,
+    >,
+}
+
+/// Why a delegation went detached (used to set `ContinuationSource`).
+pub enum DetachedSourceKind {
+    AsyncRequested,
+    BlockTimeout,
+}
+
+/// All the handles `spawn_result_collector` needs to call
+/// `report_detached_completion` when a detached delegation finishes.
+pub struct DetachedCompletionHandle {
+    pub ctx: Arc<DetachedContinuationCtx>,
+    pub source_kind: DetachedSourceKind,
+}
+
 // ─── McpCallbackServer ───────────────────────────────────────────────
 
 /// MCP callback server that brain agents connect to via HTTP.
@@ -174,6 +217,9 @@ pub struct McpCallbackServer {
     /// INV-6: handle to the orchestrator's per-delegation cancellation token
     /// registry. `None` in test harnesses that don't wire a real orchestrator.
     cancellation_control: Option<CancellationControl>,
+    /// Bundle of handles for routing detached delegation completions back
+    /// into the orchestrator ingress via `report_detached_completion`.
+    continuation_ctx: Arc<DetachedContinuationCtx>,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -486,6 +532,7 @@ impl McpCallbackServer {
         session_id: &spur_acp::BrainSessionId,
         pm_service: Option<Arc<PmService>>,
         event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+        continuation_ctx: DetachedContinuationCtx,
     ) -> (Self, DelegationChannel) {
         let (req_tx, req_rx) = mpsc::channel::<DelegationRequest>(32);
 
@@ -501,6 +548,7 @@ impl McpCallbackServer {
             active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             plan_registry: Arc::new(tokio::sync::Mutex::new(crate::plan::PlanRegistry::default())),
             cancellation_control: None,
+            continuation_ctx: Arc::new(continuation_ctx),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -516,6 +564,10 @@ impl McpCallbackServer {
 
     /// Spawn a background task that awaits a delegation oneshot and stores
     /// the result in `completed_delegations` for later polling.
+    ///
+    /// When `detached` is `Some`, the task additionally calls
+    /// `report_detached_completion` to route the result back into the
+    /// orchestrator ingress (INV-C3 ordering: UI event BEFORE ingress).
     fn spawn_result_collector(
         tracker: &TaskTracker,
         delegation_id: String,
@@ -524,6 +576,7 @@ impl McpCallbackServer {
         completed: Arc<
             tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>,
         >,
+        detached: Option<DetachedCompletionHandle>,
     ) {
         tracker.spawn(async move {
             let result = match rx.await {
@@ -543,7 +596,40 @@ impl McpCallbackServer {
             completed
                 .lock()
                 .await
-                .insert(delegation_id, (result, tokio::time::Instant::now()));
+                .insert(delegation_id.clone(), (result.clone(), tokio::time::Instant::now()));
+
+            if let Some(h) = detached {
+                use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
+
+                let source = if matches!(
+                    result.status,
+                    DelegationStatus::Cancelled { .. }
+                ) {
+                    ContinuationSource::Cancelled
+                } else {
+                    match h.source_kind {
+                        DetachedSourceKind::AsyncRequested => ContinuationSource::AsyncRequested,
+                        DetachedSourceKind::BlockTimeout => ContinuationSource::BlockTimeout,
+                    }
+                };
+
+                let cont = BrainContinuation {
+                    delegation_id: delegation_id.clone(),
+                    source,
+                    payload: ContinuationPayload {
+                        status: result.status.clone(),
+                        summary: result.summary.clone(),
+                        diff_summary: result.diff_summary.clone(),
+                        worker_branch: result.worker_branch.clone(),
+                    },
+                    created_at: std::time::Instant::now(),
+                };
+                // Route the completion back to the orchestrator ingress via
+                // the injected callback (wired in spur-core to avoid a
+                // circular dependency). The delegation_id is used as a
+                // worker_session proxy for the DelegationCompleted UI event.
+                (h.ctx.on_complete)(cont, delegation_id.clone()).await;
+            }
         });
     }
 
@@ -743,6 +829,7 @@ impl McpCallbackServer {
             rx,
             Arc::clone(&self.active_delegations),
             Arc::clone(&self.completed_delegations),
+            None, // inline-wait path; brain gets result in MCP response
         );
 
         let deadline = tokio::time::Instant::now() + DELEGATION_BLOCK_TIMEOUT;
@@ -837,6 +924,7 @@ impl McpCallbackServer {
                 rx,
                 Arc::clone(&self.active_delegations),
                 Arc::clone(&self.completed_delegations),
+                None, // parallel path; brain waits inline for all results
             );
             receivers.push((request_id, agent));
         }
@@ -2022,12 +2110,21 @@ impl McpCallbackServer {
             .await
             .insert(request_id.clone());
 
+        // Build the detached handle so the result-collector can route the
+        // completion back into the orchestrator ingress via the `on_complete`
+        // callback wired in spur-core.
+        let detached = Some(DetachedCompletionHandle {
+            ctx: Arc::clone(&self.continuation_ctx),
+            source_kind: DetachedSourceKind::AsyncRequested,
+        });
+
         Self::spawn_result_collector(
             &self.task_tracker,
             request_id.clone(),
             rx,
             Arc::clone(&self.active_delegations),
             Arc::clone(&self.completed_delegations),
+            detached,
         );
 
         JsonRpcResponse::success(
