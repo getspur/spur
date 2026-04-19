@@ -136,8 +136,26 @@ impl HistoryQuerySource {
             .1
     }
 
-    fn row_from_entry(entry: &InputHistoryEntry) -> RetrievalRow {
-        let primary = entry.snapshot.text.replace('\n', " ↵ ");
+    pub(crate) fn row_from_entry(entry: &InputHistoryEntry) -> RetrievalRow {
+        let text = &entry.snapshot.text;
+        let mut primary = String::with_capacity(text.len());
+        // offset_map[i] = byte offset in `primary` corresponding to byte i
+        // in the original `text`. Length = text.len() + 1 so atom
+        // end-exclusive indices map cleanly.
+        let mut offset_map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+        offset_map.push(0);
+        for ch in text.chars() {
+            if ch == '\n' {
+                primary.push_str(" ↵ ");
+            } else {
+                primary.push(ch);
+            }
+            for _ in 0..ch.len_utf8() {
+                offset_map.push(primary.len());
+            }
+        }
+        debug_assert_eq!(offset_map.len(), text.len() + 1);
+
         let mention_count = entry.snapshot.protected_ranges.len();
         let secondary = match mention_count {
             0 => String::new(),
@@ -149,16 +167,16 @@ impl HistoryQuerySource {
             .as_ref()
             .map(|a| format!("⟨{a}⟩"))
             .unwrap_or_default();
-        let atoms = if entry.snapshot.text.contains('\n') {
-            Vec::new()
-        } else {
-            entry
-                .snapshot
-                .protected_ranges
-                .iter()
-                .map(|r| (r.start, r.end))
-                .collect()
-        };
+        let atoms: Vec<(usize, usize)> = entry
+            .snapshot
+            .protected_ranges
+            .iter()
+            .filter_map(|r| {
+                let a = offset_map.get(r.start)?;
+                let b = offset_map.get(r.end)?;
+                Some((*a, *b))
+            })
+            .collect();
         RetrievalRow {
             primary,
             secondary,
@@ -228,6 +246,7 @@ impl QuerySource for HistoryQuerySource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::input_bar::ProtectedRange;
     use crate::input_history::{InputHistoryEntry, InputStateSnapshot};
 
     fn mk_entry(text: &str) -> InputHistoryEntry {
@@ -383,5 +402,52 @@ mod tests {
         let _ = src.refresh("");
         let _ = src.refresh("");
         assert_eq!(src.pattern_parse_count_for_test(), 0);
+    }
+
+    #[test]
+    fn row_from_entry_maps_atoms_through_newline_replacement() {
+        let mut snap = InputStateSnapshot::from_text("hi\n@foo\nbye");
+        snap.protected_ranges = vec![ProtectedRange {
+            start: 3,
+            end: 7,
+            uri: "file:///foo".to_string(),
+            name: "foo".to_string(),
+        }];
+        let entry = InputHistoryEntry::new(snap);
+        let row = HistoryQuerySource::row_from_entry(&entry);
+        assert_eq!(row.primary, "hi ↵ @foo ↵ bye");
+        assert_eq!(row.atoms, vec![(7, 11)]);
+        let (a, b) = row.atoms[0];
+        assert_eq!(&row.primary[a..b], "@foo");
+    }
+
+    #[test]
+    fn row_from_entry_preserves_atoms_without_newlines() {
+        let mut snap = InputStateSnapshot::from_text("hi @foo");
+        snap.protected_ranges = vec![ProtectedRange {
+            start: 3,
+            end: 7,
+            uri: "file:///foo".to_string(),
+            name: "foo".to_string(),
+        }];
+        let entry = InputHistoryEntry::new(snap);
+        let row = HistoryQuerySource::row_from_entry(&entry);
+        assert_eq!(row.primary, "hi @foo");
+        assert_eq!(row.atoms, vec![(3, 7)]);
+    }
+
+    #[test]
+    fn row_from_entry_handles_multiple_newlines_before_atom() {
+        let mut snap = InputStateSnapshot::from_text("\n\n\nx @foo");
+        snap.protected_ranges = vec![ProtectedRange {
+            start: 5,
+            end: 9,
+            uri: "file:///foo".to_string(),
+            name: "foo".to_string(),
+        }];
+        let entry = InputHistoryEntry::new(snap);
+        let row = HistoryQuerySource::row_from_entry(&entry);
+        let (a, b) = row.atoms[0];
+        assert_eq!(&row.primary[a..b], "@foo");
     }
 }
