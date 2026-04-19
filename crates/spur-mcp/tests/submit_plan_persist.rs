@@ -156,10 +156,10 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
 #[tokio::test]
 async fn run_plan_emits_plan_completed_on_terminal_state() {
     use spur_acp::{SpurEvent, SpurEventBody};
+    use spur_mcp::plan::{run_plan, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
     use spur_mcp::McpEventSink;
-    use spur_mcp::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus, run_plan};
     use std::sync::Arc;
-    use tokio::sync::{Mutex, mpsc};
+    use tokio::sync::{mpsc, Mutex};
 
     let state = PlanState {
         plan_id: "p1".into(),
@@ -319,10 +319,10 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
 #[tokio::test]
 async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
     use spur_acp::{SpurEvent, SpurEventBody};
+    use spur_mcp::plan::{run_plan, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
     use spur_mcp::McpEventSink;
-    use spur_mcp::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus, run_plan};
     use std::sync::Arc;
-    use tokio::sync::{Mutex, mpsc};
+    use tokio::sync::{mpsc, Mutex};
 
     struct CaptureSink {
         events: std::sync::Mutex<Vec<SpurEvent>>,
