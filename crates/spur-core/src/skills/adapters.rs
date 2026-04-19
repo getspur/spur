@@ -65,11 +65,28 @@ impl Adapter {
 // --- render helpers land in tasks 7-10 ---
 
 fn render_agentskills(
-    _skill: &SkillPayload,
-    _target_root: &Path,
-    _name_prefix: &str,
+    skill: &SkillPayload,
+    target_root: &Path,
+    name_prefix: &str,
 ) -> RenderedFile {
-    unimplemented!("Task 7")
+    use crate::skills::installer::{sha256_hex, Marker};
+    let id = format!("{name_prefix}{}", skill.id);
+    let path = target_root.join(&id).join("SKILL.md");
+    let body = &skill.body;
+    let marker = Marker {
+        version: 1,
+        skill_id: id.clone(),
+        sha256: sha256_hex(body.as_bytes()),
+    };
+    let bytes = format!(
+        "---\nname: {id}\ndescription: {desc}\n---\n{marker}{body}",
+        id = id,
+        desc = skill.description,
+        marker = marker.render(),
+        body = body,
+    )
+    .into_bytes();
+    RenderedFile { path, bytes }
 }
 
 fn render_codex(_skill: &SkillPayload, _repo_root: &Path) -> RenderedFile {
@@ -84,6 +101,15 @@ fn render_cursor(_skill: &SkillPayload, _repo_root: &Path) -> RenderedFile {
 mod tests {
     use super::*;
 
+    fn sample_skill() -> SkillPayload {
+        SkillPayload {
+            id: "tdd".to_string(),
+            description: "Use for TDD".to_string(),
+            body: "Write the test first.\n".to_string(),
+            source: crate::skills::SkillSource::Bundled,
+        }
+    }
+
     #[test]
     fn adapter_all_has_seven_unique() {
         let all = Adapter::all();
@@ -92,5 +118,43 @@ mod tests {
         for a in all {
             assert!(seen.insert(*a), "{a:?} appears twice");
         }
+    }
+
+    #[test]
+    fn agentskills_render_no_prefix() {
+        let skill = sample_skill();
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let rf = render_agentskills(&skill, &root.join(".spur/skills"), "");
+        assert_eq!(
+            rf.path,
+            std::path::PathBuf::from("/tmp/repo/.spur/skills/tdd/SKILL.md"),
+        );
+        let s = std::str::from_utf8(&rf.bytes).unwrap();
+        assert!(s.starts_with("---\nname: tdd\ndescription: Use for TDD\n---\n"));
+        assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=tdd sha256="));
+        assert!(s.trim_end().ends_with("Write the test first."));
+    }
+
+    #[test]
+    fn agentskills_render_with_spurpower_prefix() {
+        let skill = sample_skill();
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let rf = render_agentskills(&skill, &root.join(".claude/skills"), "spurpower-");
+        assert_eq!(
+            rf.path,
+            std::path::PathBuf::from("/tmp/repo/.claude/skills/spurpower-tdd/SKILL.md"),
+        );
+        let s = std::str::from_utf8(&rf.bytes).unwrap();
+        assert!(s.contains("name: spurpower-tdd"));
+        assert!(s.contains("skill=spurpower-tdd"));
+    }
+
+    #[test]
+    fn agentskills_render_is_deterministic() {
+        let skill = sample_skill();
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let a = render_agentskills(&skill, &root.join(".claude/skills"), "spurpower-");
+        let b = render_agentskills(&skill, &root.join(".claude/skills"), "spurpower-");
+        assert_eq!(a.bytes, b.bytes);
     }
 }
