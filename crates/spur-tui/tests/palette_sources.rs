@@ -1,6 +1,6 @@
 use spur_tui::commands::registry::CommandRegistry;
 use spur_tui::components::palette::{PaletteKind, PalettePayload};
-use spur_tui::components::palette_sources::{CommandSource, PaletteSource, SessionSource};
+use spur_tui::components::palette_sources::{CommandSource, PaletteSource, SessionSource, WorkerSource};
 use spur_tui::session_metadata::{SessionEntry, SessionMetadata};
 
 #[test]
@@ -50,4 +50,13 @@ fn session_source_yields_session_kind_rows_with_title_as_label() {
     for r in &results {
         assert!(matches!(r.kind, spur_tui::components::palette::PaletteKind::Session));
     }
+}
+
+use spur_core::lineage::projection::ExecutorLineage;
+
+#[test]
+fn worker_source_yields_no_rows_for_empty_lineage() {
+    let lineage = ExecutorLineage::new();
+    let src = WorkerSource::from_lineage(&lineage);
+    assert_eq!(src.collect().len(), 0);
 }
