@@ -101,6 +101,18 @@ impl LicenseSeatProvider {
         let tx = self.events_tx.clone();
         handle.spawn(async move {
             while let Ok(event) = rx.recv().await {
+                // C9 dedup (see docs/rca/2026-04-19-licenseseat-emission-audit.md
+                // Gate 1). The explicit activate/validate/heartbeat/deactivate
+                // handlers ALREADY broadcast via `replace_state` with an
+                // authoritative post-mutation snapshot. The SDK also fires
+                // these kinds synchronously during each explicit call, so
+                // forwarding them here produces a stale-then-fresh duplicate.
+                // Drop the handler-originated kinds; keep autonomous / server-
+                // push kinds (revocation, offline-verification failures,
+                // license-loaded).
+                if is_handler_originated(&event.kind) {
+                    continue;
+                }
                 let kind = map_event_kind(event.kind);
                 let snapshot = state
                     .read()
@@ -321,6 +333,30 @@ impl LicenseProvider for DisabledProvider {
     async fn deactivate(&self) -> Result<LicenseState> {
         Ok(self.snapshot())
     }
+}
+
+/// Returns `true` for `EventKind`s that are emitted synchronously inside
+/// the explicit handler methods (`activate`, `validate`, `heartbeat`,
+/// `deactivate`) and therefore already covered by a `replace_state` broadcast.
+/// Forwarding these from the bridge would produce a stale-then-fresh duplicate
+/// pair on every explicit call (C9).
+///
+/// Verified against upstream enum in `licenseseat-0.5.3/src/events.rs`.
+/// See: docs/rca/2026-04-19-licenseseat-emission-audit.md Gate 1 dedup table.
+fn is_handler_originated(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::ActivationSuccess
+            | EventKind::ActivationError
+            | EventKind::ValidationSuccess
+            | EventKind::ValidationFailed
+            | EventKind::ValidationError
+            | EventKind::ValidationAuthFailed
+            | EventKind::HeartbeatSuccess
+            | EventKind::HeartbeatError
+            | EventKind::DeactivationSuccess
+            | EventKind::DeactivationError
+    )
 }
 
 fn map_event_kind(kind: EventKind) -> LicenseEventKind {
