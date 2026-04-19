@@ -823,46 +823,66 @@ impl SessionDetailView {
             }
         }
 
-        // Priority 1.4: picker shell (Ctrl+R history; Phase 3 will add mention/slash).
-        if let Some(ref mut shell) = self.picker_shell {
-            use crate::components::picker_shell::PickerAction;
-            use crate::components::query_source::RetrievalAccept;
-            let act = shell.handle_key(key);
-            match act {
-                PickerAction::None => {}
-                PickerAction::Cancel => {
-                    self.picker_shell = None;
-                    self.active_trigger = None;
-                }
-                PickerAction::Accept(accept) => {
-                    match accept {
-                        RetrievalAccept::ReplaceState(snap) => {
-                            let len = snap.text.len();
-                            self.input_bar.set_state(snap, len);
-                        }
-                        RetrievalAccept::InsertAtom {
-                            text,
-                            uri,
-                            name,
-                            replace_from,
-                        } => {
-                            if let Some(prefix_start) = replace_from {
-                                self.replace_trigger_token(prefix_start, "");
-                            }
-                            self.input_bar.insert_atom(text, uri, name);
-                        }
-                        RetrievalAccept::ReplaceTriggerToken {
-                            prefix_start,
-                            replacement,
-                        } => {
-                            self.replace_trigger_token(prefix_start, &replacement);
-                        }
+        // Priority 1.4: picker shell (history via Ctrl+R, or trigger-driven
+        // @mention / /slash). Trigger-driven shells (active_trigger.is_some())
+        // read their query from the InputBar, so editing keys must fall
+        // through to input_bar; only navigation/accept/cancel keys are
+        // consumed here. History shells (active_trigger.is_none()) own their
+        // own MiniInput and receive ALL keys.
+        if self.picker_shell.is_some() {
+            let is_trigger_driven = self.active_trigger.is_some();
+            let shell_consumes = if is_trigger_driven {
+                matches!(
+                    key.code,
+                    KeyCode::Up | KeyCode::Down | KeyCode::Esc | KeyCode::Tab | KeyCode::Enter
+                ) || (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+            } else {
+                true
+            };
+            if shell_consumes {
+                use crate::components::picker_shell::PickerAction;
+                use crate::components::query_source::RetrievalAccept;
+                let shell = self.picker_shell.as_mut().expect("is_some checked");
+                let act = shell.handle_key(key);
+                match act {
+                    PickerAction::None => {}
+                    PickerAction::Cancel => {
+                        self.picker_shell = None;
+                        self.active_trigger = None;
                     }
-                    self.picker_shell = None;
-                    self.active_trigger = None;
+                    PickerAction::Accept(accept) => {
+                        match accept {
+                            RetrievalAccept::ReplaceState(snap) => {
+                                let len = snap.text.len();
+                                self.input_bar.set_state(snap, len);
+                            }
+                            RetrievalAccept::InsertAtom {
+                                text,
+                                uri,
+                                name,
+                                replace_from,
+                            } => {
+                                if let Some(prefix_start) = replace_from {
+                                    self.replace_trigger_token(prefix_start, "");
+                                }
+                                self.input_bar.insert_atom(text, uri, name);
+                            }
+                            RetrievalAccept::ReplaceTriggerToken {
+                                prefix_start,
+                                replacement,
+                            } => {
+                                self.replace_trigger_token(prefix_start, &replacement);
+                            }
+                        }
+                        self.picker_shell = None;
+                        self.active_trigger = None;
+                    }
                 }
+                return None;
             }
-            return None;
+            // else: editing key on a trigger-driven shell; fall through so
+            // input_bar receives it, then refresh_popup syncs the shell query.
         }
 
         // Ctrl+R / Alt+R → open history PickerShell. Rejected while a
