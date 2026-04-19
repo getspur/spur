@@ -966,6 +966,14 @@ impl Orchestrator {
                     // ── ResumeSession ─────────────────────────────────────
                     InteractiveInput::ResumeSession { session_id } => {
                         Self::retire_active_brain(&mut brain, &mut agent_connection);
+                        // Evict stale continuations targeting the prior brain session.
+                        let evicted = scheduler.note_session_swap(None);
+                        for c in evicted {
+                            self.funnel.emit(SpurEventBody::ContinuationDropped {
+                                delegation_id: c.delegation_id,
+                                reason: spur_acp::domain::events::ContinuationDropReason::SessionSwap,
+                            });
+                        }
 
                         let (connection, brain_name) = match agent_connection.take() {
                             Some(existing) => existing,
@@ -1026,6 +1034,13 @@ impl Orchestrator {
                                 }
 
                                 brain = Some(session);
+                                // Register the resumed session with the scheduler so
+                                // future continuations target the correct session id.
+                                // No eviction emission here — the note_session_swap(None)
+                                // above already drained any stale continuations.
+                                if let Some(ref b) = brain {
+                                    scheduler.note_session_swap(Some(SessionId(b.acp_session_id.clone())));
+                                }
                                 self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
                                     session: spur_id,
                                 }));
@@ -1468,7 +1483,10 @@ impl Orchestrator {
             // Unconditional: turn finished regardless of how the loop exited.
             scheduler.note_turn_finished();
 
-            // If cancel was the exit path, note it for the scheduler's grace window.
+            // Fire the grace window if a cancel was ARMED during this turn, regardless
+            // of whether the stream ended naturally or the deadline force-broke. Either
+            // way the user just expressed "stop" intent; autonomous continuations should
+            // pause briefly per G5.
             if cancel_resolved || cancel_deadline.is_some() {
                 scheduler.note_cancel_resolved(std::time::Instant::now());
             }
