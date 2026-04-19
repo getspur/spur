@@ -100,10 +100,8 @@ pub struct SessionDetailView {
     /// rendered.
     pub(crate) cancel_mode: Option<spur_acp::CancelMode>,
 
-    /// Active fuzzy history search query (`Ctrl+R`).  `None` = inactive.
-    history_search: Option<String>,
-    /// Full history entries parallel to the popup rows during history search.
-    history_search_hits: Vec<InputHistoryEntry>,
+    /// Active picker-shell (history / mention / slash). `None` = no popup.
+    picker_shell: Option<crate::components::picker_shell::PickerShell>,
     /// Whether the inline workers panel is collapsed. Toggled by Alt+D.
     workers_panel_collapsed: bool,
     /// Maps ToolCall id -> render depth for subagent nesting.
@@ -156,8 +154,7 @@ impl SessionDetailView {
             stream_in_flight: false,
             cancelling_in_flight: false,
             cancel_mode: None,
-            history_search: None,
-            history_search_hits: Vec::new(),
+            picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
         }
@@ -627,74 +624,12 @@ impl SessionDetailView {
     }
 
     fn popup_open(&self) -> bool {
+        if self.picker_shell.is_some() {
+            return true;
+        }
         let popup_has_rows = !self.completion_popup.borrow().is_empty();
         let trigger_active = self.active_trigger.is_some();
-        let history_active = self.history_search.is_some();
-        (trigger_active || history_active) && popup_has_rows
-    }
-
-    /// Rebuild the completion popup with fuzzy-matched history entries.
-    fn refresh_history_popup(&mut self, query: &str) {
-        use crate::components::completion_popup::PopupRow;
-        use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-        use nucleo_matcher::{Config, Matcher, Utf32Str};
-
-        let history = self.input_bar.history();
-        let hits: Vec<InputHistoryEntry> = if query.is_empty() {
-            history.iter().rev().take(20).cloned().collect()
-        } else {
-            let mut matcher = Matcher::new(Config::DEFAULT);
-            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-            let mut buf = Vec::new();
-            let mut scored: Vec<(u32, InputHistoryEntry)> = history
-                .iter()
-                .filter_map(|h| {
-                    buf.clear();
-                    let score =
-                        pattern.score(Utf32Str::new(&h.snapshot.text, &mut buf), &mut matcher)?;
-                    Some((score, h.clone()))
-                })
-                .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
-            scored.into_iter().take(20).map(|(_, h)| h).collect()
-        };
-
-        self.history_search_hits = hits.clone();
-        let rows: Vec<PopupRow> = hits
-            .iter()
-            .map(|entry| {
-                let h = &entry.snapshot.text;
-                // Truncate at char boundary to avoid panic on multi-byte UTF-8.
-                let display = if h.len() > 80 {
-                    let mut end = 80;
-                    while !h.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    &h[..end]
-                } else {
-                    h
-                };
-                let mention_count = entry.snapshot.protected_ranges.len();
-                let description = if mention_count == 0 {
-                    String::new()
-                } else if mention_count == 1 {
-                    "1 mention".to_string()
-                } else {
-                    format!("{mention_count} mentions")
-                };
-                let source_tag = entry
-                    .agent
-                    .as_ref()
-                    .map(|agent| format!("⟨{}⟩", agent))
-                    .unwrap_or_default();
-                PopupRow {
-                    label: display.replace('\n', " ↵ "),
-                    description,
-                    source_tag,
-                }
-            })
-            .collect();
-        self.completion_popup.borrow_mut().set_rows(rows);
+        trigger_active && popup_has_rows
     }
 
     /// Replace the range [prefix_start..cursor] in the InputBar with `replacement`.
@@ -918,68 +853,58 @@ impl SessionDetailView {
             }
         }
 
-        // Priority 1.4: fuzzy history search (Ctrl+R / Alt+R).
-        if let Some(ref mut query) = self.history_search {
-            match key.code {
-                KeyCode::Esc => {
-                    self.history_search = None;
-                    self.history_search_hits.clear();
-                    self.completion_popup.borrow_mut().set_rows(Vec::new());
-                    return None;
+        // Priority 1.4: picker shell (Ctrl+R history; Phase 3 will add mention/slash).
+        if let Some(ref mut shell) = self.picker_shell {
+            use crate::components::picker_shell::PickerAction;
+            use crate::components::query_source::RetrievalAccept;
+            let act = shell.handle_key(key);
+            match act {
+                PickerAction::None => {}
+                PickerAction::Cancel => {
+                    self.picker_shell = None;
                 }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.history_search = None;
-                    self.history_search_hits.clear();
-                    self.completion_popup.borrow_mut().set_rows(Vec::new());
-                    return None;
-                }
-                KeyCode::Enter | KeyCode::Tab => {
-                    if let Some(idx) = self.completion_popup.borrow().selected() {
-                        if let Some(entry) = self.history_search_hits.get(idx) {
-                            let len = entry.snapshot.text.len();
-                            self.input_bar.set_state(entry.snapshot.clone(), len);
+                PickerAction::Accept(accept) => {
+                    match accept {
+                        RetrievalAccept::ReplaceState(snap) => {
+                            let len = snap.text.len();
+                            self.input_bar.set_state(snap, len);
+                        }
+                        RetrievalAccept::InsertAtom { text, uri, name } => {
+                            self.input_bar.insert_atom(text, uri, name);
+                        }
+                        RetrievalAccept::ReplaceTriggerToken {
+                            prefix_start,
+                            replacement,
+                        } => {
+                            let current = self.input_bar.text().to_string();
+                            let cursor = self.input_bar.cursor();
+                            let mut new_text = String::with_capacity(current.len());
+                            new_text.push_str(&current[..prefix_start]);
+                            new_text.push_str(&replacement);
+                            new_text.push_str(&current[cursor..]);
+                            let new_cursor = prefix_start + replacement.len();
+                            self.input_bar.set_text(new_text, new_cursor);
                         }
                     }
-                    self.history_search = None;
-                    self.history_search_hits.clear();
-                    self.completion_popup.borrow_mut().set_rows(Vec::new());
-                    return None;
+                    self.picker_shell = None;
                 }
-                KeyCode::Up => {
-                    self.completion_popup.borrow_mut().select_prev();
-                    return None;
-                }
-                KeyCode::Down => {
-                    self.completion_popup.borrow_mut().select_next();
-                    return None;
-                }
-                KeyCode::Backspace => {
-                    query.pop();
-                    let q = query.clone();
-                    self.refresh_history_popup(&q);
-                    return None;
-                }
-                KeyCode::Char(c)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    query.push(c);
-                    let q = query.clone();
-                    self.refresh_history_popup(&q);
-                    return None;
-                }
-                _ => return None,
             }
+            return None;
         }
 
-        // Ctrl+R / Alt+R → open fuzzy history search.
+        // Ctrl+R / Alt+R → open history PickerShell. Rejected while a
+        // completion_trigger popup is active (user must Esc first).
         if matches!(key.code, KeyCode::Char('r'))
             && (key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT))
+            && self.active_trigger.is_none()
         {
-            self.history_search = Some(String::new());
-            self.refresh_history_popup("");
+            use crate::components::picker_shell::PickerShell;
+            use crate::components::query_source::HistoryQuerySource;
+            let history = self.input_bar.history().to_vec();
+            self.picker_shell = Some(PickerShell::open(Box::new(HistoryQuerySource::new(
+                history,
+            ))));
             return None;
         }
 
