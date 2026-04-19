@@ -66,6 +66,24 @@ async fn live_validate_smoke() {
 }
 
 #[test]
+#[ignore = "requires a cached live activation"]
+fn cached_active_startup_surfaces_real_plan() {
+    // Precondition: an earlier run called activate() with a non-community
+    // key so `trusted_license` is present in the disk cache.
+    let license = SpurLicense::from_env().expect("env configured");
+    let state = license.current_state();
+    assert!(matches!(
+        state.status,
+        spur_license::LicenseStatus::Active
+    ));
+    assert!(
+        !matches!(state.plan, spur_license::Plan::Unknown),
+        "expected cached plan to hydrate, got Unknown (plan={:?})",
+        state.plan,
+    );
+}
+
+#[test]
 fn from_provider_returns_a_usable_facade() {
     use std::sync::Arc;
     use spur_license::provider::LicenseProvider;
