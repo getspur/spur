@@ -177,6 +177,21 @@ impl BrainScheduler {
         batch
     }
 
+    /// Evict continuations tagged for a session other than the new active
+    /// one. Returns the evicted continuations so the caller can emit
+    /// `ContinuationDropped` events for audit.
+    pub fn note_session_swap(&mut self, new_active: Option<SessionId>) -> Vec<BrainContinuation> {
+        // Continuations don't currently carry their own SessionId; the
+        // scheduler's `active_session` acts as the lane guard. On swap,
+        // every currently-pending continuation becomes stale.
+        let evicted: Vec<_> = self.pending_continuations.drain(..).collect();
+        self.active_session = new_active;
+        // Do NOT insert evicted ids into delivered_ids — they were dropped,
+        // not delivered; future re-push of the same id under the new brain
+        // should still be accepted if semantically valid.
+        evicted
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_user_len(&self) -> usize { self.pending_user.len() }
     #[cfg(test)]
@@ -343,6 +358,19 @@ mod tests {
             }
             other => panic!("expected MergedPrompt, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn session_swap_evicts_stale_continuations_and_returns_them() {
+        let sid_a = SessionId::new();
+        let sid_b = SessionId::new();
+        let mut s = BrainScheduler::new(Some(sid_a.clone()));
+        s.push_continuation(mk_cont("id-1"));
+        s.push_continuation(mk_cont("id-2"));
+
+        let evicted = s.note_session_swap(Some(sid_b));
+        assert_eq!(evicted.len(), 2);
+        assert_eq!(s.pending_continuation_len(), 0);
     }
 
     #[test]
