@@ -11,6 +11,11 @@ use spur_acp::{ContentBlock, TextContent};
 
 use crate::components::input_bar::ProtectedRange;
 
+/// Builds the hint by collecting `worker://<name>` URIs from `ranges`,
+/// keeping only those present in `known_workers`, then sorting and
+/// deduplicating (sort-then-dedup is required because `Vec::dedup`
+/// only removes *consecutive* duplicates).
+///
 /// Returns `true` if a hint was prepended; otherwise leaves
 /// `blocks` unchanged and returns `false`.
 pub fn prepend_worker_hint(
@@ -103,5 +108,6 @@ mod tests {
         let prepended = prepend_worker_hint(&mut blocks, &ranges, &known);
         assert!(!prepended);
         assert_eq!(blocks.len(), 1);
+        assert_eq!(hint_text(&blocks), Some("user text"));
     }
 }
