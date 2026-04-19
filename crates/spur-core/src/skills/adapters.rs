@@ -102,8 +102,23 @@ fn render_codex(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
     RenderedFile { path, bytes }
 }
 
-fn render_cursor(_skill: &SkillPayload, _repo_root: &Path) -> RenderedFile {
-    unimplemented!("Task 9")
+fn render_cursor(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
+    use crate::skills::installer::{sha256_hex, Marker};
+    let id = format!("spurpower-{}", skill.id);
+    let path = repo_root.join(".cursor/rules").join(format!("{id}.mdc"));
+    let marker = Marker {
+        version: 1,
+        skill_id: id.clone(),
+        sha256: sha256_hex(skill.body.as_bytes()),
+    };
+    let bytes = format!(
+        "---\ndescription: {desc}\nalwaysApply: true\n---\n{marker}{body}",
+        desc = skill.description,
+        marker = marker.render(),
+        body = skill.body,
+    )
+    .into_bytes();
+    RenderedFile { path, bytes }
 }
 
 #[cfg(test)]
@@ -181,6 +196,22 @@ mod tests {
             s.starts_with("<!-- SPUR-MANAGED v=1 skill=spurpower-tdd sha256="),
             "marker must be on line 1, got: {s:?}",
         );
+        assert!(s.contains("Write the test first."));
+    }
+
+    #[test]
+    fn cursor_render_mdc_with_alwaysapply() {
+        let skill = sample_skill();
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let rf = render_cursor(&skill, &root);
+        assert_eq!(
+            rf.path,
+            std::path::PathBuf::from("/tmp/repo/.cursor/rules/spurpower-tdd.mdc"),
+        );
+        let s = std::str::from_utf8(&rf.bytes).unwrap();
+        assert!(s.starts_with("---\ndescription: Use for TDD\nalwaysApply: true\n---\n"));
+        assert!(!s.contains("globs:"));
+        assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=spurpower-tdd sha256="));
         assert!(s.contains("Write the test first."));
     }
 }
