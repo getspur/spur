@@ -559,9 +559,7 @@ impl SessionDetailView {
     fn refresh_popup(&mut self) {
         use crate::components::completion_trigger::{detect, TriggerKind};
         use crate::components::picker_shell::PickerShell;
-        use crate::components::query_source::{
-            MentionQuerySource, QuerySource, SlashQuerySource, SlashRow,
-        };
+        use crate::components::query_source::{MentionQuerySource, SlashQuerySource, SlashRow};
 
         let text = self.input_bar.text();
         let cursor = self.input_bar.cursor();
@@ -608,8 +606,7 @@ impl SessionDetailView {
                                 },
                             })
                             .collect();
-                        let mut src = SlashQuerySource::new(rows, new.prefix_start);
-                        let _ = src.refresh(&new.query);
+                        let src = SlashQuerySource::new(rows, new.prefix_start);
                         PickerShell::open_with_query(Box::new(src), &new.query)
                     }
                     TriggerKind::Mention => {

@@ -716,7 +716,7 @@ mod tests {
             rows[0].primary
         );
         assert!(
-            rows[0].primary.starts_with(|c: char| c == '📁' || c == '📄'),
+            rows[0].primary.starts_with(['📁', '📄']),
             "primary missing icon prefix: {:?}",
             rows[0].primary
         );
