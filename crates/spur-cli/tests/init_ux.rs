@@ -22,6 +22,7 @@ fn install_hints_cover_all_seed_agents() {
         "codex",
         "codex-acp",
         "gemini",
+        "opencode-acp",
     ];
     let seeds = spur_acp::config::load_seed_template();
     for agent in &seeds.entries {

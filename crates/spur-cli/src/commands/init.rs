@@ -23,6 +23,7 @@ pub const INSTALL_HINTS: &[(&str, &str)] = &[
     ),
     ("codex-acp", "npx @zed-industries/codex-acp"),
     ("gemini", "npm install -g @google/gemini-cli"),
+    ("opencode-acp", "npm install -g opencode"),
 ];
 
 pub fn install_hint(name: &str) -> &'static str {
