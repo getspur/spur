@@ -156,6 +156,7 @@ fn plan_completed_roundtrips() {
         approved: 3,
         rejected: 1,
         failed: 0,
+        cancelled: 0,
     });
     let json = serde_json::to_string(&ev).unwrap();
     let round: SpurEvent = serde_json::from_str(&json).unwrap();

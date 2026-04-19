@@ -50,6 +50,8 @@ pub enum PlanTaskStatus {
     Rejected { feedback: Option<String> },
     /// Worker failed or dependency failed.
     Failed { error: String },
+    /// Task was cancelled (e.g. by brain or system)
+    Cancelled { reason: String },
 }
 
 /// Record of a single attempt at a plan task. Stored in `PlanTaskEntry.history`
@@ -642,6 +644,12 @@ pub async fn run_plan(
                                         error: error.clone(),
                                     };
                                 }
+                                DelegationStatus::Cancelled { reason } => {
+                                    warn!(plan_id = %pid, task_id = %tid, "Plan task cancelled: {reason}");
+                                    entry.status = PlanTaskStatus::Cancelled {
+                                        reason: reason.clone(),
+                                    };
+                                }
                                 other => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task ended: {other:?}");
                                     entry.status = PlanTaskStatus::Failed {
@@ -687,7 +695,10 @@ pub async fn run_plan(
         }
     }
 
-    // ── Mark unreachable tasks (blocked by failed dependencies) ──────
+    // DN-6: On terminal loop exit, promote all non-terminal tasks to Failed with
+    // a specific error. Originally this block only caught Pending-with-failed-dep;
+    // now it also catches Pending with missing deps, stuck Ready, stuck Dispatched,
+    // and stuck AwaitingReview. Approved / Rejected / Failed pass through unchanged.
     {
         let mut p = plan.lock().await;
         let failed_ids: HashSet<String> = p
@@ -698,23 +709,56 @@ pub async fn run_plan(
             .collect();
 
         for entry in &mut p.tasks {
-            #[allow(clippy::collapsible_if)]
-            if matches!(entry.status, PlanTaskStatus::Pending) {
-                if entry.spec.depends_on.iter().any(|d| failed_ids.contains(d)) {
+            match &entry.status {
+                PlanTaskStatus::Pending
+                    if entry.spec.depends_on.iter().any(|d| failed_ids.contains(d)) =>
+                {
                     entry.status = PlanTaskStatus::Failed {
                         error: "Blocked by failed dependency".into(),
                     };
                 }
+                PlanTaskStatus::Pending => {
+                    entry.status = PlanTaskStatus::Failed {
+                        error: "Plan exited with task still pending (dep never satisfied)".into(),
+                    };
+                }
+                PlanTaskStatus::Ready => {
+                    entry.status = PlanTaskStatus::Failed {
+                        error: "Plan exited with task ready but never dispatched".into(),
+                    };
+                }
+                PlanTaskStatus::Dispatched { delegation_id } => {
+                    let err =
+                        format!("Plan exited with task still running (delegation {delegation_id})");
+                    entry.status = PlanTaskStatus::Failed { error: err };
+                }
+                PlanTaskStatus::AwaitingReview { .. } => {
+                    entry.status = PlanTaskStatus::Failed {
+                        error: "Plan exited with task awaiting review".into(),
+                    };
+                }
+                PlanTaskStatus::Approved { .. }
+                | PlanTaskStatus::Rejected { .. }
+                | PlanTaskStatus::Failed { .. }
+                | PlanTaskStatus::Cancelled { .. } => {}
             }
         }
     }
 
     // INV-7: Compute terminal counts and emit lifecycle events OUTSIDE the lock.
-    let (approved_count, rejected_count, failed_count, awaiting_review_count, all_approved) = {
+    let (
+        approved_count,
+        rejected_count,
+        failed_count,
+        cancelled_count,
+        awaiting_review_count,
+        all_approved,
+    ) = {
         let p = plan.lock().await;
         let mut a = 0u32;
         let mut r = 0u32;
         let mut f = 0u32;
+        let mut c = 0u32;
         let mut ar = 0u32;
         let non_empty = !p.tasks.is_empty();
         let mut all_a = non_empty;
@@ -729,6 +773,10 @@ pub async fn run_plan(
                     f += 1;
                     all_a = false;
                 }
+                PlanTaskStatus::Cancelled { .. } => {
+                    c += 1;
+                    all_a = false;
+                }
                 PlanTaskStatus::AwaitingReview { .. } => {
                     ar += 1;
                     all_a = false;
@@ -739,7 +787,7 @@ pub async fn run_plan(
                 }
             }
         }
-        (a, r, f, ar, all_a)
+        (a, r, f, c, ar, all_a)
     }; // Lock released before emitting.
 
     info!(
@@ -747,6 +795,7 @@ pub async fn run_plan(
         awaiting_review = awaiting_review_count,
         approved = approved_count,
         failed = failed_count,
+        cancelled = cancelled_count,
         "Plan executor finished"
     );
 
@@ -756,8 +805,9 @@ pub async fn run_plan(
             approved: approved_count,
             rejected: rejected_count,
             failed: failed_count,
+            cancelled: cancelled_count,
         });
-        if all_approved {
+        if all_approved && cancelled_count == 0 {
             sink.emit(spur_acp::SpurEventBody::PlanReadyToMerge {
                 plan_id: plan_id.clone(),
             });
@@ -779,6 +829,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
     let mut n_approved = 0usize;
     let mut n_rejected = 0usize;
     let mut n_failed = 0usize;
+    let mut n_cancelled = 0usize;
 
     for t in &state.tasks {
         match &t.status {
@@ -789,6 +840,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             PlanTaskStatus::Approved { .. } => n_approved += 1,
             PlanTaskStatus::Rejected { .. } => n_rejected += 1,
             PlanTaskStatus::Failed { .. } => n_failed += 1,
+            PlanTaskStatus::Cancelled { .. } => n_cancelled += 1,
         }
     }
 
@@ -797,6 +849,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         && n_awaiting_review == 0
         && n_rejected == 0
         && n_failed == 0
+        && n_cancelled == 0
         && n_approved == total;
 
     let overall = if n_dispatched > 0 || n_pending > 0 || n_ready > 0 {
@@ -839,7 +892,11 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                         .filter(|d| {
                             !state.tasks.iter().any(|o| {
                                 o.spec.task_id == **d
-                                    && matches!(o.status, PlanTaskStatus::Approved { .. })
+                                    && matches!(
+                                        o.status,
+                                        PlanTaskStatus::Approved { .. }
+                                            | PlanTaskStatus::Cancelled { .. }
+                                    )
                             })
                         })
                         .map(|d| d.as_str())
@@ -892,6 +949,10 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                 PlanTaskStatus::Failed { error } => {
                     obj["status"] = "failed".into();
                     obj["error"] = error.clone().into();
+                }
+                PlanTaskStatus::Cancelled { reason } => {
+                    obj["status"] = "cancelled".into();
+                    obj["reason"] = reason.clone().into();
                 }
             }
             obj
@@ -1969,7 +2030,11 @@ fn dispatch_newly_ready(
         .filter(|t| {
             t.spec.depends_on.iter().all(|dep| {
                 state.tasks.iter().any(|o| {
-                    o.spec.task_id == *dep && matches!(o.status, PlanTaskStatus::Approved { .. })
+                    o.spec.task_id == *dep
+                        && matches!(
+                            o.status,
+                            PlanTaskStatus::Approved { .. } | PlanTaskStatus::Cancelled { .. }
+                        )
                 })
             })
         })
@@ -2099,6 +2164,12 @@ fn spawn_completion_future(
                     error: error.clone(),
                 };
                 transitioned_to_failed = true;
+            }
+            DelegationStatus::Cancelled { reason } => {
+                entry.status = PlanTaskStatus::Cancelled {
+                    reason: reason.clone(),
+                };
+                // Explicitly DO NOT cascade Cancelled
             }
             other => {
                 entry.status = PlanTaskStatus::Failed {

@@ -591,3 +591,82 @@ fn eager_stamp_cannot_misattribute_when_dispatch_order_differs() {
         "Worker-B owns req-A per authoritative dispatch"
     );
 }
+
+// ─── DN-5: INV-1 replay-safety — orphan dispatch + dup-requested warning ────
+
+#[test]
+fn dispatched_before_spawned_drains_on_worker_arrival() {
+    // Adversarial event order: DelegationRequested → DelegationDispatched
+    // both arrive BEFORE the WorkerSpawned for the named executor. The
+    // dispatch payload must be buffered and drained when the node finally
+    // appears, so task_spec lands on the worker post-spawn.
+    let mut l = ExecutorLineage::new();
+
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("brain".into()),
+        to_agent: "coder".into(),
+        task: "TASK-A".into(),
+        request_id: "req-A".into(),
+        delegation_plan: None,
+        issue_id: None,
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+        from: SessionId("brain".into()),
+        request_id: "req-A".into(),
+        executor_id: "worker-A".into(),
+    }));
+    // Worker spawns AFTER dispatch — drain must fire here.
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "coder".into(),
+        session: SessionId("worker-A".into()),
+        worktree: std::path::PathBuf::from("/tmp/wA"),
+    }));
+
+    let n = l.node(&ExecutorId::new("worker-A")).expect("worker-A");
+    assert_eq!(
+        n.task_spec, "TASK-A",
+        "orphan-dispatch buffer must drain task onto worker after spawn"
+    );
+}
+
+#[test]
+fn duplicate_delegation_requested_with_same_payload_is_silent() {
+    // Identical replay must not panic and must not corrupt buffered payload.
+    let mut l = ExecutorLineage::new();
+
+    let ev = SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("brain".into()),
+        to_agent: "coder".into(),
+        task: "TASK-A".into(),
+        request_id: "req-A".into(),
+        delegation_plan: None,
+        issue_id: None,
+    });
+    l.apply(&ev);
+    l.apply(&ev); // identical replay — must stay silent, no panic.
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn duplicate_delegation_requested_with_differing_payload_warns() {
+    let mut l = ExecutorLineage::new();
+
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("brain".into()),
+        to_agent: "coder".into(),
+        task: "TASK-A".into(),
+        request_id: "req-A".into(),
+        delegation_plan: None,
+        issue_id: None,
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("brain".into()),
+        to_agent: "coder".into(),
+        task: "TASK-DIFFERENT".into(),
+        request_id: "req-A".into(),
+        delegation_plan: None,
+        issue_id: None,
+    }));
+
+    assert!(logs_contain("duplicate DelegationRequested"));
+}

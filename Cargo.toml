@@ -19,6 +19,7 @@ rust-version = "1.88"
 license = "GPL-3.0-only"
 
 [workspace.dependencies]
+schemars = "0.8"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
