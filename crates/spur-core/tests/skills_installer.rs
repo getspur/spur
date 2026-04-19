@@ -75,3 +75,22 @@ fn fresh_install_creates_all_expected_files() {
         assert!(count_files_under(&root) > 0, "expected files under {}", root.display());
     }
 }
+
+#[test]
+fn rerun_is_idempotent_no_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _first = run(tmp.path()).unwrap();
+    let second = run(tmp.path()).unwrap();
+    assert!(
+        second.written.is_empty(),
+        "expected no writes on re-run, got {}: {:?}",
+        second.written.len(),
+        second.written,
+    );
+    assert!(
+        second.skipped.is_empty(),
+        "expected no skips on re-run, got: {:?}",
+        second.skipped,
+    );
+    assert!(!second.unchanged.is_empty(), "expected some NoOps");
+}
