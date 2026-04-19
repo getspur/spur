@@ -19,6 +19,8 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+axum = { workspace = true }
+rmcp = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }

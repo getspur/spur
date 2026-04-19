@@ -41,6 +41,15 @@ crossterm = "0.28"
 
 # HTTP
 reqwest = { version = "0.12", features = ["json"] }
+axum = "0.8"
+rmcp = { version = "1.4", features = [
+    "client",
+    "server",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-server",
+    "transport-streamable-http-server-session",
+] }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }

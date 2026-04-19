@@ -25,6 +25,16 @@ Delegate when:
     context window on.
   - You need fresh context isolation.
 
+## Complex Workflows (The Spurpower Paradigm)
+
+Do not manually orchestrate multi-step, dependent tasks. For features requiring multiple steps, testing, or strict review gates (e.g., Implement -> Review -> Test), use the **Plan Engine**:
+1. Use `create_issue` to create an Epic and child tasks.
+2. Wire their dependencies using the `depends_on` parameter.
+3. Call `graph_plan` to verify the execution DAG.
+4. Call `submit_plan(persist_as_epic=true)` or `execute_epic`.
+
+The system will automatically manage the dispatch, parallelism, and review gates (`review_task`) for you. Tactical instructions (e.g., TDD, systematic debugging) are automatically injected into the worker nodes by the system's hermetic `.spur/skills/` environment. You do not need to prompt workers to use them.
+
 Routing rule: prefer specialist tier when good_for matches exactly;
 fall back to generalist tier otherwise. avoid_for is a SOFT signal —
 you MAY override it with a stated rationale when no better agent exists.

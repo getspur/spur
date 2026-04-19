@@ -2,9 +2,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use axum::Router;
+use rmcp::{
+    model::{
+        object as rmcp_object, CallToolRequestParams, CallToolResult, Implementation,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    },
+    service::RequestContext,
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    },
+    ErrorData as McpError, RoleServer, ServerHandler,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -28,16 +39,6 @@ const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct JsonRpcRequest {
-    jsonrpc: String,
-    id: Option<Value>,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
 #[derive(Debug, Serialize)]
 struct JsonRpcResponse {
     jsonrpc: String,
@@ -54,6 +55,16 @@ struct JsonRpcError {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<Value>,
+}
+
+impl JsonRpcError {
+    fn into_mcp_error(self) -> McpError {
+        McpError::new(
+            rmcp::model::ErrorCode(self.code as i32),
+            self.message,
+            self.data,
+        )
+    }
 }
 
 impl JsonRpcResponse {
@@ -78,11 +89,6 @@ impl JsonRpcResponse {
             }),
         }
     }
-
-    fn method_not_found(id: Value, method: &str) -> Self {
-        Self::error(id, -32601, format!("Method not found: {method}"))
-    }
-
     fn invalid_params(id: Value, msg: impl Into<String>) -> Self {
         Self::error(id, -32602, msg)
     }
@@ -564,146 +570,62 @@ impl McpCallbackServer {
 
     /// Start listening on a random localhost port.
     ///
-    /// Returns the URL (e.g. `http://127.0.0.1:12345`) and a `JoinHandle`.
+    /// Returns the MCP endpoint URL (e.g. `http://127.0.0.1:12345/mcp`) and
+    /// a `JoinHandle`.
     pub async fn start(self: Arc<Self>) -> Result<(String, JoinHandle<()>)> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("Failed to bind TCP listener")?;
 
         let addr = listener.local_addr()?;
-        let url = format!("http://{addr}");
+        let url = format!("http://{addr}/mcp");
+        let mut config = StreamableHttpServerConfig::default();
+        config.stateful_mode = true;
+        let session_manager = Arc::new(LocalSessionManager::default());
+        let service = {
+            let server = Arc::clone(&self);
+            StreamableHttpService::new(move || Ok(Arc::clone(&server)), session_manager, config)
+        };
+        let router = Router::new().nest_service("/mcp", service);
 
-        info!(url = %url, "MCP callback server listening (HTTP)");
+        info!(url = %url, "MCP callback server listening (streamable HTTP)");
 
-        let server = Arc::clone(&self);
         let handle = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let server = Arc::clone(&server);
-                        tokio::spawn(async move {
-                            if let Err(e) = server.handle_http(stream).await {
-                                debug!(error = %e, "HTTP connection error");
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Failed to accept TCP connection");
-                    }
-                }
+            if let Err(error) = axum::serve(listener, router).await {
+                debug!(%error, "RMCP callback server exited");
             }
         });
 
         Ok((url, handle))
     }
 
-    // ─── Minimal HTTP handler ─────────────────────────────────────────
-
-    async fn handle_http(&self, mut stream: tokio::net::TcpStream) -> Result<()> {
-        let (reader, mut writer) = stream.split();
-        let mut buf_reader = BufReader::new(reader);
-
-        // Read request line.
-        let mut request_line = String::new();
-        buf_reader.read_line(&mut request_line).await?;
-
-        // Read headers to find Content-Length. HTTP header names are
-        // case-insensitive per RFC 9110; compare after lowercasing.
-        let mut content_length: usize = 0;
-        loop {
-            let mut header = String::new();
-            buf_reader.read_line(&mut header).await?;
-            if header.trim().is_empty() {
-                break;
-            }
-            if let Some((name, val)) = header.split_once(':') {
-                if name.trim().eq_ignore_ascii_case("content-length") {
-                    content_length = val.trim().parse().unwrap_or(0);
-                }
-            }
-        }
-
-        // Cap body size. Real MCP JSON-RPC payloads are a few KB; 1 MiB is
-        // generous and prevents attacker-controlled allocation from an
-        // inflated Content-Length header.
-        const MAX_BODY: usize = 1024 * 1024;
-        if content_length > MAX_BODY {
-            let resp = b"Payload Too Large";
-            let http = format!(
-                "HTTP/1.1 413 Payload Too Large\r\nContent-Length: {}\r\n\r\n",
-                resp.len()
-            );
-            writer.write_all(http.as_bytes()).await?;
-            writer.write_all(resp).await?;
-            return Ok(());
-        }
-
-        // Read body.
-        let mut body = vec![0u8; content_length];
-        buf_reader.read_exact(&mut body).await?;
-
-        // Dispatch JSON-RPC.
-        let response_body = if request_line.starts_with("POST") {
-            match serde_json::from_slice::<JsonRpcRequest>(&body) {
-                Ok(req) => {
-                    let resp = self.dispatch(req).await;
-                    serde_json::to_vec(&resp)?
-                }
-                Err(e) => {
-                    let resp =
-                        JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {e}"));
-                    serde_json::to_vec(&resp)?
-                }
-            }
-        } else {
-            // GET or other — return 405.
-            let resp = b"Method Not Allowed";
-            let http = format!(
-                "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: {}\r\n\r\n",
-                resp.len()
-            );
-            writer.write_all(http.as_bytes()).await?;
-            writer.write_all(resp).await?;
-            return Ok(());
-        };
-
-        // Write HTTP response.
-        let http_header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            response_body.len()
-        );
-        writer.write_all(http_header.as_bytes()).await?;
-        writer.write_all(&response_body).await?;
-
-        Ok(())
+    fn rmcp_tools(&self) -> Vec<Tool> {
+        tools::tools_list()
+            .into_iter()
+            .map(|def| Tool::new(def.name, def.description, rmcp_object(def.input_schema)))
+            .collect()
     }
 
-    // ─── Request dispatcher ───────────────────────────────────────────
+    fn rmcp_tool(&self, name: &str) -> Option<Tool> {
+        self.rmcp_tools().into_iter().find(|tool| tool.name == name)
+    }
 
-    async fn dispatch(&self, request: JsonRpcRequest) -> JsonRpcResponse {
-        let id = request.id.clone().unwrap_or(Value::Null);
-
-        match request.method.as_str() {
-            "initialize" => JsonRpcResponse::success(
-                id,
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {
-                        "name": "spur-mcp",
-                        "version": env!("CARGO_PKG_VERSION")
-                    },
-                    "capabilities": {
-                        "tools": {}
-                    }
-                }),
-            ),
-            "notifications/initialized" => JsonRpcResponse::success(id, json!({})),
-            "tools/list" => {
-                let defs = tools::tools_list();
-                JsonRpcResponse::success(id, json!({ "tools": defs }))
-            }
-            "tools/call" => self.handle_tool_call(id, request.params).await,
-            _ => JsonRpcResponse::method_not_found(id, &request.method),
+    fn call_tool_result_from_legacy_response(
+        response: JsonRpcResponse,
+        tool_name: &str,
+    ) -> Result<CallToolResult, McpError> {
+        match (response.result, response.error) {
+            (Some(result), None) => serde_json::from_value(result).map_err(|error| {
+                McpError::internal_error(
+                    format!("failed to serialize tool result for {tool_name}: {error}"),
+                    None,
+                )
+            }),
+            (None, Some(error)) => Err(error.into_mcp_error()),
+            (Some(_), Some(_)) | (None, None) => Err(McpError::internal_error(
+                format!("tool handler returned an invalid response envelope for {tool_name}"),
+                None,
+            )),
         }
     }
 
@@ -2205,6 +2127,49 @@ impl McpCallbackServer {
                 );
             }
         }
+    }
+}
+
+impl ServerHandler for McpCallbackServer {
+    fn get_info(&self) -> ServerInfo {
+        let mut info = ServerInfo::default();
+        info.instructions = Some(
+            "Use these tools to delegate work, inspect plan status, and interact with the configured project management backend."
+                .into(),
+        );
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+
+        let mut implementation = Implementation::default();
+        implementation.name = "spur-mcp".into();
+        implementation.version = env!("CARGO_PKG_VERSION").into();
+        info.server_info = implementation;
+        info
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.rmcp_tool(name)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(self.rmcp_tools()))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let tool_name = request.name.to_string();
+        let params = json!({
+            "name": tool_name,
+            "arguments": request.arguments.map(Value::Object).unwrap_or_else(|| json!({})),
+        });
+        let response = self.handle_tool_call(Value::Null, params).await;
+        Self::call_tool_result_from_legacy_response(response, &tool_name)
     }
 }
 
