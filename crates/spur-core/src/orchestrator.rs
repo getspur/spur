@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -199,14 +198,6 @@ pub enum InteractiveInput {
         session: SessionId,
         continuation: spur_acp::domain::BrainContinuation,
     },
-}
-
-#[inline]
-fn ignore_system_continuation_unexpected_site(site: &'static str) {
-    tracing::debug!(
-        site = %site,
-        "SystemContinuation reached unexpected match arm — routed via BrainScheduler in run_interactive only"
-    );
 }
 
 /// Convert spur_pm::IssueSummary to the spur_acp mirror type for event bus transmission.
@@ -760,9 +751,12 @@ impl Orchestrator {
         permission_tx: Option<
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
+        overflow_continuations: crate::continuation_bridge::OverflowBuf,
     ) -> Result<()> {
         let mut brain: Option<BrainSession> = None;
-        let mut pending_messages: VecDeque<InteractiveInput> = VecDeque::new();
+        let mut scheduler = crate::scheduler::BrainScheduler::new(
+            None, // active_session set when first brain spawns
+        );
         // Pre-connected (initialized) agent connection, ready for create_brain_session
         // or load_brain_session without re-running connect_brain.
         let mut agent_connection: Option<(Box<dyn spur_acp::AgentConnection>, String)> = None;
@@ -797,561 +791,617 @@ impl Orchestrator {
         }
 
         loop {
-            // ── Get next input (from queue or user) ────────────────────
-            let input = if !pending_messages.is_empty() {
-                pending_messages.pop_front().unwrap()
-            } else {
-                match user_input_rx.recv().await {
-                    Some(i) => i,
-                    None => break, // TUI closed
+            // ── (a) Drain overflow buffer so scheduler sees fresh state ──
+            {
+                let mut over = overflow_continuations.lock().await;
+                while let Some((_sid, c)) = over.pop_front() {
+                    scheduler.push_continuation(c);
                 }
-            };
+            }
 
-            match input {
-                // ── ListSessions ────────────────────────────────────────
-                InteractiveInput::ListSessions => {
-                    // Connect if we don't already have an initialized connection.
-                    let (mut conn, brain_name) = match agent_connection.take() {
-                        Some(existing) => existing,
-                        None => {
-                            match self
-                                .connect_brain(brain_override.as_deref(), permission_tx.clone())
-                                .await
-                            {
-                                Ok(pair) => pair,
-                                Err(e) => {
-                                    error!(error = %e, "Failed to connect brain for list_sessions");
-                                    self.emit(SpurEvent::now(SpurEventBody::SessionsListError {
-                                        message: e.to_string(),
-                                    }));
-                                    continue;
+            // ── (b) Ask scheduler what to do ────────────────────────────
+            let now = std::time::Instant::now();
+            let action = scheduler.next(now);
+
+            // ── (c) Idle: recv next input and dispatch immediately ───────
+            if matches!(action, crate::scheduler::ScheduledAction::Idle) {
+                let raw = match user_input_rx.recv().await {
+                    Some(i) => i,
+                    None => break, // channel closed — shutdown
+                };
+
+                match raw {
+                    // Continuation — route to scheduler for next tick.
+                    InteractiveInput::SystemContinuation { continuation, .. } => {
+                        scheduler.push_continuation(continuation);
+                        continue;
+                    }
+                    // Prompt-class — push to scheduler; will be dispatched next tick.
+                    InteractiveInput::Message { .. } => {
+                        scheduler.push_user(raw);
+                        continue;
+                    }
+                    // NewSessionWithMessage — retire brain, then push Message to scheduler.
+                    InteractiveInput::NewSessionWithMessage { blocks, interrupt } => {
+                        Self::retire_active_brain(&mut brain, &mut agent_connection);
+                        let evicted = scheduler.note_session_swap(None);
+                        for c in evicted {
+                            self.funnel.emit(SpurEventBody::ContinuationDropped {
+                                delegation_id: c.delegation_id,
+                                reason: spur_acp::domain::events::ContinuationDropReason::SessionSwap,
+                            });
+                        }
+                        if blocks.is_empty() {
+                            info!("NewSessionWithMessage with empty blocks — spawn deferred to next Message");
+                        } else {
+                            scheduler.push_user(InteractiveInput::Message { blocks, interrupt });
+                        }
+                        continue;
+                    }
+
+                    // ── ListSessions ──────────────────────────────────────
+                    InteractiveInput::ListSessions => {
+                        let (mut conn, brain_name) = match agent_connection.take() {
+                            Some(existing) => existing,
+                            None => {
+                                match self
+                                    .connect_brain(brain_override.as_deref(), permission_tx.clone())
+                                    .await
+                                {
+                                    Ok(pair) => pair,
+                                    Err(e) => {
+                                        error!(error = %e, "Failed to connect brain for list_sessions");
+                                        self.emit(SpurEvent::now(SpurEventBody::SessionsListError {
+                                            message: e.to_string(),
+                                        }));
+                                        continue;
+                                    }
                                 }
                             }
-                        }
-                    };
+                        };
 
-                    // Scope to the repo's cwd so we get project-local sessions, not every
-                    // session the agent has ever tracked. The ACP SDK treats an absent
-                    // cwd as "list everything globally" (for claude-agent-acp: all 194
-                    // sessions across all projects vs the 37 that belong to this repo).
-                    let list_req = ListSessionsRequest::new().cwd(self.repo_root.clone());
-                    let sessions_result = match conn.list_sessions(list_req).await {
-                        Ok(response) => Ok(response.sessions),
-                        Err(e) => {
-                            // Fallback: read sessions from agent's local storage.
-                            warn!(error = %e, "list_sessions failed, trying filesystem fallback");
-                            Self::list_sessions_from_disk(&brain_name)
-                        }
-                    };
+                        let list_req = ListSessionsRequest::new().cwd(self.repo_root.clone());
+                        let sessions_result = match conn.list_sessions(list_req).await {
+                            Ok(response) => Ok(response.sessions),
+                            Err(e) => {
+                                warn!(error = %e, "list_sessions failed, trying filesystem fallback");
+                                Self::list_sessions_from_disk(&brain_name)
+                            }
+                        };
 
-                    match sessions_result {
-                        Ok(sessions) => {
-                            self.emit(SpurEvent::now(SpurEventBody::SessionsListed {
-                                agent: brain_name.clone(),
-                                sessions,
-                            }));
+                        match sessions_result {
+                            Ok(sessions) => {
+                                self.emit(SpurEvent::now(SpurEventBody::SessionsListed {
+                                    agent: brain_name.clone(),
+                                    sessions,
+                                }));
+                            }
+                            Err(e) => {
+                                error!(error = %e, "list_sessions failed (no fallback available)");
+                                self.emit(SpurEvent::now(SpurEventBody::SessionsListError {
+                                    message: e.to_string(),
+                                }));
+                            }
                         }
-                        Err(e) => {
-                            error!(error = %e, "list_sessions failed (no fallback available)");
-                            self.emit(SpurEvent::now(SpurEventBody::SessionsListError {
-                                message: e.to_string(),
-                            }));
+
+                        agent_connection = Some((conn, brain_name));
+                    }
+
+                    // ── ResumeSession ─────────────────────────────────────
+                    InteractiveInput::ResumeSession { session_id } => {
+                        Self::retire_active_brain(&mut brain, &mut agent_connection);
+
+                        let (connection, brain_name) = match agent_connection.take() {
+                            Some(existing) => existing,
+                            None => {
+                                match self
+                                    .connect_brain(brain_override.as_deref(), permission_tx.clone())
+                                    .await
+                                {
+                                    Ok(pair) => pair,
+                                    Err(e) => {
+                                        error!(error = %e, "Failed to connect brain for resume");
+                                        self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                                            session: SessionId::new(),
+                                            message: e.to_string(),
+                                        }));
+                                        continue;
+                                    }
+                                }
+                            }
+                        };
+
+                        let original_session_id = session_id.clone();
+                        match self
+                            .load_brain_session(
+                                connection,
+                                brain_name,
+                                permission_tx.clone(),
+                                session_id,
+                                None,
+                                false,
+                            )
+                            .await
+                        {
+                            Ok((session, mut history_stream, _load_outcome)) => {
+                                let spur_id = session.spur_session_id.clone();
+                                let mut history_count = 0usize;
+                                while let Some(notification) = history_stream.next().await {
+                                    history_count += 1;
+                                    self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
+                                        session: spur_id.clone(),
+                                        notification: Box::new(notification),
+                                    }));
+                                }
+
+                                if history_count == 0 {
+                                    let entries =
+                                        Self::read_session_history_from_disk(&original_session_id);
+                                    if !entries.is_empty() {
+                                        info!(
+                                            count = entries.len(),
+                                            "Replaying conversation history from disk"
+                                        );
+                                        self.emit(SpurEvent::now(SpurEventBody::SessionHistory {
+                                            session: spur_id.clone(),
+                                            entries,
+                                        }));
+                                    }
+                                }
+
+                                brain = Some(session);
+                                self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
+                                    session: spur_id,
+                                }));
+                            }
+                            Err(e) => {
+                                error!(error = %e, "Failed to load brain session");
+                                self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                                    session: SessionId::new(),
+                                    message: e.to_string(),
+                                }));
+                            }
                         }
                     }
 
-                    // Stash the connection for future use.
-                    agent_connection = Some((conn, brain_name));
+                    // ── VendorExec ────────────────────────────────────────
+                    InteractiveInput::VendorExec {
+                        session,
+                        method,
+                        mut params,
+                    } => {
+                        if let Some(b) = brain.as_mut() {
+                            if let Some(obj) = params.as_object_mut() {
+                                obj.insert("sessionId".into(), serde_json::json!(b.acp_session_id));
+                            } else {
+                                warn!(
+                                    method = %method,
+                                    "VendorExec params is not a JSON object; sessionId not injected"
+                                );
+                            }
+                            let brain_name_for_log = b.brain_name.clone();
+                            let call_result = b.connection.call_ext(&method, params).await;
+                            match call_result {
+                                Ok(resp) => {
+                                    self.emit(SpurEvent::now(SpurEventBody::AgentExtNotification {
+                                        session: session.clone(),
+                                        method: format!("{}/response", method),
+                                        params: resp,
+                                    }));
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        brain = %brain_name_for_log,
+                                        method = %method,
+                                        error = %e,
+                                        "vendor exec call failed"
+                                    );
+                                    if is_connection_death(&e) {
+                                        if let Some(dead) = brain.take() {
+                                            let reason =
+                                                format!("vendor exec `{method}` died: {e}");
+                                            if let Some(new_brain) = self
+                                                .reconnect_with_events(
+                                                    dead,
+                                                    permission_tx.clone(),
+                                                    brain_override.as_deref(),
+                                                    reason,
+                                                    &mut reconnect_failures,
+                                                    RECONNECT_CIRCUIT_LIMIT,
+                                                    RECONNECT_CIRCUIT_WINDOW,
+                                                )
+                                                .await
+                                            {
+                                                brain = Some(new_brain);
+                                            }
+                                        }
+                                    } else {
+                                        self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                                            session,
+                                            message: format!(
+                                                "vendor exec `{}` failed: {}",
+                                                method, e
+                                            ),
+                                        }));
+                                    }
+                                }
+                            }
+                        } else {
+                            warn!(method = %method, "VendorExec received but no active brain session");
+                        }
+                    }
+
+                    // ── SetSessionMode ────────────────────────────────────
+                    InteractiveInput::SetSessionMode { mode_id } => {
+                        if let Some(b) = brain.as_mut() {
+                            let req = SetSessionModeRequest::new(
+                                agent_client_protocol::SessionId::new(b.acp_session_id.clone()),
+                                agent_client_protocol::SessionModeId::new(
+                                    std::sync::Arc::<str>::from(mode_id.as_str()),
+                                ),
+                            );
+                            if let Err(e) = b.connection.set_session_mode(req).await {
+                                warn!(
+                                    brain = %b.brain_name,
+                                    session_id = %b.spur_session_id,
+                                    mode_id = %mode_id,
+                                    error = %e,
+                                    "set_session_mode failed"
+                                );
+                            }
+                        } else {
+                            warn!(
+                                mode_id = %mode_id,
+                                "SetSessionMode received but no active brain session"
+                            );
+                        }
+                    }
+
+                    // ── CancelStream (outside active turn) ────────────────
+                    InteractiveInput::CancelStream { session } => {
+                        tracing::debug!(
+                            session = %session,
+                            "CancelStream received outside active turn; dropping (no stream to cancel)"
+                        );
+                    }
+
+                    // ── RefreshIssues ─────────────────────────────────────
+                    InteractiveInput::RefreshIssues => {
+                        if let Some(pm) = &self.pm_service {
+                            refresh_pm_state(pm, &self.funnel, Some(50), false).await;
+                        } else {
+                            self.funnel.emit(SpurEventBody::IssueCommandError {
+                                operation: "RefreshIssues".into(),
+                                error: "No issue tracker configured".into(),
+                            });
+                        }
+                    }
+
+                    // ── GetIssueDetail ────────────────────────────────────
+                    InteractiveInput::GetIssueDetail { id } => {
+                        if let Some(pm) = &self.pm_service {
+                            match pm.get_issue(&id).await {
+                                Ok(issue) => {
+                                    self.funnel.emit(SpurEventBody::IssueDetailFetched {
+                                        requested_id: id,
+                                        issue: issue_to_detail_event(&issue),
+                                    });
+                                }
+                                Err(e) => {
+                                    self.funnel.emit(SpurEventBody::IssueCommandError {
+                                        operation: "GetIssueDetail".into(),
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        } else {
+                            self.funnel.emit(SpurEventBody::IssueCommandError {
+                                operation: "GetIssueDetail".into(),
+                                error: "No issue tracker configured".into(),
+                            });
+                        }
+                    }
+
+                    // ── UpdateIssue ───────────────────────────────────────
+                    InteractiveInput::UpdateIssue { id, update } => {
+                        if let Some(pm) = &self.pm_service {
+                            match pm.update_issue(&id, update.clone()).await {
+                                Ok(()) => {
+                                    self.funnel.emit(SpurEventBody::IssueUpdated {
+                                        source: pm.source_str().into(),
+                                        id,
+                                        status: update.status.clone(),
+                                        assignee: update.assignee.clone(),
+                                    });
+                                }
+                                Err(e) => {
+                                    self.funnel.emit(SpurEventBody::IssueCommandError {
+                                        operation: "UpdateIssue".into(),
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        } else {
+                            self.funnel.emit(SpurEventBody::IssueCommandError {
+                                operation: "UpdateIssue".into(),
+                                error: "No issue tracker configured".into(),
+                            });
+                        }
+                    }
+
+                    // ── SubmitReview ──────────────────────────────────────
+                    // Intentional no-op: spur-cli routes SubmitReview to the
+                    // review_dispatcher_loop task, not to run_interactive.
+                    InteractiveInput::SubmitReview { .. } => {}
                 }
 
-                // ── ResumeSession ───────────────────────────────────────
-                InteractiveInput::ResumeSession { session_id } => {
-                    // If a brain is already active, retire its session-level state so
-                    // the incoming ResumeSession replaces it cleanly. The initialized
-                    // connection is preserved in `agent_connection` for reuse below.
-                    Self::retire_active_brain(&mut brain, &mut agent_connection);
+                // Done handling non-prompt variant — go back to top of loop.
+                continue;
+            }
 
-                    // Use pre-connected or connect fresh.
-                    let (connection, brain_name) = match agent_connection.take() {
-                        Some(existing) => existing,
-                        None => {
-                            match self
-                                .connect_brain(brain_override.as_deref(), permission_tx.clone())
-                                .await
-                            {
-                                Ok(pair) => pair,
-                                Err(e) => {
-                                    error!(error = %e, "Failed to connect brain for resume");
-                                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                        session: SessionId::new(),
-                                        message: e.to_string(),
-                                    }));
-                                    continue;
-                                }
-                            }
-                        }
+            // ── (d) Scheduler returned a prompt action — fire the brain turn ──
+            //
+            // Decompose the ScheduledAction into (user_input_opt, continuations).
+            let (user_input_opt, continuations): (Option<InteractiveInput>, Vec<spur_acp::domain::BrainContinuation>) = match action {
+                crate::scheduler::ScheduledAction::UserPrompt(u) => (Some(u), vec![]),
+                crate::scheduler::ScheduledAction::MergedPrompt { user, continuations } => {
+                    (Some(user), continuations)
+                }
+                crate::scheduler::ScheduledAction::ContinuationPrompt(cs) => (None, cs),
+                crate::scheduler::ScheduledAction::Idle => unreachable!("handled above"),
+            };
+
+            // ── Build the blocks for this turn ─────────────────────────
+            let prompt_blocks: Vec<ContentBlock> = match &user_input_opt {
+                Some(InteractiveInput::Message { blocks, interrupt }) => {
+                    let base = if *interrupt {
+                        strip_bang_prefix(blocks.clone())
+                    } else {
+                        blocks.clone()
                     };
-
-                    let original_session_id = session_id.clone();
-                    match self
-                        .load_brain_session(
-                            connection,
-                            brain_name,
-                            permission_tx.clone(),
-                            session_id,
-                            None,  // preserve_spur_session_id: fresh view on ResumeSession
-                            false, // force_new_session: normal load behavior
-                        )
-                        .await
-                    {
-                        Ok((session, mut history_stream, _load_outcome)) => {
-                            let spur_id = session.spur_session_id.clone();
-                            // Drain history stream (populated if load_session worked,
-                            // empty if we fell back to new_session).
-                            let mut history_count = 0usize;
-                            while let Some(notification) = history_stream.next().await {
-                                history_count += 1;
-                                self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
-                                    session: spur_id.clone(),
-                                    notification: Box::new(notification),
-                                }));
-                            }
-
-                            // If no history came from the agent (new_session fallback),
-                            // replay conversation from disk so the user sees context.
-                            if history_count == 0 {
-                                let entries =
-                                    Self::read_session_history_from_disk(&original_session_id);
-                                if !entries.is_empty() {
-                                    info!(
-                                        count = entries.len(),
-                                        "Replaying conversation history from disk"
-                                    );
-                                    self.emit(SpurEvent::now(SpurEventBody::SessionHistory {
-                                        session: spur_id.clone(),
-                                        entries,
-                                    }));
-                                }
-                            }
-
-                            brain = Some(session);
-                            self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
-                                session: spur_id,
-                            }));
+                    if continuations.is_empty() {
+                        base
+                    } else {
+                        let (merged, spilled) =
+                            crate::continuation_bridge::render_merged_turn_with_spill(
+                                &base,
+                                &continuations,
+                                crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                            );
+                        for c in spilled {
+                            scheduler.push_continuation(c);
                         }
-                        Err(e) => {
-                            error!(error = %e, "Failed to load brain session");
+                        merged
+                    }
+                }
+                None => {
+                    // Autonomous continuation-only turn.
+                    crate::continuation_bridge::render_autonomous_continuation_turn(&continuations)
+                }
+                Some(other) => {
+                    // Defensive: unexpected variant in scheduler (e.g. a non-Message
+                    // that somehow got pushed). Log and skip.
+                    tracing::warn!(?other, "unexpected non-Message variant dequeued from scheduler; skipping turn");
+                    continue;
+                }
+            };
+
+            // ── Lazy-spawn brain on first turn (or after crash) ─────────
+            if brain.is_none() {
+                let result = match agent_connection.take() {
+                    Some((connection, brain_name)) => {
+                        self.create_brain_session(connection, brain_name, permission_tx.clone())
+                            .await
+                    }
+                    None => {
+                        self.spawn_brain_session(brain_override.as_deref(), permission_tx.clone())
+                            .await
+                    }
+                };
+
+                match result {
+                    Ok(b) => {
+                        // Wire the new session into the scheduler.
+                        let new_sid = Some(SessionId(b.acp_session_id.clone()));
+                        let evicted = scheduler.note_session_swap(new_sid);
+                        for c in evicted {
+                            self.funnel.emit(SpurEventBody::ContinuationDropped {
+                                delegation_id: c.delegation_id,
+                                reason: spur_acp::domain::events::ContinuationDropReason::SessionSwap,
+                            });
+                        }
+                        brain = Some(b);
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to spawn brain");
+                        if Self::is_auth_required_error(&e) {
+                            self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
+                                session: SessionId(String::new()),
+                                message: Self::auth_required_banner(),
+                            }));
+                        } else {
                             self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                 session: SessionId::new(),
                                 message: e.to_string(),
                             }));
                         }
+                        continue;
                     }
                 }
+            }
+            let b = brain.as_mut().unwrap();
 
-                // ── VendorExec ───────────────────────────────────────────
-                InteractiveInput::VendorExec {
-                    session,
-                    method,
-                    mut params,
-                } => {
-                    if let Some(b) = brain.as_mut() {
-                        // Inject ACP session ID — TUI doesn't know it.
-                        // Contract: submit_router always produces a JSON object.
-                        // Warn (don't fail) if a future args_template emits a
-                        // non-object — the call still goes through, minus sessionId.
-                        if let Some(obj) = params.as_object_mut() {
-                            obj.insert("sessionId".into(), serde_json::json!(b.acp_session_id));
-                        } else {
-                            warn!(
-                                method = %method,
-                                "VendorExec params is not a JSON object; sessionId not injected"
-                            );
+            // ── Send prompt ──────────────────────────────────────────────
+            let prompt_request = PromptRequest::new(b.acp_session_id.clone(), prompt_blocks);
+            let spur_sid_for_log = b.spur_session_id.clone();
+
+            let prompt_started_at = std::time::Instant::now();
+            let mut stream = match b.connection.prompt(prompt_request).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(error = %e, "Brain prompt failed");
+                    if Self::is_auth_required_error(&e) {
+                        self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
+                            session: spur_sid_for_log,
+                            message: Self::auth_required_banner(),
+                        }));
+                        let mut dead = brain.take().expect("brain.as_mut() just held it");
+                        dead.delegation_handle.abort();
+                        if let Some(h) = dead.notification_pump_handle.take() {
+                            h.abort();
                         }
-                        let brain_name_for_log = b.brain_name.clone();
-                        let call_result = b.connection.call_ext(&method, params).await;
-                        match call_result {
-                            Ok(resp) => {
-                                self.emit(SpurEvent::now(SpurEventBody::AgentExtNotification {
-                                    session: session.clone(),
-                                    method: format!("{}/response", method),
-                                    params: resp,
-                                }));
-                            }
-                            Err(e) => {
-                                warn!(
-                                    brain = %brain_name_for_log,
-                                    method = %method,
-                                    error = %e,
-                                    "vendor exec call failed"
-                                );
-                                if is_connection_death(&e) {
-                                    if let Some(dead) = brain.take() {
-                                        let reason = format!("vendor exec `{method}` died: {e}");
-                                        if let Some(new_brain) = self
-                                            .reconnect_with_events(
-                                                dead,
-                                                permission_tx.clone(),
-                                                brain_override.as_deref(),
-                                                reason,
-                                                &mut reconnect_failures,
-                                                RECONNECT_CIRCUIT_LIMIT,
-                                                RECONNECT_CIRCUIT_WINDOW,
-                                            )
-                                            .await
-                                        {
-                                            brain = Some(new_brain);
-                                        }
-                                    }
-                                } else {
-                                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                        session,
-                                        message: format!("vendor exec `{}` failed: {}", method, e),
-                                    }));
-                                }
-                            }
-                        }
-                    } else {
-                        warn!(method = %method, "VendorExec received but no active brain session");
+                        dead.mcp_handle.abort();
+                        let _ = dead.connection.shutdown().await;
+                        continue;
                     }
-                }
-
-                // ── SetSessionMode ───────────────────────────────────────
-                InteractiveInput::SetSessionMode { mode_id } => {
-                    if let Some(b) = brain.as_mut() {
-                        let req = SetSessionModeRequest::new(
-                            agent_client_protocol::SessionId::new(b.acp_session_id.clone()),
-                            agent_client_protocol::SessionModeId::new(std::sync::Arc::<str>::from(
-                                mode_id.as_str(),
-                            )),
-                        );
-                        if let Err(e) = b.connection.set_session_mode(req).await {
-                            warn!(
-                                brain = %b.brain_name,
-                                session_id = %b.spur_session_id,
-                                mode_id = %mode_id,
-                                error = %e,
-                                "set_session_mode failed"
-                            );
+                    if is_connection_death(&e) {
+                        let dead = brain.take().expect("brain.as_mut() just held it");
+                        let reason = format!("prompt died: {e}");
+                        if let Some(new_brain) = self
+                            .reconnect_with_events(
+                                dead,
+                                permission_tx.clone(),
+                                brain_override.as_deref(),
+                                reason,
+                                &mut reconnect_failures,
+                                RECONNECT_CIRCUIT_LIMIT,
+                                RECONNECT_CIRCUIT_WINDOW,
+                            )
+                            .await
+                        {
+                            brain = Some(new_brain);
                         }
-                    } else {
-                        warn!(mode_id = %mode_id, "SetSessionMode received but no active brain session");
+                        continue;
                     }
-                }
-
-                // ── CancelStream (outside active turn) ───────────────────
-                InteractiveInput::CancelStream { session } => {
-                    tracing::debug!(
-                        session = %session,
-                        "CancelStream received outside active turn; dropping (no stream to cancel)"
-                    );
-                }
-
-                // ── RefreshIssues ────────────────────────────────────────
-                InteractiveInput::RefreshIssues => {
-                    if let Some(pm) = &self.pm_service {
-                        refresh_pm_state(pm, &self.funnel, Some(50), false).await;
-                    } else {
-                        self.funnel.emit(SpurEventBody::IssueCommandError {
-                            operation: "RefreshIssues".into(),
-                            error: "No issue tracker configured".into(),
-                        });
+                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                        session: spur_sid_for_log,
+                        message: e.to_string(),
+                    }));
+                    let mut dead = brain.take().expect("brain.as_mut() just held it");
+                    dead.delegation_handle.abort();
+                    if let Some(h) = dead.notification_pump_handle.take() {
+                        h.abort();
                     }
+                    dead.mcp_handle.abort();
+                    let _ = dead.connection.shutdown().await;
+                    continue;
                 }
+            };
 
-                // ── GetIssueDetail ───────────────────────────────────────
-                InteractiveInput::GetIssueDetail { id } => {
-                    if let Some(pm) = &self.pm_service {
-                        match pm.get_issue(&id).await {
-                            Ok(issue) => {
-                                self.funnel.emit(SpurEventBody::IssueDetailFetched {
-                                    requested_id: id,
-                                    issue: issue_to_detail_event(&issue),
-                                });
-                            }
-                            Err(e) => {
-                                self.funnel.emit(SpurEventBody::IssueCommandError {
-                                    operation: "GetIssueDetail".into(),
-                                    error: e.to_string(),
-                                });
-                            }
-                        }
-                    } else {
-                        self.funnel.emit(SpurEventBody::IssueCommandError {
-                            operation: "GetIssueDetail".into(),
-                            error: "No issue tracker configured".into(),
-                        });
-                    }
-                }
+            // ── Stream output + check for interrupts ─────────────────────
+            // note_turn_started() / note_turn_finished() bracket the streaming
+            // loop. We call note_turn_started() here (before the loop) and
+            // note_turn_finished() unconditionally after the loop exits. All
+            // early-exit `continue` paths above skip this block entirely, so
+            // the scheduler never sees a spurious in-flight flag on error paths.
+            scheduler.note_turn_started();
+            let mut cancel_deadline: Option<tokio::time::Instant> = None;
+            let mut cancel_resolved = false;
+            {
+                let b = brain.as_mut().unwrap();
 
-                // ── UpdateIssue ──────────────────────────────────────────
-                InteractiveInput::UpdateIssue { id, update } => {
-                    if let Some(pm) = &self.pm_service {
-                        match pm.update_issue(&id, update.clone()).await {
-                            Ok(()) => {
-                                self.funnel.emit(SpurEventBody::IssueUpdated {
-                                    source: pm.source_str().into(),
-                                    id,
-                                    status: update.status.clone(),
-                                    assignee: update.assignee.clone(),
-                                });
-                            }
-                            Err(e) => {
-                                self.funnel.emit(SpurEventBody::IssueCommandError {
-                                    operation: "UpdateIssue".into(),
-                                    error: e.to_string(),
-                                });
-                            }
-                        }
-                    } else {
-                        self.funnel.emit(SpurEventBody::IssueCommandError {
-                            operation: "UpdateIssue".into(),
-                            error: "No issue tracker configured".into(),
-                        });
-                    }
-                }
-
-                // ── Message ─────────────────────────────────────────────
-                InteractiveInput::Message { blocks, interrupt } => {
-                    // Flatten interrupt messages (they were queued during streaming).
-                    // When interrupt is true, the user typed `!…`; strip the leading
-                    // bang from the *first* text block so downstream agents don't see it.
-                    let blocks = if interrupt {
-                        strip_bang_prefix(blocks)
-                    } else {
-                        blocks
-                    };
-
-                    // ── Lazy-spawn brain on first message (or after crash) ──
-                    if brain.is_none() {
-                        // Use pre-connected agent if available; otherwise connect_brain.
-                        let result = match agent_connection.take() {
-                            Some((connection, brain_name)) => {
-                                self.create_brain_session(
-                                    connection,
-                                    brain_name,
-                                    permission_tx.clone(),
-                                )
-                                .await
-                            }
-                            None => {
-                                self.spawn_brain_session(
-                                    brain_override.as_deref(),
-                                    permission_tx.clone(),
-                                )
-                                .await
-                            }
-                        };
-
-                        match result {
-                            Ok(b) => brain = Some(b),
-                            Err(e) => {
-                                error!(error = %e, "Failed to spawn brain");
-                                if Self::is_auth_required_error(&e) {
-                                    self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
-                                        session: SessionId(String::new()),
-                                        message: Self::auth_required_banner(),
-                                    }));
-                                } else {
-                                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                        session: SessionId::new(),
-                                        message: e.to_string(),
-                                    }));
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    let b = brain.as_mut().unwrap();
-
-                    // ── Send prompt ─────────────────────────────────────
-                    let prompt_request = PromptRequest::new(b.acp_session_id.clone(), blocks);
-                    // Pre-capture session ID so the Err branch can use it
-                    // without holding the `b` borrow (needed for brain.take()).
-                    let spur_sid_for_log = b.spur_session_id.clone();
-
-                    let prompt_started_at = std::time::Instant::now();
-                    let mut stream = match b.connection.prompt(prompt_request).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!(error = %e, "Brain prompt failed");
-                            if Self::is_auth_required_error(&e) {
-                                self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
-                                    session: spur_sid_for_log,
-                                    message: Self::auth_required_banner(),
-                                }));
-                                let mut dead = brain.take().expect("brain.as_mut() just held it");
-                                dead.delegation_handle.abort();
-                                if let Some(h) = dead.notification_pump_handle.take() {
-                                    h.abort();
-                                }
-                                dead.mcp_handle.abort();
-                                let _ = dead.connection.shutdown().await;
-                                continue;
-                            }
-                            if is_connection_death(&e) {
-                                let dead = brain.take().expect("brain.as_mut() just held it");
-                                let reason = format!("prompt died: {e}");
-                                if let Some(new_brain) = self
-                                    .reconnect_with_events(
-                                        dead,
-                                        permission_tx.clone(),
-                                        brain_override.as_deref(),
-                                        reason,
-                                        &mut reconnect_failures,
-                                        RECONNECT_CIRCUIT_LIMIT,
-                                        RECONNECT_CIRCUIT_WINDOW,
-                                    )
-                                    .await
-                                {
-                                    brain = Some(new_brain);
-                                }
-                                // Drop this turn's prompt regardless (no auto-replay).
-                                continue;
-                            }
-                            self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                session: spur_sid_for_log,
-                                message: e.to_string(),
-                            }));
-                            let mut dead = brain.take().expect("brain.as_mut() just held it");
-                            dead.delegation_handle.abort();
-                            if let Some(h) = dead.notification_pump_handle.take() {
-                                h.abort();
-                            }
-                            dead.mcp_handle.abort();
-                            let _ = dead.connection.shutdown().await;
-                            continue;
-                        }
-                    };
-
-                    // ── Stream output + check for interrupts ────────────
-                    let mut cancel_deadline: Option<tokio::time::Instant> = None;
-
-                    loop {
-                        tokio::select! {
-                            item = stream.next() => {
-                                match item {
-                                    Some(notification) => {
-                                        let variant = match &notification.update {
-                                            spur_acp::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
-                                            spur_acp::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
-                                            spur_acp::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
-                                            spur_acp::SessionUpdate::ToolCall(_) => "tool_call",
-                                            spur_acp::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
-                                            spur_acp::SessionUpdate::Plan(_) => "plan",
-                                            spur_acp::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
-                                            spur_acp::SessionUpdate::CurrentModeUpdate(_) => "current_mode_update",
-                                            _ => "other",
-                                        };
-                                        let text_len = match &notification.update {
-                                            spur_acp::SessionUpdate::AgentMessageChunk(c)
-                                            | spur_acp::SessionUpdate::AgentThoughtChunk(c)
-                                            | spur_acp::SessionUpdate::UserMessageChunk(c) => {
-                                                match &c.content {
-                                                    spur_acp::ContentBlock::Text(tc) => tc.text.len(),
-                                                    _ => 0,
-                                                }
+                loop {
+                    tokio::select! {
+                        item = stream.next() => {
+                            match item {
+                                Some(notification) => {
+                                    let variant = match &notification.update {
+                                        spur_acp::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+                                        spur_acp::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+                                        spur_acp::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+                                        spur_acp::SessionUpdate::ToolCall(_) => "tool_call",
+                                        spur_acp::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+                                        spur_acp::SessionUpdate::Plan(_) => "plan",
+                                        spur_acp::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
+                                        spur_acp::SessionUpdate::CurrentModeUpdate(_) => "current_mode_update",
+                                        _ => "other",
+                                    };
+                                    let text_len = match &notification.update {
+                                        spur_acp::SessionUpdate::AgentMessageChunk(c)
+                                        | spur_acp::SessionUpdate::AgentThoughtChunk(c)
+                                        | spur_acp::SessionUpdate::UserMessageChunk(c) => {
+                                            match &c.content {
+                                                spur_acp::ContentBlock::Text(tc) => tc.text.len(),
+                                                _ => 0,
                                             }
-                                            _ => 0,
-                                        };
-                                        tracing::debug!(
-                                            streaming_probe = true,
-                                            site = "C_orchestrator_emit",
-                                            variant = variant,
-                                            text_len = text_len,
-                                            since_prompt_ms = prompt_started_at.elapsed().as_millis() as u64,
-                                            session = %b.spur_session_id,
-                                            "orchestrator emitting AgentNotification"
-                                        );
-                                        self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
-                                            session: b.spur_session_id.clone(),
-                                            notification: Box::new(notification),
-                                        }));
-                                    }
-                                    None => break, // Turn complete
-                                }
-                            }
-                            Some(queued) = user_input_rx.recv() => {
-                                match queued {
-                                    InteractiveInput::Message { blocks: msg_blocks, interrupt: msg_interrupt } => {
-                                        if msg_interrupt {
-                                            let _ = b.connection.cancel(&b.acp_session_id).await;
-                                            arm_cancel_deadline(&mut cancel_deadline);
                                         }
-                                        let queued_blocks = if msg_interrupt {
-                                            strip_bang_prefix(msg_blocks)
-                                        } else {
-                                            msg_blocks
-                                        };
-                                        pending_messages.push_back(InteractiveInput::Message {
-                                            blocks: queued_blocks,
-                                            interrupt: false,
-                                        });
-                                    }
-                                    InteractiveInput::CancelStream { session } => {
-                                        // Pure halt: cancel the stream without queuing any follow-on.
-                                        // The `session` field is informational — the streaming loop
-                                        // runs per-brain-session, so there is exactly one active stream.
-                                        let _ = session;
+                                        _ => 0,
+                                    };
+                                    tracing::debug!(
+                                        streaming_probe = true,
+                                        site = "C_orchestrator_emit",
+                                        variant = variant,
+                                        text_len = text_len,
+                                        since_prompt_ms = prompt_started_at.elapsed().as_millis() as u64,
+                                        session = %b.spur_session_id,
+                                        "orchestrator emitting AgentNotification"
+                                    );
+                                    self.emit(SpurEvent::now(SpurEventBody::AgentNotification {
+                                        session: b.spur_session_id.clone(),
+                                        notification: Box::new(notification),
+                                    }));
+                                }
+                                None => break, // Turn complete
+                            }
+                        }
+                        Some(queued) = user_input_rx.recv() => {
+                            match queued {
+                                InteractiveInput::Message { blocks: msg_blocks, interrupt: msg_interrupt } => {
+                                    if msg_interrupt {
                                         let _ = b.connection.cancel(&b.acp_session_id).await;
                                         arm_cancel_deadline(&mut cancel_deadline);
                                     }
-                                    other => {
-                                        // Queue non-message inputs for after streaming completes.
-                                        pending_messages.push_back(other);
-                                    }
+                                    let queued_blocks = if msg_interrupt {
+                                        strip_bang_prefix(msg_blocks)
+                                    } else {
+                                        msg_blocks
+                                    };
+                                    scheduler.push_user(InteractiveInput::Message {
+                                        blocks: queued_blocks,
+                                        interrupt: false,
+                                    });
                                 }
-                            }
-                            _ = async {
-                                match cancel_deadline {
-                                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                                    None => futures::future::pending().await,
+                                InteractiveInput::CancelStream { session } => {
+                                    let _ = session;
+                                    let _ = b.connection.cancel(&b.acp_session_id).await;
+                                    arm_cancel_deadline(&mut cancel_deadline);
                                 }
-                            } => {
-                                warn!("Cancel timeout — force-ending stream");
-                                break;
+                                InteractiveInput::SystemContinuation { continuation, .. } => {
+                                    scheduler.push_continuation(continuation);
+                                }
+                                other => {
+                                    // Non-prompt, non-cancel variants arriving mid-stream:
+                                    // push to scheduler as user input so they run after the turn.
+                                    scheduler.push_user(other);
+                                }
                             }
                         }
+                        _ = async {
+                            match cancel_deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                None => futures::future::pending().await,
+                            }
+                        } => {
+                            warn!("Cancel timeout — force-ending stream");
+                            cancel_resolved = true;
+                            break;
+                        }
                     }
-
-                    // Emit turn complete
-                    self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
-                        session: b.spur_session_id.clone(),
-                    }));
-                }
-
-                // ── NewSessionWithMessage ────────────────────────────────
-                // Explicit "spawn a fresh brain and send first prompt atomically".
-                // Shut down any existing brain first, then delegate to the
-                // Message arm's lazy-spawn path by pushing back onto the queue.
-                // Empty `blocks` means spawn-only (no first prompt) — we still
-                // re-queue so the Message arm owns the spawn logic uniformly.
-                InteractiveInput::NewSessionWithMessage { blocks, interrupt } => {
-                    // Retire the active brain (if any) but preserve the initialized
-                    // connection for the next Message arm's lazy-spawn to reuse.
-                    Self::retire_active_brain(&mut brain, &mut agent_connection);
-
-                    if blocks.is_empty() {
-                        // Spawn-only: no prompt. Leave brain=None; the next Message
-                        // will lazy-spawn using the preserved agent_connection.
-                        info!("NewSessionWithMessage with empty blocks — spawn deferred to next Message");
-                    } else {
-                        pending_messages.push_back(InteractiveInput::Message { blocks, interrupt });
-                    }
-                }
-
-                // ── SubmitReview ─────────────────────────────────────────
-                // Intentional no-op: spur-cli routes SubmitReview to the
-                // review_dispatcher_loop task, not to run_interactive. If
-                // it somehow arrives here (e.g., in tests that send directly
-                // to user_rx), we silently discard it to avoid double-routing.
-                InteractiveInput::SubmitReview { .. } => {}
-
-                // ── SystemContinuation ───────────────────────────────────
-                // Task 8 wires this into BrainScheduler. For now, log and drop.
-                InteractiveInput::SystemContinuation { .. } => {
-                    ignore_system_continuation_unexpected_site(concat!(file!(), ":", line!()));
                 }
             }
+            // Unconditional: turn finished regardless of how the loop exited.
+            scheduler.note_turn_finished();
+
+            // If cancel was the exit path, note it for the scheduler's grace window.
+            if cancel_resolved || cancel_deadline.is_some() {
+                scheduler.note_cancel_resolved(std::time::Instant::now());
+            }
+
+            // Emit turn complete
+            let b = brain.as_mut().unwrap();
+            self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
+                session: b.spur_session_id.clone(),
+            }));
         }
 
         // ── Cleanup ─────────────────────────────────────────────────────

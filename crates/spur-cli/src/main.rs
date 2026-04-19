@@ -481,8 +481,9 @@ async fn main() -> Result<()> {
 
             // Spawn interactive orchestrator (moves orch). `mut` so we can
             // `&mut orch_handle` inside a timeout for graceful shutdown below.
+            let overflow_continuations = spur_core::continuation_bridge::new_overflow_buf();
             let mut orch_handle = tokio::spawn(async move {
-                if let Err(e) = orch.run_interactive(user_rx, brain, Some(perm_tx)).await {
+                if let Err(e) = orch.run_interactive(user_rx, brain, Some(perm_tx), overflow_continuations).await {
                     tracing::error!(error = %e, "Interactive session error");
                 }
             });
