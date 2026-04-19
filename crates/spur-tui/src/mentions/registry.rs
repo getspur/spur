@@ -23,11 +23,37 @@ pub struct MentionRegistry {
 }
 
 impl MentionRegistry {
-    pub fn new() -> Self {
+    /// Source list for direct (single-agent) sessions. Files only.
+    pub fn for_direct_session() -> Self {
         Self {
             sources: vec![Box::new(FileMentionSource)],
             cache: HashMap::new(),
         }
+    }
+
+    /// Source list for brain sessions. Files + workers.
+    /// `workers` is the snapshot derived from the agent registry.
+    pub fn for_brain_session(workers: Vec<super::WorkerMentionDescriptor>) -> Self {
+        Self {
+            sources: vec![
+                Box::new(FileMentionSource),
+                Box::new(super::WorkerMentionSource::new(workers)),
+            ],
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Back-compat alias used by tests and any caller that doesn't
+    /// know the session role. Equivalent to `for_direct_session()`.
+    pub fn new() -> Self {
+        Self::for_direct_session()
+    }
+
+    /// Drop all cached per-session indexes. Call after the agent
+    /// registry reloads so the next `query()` rebuilds with the
+    /// fresh worker snapshot.
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
     }
 
     pub fn query(
@@ -37,6 +63,7 @@ impl MentionRegistry {
         query: &str,
         limit: usize,
     ) -> Vec<MentionEntry> {
+        // … existing body unchanged in this task; ranking changes happen in Task 4.
         let key = session_key(session);
         let needs_rebuild = match self.cache.get(&key) {
             Some(c) => c.built_at.elapsed() > CACHE_TTL,
