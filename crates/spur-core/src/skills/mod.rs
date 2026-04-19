@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
+mod frontmatter;
+
 static BUNDLED: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 static BUNDLED_RAW: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 
