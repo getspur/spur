@@ -111,6 +111,52 @@ impl Default for PaletteState {
     fn default() -> Self { Self::new() }
 }
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+#[derive(Debug)]
+pub enum PaletteIntent {
+    Accept(PaletteResult),
+    Dismiss,
+}
+
+impl PaletteState {
+    /// Dispatch one key. Returns `Some(intent)` when the overlay should take
+    /// a higher-level action (accept or dismiss); `None` means state was
+    /// mutated but the overlay stays open.
+    pub fn handle_key(&mut self, ev: KeyEvent) -> Option<PaletteIntent> {
+        // Ctrl+C always dismisses.
+        if ev.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(ev.code, KeyCode::Char('c'))
+        {
+            return Some(PaletteIntent::Dismiss);
+        }
+
+        match ev.code {
+            KeyCode::Esc => Some(PaletteIntent::Dismiss),
+            KeyCode::Enter | KeyCode::Tab => {
+                self.selected().cloned().map(PaletteIntent::Accept)
+            }
+            KeyCode::Up => {
+                self.cursor_up();
+                None
+            }
+            KeyCode::Down => {
+                self.cursor_down();
+                None
+            }
+            KeyCode::Backspace => {
+                self.pop_char();
+                None
+            }
+            KeyCode::Char(c) if !ev.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.push_char(c);
+                None
+            }
+            _ => None, // swallow other keys silently
+        }
+    }
+}
+
 /// Nucleo-fuzzy rank across all sources by matching `query` against `label`.
 /// Unmatched results are dropped. Ties broken by insertion order.
 fn rank_results(entries: &[PaletteResult], query: &str) -> Vec<PaletteResult> {
