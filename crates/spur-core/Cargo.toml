@@ -32,3 +32,4 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 spur-license = { workspace = true, features = ["test-support"] }
+proptest = "1"
