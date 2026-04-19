@@ -19,13 +19,15 @@ Make worker agents first-class citizens of the TUI `@`-mention picker so the use
 - A `WorkerMentionSource` that emits one mention entry per agent whose `role ∈ {worker, both}`.
 - Per-session source registration: brain sessions get `[FileMentionSource, WorkerMentionSource]`; direct (single-agent) sessions keep `[FileMentionSource]` only.
 - Picker ranking refinements so workers are visible on first `@` keypress and surface above tied file matches without overriding clear file-specific queries.
-- Send-time injection of a one-line preference hint into the brain's system prompt when worker mentions are present in the outgoing user message.
+- Send-time prepend of a one-line preference hint as the first `ContentBlock::Text` of the outgoing user message when worker mentions are present.
 - Visual differentiation in the picker (icon + tier tag + description) using existing `RetrievalRow.{primary, secondary, tag}` slots.
 
 ### Explicitly out of scope (future)
 
 - **Hard-route bypass.** Workers in mentions never bypass the brain. Direct dispatch is already covered by direct (non-brain) sessions.
-- **Structured ACP envelope field.** No new field on the brain prompt envelope; the hint travels via system-prompt text injection.
+- **Structured ACP envelope field.** No new field on `Action::SendMessage` or any ACP type; the hint travels as an in-band prepended `ContentBlock::Text`.
+
+- **Per-turn system-prompt injection.** The orchestrator builds the brain's system prompt once at session creation (`Orchestrator::build_brain_prompt_v1`, `crates/spur-core/src/orchestrator.rs:2467`). There is no per-turn system-prompt seam in the TUI, and we are not adding one. The hint rides the user turn instead.
 - **Sectioned picker (`── Workers ──` / `── Files ──` headers).** Would require changes to `RetrievalRow` and `PickerShell` selection/scroll math; revisit when mention kinds grow to 3+.
 - **Worker info expansion** (e.g., `@worker:foo!` to inline its capability sheet). Layered feature; not core to "mention a worker for tasks".
 - **Recency / usage-based ranking** of workers within the picker.
@@ -74,13 +76,20 @@ The brain remains authoritative — it can still refuse the suggestion based on 
                                           │
                               user submits prompt
                                           ▼
-                    SendPath: scan atoms for worker:// URIs
+              SendPath (session_detail.rs:921):
+              scan ProtectedRange.uri for worker:// prefixes
                                           │
                                           ▼
-              Inject one-line system-prompt addendum to brain turn
+        prepend_worker_hint() inserts a ContentBlock::Text
+        as blocks[0]; worker atoms also remain inline as
+        ResourceLink (transcript fidelity preserved)
                                           │
                                           ▼
-                          Brain LLM (with hint in system prompt)
+                    Action::SendMessage { blocks, … }
+                                          │
+                                          ▼
+                          Brain LLM sees hint as first
+                          item in the user turn
                                           │
                                           ▼
                           delegate_to_worker(...) — brain's choice
@@ -98,10 +107,15 @@ crates/spur-tui/src/mentions/
 ```
 
 ```
-crates/spur-tui/src/app.rs            ← snapshot wiring + send-time injection
+crates/spur-tui/src/app.rs                 ← snapshot construction + plumbing into SessionDetailView
+crates/spur-tui/src/views/session_detail.rs ← snapshot field, brain-vs-direct registry constructor selection,
+                                              prepend_worker_hint() call site at line ~921
+crates/spur-tui/src/mentions/hint.rs       ← NEW (small, testable): prepend_worker_hint helper
 crates/spur-tui/src/components/
-└── query_source.rs                   ← plumb secondary/tag into RetrievalRow
+└── query_source.rs                        ← plumb secondary/tag into RetrievalRow
 ```
+
+`submit_router::route` is **not** modified. The hint is layered onto its `SubmitDecision::Send` output in the view, keeping the router signature stable.
 
 ## 4. Component designs
 
@@ -180,6 +194,8 @@ The cache key remains the `SessionId`; the source list lives on the registry. Co
 
 If a session's role is unknown at registry-build time (edge case), default to `for_direct_session()`. Worker mentions are an additive affordance; missing them is harmless.
 
+**Snapshot plumbing.** `SessionDetailView::new` (currently 5 parameters: `session_id, agent_name, role, cwd, agent_cfg` — see `session_detail.rs:108`) gains a 6th: `worker_snapshot: Vec<WorkerMentionDescriptor>`. The single production call site is `app.rs:760`; four test call sites in `session_detail.rs` (lines 1657, 1779, 1816, plus any in test modules) pass `Vec::new()`. The view stores the snapshot, derives `known_worker_names: HashSet<String>` once, and uses both: the snapshot to construct `MentionRegistry::for_brain_session(snapshot.clone())`, the name set to drive `prepend_worker_hint`.
+
 ### 4.4 Picker ranking refinements (`registry.rs::query`)
 
 **Empty-query branch** (today: `entries.iter().take(limit).cloned()` then sort by `display.len()`):
@@ -222,40 +238,87 @@ RetrievalRow {
 
 `accept(row_idx)` continues to construct `RetrievalAccept::InsertAtom { text: format!("@{}", hit.display), uri: hit.uri.clone(), name: hit.display.clone(), … }`. For workers: `text = "@worker:claude-code"`, `uri = "worker://claude-code"`, `name = "worker:claude-code"`. The `InputBar` already renders this as a single-unit atom (existing `ProtectedRange` machinery).
 
-### 4.6 Send-time hint injection (`app.rs`)
+### 4.6 Send-time hint prepend (`session_detail.rs` + `mentions/hint.rs`)
 
-The brain's per-turn system prompt is composed near `app.rs:1487/1495`. Insert a small helper invoked there:
+**Architectural note (corrects an earlier draft).** The brain's "system prompt" is built once per session by `Orchestrator::build_brain_prompt_v1` (`crates/spur-core/src/orchestrator.rs:2467`). There is no per-turn system-prompt seam in the TUI, and adding one would require a cross-crate orchestrator/ACP change (out of scope per §1). The hint therefore travels **as the first `ContentBlock::Text` of the user turn** — in-band, unambiguously attributable to the UI, and reversible by a single-line deletion.
+
+The seam is `crates/spur-tui/src/views/session_detail.rs:921`, immediately before the `SubmitDecision::Send { blocks, interrupt }` is converted into `Action::SendMessage`. The view owns:
+
+- `worker_snapshot: Vec<WorkerMentionDescriptor>` — the same snapshot threaded into the `MentionRegistry` constructor (§4.3).
+- `known_worker_names: HashSet<String>` — derived once from `worker_snapshot`, kept in sync.
+
+Helper, in a new tiny module `crates/spur-tui/src/mentions/hint.rs` for unit testability:
 
 ```rust
-/// Build a one-line preference hint from the outgoing message's atoms.
-/// `atoms` is the slice of `InputBar` `ProtectedRange` atoms (the same
-/// type the existing send path already iterates to build ResourceLink
-/// content blocks — see `chat-input-commands-mentions-design.md` §B.4).
-/// `known_workers` is the snapshot built in §4.2.
-fn worker_preference_hint(
-    atoms: &[InputBarAtom],
+use std::collections::HashSet;
+use crate::components::input_bar::ProtectedRange;
+use spur_acp::{ContentBlock, TextContent};
+
+/// If the outgoing message has any worker:// atoms whose names are
+/// in `known_workers`, prepend a single ContentBlock::Text hint to
+/// `blocks` and return true. Otherwise leave `blocks` untouched and
+/// return false.
+///
+/// Worker atoms are NOT removed from the message body — they continue
+/// to serialize as ResourceLink via the existing `assemble_blocks`,
+/// preserving transcript fidelity.
+pub fn prepend_worker_hint(
+    blocks: &mut Vec<ContentBlock>,
+    ranges: &[ProtectedRange],
     known_workers: &HashSet<String>,
-) -> Option<String> {
-    let mut names: Vec<&str> = atoms.iter()
-        .filter_map(|a| a.uri.strip_prefix("worker://"))
-        .filter(|n| known_workers.contains(*n))   // drop unknown silently
+) -> bool {
+    let mut names: Vec<&str> = ranges
+        .iter()
+        .filter_map(|r| r.uri.strip_prefix("worker://"))
+        .filter(|n| known_workers.contains(*n))
         .collect();
     names.sort();
     names.dedup();
-    if names.is_empty() { return None; }
-    Some(format!(
-        "User-suggested workers for delegation this turn: {} \
+    if names.is_empty() {
+        return false;
+    }
+    let hint = format!(
+        "[UI hint] User-suggested workers for delegation this turn: {} \
          (preference, not override; honor unless `delegation.avoid_for` clearly matches).",
         names.join(", ")
-    ))
+    );
+    blocks.insert(0, ContentBlock::Text(TextContent::new(hint)));
+    true
 }
 ```
 
-`InputBarAtom` is the existing input-bar atom type carrying `{ text, uri, name }` (the same struct the picker `accept` path produces — see `query_source.rs:320`). `known_workers` is derived from the snapshot held in `App` (a `HashSet<String>` of descriptor names, rebuilt whenever the snapshot is rebuilt).
+Call site in `session_detail.rs` (sketch — exact match to existing match-arm structure):
 
-If `Some(hint)`, append it as its own line to the system prompt assembled at the existing seam. **No change to the user-message body** — the literal `@worker:foo` text still reaches the brain in the user turn, which is fine (and helps the brain trace the user's intent in transcript review).
+```rust
+SubmitDecision::Send { mut blocks, interrupt } => {
+    if self.role == "brain" {
+        let _ = crate::mentions::hint::prepend_worker_hint(
+            &mut blocks,
+            self.input_bar.protected_ranges(),  // existing accessor or add a small one
+            &self.known_worker_names,
+        );
+    }
+    Some(Action::SendMessage {
+        session: self.session_id.clone(),
+        blocks,
+        interrupt,
+    })
+}
+```
 
-If `None` (no worker mentions, or all unknown), behavior is identical to today.
+If `protected_ranges()` is not already exposed on `InputBar`, add a minimal `pub fn protected_ranges(&self) -> &[ProtectedRange]` accessor. The field is already `pub(crate)`-reachable via existing methods like `range_at_cursor`; this is a tiny additive change.
+
+**Direct sessions skip the helper entirely** (`role != "brain"`). Worker mentions can't be picked there (per §4.3 source-list selection), so the guard is defense in depth against pasted text and a clear signal in code.
+
+**Behavior summary:**
+
+| Mention pattern in outgoing message | Resulting `blocks` |
+|---|---|
+| No worker atoms | unchanged: `[Text, ResourceLink?, Text?, …]` (today's behavior) |
+| One known worker | `[Text("[UI hint] … claude-code …"), <today's blocks…>]` |
+| Multiple known workers | `[Text("[UI hint] … claude-code, codex …"), …]` (deduped, sorted) |
+| Worker atom whose name is unknown to the registry | unknown name dropped from hint; if all unknown, no hint prepended |
+| Worker mention in a direct session (e.g., pasted) | helper not invoked; literal text passes through |
 
 ## 5. Error handling & edge cases
 
@@ -278,19 +341,23 @@ Unit tests in `crates/spur-tui/src/mentions/`:
 3. **`registry_empty_query_caps_workers_at_pin_cap`** — 10 workers in source; only `WORKER_PIN_CAP` appear at the top of the empty-query result.
 4. **`registry_typed_query_boosts_workers_in_ties`** — query `cla` with `worker:claude-code` and `claudia.rs` both present; worker ranks first.
 5. **`registry_typed_query_does_not_clobber_strong_file_matches`** — query `src/spur-acp/registry.rs` (a real file present); the file is row 0 despite worker presence.
-6. **`worker_preference_hint_dedupes_and_validates`** — given atoms `[worker://a, worker://a, worker://missing, worker://b]` and registry `{a, b, c}`, hint contains `a, b` exactly once.
-7. **`worker_preference_hint_returns_none_when_no_worker_atoms`** — atoms list contains only `file://` URIs → no hint produced (system prompt unchanged).
+6. **`prepend_worker_hint_dedupes_and_validates`** — given ranges `[worker://a, worker://a, worker://missing, worker://b]` and known `{a, b, c}`, returns `true` and `blocks[0]` is a `Text` whose body lists `a, b` exactly once.
+7. **`prepend_worker_hint_noop_when_no_worker_ranges`** — ranges list contains only `file://` URIs → returns `false`, `blocks` unchanged.
+8. **`prepend_worker_hint_noop_when_all_unknown`** — only worker URIs whose names aren't in `known_workers` → returns `false`, `blocks` unchanged.
 
-Integration touchpoint:
+Integration touchpoints:
 
-8. **TUI smoke test** in the existing session-detail tests: open `@` picker in a brain session, confirm worker rows appear in the empty state; type `@wo`, confirm `worker:*` rows rank at top; pick one, confirm an atom with `worker://` URI is inserted into the input buffer.
+9. **Picker smoke test** in the existing session-detail / picker tests: open `@` picker in a brain session, confirm worker rows appear in the empty state; type `@wo`, confirm `worker:*` rows rank at top; pick one, confirm a `ProtectedRange` with `uri = "worker://…"` is inserted into the input buffer.
+10. **Send-path integration test** (new file under `crates/spur-tui/tests/`): construct a `SessionDetailView` with role `"brain"` and a snapshot of two workers; insert text + a worker atom into its `InputBar`; trigger submit; assert the resulting `Action::SendMessage { blocks, … }` has `blocks[0] == ContentBlock::Text(t)` where `t.text` starts with `"[UI hint]"` and contains the worker name; assert the original `ResourceLink` is preserved later in `blocks`.
+
+**Empirical validation already performed.** A throwaway simulation under `cargo test -p spur-tui --test _nucleo_score_simulation` (deleted post-validation) confirmed §4.4's score-boost behavior with the live `nucleo-matcher 0.3` dependency. Concrete results recorded in §10 below.
 
 ## 7. Reversibility & migration
 
 The whole feature collapses cleanly:
 
 - Remove `MentionRegistry::for_brain_session` callers (use `for_direct_session` everywhere) → workers disappear from the picker.
-- Delete `worker_preference_hint` invocation at the system-prompt seam → behavior reduces to "Option A" (literal text only, no structured hint).
+- Delete the `prepend_worker_hint` call at `session_detail.rs:921` → no hint blocks are emitted; worker atoms still serialize as ResourceLink inline (Option A behavior).
 - Keep `MentionEntry::{secondary, tag}` and the `Worker` variant — these are additive and don't constrain anything if unused.
 
 No cross-crate schema migration. No ACP envelope changes. No orchestrator entry-point additions.
@@ -309,3 +376,42 @@ No cross-crate schema migration. No ACP envelope changes. No orchestrator entry-
 - No new picker abstractions (sections, headers, multiple triggers).
 - No recency/usage ranking.
 - No sub-arg autocomplete on worker mentions.
+
+## 10. Implementability audit (pre-plan validation)
+
+This spec was audited against the live codebase before producing an implementation plan. Each load-bearing assumption was either grounded in a file:line citation or empirically validated by simulation. Results:
+
+| Assumption | Outcome | Evidence |
+|---|---|---|
+| `RetrievalRow` has `primary/secondary/tag/atoms` fields | ✅ verified | `crates/spur-tui/src/components/query_source.rs:25-35` |
+| `InputBar` atoms preserve `{ uri, name }` | ✅ verified | `ProtectedRange { start, end, uri, name }` at `input_bar.rs:18-22`; `insert_atom(text, uri, name)` at `:1044` |
+| Brain/direct distinction reachable at `MentionRegistry` construction | ✅ verified | `SessionDetailView::new(.., role: String, .., agent_cfg: Arc<AgentConfig>)` at `session_detail.rs:108` — both in scope |
+| Per-turn brain system-prompt seam exists in TUI | ❌ **refuted** | Brain prompt is built once at session creation by `Orchestrator::build_brain_prompt_v1` (`crates/spur-core/src/orchestrator.rs:2467`). Spec was repaired in §4.6 to prepend an in-band `ContentBlock::Text` to the user turn at `session_detail.rs:921` instead. |
+| `AgentRole` enum w/ `Brain/Worker/Both` and TUI-reachable filter | ✅ verified | `crates/spur-acp/src/types.rs:126`; `AgentRegistry::workers()` filter at `crates/spur-acp/src/registry.rs:85` |
+| Nucleo `5/4` boost surfaces workers for ambiguous queries without clobbering strong file matches | ✅ empirically verified — see below |
+| `MentionRegistry` cache trivially clearable | ✅ verified | `cache: HashMap<String, CachedIndex>` at `registry.rs:22` |
+| `WORKER_PIN_CAP = 6` × `limit = 20` (call site `query_source.rs:300`) leaves ≥ 14 file slots | ✅ verified |
+| MCP `worker_capable` filter mirrorable in TUI | ✅ verified | Same predicate as `registry.rs:85` |
+| Adding `Option`-typed fields to `MentionEntry` is non-breaking | ✅ verified | One construction site (`entry_for_path` at `entry.rs:25`) |
+
+### 10.1 Empirical nucleo simulation
+
+A throwaway integration test (`crates/spur-tui/tests/_nucleo_score_simulation.rs`, deleted post-validation) was run against the live `nucleo-matcher = "0.3"` dependency with a 4-worker / 12-file fixture and the proposed `5/4` worker boost. Concrete observed scores:
+
+| Query | Top result | Score | Comment |
+|---|---|---|---|
+| `cla` | `🤖 worker:claude-code` | 105 | Beats `📄 claudia.rs` (88) — ambiguous query surfaces worker. |
+| `worker:co` | `🤖 worker:codex` | 305 | Worker namespace match wins decisively. |
+| `src/spur-acp/registry.rs` | `📄 src/spur-acp/registry.rs` | 634 | Strong file match unaffected by worker boost. |
+| `registry` | `📄 src/registry.rs` | 209 | Short substring still picks file (no workers contain the substring). |
+| `toml` | `📄 Cargo.toml` | 104 | File-only query: no workers in result set. |
+
+All 5 cases match the spec's §4.4 claims. The boost factor `(NUM, DEN) = (5, 4)` is approved as the implementation default; tests in §6 lock these expectations into the regression suite using the same fixture pattern.
+
+### 10.2 Plumbing changes called out
+
+- `SessionDetailView::new` signature gains a 6th parameter (`worker_snapshot: Vec<WorkerMentionDescriptor>`); 1 production + 4 test call sites updated (`app.rs:760`, `session_detail.rs:1657 / :1779 / :1816`, plus any subsequent test additions).
+- `submit_router::route` is **not** modified.
+- `InputBar` may need a tiny `pub fn protected_ranges(&self) -> &[ProtectedRange]` accessor if not already exposed; one-line additive change.
+
+No other surface changes anticipated.
