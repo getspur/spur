@@ -1,5 +1,5 @@
 pub mod scheduler;
-pub use scheduler::BrainScheduler;
+pub use scheduler::{BrainScheduler, ScheduledAction};
 
 pub mod event_funnel;
 pub mod event_sink;
