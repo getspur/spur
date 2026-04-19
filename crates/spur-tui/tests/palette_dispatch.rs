@@ -91,3 +91,25 @@ fn ctrl_c_dismisses() {
     let i = s.handle_key(ev);
     assert!(matches!(i, Some(PaletteIntent::Dismiss)));
 }
+
+#[test]
+fn enter_on_trace_result_emits_accept_with_trace_payload() {
+    let mut s = PaletteState::new();
+    s.push_raw(vec![PaletteResult {
+        kind: PaletteKind::Trace,
+        label: "…some trace text…".into(),
+        subtitle: "trace · entry #42".into(),
+        payload: PalettePayload::Trace { entry_idx: 42 },
+    }]);
+    let ev = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    match s.handle_key(ev) {
+        Some(PaletteIntent::Accept(res)) => match res.payload {
+            PalettePayload::Trace { entry_idx } => assert_eq!(entry_idx, 42),
+            other => panic!("expected Trace payload, got {:?}", other),
+        },
+        other => panic!("expected Accept, got {:?}", other),
+    }
+}

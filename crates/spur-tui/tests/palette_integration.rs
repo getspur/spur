@@ -28,6 +28,18 @@ fn ctrl_k_with_help_visible_is_swallowed_by_help() {
 }
 
 #[test]
+fn ctrl_k_while_help_visible_does_not_open_palette_even_if_help_does_not_swallow_it() {
+    let mut app = new_app();
+    // Open help.
+    app.handle_crossterm_event(key(KeyCode::Char('?'), KeyModifiers::NONE));
+    // Directly attempt to open palette via the internal path (bypassing the
+    // priority chain). The guard in open_palette must prevent it.
+    app.try_open_palette_for_test();
+    assert!(!app.is_palette_visible(),
+        "open_palette must refuse to open while help_visible is true");
+}
+
+#[test]
 fn palette_session_accept_emits_resume_session_action() {
     let mut app = new_app();
     app.handle_crossterm_event(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
