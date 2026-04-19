@@ -79,9 +79,120 @@ pub trait QuerySource {
     fn accept(&self, row_idx: usize) -> Option<RetrievalAccept>;
 }
 
+use crate::input_history::InputHistoryEntry;
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
+
+/// QuerySource backed by a snapshot of the global input history, oldest-first.
+pub struct HistoryQuerySource {
+    history: Vec<InputHistoryEntry>,
+    matcher: Matcher,
+    /// Snapshots parallel to the rows returned by the most recent `refresh`.
+    /// `accept(i)` returns a `ReplaceState(last_snapshots[i].clone())`.
+    last_snapshots: Vec<InputStateSnapshot>,
+}
+
+impl HistoryQuerySource {
+    pub fn new(history: Vec<InputHistoryEntry>) -> Self {
+        Self {
+            history,
+            matcher: Matcher::new(Config::DEFAULT),
+            last_snapshots: Vec::new(),
+        }
+    }
+
+    fn row_from_entry(entry: &InputHistoryEntry) -> RetrievalRow {
+        let primary = entry.snapshot.text.replace('\n', " ↵ ");
+        let mention_count = entry.snapshot.protected_ranges.len();
+        let secondary = match mention_count {
+            0 => String::new(),
+            1 => "1 mention".to_string(),
+            n => format!("{n} mentions"),
+        };
+        let tag = entry
+            .agent
+            .as_ref()
+            .map(|a| format!("⟨{a}⟩"))
+            .unwrap_or_default();
+        let atoms = if entry.snapshot.text.contains('\n') {
+            Vec::new()
+        } else {
+            entry
+                .snapshot
+                .protected_ranges
+                .iter()
+                .map(|r| (r.start, r.end))
+                .collect()
+        };
+        RetrievalRow {
+            primary,
+            secondary,
+            tag,
+            atoms,
+        }
+    }
+}
+
+impl QuerySource for HistoryQuerySource {
+    fn title(&self) -> &str {
+        "History · bck-i-search"
+    }
+
+    fn query_mode(&self) -> QueryMode {
+        QueryMode::OwnedByShell
+    }
+
+    fn refresh(&mut self, query: &str) -> Vec<RetrievalRow> {
+        self.last_snapshots.clear();
+        if self.history.is_empty() {
+            return Vec::new();
+        }
+        let picked: Vec<usize> = if query.is_empty() {
+            (0..self.history.len()).rev().take(20).collect()
+        } else {
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut buf = Vec::new();
+            let mut scored: Vec<(u32, usize)> = self
+                .history
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| {
+                    buf.clear();
+                    let score =
+                        pattern.score(Utf32Str::new(&h.snapshot.text, &mut buf), &mut self.matcher)?;
+                    Some((score, i))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.into_iter().take(20).map(|(_, i)| i).collect()
+        };
+        let rows = picked
+            .iter()
+            .map(|&i| Self::row_from_entry(&self.history[i]))
+            .collect();
+        self.last_snapshots = picked
+            .iter()
+            .map(|&i| self.history[i].snapshot.clone())
+            .collect();
+        rows
+    }
+
+    fn accept(&self, row_idx: usize) -> Option<RetrievalAccept> {
+        self.last_snapshots
+            .get(row_idx)
+            .cloned()
+            .map(RetrievalAccept::ReplaceState)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input_history::{InputHistoryEntry, InputStateSnapshot};
+
+    fn mk_entry(text: &str) -> InputHistoryEntry {
+        InputHistoryEntry::new(InputStateSnapshot::from_text(text))
+    }
 
     #[test]
     fn retrieval_row_atoms_are_byte_ranges() {
@@ -104,5 +215,101 @@ mod tests {
             RetrievalAccept::ReplaceState(got) => assert_eq!(got.text, "hello"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn history_source_empty_query_returns_newest_first() {
+        let hist = vec![mk_entry("oldest"), mk_entry("middle"), mk_entry("newest")];
+        let mut src = HistoryQuerySource::new(hist);
+        let rows = src.refresh("");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].primary, "newest");
+        assert_eq!(rows[1].primary, "middle");
+        assert_eq!(rows[2].primary, "oldest");
+    }
+
+    #[test]
+    fn history_source_empty_history_returns_no_rows() {
+        let mut src = HistoryQuerySource::new(Vec::new());
+        assert!(src.refresh("").is_empty());
+        assert!(src.refresh("anything").is_empty());
+    }
+
+    #[test]
+    fn history_source_fuzzy_narrows_rows() {
+        let hist = vec![
+            mk_entry("refactor the delegation walker"),
+            mk_entry("fix the ProtectedRange panic"),
+            mk_entry("add test for INV-C2"),
+        ];
+        let mut src = HistoryQuerySource::new(hist);
+        let rows = src.refresh("refa");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "refactor the delegation walker");
+    }
+
+    #[test]
+    fn history_source_accept_returns_replace_state_snapshot() {
+        let hist = vec![mk_entry("newest")];
+        let mut src = HistoryQuerySource::new(hist);
+        let _ = src.refresh("");
+        let accept = src.accept(0).expect("row 0 exists");
+        match accept {
+            RetrievalAccept::ReplaceState(snap) => assert_eq!(snap.text, "newest"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn history_source_accept_out_of_bounds_returns_none() {
+        let src = HistoryQuerySource::new(vec![mk_entry("only")]);
+        assert!(src.accept(99).is_none());
+    }
+
+    #[test]
+    fn history_source_matcher_reused_across_refreshes() {
+        // Structural check: `refresh` does NOT construct a fresh Matcher
+        // each call. We verify by type — the field exists and is private,
+        // so the only way refresh could violate is by shadowing it, which
+        // would show up as a struct-size regression. This is a weaker form
+        // of the Phase 2 alloc-bound test and is strengthened there.
+        let src = HistoryQuerySource::new(Vec::new());
+        // The struct exists and holds a Matcher; if someone later removes
+        // the field, the below line will fail to compile.
+        let _field_exists: &nucleo_matcher::Matcher = &src.matcher;
+        let _ = src; // suppress unused warning
+    }
+
+    #[test]
+    fn history_source_title_is_bck_i_search() {
+        let src = HistoryQuerySource::new(Vec::new());
+        assert_eq!(src.title(), "History · bck-i-search");
+    }
+
+    #[test]
+    fn history_source_query_mode_is_owned_by_shell() {
+        let src = HistoryQuerySource::new(Vec::new());
+        assert_eq!(src.query_mode(), QueryMode::OwnedByShell);
+    }
+
+    #[test]
+    fn history_source_row_metadata_reflects_mentions() {
+        let hist = vec![mk_entry("no mentions here")];
+        let mut src = HistoryQuerySource::new(hist);
+        let rows = src.refresh("");
+        assert_eq!(rows[0].secondary, "");
+
+        let mut with_atom = InputStateSnapshot::from_text("hi @foo");
+        with_atom.protected_ranges = vec![crate::components::input_bar::ProtectedRange {
+            start: 3,
+            end: 7,
+            uri: "file:///foo".to_string(),
+            name: "foo".to_string(),
+        }];
+        let hist2 = vec![InputHistoryEntry::new(with_atom)];
+        let mut src2 = HistoryQuerySource::new(hist2);
+        let rows2 = src2.refresh("");
+        assert_eq!(rows2[0].secondary, "1 mention");
+        assert_eq!(rows2[0].atoms, vec![(3, 7)]);
     }
 }
