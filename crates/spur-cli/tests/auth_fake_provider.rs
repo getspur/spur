@@ -40,9 +40,14 @@ async fn refresh_invokes_validate_exactly_once() {
     )));
     let license = SpurLicense::from_provider(fake.clone());
 
-    run_with_license(AuthCommands::Refresh { format: OutputFormat::Plain }, license)
-        .await
-        .expect("refresh happy path");
+    run_with_license(
+        AuthCommands::Refresh {
+            format: OutputFormat::Plain,
+        },
+        license,
+    )
+    .await
+    .expect("refresh happy path");
     assert_eq!(fake.validate_call_count(), 1);
 }
 
@@ -51,9 +56,14 @@ async fn logout_invokes_deactivate_and_transitions_to_inactive() {
     let fake = Arc::new(FakeProvider::new(LicenseState::active_cached()));
     let license = SpurLicense::from_provider(fake.clone());
 
-    run_with_license(AuthCommands::Logout { format: OutputFormat::Plain }, license.clone())
-        .await
-        .expect("logout happy path");
+    run_with_license(
+        AuthCommands::Logout {
+            format: OutputFormat::Plain,
+        },
+        license.clone(),
+    )
+    .await
+    .expect("logout happy path");
     assert_eq!(fake.deactivate_call_count(), 1);
     assert!(matches!(
         license.current_state().status,

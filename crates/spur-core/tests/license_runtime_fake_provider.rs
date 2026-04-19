@@ -13,20 +13,20 @@ use spur_acp::LicenseStatusEvent;
 use spur_core::event_funnel::spawn_funnel;
 use spur_core::license_runtime::spawn_license_runtime;
 use spur_license::test_support::FakeProvider;
-use spur_license::{LicenseError, LicenseEventKind, LicenseState, LicenseStatus, Plan, SpurLicense};
+use spur_license::{
+    LicenseError, LicenseEventKind, LicenseState, LicenseStatus, Plan, SpurLicense,
+};
 use tokio::sync::broadcast;
 
 #[tokio::test]
 async fn active_to_degraded_and_back_via_validate() {
     let seed = LicenseState::active_validated(Plan::Pro, Default::default());
-    let fake = Arc::new(
-        FakeProvider::new(seed).with_refresh_policy(
-            spur_license::provider::RefreshPolicy {
-                validate_interval: Duration::from_millis(40),
-                heartbeat_interval: Duration::from_secs(3600),
-            },
-        ),
-    );
+    let fake = Arc::new(FakeProvider::new(seed).with_refresh_policy(
+        spur_license::provider::RefreshPolicy {
+            validate_interval: Duration::from_millis(40),
+            heartbeat_interval: Duration::from_secs(3600),
+        },
+    ));
     fake.push_validate_result(Err(LicenseError::Provider("network".into())));
     fake.push_validate_result(Ok(LicenseState::active_validated(
         Plan::Pro,
@@ -77,14 +77,12 @@ async fn active_to_degraded_and_back_via_validate() {
 #[tokio::test]
 async fn authoritative_invalid_propagates_to_funnel() {
     let seed = LicenseState::active_validated(Plan::Pro, Default::default());
-    let fake = Arc::new(
-        FakeProvider::new(seed).with_refresh_policy(
-            spur_license::provider::RefreshPolicy {
-                validate_interval: Duration::from_millis(20),
-                heartbeat_interval: Duration::from_secs(3600),
-            },
-        ),
-    );
+    let fake = Arc::new(FakeProvider::new(seed).with_refresh_policy(
+        spur_license::provider::RefreshPolicy {
+            validate_interval: Duration::from_millis(20),
+            heartbeat_interval: Duration::from_secs(3600),
+        },
+    ));
     let mut invalid = LicenseState::inactive("revoked");
     invalid.status = LicenseStatus::Invalid;
     fake.push_validate_result(Ok(invalid));
@@ -148,14 +146,12 @@ async fn injected_subscription_event_reaches_funnel() {
 async fn degraded_from_preserves_invalid_status_text() {
     let mut invalid = LicenseState::inactive("revoked");
     invalid.status = LicenseStatus::Invalid;
-    let fake = Arc::new(
-        FakeProvider::new(invalid).with_refresh_policy(
-            spur_license::provider::RefreshPolicy {
-                validate_interval: Duration::from_millis(20),
-                heartbeat_interval: Duration::from_secs(3600),
-            },
-        ),
-    );
+    let fake = Arc::new(FakeProvider::new(invalid).with_refresh_policy(
+        spur_license::provider::RefreshPolicy {
+            validate_interval: Duration::from_millis(20),
+            heartbeat_interval: Duration::from_secs(3600),
+        },
+    ));
     fake.push_validate_result(Err(LicenseError::Provider("transient".into())));
 
     let license = SpurLicense::from_provider(fake);
@@ -179,7 +175,11 @@ async fn degraded_from_preserves_invalid_status_text() {
     }
     handle.abort();
 
-    assert_eq!(last_status, Some(LicenseStatusEvent::Invalid), "status must stay Invalid");
+    assert_eq!(
+        last_status,
+        Some(LicenseStatusEvent::Invalid),
+        "status must stay Invalid"
+    );
     assert_eq!(
         last_text, "revoked",
         "transient validate error must not overwrite prior Invalid text"
@@ -189,14 +189,12 @@ async fn degraded_from_preserves_invalid_status_text() {
 #[tokio::test(start_paused = true)]
 async fn runtime_validates_within_first_minute_after_boot() {
     let seed = LicenseState::active_validated(Plan::Pro, Default::default());
-    let fake = Arc::new(
-        FakeProvider::new(seed).with_refresh_policy(
-            spur_license::provider::RefreshPolicy {
-                validate_interval: Duration::from_secs(3600),
-                heartbeat_interval: Duration::from_secs(3600),
-            },
-        ),
-    );
+    let fake = Arc::new(FakeProvider::new(seed).with_refresh_policy(
+        spur_license::provider::RefreshPolicy {
+            validate_interval: Duration::from_secs(3600),
+            heartbeat_interval: Duration::from_secs(3600),
+        },
+    ));
     fake.push_validate_result(Ok(LicenseState::active_validated(
         Plan::Pro,
         Default::default(),

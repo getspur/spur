@@ -56,8 +56,11 @@ fn auth_status_json_emits_parseable_object() {
         .expect("spawn spur auth status --format json");
     assert!(output.status.success(), "exit status: {:?}", output.status);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(stdout.trim())
-        .expect("valid JSON on stdout");
-    assert!(value.get("status").is_some(), "missing status field: {stdout}");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("valid JSON on stdout");
+    assert!(
+        value.get("status").is_some(),
+        "missing status field: {stdout}"
+    );
     assert!(value.get("plan").is_some(), "missing plan field: {stdout}");
 }

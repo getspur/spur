@@ -72,10 +72,7 @@ fn cached_active_startup_surfaces_real_plan() {
     // key so `trusted_license` is present in the disk cache.
     let license = SpurLicense::from_env().expect("env configured");
     let state = license.current_state();
-    assert!(matches!(
-        state.status,
-        spur_license::LicenseStatus::Active
-    ));
+    assert!(matches!(state.status, spur_license::LicenseStatus::Active));
     assert!(
         !matches!(state.plan, spur_license::Plan::Unknown),
         "expected cached plan to hydrate, got Unknown (plan={:?})",
@@ -85,8 +82,8 @@ fn cached_active_startup_surfaces_real_plan() {
 
 #[test]
 fn from_provider_returns_a_usable_facade() {
-    use std::sync::Arc;
     use spur_license::provider::LicenseProvider;
+    use std::sync::Arc;
 
     // Inline minimal provider so this test doesn't depend on FakeProvider
     // (which lands in Task 4).
@@ -96,9 +93,7 @@ fn from_provider_returns_a_usable_facade() {
         fn current_state(&self) -> spur_license::LicenseState {
             spur_license::LicenseState::inactive("noop")
         }
-        fn subscribe(
-            &self,
-        ) -> tokio::sync::broadcast::Receiver<spur_license::LicenseEvent> {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<spur_license::LicenseEvent> {
             let (tx, rx) = tokio::sync::broadcast::channel(1);
             std::mem::forget(tx);
             rx
