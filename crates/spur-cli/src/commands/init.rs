@@ -215,12 +215,8 @@ fn print_gitattributes_advisory_if_needed(repo_root: &std::path::Path) {
     // Advisory if the file doesn't mention LF normalization for .md files.
     if !(contents.contains("*.md") && contents.contains("eol=lf")) {
         println!();
-        println!(
-            "Tip: add `*.md text eol=lf` to .gitattributes for cross-platform"
-        );
-        println!(
-            "     teammates. SpurPower marker files may thrash across CRLF/LF"
-        );
+        println!("Tip: add `*.md text eol=lf` to .gitattributes for cross-platform");
+        println!("     teammates. SpurPower marker files may thrash across CRLF/LF");
         println!("     systems otherwise.");
     }
 }
