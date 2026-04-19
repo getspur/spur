@@ -75,6 +75,72 @@ impl PaletteSource for SessionSource {
     }
 }
 
+use crate::components::react_trace::ReactTrace;
+
+pub struct TraceSource {
+    /// Snapshot: (entry_idx, preview_text). Preview is truncated to 80 chars.
+    entries: Vec<(usize, String)>,
+}
+
+impl TraceSource {
+    pub fn from_trace(trace: &ReactTrace) -> Self {
+        let entries = trace
+            .entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| {
+                if !has_user_visible_text(&entry.kind) {
+                    return None;
+                }
+                let preview = truncate_trace(entry.text.clone(), 80);
+                Some((idx, preview))
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// Empty-trace constructor for smoke tests without a full view.
+    pub fn from_empty() -> Self {
+        Self { entries: Vec::new() }
+    }
+}
+
+impl PaletteSource for TraceSource {
+    fn collect(&self) -> Vec<PaletteResult> {
+        self.entries
+            .iter()
+            .map(|(idx, preview)| PaletteResult {
+                kind: PaletteKind::Trace,
+                label: preview.clone(),
+                subtitle: format!("trace · entry #{}", idx),
+                payload: PalettePayload::Trace { entry_idx: *idx },
+            })
+            .collect()
+    }
+}
+
+/// Returns true for TraceKind variants that carry user-readable text.
+/// `Act`, `Delegate`, and `Permission` are skipped.
+fn has_user_visible_text(kind: &crate::components::react_trace::TraceKind) -> bool {
+    use crate::components::react_trace::TraceKind;
+    matches!(
+        kind,
+        TraceKind::Think
+            | TraceKind::AgentMessage { .. }
+            | TraceKind::Observe { .. }
+            | TraceKind::UserMessage
+    )
+}
+
+fn truncate_trace(s: String, max: usize) -> String {
+    if s.chars().count() <= max {
+        s
+    } else {
+        let taken: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}…", taken)
+    }
+}
+
 use spur_core::lineage::projection::ExecutorLineage;
 
 pub struct WorkerSource {
