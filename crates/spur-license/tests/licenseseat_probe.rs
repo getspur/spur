@@ -64,3 +64,50 @@ async fn live_validate_smoke() {
     let license = SpurLicense::from_env().expect("license env configured");
     let _ = license.validate().await.expect("validate");
 }
+
+#[test]
+fn from_provider_returns_a_usable_facade() {
+    use std::sync::Arc;
+    use spur_license::provider::LicenseProvider;
+
+    // Inline minimal provider so this test doesn't depend on FakeProvider
+    // (which lands in Task 4).
+    struct Noop;
+    #[async_trait::async_trait]
+    impl LicenseProvider for Noop {
+        fn current_state(&self) -> spur_license::LicenseState {
+            spur_license::LicenseState::inactive("noop")
+        }
+        fn subscribe(
+            &self,
+        ) -> tokio::sync::broadcast::Receiver<spur_license::LicenseEvent> {
+            let (tx, rx) = tokio::sync::broadcast::channel(1);
+            std::mem::forget(tx);
+            rx
+        }
+        fn refresh_policy(&self) -> spur_license::provider::RefreshPolicy {
+            spur_license::provider::RefreshPolicy::default()
+        }
+        fn has_entitlement(&self, _: &str) -> bool {
+            false
+        }
+        async fn activate(&self, _: &str) -> spur_license::Result<spur_license::LicenseState> {
+            Ok(spur_license::LicenseState::inactive("noop"))
+        }
+        async fn validate(&self) -> spur_license::Result<spur_license::LicenseState> {
+            Ok(spur_license::LicenseState::inactive("noop"))
+        }
+        async fn heartbeat(&self) -> spur_license::Result<spur_license::LicenseState> {
+            Ok(spur_license::LicenseState::inactive("noop"))
+        }
+        async fn deactivate(&self) -> spur_license::Result<spur_license::LicenseState> {
+            Ok(spur_license::LicenseState::inactive("noop"))
+        }
+    }
+
+    let license = SpurLicense::from_provider(Arc::new(Noop));
+    assert!(matches!(
+        license.current_state().status,
+        spur_license::LicenseStatus::Inactive
+    ));
+}
