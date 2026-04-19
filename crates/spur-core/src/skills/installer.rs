@@ -2,6 +2,7 @@
 //! agent dirs, protects user hand-edits via an in-file marker + sha256.
 
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// SPUR-MANAGED marker embedded in every file the installer writes.
@@ -49,6 +50,68 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{digest:x}")
 }
 
+/// Why a target path was not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// File exists, has no SPUR-MANAGED marker — treat as user-owned.
+    NoMarker,
+    /// File exists, has a marker, but body hash does not match marker's
+    /// embedded hash — user edited since last install.
+    UserEdited,
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkipReason::NoMarker => write!(f, "user-owned (no marker)"),
+            SkipReason::UserEdited => write!(f, "user-edited"),
+        }
+    }
+}
+
+/// Report of what the installer did in a single run.
+#[derive(Debug, Default, Clone)]
+pub struct Summary {
+    pub written: Vec<PathBuf>,
+    pub unchanged: Vec<PathBuf>,
+    pub skipped: Vec<(PathBuf, SkipReason)>,
+}
+
+impl std::fmt::Display for Summary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "SpurPower skills: wrote {w}, unchanged {u}, skipped {s}",
+            w = self.written.len(),
+            u = self.unchanged.len(),
+            s = self.skipped.len(),
+        )?;
+        for (p, reason) in &self.skipped {
+            writeln!(f, "  skipped {} ({reason})", p.display())?;
+        }
+        Ok(())
+    }
+}
+
+/// Error variant for any failure during install.
+#[derive(Debug, thiserror::Error)]
+pub enum InstallError {
+    #[error("I/O error on {path}: {source}")]
+    Io { path: PathBuf, #[source] source: std::io::Error },
+
+    #[error("invalid skill id `{id}`: {reason}")]
+    InvalidSkillId { id: String, reason: String },
+}
+
+impl From<crate::skills::InvalidSkillId> for InstallError {
+    fn from(e: crate::skills::InvalidSkillId) -> Self {
+        InstallError::InvalidSkillId {
+            id: e.id,
+            reason: e.reason.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +154,24 @@ mod tests {
         let h = sha256_hex(b"hello");
         assert_eq!(h.len(), 64);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn summary_display_empty_run() {
+        let s = Summary::default();
+        let rendered = format!("{s}");
+        assert!(rendered.contains("wrote 0"));
+    }
+
+    #[test]
+    fn summary_display_reports_skips() {
+        let mut s = Summary::default();
+        s.written.push(std::path::PathBuf::from("/x/a"));
+        s.skipped.push((std::path::PathBuf::from("/x/b"), SkipReason::UserEdited));
+        s.skipped.push((std::path::PathBuf::from("/x/c"), SkipReason::NoMarker));
+        let rendered = format!("{s}");
+        assert!(rendered.contains("wrote 1"));
+        assert!(rendered.contains("skipped 2"));
+        assert!(rendered.contains("/x/b"));
     }
 }
