@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use spur_tui::components::input_bar::InputBar;
+use spur_tui::components::input_bar::{InputBar, ProtectedRange};
+use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 
 fn press(bar: &mut InputBar, code: KeyCode) {
     bar.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -190,4 +191,45 @@ fn typing_while_browsing_history_exits_history_mode() {
     // Ctrl+N back should restore "first!" (the modified draft)
     b.history_next();
     assert_eq!(b.text(), "first!");
+}
+
+#[test]
+fn history_prev_restores_protected_ranges() {
+    let mut b = InputBar::new();
+    b.seed_history(vec![InputHistoryEntry::new(InputStateSnapshot::new(
+        "look @src/foo.rs".into(),
+        vec![ProtectedRange {
+            start: 5,
+            end: 16,
+            uri: "file:///abs/src/foo.rs".into(),
+            name: "src/foo.rs".into(),
+        }],
+    ))]);
+
+    b.history_prev();
+
+    assert_eq!(b.text(), "look @src/foo.rs");
+    assert_eq!(b.protected_ranges().len(), 1);
+    assert_eq!(b.protected_ranges()[0].uri, "file:///abs/src/foo.rs");
+}
+
+#[test]
+fn draft_with_protected_ranges_roundtrips_through_history_browsing() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "check ");
+    b.insert_atom(
+        "@src/foo.rs",
+        "file:///abs/src/foo.rs".into(),
+        "src/foo.rs".into(),
+    );
+    type_str(&mut b, " now");
+    b.seed_history(vec![InputHistoryEntry::from_text("older prompt")]);
+
+    b.history_prev();
+    assert_eq!(b.text(), "older prompt");
+
+    b.history_next();
+    assert_eq!(b.text(), "check @src/foo.rs now");
+    assert_eq!(b.protected_ranges().len(), 1);
+    assert_eq!(b.protected_ranges()[0].name, "src/foo.rs");
 }

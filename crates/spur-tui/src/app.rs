@@ -20,6 +20,7 @@ use crate::components::help_overlay::HelpOverlay;
 use crate::components::input_bar::EditMode;
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
+use crate::input_history::InputHistoryEntry;
 use crate::session_metadata::SessionMetadataStore;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
@@ -560,21 +561,15 @@ impl App {
 
                 // Backfill global input history from replayed user messages
                 // so Ctrl-P recalls past inputs even from older sessions.
-                let hist = &mut self.metadata_store.metadata_mut().input_history;
                 let mut changed = false;
-                for entry in entries {
-                    if entry.role == "user" {
-                        let text = Self::sanitize_history_entry(&entry.text);
-                        if !text.is_empty() && !hist.contains(&text) {
-                            hist.push(text);
-                            changed = true;
+                {
+                    let hist = &mut self.metadata_store.metadata_mut().input_history;
+                    for entry in entries {
+                        if entry.role == "user" {
+                            let history_entry = InputHistoryEntry::from_text(entry.text.clone());
+                            changed |= Self::merge_input_history_entry(hist, history_entry);
                         }
                     }
-                }
-                if hist.len() > 100 {
-                    let excess = hist.len() - 100;
-                    hist.drain(..excess);
-                    changed = true;
                 }
                 if changed {
                     if let Err(e) = self.metadata_store.save() {
@@ -878,6 +873,12 @@ impl App {
                     );
                 }
 
+                let history_entry = InputHistoryEntry::from_blocks(&blocks).with_context(
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    Some(session.0.clone()),
+                    self.brain_name.clone(),
+                );
+
                 if let Some(ref tx) = self.user_input_tx {
                     let input = UserInput::Message {
                         session,
@@ -887,7 +888,7 @@ impl App {
                     let _ = tx.try_send(input);
                 }
 
-                self.push_input_history(&preview);
+                self.push_input_history_entry(history_entry);
 
                 self.sync_brain_status();
             }
@@ -911,11 +912,15 @@ impl App {
                 // or acts on it. Buffering here caused BUG-1 (cross-session
                 // replay into an unrelated session that happens to spawn next).
 
-                let preview = crate::commands::submit_router::blocks_preview(&blocks);
+                let history_entry = InputHistoryEntry::from_blocks(&blocks).with_context(
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    None,
+                    self.brain_name.clone(),
+                );
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::NewSessionWithMessage { blocks, interrupt });
                 }
-                self.push_input_history(&preview);
+                self.push_input_history_entry(history_entry);
                 self.sync_brain_status();
                 self.dirty = true;
             }
@@ -1383,39 +1388,36 @@ impl App {
     }
 
     /// Append a submitted message to the global input history (dedup + cap).
-    fn push_input_history(&mut self, text: &str) {
-        let text = Self::sanitize_history_entry(text);
-        if text.is_empty() {
-            return;
+    fn push_input_history_entry(&mut self, entry: InputHistoryEntry) -> bool {
+        if entry.snapshot.text.trim().is_empty() {
+            return false;
         }
-        let hist = &mut self.metadata_store.metadata_mut().input_history;
-        hist.retain(|e| *e != text);
-        hist.push(text);
+        let changed = {
+            let hist = &mut self.metadata_store.metadata_mut().input_history;
+            Self::merge_input_history_entry(hist, entry)
+        };
+        if changed {
+            if let Err(e) = self.metadata_store.save() {
+                tracing::warn!(error = %e, "failed to persist input history");
+            }
+            self.sync_input_history();
+        }
+        changed
+    }
+
+    fn merge_input_history_entry(
+        hist: &mut Vec<InputHistoryEntry>,
+        entry: InputHistoryEntry,
+    ) -> bool {
+        if entry.snapshot.text.trim().is_empty() {
+            return false;
+        }
+        hist.retain(|existing| !existing.same_recall_state(&entry));
+        hist.push(entry);
         if hist.len() > 100 {
             hist.remove(0);
         }
-        if let Err(e) = self.metadata_store.save() {
-            tracing::warn!(error = %e, "failed to persist input history");
-        }
-        self.sync_input_history();
-    }
-
-    /// Trim whitespace and truncate to 4 KiB so pasted code blocks don't
-    /// bloat `session_metadata.json`.
-    fn sanitize_history_entry(text: &str) -> String {
-        let text = text.trim();
-        if text.is_empty() {
-            return String::new();
-        }
-        const MAX: usize = 4096;
-        if text.len() <= MAX {
-            return text.to_string();
-        }
-        let mut end = MAX;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text[..end].to_string()
+        true
     }
 
     /// Reseed all active InputBars with the current global history.

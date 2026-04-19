@@ -10,9 +10,11 @@
 //! parent directory after rename.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use crate::input_history::InputHistoryEntry;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionEntry {
@@ -56,13 +58,34 @@ pub struct SessionMetadata {
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionEntry>,
     /// Global input history across all sessions, newest last.
-    /// Persisted so Ctrl-P/Ctrl-N recall works across restarts.
-    #[serde(default)]
-    pub input_history: Vec<String>,
+    /// Persisted as exact input snapshots so recall preserves mention atoms.
+    #[serde(default, deserialize_with = "deserialize_input_history")]
+    pub input_history: Vec<InputHistoryEntry>,
 }
 
 fn default_version() -> u32 {
     1
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredInputHistoryEntry {
+    Structured(InputHistoryEntry),
+    Legacy(String),
+}
+
+fn deserialize_input_history<'de, D>(deserializer: D) -> Result<Vec<InputHistoryEntry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Vec::<StoredInputHistoryEntry>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .map(|entry| match entry {
+            StoredInputHistoryEntry::Structured(entry) => entry,
+            StoredInputHistoryEntry::Legacy(text) => InputHistoryEntry::from_text(text),
+        })
+        .collect())
 }
 
 pub struct SessionMetadataStore {
