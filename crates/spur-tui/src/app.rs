@@ -1050,6 +1050,25 @@ impl App {
                 self.sync_brain_status();
             }
 
+            Action::ClearSession => {
+                // /clear is a spur-local META command: retire the active
+                // brain via the existing NewSessionWithMessage{blocks:empty}
+                // primitive. The orchestrator's arm aborts delegation/mcp
+                // /pump handles and stashes the initialized connection
+                // for reuse by the next user prompt (lazy-spawn). The
+                // resulting fresh spur_session_id drives the TUI to
+                // open a clean SessionDetail view.
+                self.brain_status = BrainStatus::Idle;
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::NewSessionWithMessage {
+                        blocks: vec![],
+                        interrupt: false,
+                    });
+                }
+                self.sync_brain_status();
+                self.dirty = true;
+            }
+
             Action::NewSessionWithMessage { blocks, interrupt } => {
                 // Transition to Thinking so the UI reflects work-in-flight
                 // immediately; the orchestrator will spawn a brain and send

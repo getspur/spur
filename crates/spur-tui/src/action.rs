@@ -26,6 +26,11 @@ pub enum Action {
         blocks: Vec<spur_acp::ContentBlock>,
         interrupt: bool,
     },
+    /// Retire the active brain and reset view state. The user's next
+    /// prompt will lazy-spawn a fresh brain with a new `spur_session_id`.
+    /// A spur-local meta-command (client-owned): it does NOT forward
+    /// `/clear` text to the agent.
+    ClearSession,
     ToggleVerbose,
     ScrollUp,
     ScrollDown,

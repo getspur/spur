@@ -221,3 +221,23 @@ The brain-delegation framework is gated by:
     framework = "v1"    # "v1" | "legacy"
 
 Defaults: `"v1"` in dev builds (debug_assertions=true); `"legacy"` in release builds at v1 ship. Flag will flip to `"v1"` in release builds at v2, and be removed at v3.
+
+## Command precedence — meta vs conversational
+
+Slash commands come from three sources: spur-local (built into the
+TUI), an agent's `[[commands.static]]` config, and runtime
+`_<agent>.dev/commands/available` notifications.
+
+Spur defines a small set of **meta-commands** that operate on the
+client's view and session lifecycle — `/clear`, `/sessions`, `/help`,
+`/quit`, `/mode`, `/cost`, `/vim`. These are client-owned and
+**shadow agent-advertised entries with the same name**. If your agent
+advertises `/clear`, users will still see spur's built-in `/clear`
+(which retires the current brain and lazy-spawns a fresh session on
+the next prompt). This is intentional: `/clear` must behave
+identically across every brain kind, and the client — not the agent —
+owns the view.
+
+Commands that affect the brain's reasoning (e.g. `/compact`,
+`/model`, `/undo`) belong in the agent's config and flow through
+`prompt_text` or `vendor_exec` dispatch.

@@ -86,21 +86,41 @@ impl CommandRegistry {
             }
         }
 
-        let mut entries = SpurLocalSource::entries();
+        let spur_local_entries = SpurLocalSource::entries();
 
-        // Static entries — include only if not overridden by a dynamic entry
-        // at the same (handle, name).
+        // Meta-command precedence: spur-local entries that are "exclusive"
+        // shadow any agent-advertised entry with the same name. See the
+        // module comment in `spur_local.rs` for the taxonomy rationale.
+        // Non-exclusive spur-local entries (e.g. /help) may still coexist
+        // with agent entries of the same name (collision-display applies).
+        let exclusive_names: HashSet<&str> =
+            SpurLocalSource::exclusive_names().iter().copied().collect();
+
+        let mut entries = spur_local_entries;
+
+        // Static entries — include only if not overridden by a dynamic
+        // entry at the same (handle, name), AND not shadowed by a
+        // spur-local exclusive meta-command.
         for (handle, statics) in &self.static_commands {
             for s in statics {
+                if exclusive_names.contains(s.name.as_str()) {
+                    continue;
+                }
                 if !dynamic_index.contains_key(&(handle.as_str(), s.name.as_str())) {
                     entries.push(s.clone());
                 }
             }
         }
 
-        // Dynamic entries — always included.
+        // Dynamic entries — include only if not shadowed by a spur-local
+        // exclusive meta-command.
         for (_handle, dyn_entries) in &self.dynamic_commands {
-            entries.extend(dyn_entries.iter().cloned());
+            for e in dyn_entries {
+                if exclusive_names.contains(e.name.as_str()) {
+                    continue;
+                }
+                entries.push(e.clone());
+            }
         }
 
         let mut seen: HashSet<String> = HashSet::new();
@@ -278,20 +298,56 @@ mod tests {
 
     #[test]
     fn cross_agent_same_name_still_disambiguates_with_prefix() {
-        let codex = config_with_static("codex", "codex", vec!["help"]);
-        let kiro = config_with_static("kiro", "kiro", vec!["help"]);
+        // Use a command name that is NOT a spur-local meta-command so
+        // both agent entries survive into the registry and collide.
+        let codex = config_with_static("codex", "codex", vec!["compact"]);
+        let kiro = config_with_static("kiro", "kiro", vec!["compact"]);
         let registry = CommandRegistry::from_configs(&[codex, kiro]);
-        // Filter to agent-sourced entries only; spur-local also has /help.
-        let help_entries: Vec<_> = registry
+        let compact_entries: Vec<_> = registry
             .list()
             .into_iter()
-            .filter(|e| e.name == "help" && matches!(e.source, CommandSource::Agent { .. }))
+            .filter(|e| e.name == "compact" && matches!(e.source, CommandSource::Agent { .. }))
             .collect();
-        assert_eq!(help_entries.len(), 2);
-        let codex_help = help_entries
+        assert_eq!(compact_entries.len(), 2);
+        let codex_compact = compact_entries
             .iter()
             .find(|e| matches!(&e.source, CommandSource::Agent { handle } if handle == "codex"))
             .unwrap();
-        assert_eq!(registry.canonical_typed_form(codex_help), "/codex:help");
+        assert_eq!(registry.canonical_typed_form(codex_compact), "/codex:compact");
+    }
+
+    #[test]
+    fn spur_local_meta_command_shadows_agent_entry_with_same_name() {
+        // Agent advertises /clear dynamically (kiro does this). The
+        // spur-local /clear meta-command must take precedence and the
+        // agent's /clear must NOT appear in the list.
+        let mut registry = CommandRegistry::new();
+        let agent_clear = CommandEntry {
+            name: "clear".into(),
+            description: "agent's own clear".into(),
+            hint: None,
+            source: CommandSource::Agent {
+                handle: "kiro".into(),
+            },
+            dispatch: Dispatch::PromptText {
+                normalized: "/clear".into(),
+            },
+        };
+        registry.set_agent_commands("kiro", vec![agent_clear]);
+
+        let list = registry.list();
+        let clear_entries: Vec<_> = list
+            .iter()
+            .filter(|e| e.name == "clear")
+            .collect();
+        assert_eq!(
+            clear_entries.len(),
+            1,
+            "agent /clear must be shadowed by spur-local /clear"
+        );
+        assert!(
+            matches!(clear_entries[0].source, CommandSource::Spur),
+            "the surviving /clear must be spur-local"
+        );
     }
 }
