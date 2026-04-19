@@ -171,3 +171,43 @@ fn override_body_flows_into_every_adapter() {
         );
     }
 }
+
+#[test]
+fn cross_version_upgrade_updates_unedited_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    run(tmp.path()).unwrap();
+
+    // Simulate "next Spur version" by using a workspace override with a
+    // different body. From the installer's point of view, this is
+    // indistinguishable from a bundled-body change.
+    let id = "test-driven-development";
+    let override_dir = tmp.path().join(".spur/skills").join(id);
+    std::fs::create_dir_all(&override_dir).unwrap();
+    std::fs::write(
+        override_dir.join("SKILL.md"),
+        format!(
+            "---\nname: {id}\ndescription: new\n---\nNEW VERSION BODY\n"
+        ),
+    )
+    .unwrap();
+
+    let summary = run(tmp.path()).unwrap();
+
+    // All adapter outputs for this skill should have been rewritten —
+    // NOT skipped as "user-edited" (their on-disk bodies still matched
+    // their old markers, even though the new render is different).
+    for p in [
+        ".claude/skills/spurpower-test-driven-development/SKILL.md",
+        ".codex/skills/spurpower-test-driven-development/SKILL.md",
+        ".cursor/rules/spurpower-test-driven-development.mdc",
+    ] {
+        let path = tmp.path().join(p);
+        assert!(
+            summary.written.contains(&path),
+            "{p}: expected in written, got skipped: {:?}",
+            summary.skipped,
+        );
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert!(s.contains("NEW VERSION BODY"), "{p}: body not updated");
+    }
+}
