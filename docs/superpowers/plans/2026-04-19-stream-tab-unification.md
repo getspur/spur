@@ -236,6 +236,22 @@ fn compact_render_truncates_long_text_with_ellipsis() {
         .collect();
     assert!(rendered.contains('…'), "long text should be truncated with '…'");
 }
+
+#[test]
+fn render_compact_does_not_panic_and_updates_dimensions() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    t.append_message("hello", "bot", "12:00".into());
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+
+    assert_eq!(t.last_render_width, Some(40));
+    assert_eq!(t.last_visible_height, 10);
+    assert!(t.last_total_lines >= 1);
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -389,25 +405,54 @@ In `crates/spur-tui/src/components/react_trace/mod.rs`, add near the other `mod`
 mod compact_render;
 ```
 
-In `crates/spur-tui/src/components/react_trace/render.rs`, near the top of the main `render` method (locate via `Grep` for `pub fn render`), add at the very start of the method body:
+**Important — separate entry point.** The existing `ReactTrace::render(&mut self, &mut Frame, Rect, Option<&ExecutorLineage>)` draws its own block/border/title (`render.rs:280-284`). That is wrong for embedding inside `DetailPane`, which already owns the outer block. Therefore we add a **new public method** `render_compact` that paints only the body — no block, no border, no title. It lives in `compact_render.rs` alongside `build_compact_lines`.
+
+Append to `crates/spur-tui/src/components/react_trace/compact_render.rs` (after the `build_compact_lines` impl block you wrote above):
 
 ```rust
-        if self.compact {
-            let width = area.width;
-            self.last_render_width = Some(width);
-            let lines = self.build_compact_lines(width);
-            self.last_total_lines = lines.len();
-            self.last_visible_height = area.height as usize;
-            let scroll = self.resolve_anchor_offset(self.last_total_lines, self.last_visible_height);
-            let p = ratatui::widgets::Paragraph::new(lines)
-                .wrap(ratatui::widgets::Wrap { trim: false })
-                .scroll((scroll as u16, 0));
-            frame.render_widget(p, area);
-            return;
-        }
+impl ReactTrace {
+    /// Paint the compact single-line-per-entry body into `area`.
+    ///
+    /// Does NOT draw a block/border/title — the caller (DetailPane) owns
+    /// the outer block. Honours the current `ScrollAnchor` for vertical
+    /// offset and refreshes `last_total_lines` / `last_visible_height` /
+    /// `last_render_width` so scroll helpers stay consistent.
+    pub fn render_compact(&mut self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Paragraph, Wrap};
+
+        let width = area.width;
+        self.last_render_width = Some(width);
+        let lines = self.build_compact_lines(width);
+        self.last_total_lines = lines.len();
+        self.last_visible_height = area.height as usize;
+
+        // Resolve anchor → scroll offset. Mirrors the logic in `render()`.
+        let scroll = match self.anchor {
+            crate::components::react_trace::types::ScrollAnchor::Following => {
+                self.last_total_lines
+                    .saturating_sub(self.last_visible_height)
+            }
+            crate::components::react_trace::types::ScrollAnchor::Row {
+                entry_idx,
+                row_within_entry,
+            } => {
+                // Compact mode is one line per entry + separators. Approximate
+                // row resolution: use entry_idx + row_within_entry, clamped.
+                let total = self.last_total_lines;
+                let max = total.saturating_sub(self.last_visible_height);
+                (entry_idx + row_within_entry).min(max)
+            }
+        };
+
+        let p = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0));
+        frame.render_widget(p, area);
+    }
+}
 ```
 
-> If `resolve_anchor_offset` is named differently in your repo, substitute the existing anchor-to-offset helper. If none exists as a single-call helper, inline: `let scroll = match self.anchor { ScrollAnchor::Following => self.last_total_lines.saturating_sub(self.last_visible_height), ScrollAnchor::Row { entry_idx, row_within_entry } => ... };` — follow the pattern already present in `render.rs` around `ScrollAnchor` resolution.
+**Do NOT modify `render.rs`** — the full-screen `render()` entry point is unchanged. The `compact: bool` field from Task 0.2 remains on the struct for documentation/testing purposes, but `render_compact` is the authoritative entry point for the Stream tab.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -560,7 +605,7 @@ fn dispatch_tool_call_then_update_merges_status() {
 }
 ```
 
-> If the exact field names of `ToolCall` / `ToolCallUpdate` / `ContentChunk` differ in your `spur-acp` version, adjust the test constructor accordingly — open one existing test in `streaming_tests.rs` for a canonical shape.
+> **Constructor pattern.** The sketch above uses `ToolCall { ..Default::default() }` and `ToolCallUpdate { ..Default::default() }` — these may NOT have `Default` impls in your `spur-acp` version. Before writing the tests, open `crates/spur-tui/src/components/react_trace/streaming_tests.rs` and copy the canonical `ToolCall` / `ToolCallUpdate` / `ContentChunk` / `ToolCallUpdateFields` construction pattern verbatim (search for `ToolCall {` and `ToolCallUpdate {`). Use that exact pattern here. If a test helper function exists in that file (e.g., `make_tool_call(id, title)`), reuse it by importing from the same module.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -889,6 +934,29 @@ mod tests {
     }
 
     #[test]
+    fn reset_clears_entries_and_depths_but_keeps_kind() {
+        let mut ws = WorkerStreams::new();
+        ws.route("exec-r", "claude", &msg("hi"));
+        assert_eq!(ws.get("exec-r").unwrap().entry_count(), 1);
+        ws.reset("exec-r");
+        assert_eq!(ws.get("exec-r").unwrap().entry_count(), 0, "reset clears entries");
+        ws.route("exec-r", "claude", &msg("hi-again"));
+        assert_eq!(ws.get("exec-r").unwrap().entry_count(), 1, "reset preserves slot for reuse");
+    }
+
+    #[test]
+    fn tick_all_advances_every_trace_without_panic() {
+        let mut ws = WorkerStreams::new();
+        ws.route("a", "claude", &msg("x"));
+        ws.route("b", "codex", &msg("y"));
+        ws.tick_all();
+        ws.tick_all();
+        // Success == no panic; traces remain queryable.
+        assert!(ws.get("a").is_some());
+        assert!(ws.get("b").is_some());
+    }
+
+    #[test]
     fn seed_from_stream_buffer_hydrates_pre_existing_entries() {
         use spur_core::lineage::types::{WorkerStreamEntry, WorkerStreamKind};
         use std::time::SystemTime;
@@ -934,17 +1002,26 @@ use crate::components::react_trace::ReactTrace;
 pub struct WorkerStreams {
     traces: HashMap<String, ReactTrace>,
     depths: HashMap<String, HashMap<String, u8>>,
+    /// Remember the resolved `AgentKind` per executor so `reset` can
+    /// rebuild the trace with the correct accent color without needing
+    /// to peek inside `ReactTrace`.
+    kinds: HashMap<String, AgentKind>,
 }
 
 impl WorkerStreams {
     pub fn new() -> Self {
-        Self { traces: HashMap::new(), depths: HashMap::new() }
+        Self {
+            traces: HashMap::new(),
+            depths: HashMap::new(),
+            kinds: HashMap::new(),
+        }
     }
 
     /// Route a live `SessionUpdate` for `executor_id` into that
     /// executor's `ReactTrace`, creating the trace if needed.
     pub fn route(&mut self, executor_id: &str, agent_name: &str, update: &SessionUpdate) {
         let kind = AgentKind::from_name(agent_name);
+        self.kinds.insert(executor_id.to_string(), kind);
         let trace = self
             .traces
             .entry(executor_id.to_string())
@@ -957,6 +1034,15 @@ impl WorkerStreams {
             tool_depth: depths,
         };
         dispatch_session_update(trace, update, &mut ctx);
+    }
+
+    /// Advance the spinner frame on all live traces. Called from App's
+    /// tick loop so Act entries with `Pending` / `InProgress` status
+    /// animate consistently with the brain view.
+    pub fn tick_all(&mut self) {
+        for trace in self.traces.values_mut() {
+            trace.tick();
+        }
     }
 
     /// Seed a trace from persisted `stream_buffer` entries. Used on
@@ -1012,10 +1098,28 @@ impl WorkerStreams {
         self.traces.get_mut(executor_id)
     }
 
-    /// Drop a trace when its executor is garbage-collected or retried.
+    /// Drop a trace when its executor is garbage-collected.
     pub fn remove(&mut self, executor_id: &str) {
         self.traces.remove(executor_id);
         self.depths.remove(executor_id);
+    }
+
+    /// Reset a trace on retry. Clears entries + tool-depth namespace
+    /// but keeps the HashMap slot, so the next `route` call reuses the
+    /// same trace. Matches the lineage projection's
+    /// `stream_buffer.clear()` on `ExecutorRetryStarted`.
+    pub fn reset(&mut self, executor_id: &str) {
+        if let Some(depths) = self.depths.get_mut(executor_id) {
+            depths.clear();
+        }
+        let kind = self
+            .kinds
+            .get(executor_id)
+            .copied()
+            .unwrap_or(AgentKind::Generic);
+        if let Some(slot) = self.traces.get_mut(executor_id) {
+            *slot = ReactTrace::with_kind_compact(kind);
+        }
     }
 }
 
@@ -1068,52 +1172,143 @@ git commit -m "feat(spur-tui): WorkerStreams — per-executor ReactTrace router"
 **Files:**
 - Modify: `crates/spur-tui/src/app.rs` (add `worker_streams: WorkerStreams` field + routing after `self.lineage.apply`)
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Locate the canonical test-fixture pattern**
 
-Create `crates/spur-tui/tests/worker_stream_routing.rs`:
+Run: `rg -n 'fn.*App.*->|new_for_tests|SpurEvent::|fn build_test_event' crates/spur-tui/tests/ crates/spur-tui/src/ --type rust | head -40`
+
+Record the exact constructors used by existing TUI tests for `App` and `SpurEvent`. Use those patterns verbatim in the tests below. If no `App` test-fixture exists, the tests go inline in `app.rs` (see Step 2) and exercise the routing through a thin helper rather than a full App.
+
+- [ ] **Step 2: Write the failing test — inline `#[cfg(test)] mod` in `app.rs`**
+
+Integration tests in `crates/spur-tui/tests/` cannot see private constructors. To avoid a fragile assumption about test helpers, the routing test lives inside `crates/spur-tui/src/app.rs` in a `#[cfg(test)]` module. Append (or extend the existing test module):
 
 ```rust
-//! Integration test: App routes WorkerNotification events into
-//! per-executor ReactTraces.
-
-// NOTE: this test relies on test helpers constructing App; follow the
-// pattern used in other crates/spur-tui/tests/*.rs files. If your
-// `App::new_for_tests` signature differs, adapt accordingly.
-
-#[test]
-fn worker_notification_populates_per_executor_trace() {
+#[cfg(test)]
+mod worker_stream_routing_tests {
+    use super::*;
     use spur_acp::{ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent};
     use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+    use spur_core::lineage::types::ExecutorId;
 
-    let mut app = spur_tui::app::App::new_for_tests();
-    let exec_id = "exec-42".to_string();
-    let notif = Box::new(SessionNotification {
-        session_id: SessionId("abc".into()),
-        update: SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-            TextContent { text: "hello from worker".into(), ..Default::default() },
-        ))),
-        ..Default::default()
-    });
-    let event = SpurEvent::for_test(SpurEventBody::WorkerNotification {
-        brain_session_id: SessionId("brain-1".into()),
-        executor_id: exec_id.clone(),
-        notification: notif,
-    });
-    app.handle_spur_event(event);
+    fn msg_update(text: &str) -> SessionUpdate {
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent { text: text.into(), ..Default::default() },
+        )))
+    }
 
-    let trace = app.worker_streams().get(&exec_id).expect("trace for executor");
-    assert_eq!(trace.entry_count(), 1);
+    // Replace this with whatever test-friendly App constructor your
+    // codebase exposes. If App::new takes dependencies that are heavy
+    // in tests, define a narrower helper that just exercises
+    // handle_spur_event with a pre-seeded lineage.
+    fn test_app() -> App {
+        App::new_for_tests()
+    }
+
+    fn wrap_event(body: SpurEventBody) -> SpurEvent {
+        // Use whatever constructor already exists in spur-acp for test
+        // events (look for `SpurEvent::new`, `SpurEvent::synthetic`,
+        // `SpurEvent::for_test`, or a bare struct literal with the
+        // required fields). Copy from an existing test in
+        // crates/spur-tui/tests/ for the canonical shape.
+        SpurEvent::for_test(body)
+    }
+
+    #[test]
+    fn worker_notification_populates_per_executor_trace() {
+        let mut app = test_app();
+        // Seed the lineage with the executor first — routing drops
+        // orphan WorkerNotifications.
+        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+            executor_id: "exec-42".into(),
+            parent_id: None,
+            agent: "claude".into(),
+            role: spur_acp::Role::Worker,
+            task_spec: String::new(),
+            issue_id: None,
+        }));
+
+        let notif = Box::new(SessionNotification {
+            session_id: SessionId("abc".into()),
+            update: msg_update("hello from worker"),
+            ..Default::default()
+        });
+        app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
+            brain_session_id: SessionId("brain-1".into()),
+            executor_id: "exec-42".into(),
+            notification: notif,
+        }));
+
+        let trace = app
+            .worker_streams()
+            .get("exec-42")
+            .expect("trace for spawned executor");
+        assert_eq!(trace.entry_count(), 1);
+    }
+
+    #[test]
+    fn orphan_worker_notification_is_dropped() {
+        let mut app = test_app();
+        let notif = Box::new(SessionNotification {
+            session_id: SessionId("abc".into()),
+            update: msg_update("orphan"),
+            ..Default::default()
+        });
+        // No prior ExecutorSpawned — executor unknown to lineage.
+        app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
+            brain_session_id: SessionId("brain-1".into()),
+            executor_id: "orphan-exec".into(),
+            notification: notif,
+        }));
+        assert!(
+            app.worker_streams().get("orphan-exec").is_none(),
+            "orphan events must not materialize a trace"
+        );
+    }
+
+    #[test]
+    fn executor_retry_started_resets_trace() {
+        let mut app = test_app();
+        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+            executor_id: "exec-r".into(),
+            parent_id: None,
+            agent: "claude".into(),
+            role: spur_acp::Role::Worker,
+            task_spec: String::new(),
+            issue_id: None,
+        }));
+        app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
+            brain_session_id: SessionId("brain-1".into()),
+            executor_id: "exec-r".into(),
+            notification: Box::new(SessionNotification {
+                session_id: SessionId("abc".into()),
+                update: msg_update("pre-retry"),
+                ..Default::default()
+            }),
+        }));
+        assert_eq!(app.worker_streams().get("exec-r").unwrap().entry_count(), 1);
+
+        app.handle_spur_event(wrap_event(SpurEventBody::ExecutorRetryStarted {
+            executor_id: "exec-r".into(),
+            attempt_n: 2,
+            ..Default::default()
+        }));
+        assert_eq!(
+            app.worker_streams().get("exec-r").unwrap().entry_count(),
+            0,
+            "retry clears the per-executor trace"
+        );
+    }
 }
 ```
 
-> If `App::new_for_tests` and `SpurEvent::for_test` do not exist, add minimal shims in the same style as other tests in `crates/spur-tui/tests/`. If there is NO test helper for constructing `App`, move this test to a `#[cfg(test)]` inline module in `app.rs` that uses whatever internal constructors are available, but keep the assertion the same.
+> The exact field names on `ExecutorSpawned` / `ExecutorRetryStarted` / `SessionNotification` / `SpurEvent` may differ from this sketch. Open `crates/spur-acp/src/domain/events.rs` and copy the exact shape. The assertions remain the same: spawn→route creates a trace, orphan→route creates nothing, retry→reset empties the trace.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
-Run: `cargo test -p spur-tui --test worker_stream_routing`
+Run: `cargo test -p spur-tui worker_stream_routing_tests`
 Expected: FAIL — `worker_streams()` method and/or field missing.
 
-- [ ] **Step 3: Add field and routing**
+- [ ] **Step 4: Add field and routing**
 
 In `crates/spur-tui/src/app.rs`, at the top of the file:
 
@@ -1139,21 +1334,41 @@ In `App::handle_spur_event` (crates/spur-tui/src/app.rs:503), immediately after 
 
 ```rust
         // Route worker stream updates into per-executor ReactTraces.
+        // IMPORTANT — orphan drop: skip events whose executor the lineage
+        // doesn't know yet. Otherwise we materialize a trace with
+        // agent_name defaulting to "generic" → AgentKind::Generic →
+        // permanent mis-coloring after ExecutorSpawned arrives. This
+        // matches the brain view's fidelity ceiling (events before
+        // SessionDetailView construction are dropped).
         if let spur_acp::domain::events::SpurEventBody::WorkerNotification {
             executor_id, notification, ..
         } = &event.body
         {
-            let agent_name = self
-                .lineage
-                .get(&spur_core::lineage::types::ExecutorId(executor_id.clone()))
-                .map(|n| n.agent.as_str())
-                .unwrap_or("generic");
-            self.worker_streams
-                .route(executor_id, agent_name, &notification.update);
+            let exec_id = spur_core::lineage::types::ExecutorId(executor_id.clone());
+            if let Some(node) = self.lineage.node(&exec_id) {
+                let agent_name = node.agent.clone();
+                self.worker_streams
+                    .route(executor_id, &agent_name, &notification.update);
+            } else {
+                tracing::trace!(
+                    executor_id = %executor_id,
+                    "dropping WorkerNotification for unknown executor (orphan)"
+                );
+            }
+        }
+
+        // Reset per-executor trace on retry. Mirrors the lineage
+        // projection's `node.stream_buffer.clear()` on the same event
+        // (`crates/spur-core/src/lineage/projection.rs:268`).
+        if let spur_acp::domain::events::SpurEventBody::ExecutorRetryStarted {
+            executor_id, ..
+        } = &event.body
+        {
+            self.worker_streams.reset(executor_id);
         }
 ```
 
-> Adapt `self.lineage.get(...)` to the actual LineageProjection accessor name (look in `crates/spur-core/src/lineage/mod.rs` for the getter; candidates: `get`, `node`, `executor_node`). Default `agent_name` to `"generic"` if unknown.
+> The real accessor is `LineageProjection::node(&ExecutorId) -> Option<&ExecutorNode>` (`crates/spur-core/src/lineage/projection.rs:384`). No adaptation needed.
 
 Add a public accessor (integration tests under `tests/` cannot see `#[cfg(test)]` items, so this is unconditionally `pub`):
 
@@ -1169,16 +1384,16 @@ Add a public accessor (integration tests under `tests/` cannot see `#[cfg(test)]
     }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
-Run: `cargo test -p spur-tui --test worker_stream_routing`
-Expected: PASS. Also run: `cargo test -p spur-tui` (no regressions).
+Run: `cargo test -p spur-tui worker_stream_routing_tests`
+Expected: all three tests PASS. Also run: `cargo test -p spur-tui` (no regressions).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add crates/spur-tui/src/app.rs crates/spur-tui/tests/worker_stream_routing.rs
-git commit -m "feat(spur-tui): App routes WorkerNotification into WorkerStreams"
+git add crates/spur-tui/src/app.rs
+git commit -m "feat(spur-tui): App routes WorkerNotification + orphan drop + retry reset"
 ```
 
 ---
@@ -1240,6 +1455,84 @@ git commit -m "feat(spur-tui): seed WorkerStreams from persisted stream_buffer o
 
 ---
 
+### Task 1.6: Wire `WorkerStreams::tick_all` into `App::tick`
+
+**Files:**
+- Modify: `crates/spur-tui/src/app.rs` (locate the tick handler via `Grep` for `fn tick` or `Action::Tick`)
+
+**Why:** `ReactTrace::tick()` (`crates/spur-tui/src/components/react_trace/mod.rs:548`) advances the spinner frame for `ActStatus::Pending` / `InProgress` entries. The brain view gets ticked from the App's tick loop. Per-executor traces are owned by `WorkerStreams` and MUST be ticked the same way, or spinners freeze — which would invalidate the spec's "Stream tab shows tool-call lifecycle spinners identical to the brain view" acceptance criterion.
+
+- [ ] **Step 1: Locate the tick handler**
+
+Run: `rg -n 'fn tick|Action::Tick|react_trace.tick|\.tick\(\)' crates/spur-tui/src/app.rs | head -20`
+
+Identify where the brain's `react_trace.tick()` is called from App. The `WorkerStreams::tick_all` call goes right alongside it.
+
+- [ ] **Step 2: Write the failing test**
+
+Append to the `worker_stream_routing_tests` module in `crates/spur-tui/src/app.rs`:
+
+```rust
+    #[test]
+    fn app_tick_drives_worker_streams_tick_all() {
+        let mut app = test_app();
+        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+            executor_id: "exec-tick".into(),
+            parent_id: None,
+            agent: "claude".into(),
+            role: spur_acp::Role::Worker,
+            task_spec: String::new(),
+            issue_id: None,
+        }));
+        app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
+            brain_session_id: SessionId("brain-1".into()),
+            executor_id: "exec-tick".into(),
+            notification: Box::new(SessionNotification {
+                session_id: SessionId("abc".into()),
+                update: msg_update("x"),
+                ..Default::default()
+            }),
+        }));
+
+        // Ticking should not panic and should be observable via tick_counter
+        // on at least one trace. The exact counter increment is an
+        // implementation detail; we just assert the function is callable
+        // and the trace remains present.
+        app.tick();
+        app.tick();
+        assert!(app.worker_streams().get("exec-tick").is_some());
+    }
+```
+
+> If `App::tick` takes arguments or isn't public, adapt the call. The assertion is just that the trace survives and no panic occurs. If you can expose a `tick_counter` accessor on `ReactTrace` (e.g., via a `#[cfg(test)]` helper), add an `assert!(trace.tick_counter_for_tests() > 0)` for stronger coverage.
+
+- [ ] **Step 3: Run test to verify it fails or already-passes**
+
+Run: `cargo test -p spur-tui app_tick_drives_worker_streams_tick_all`
+Expected: FAIL if `tick_all` is not yet called from `App::tick`.
+
+- [ ] **Step 4: Wire `tick_all`**
+
+Locate the `App::tick` function (or the `Action::Tick` handler). Alongside the existing brain-view tick call (something like `self.session_detail.as_mut().map(|d| d.react_trace.tick())` or similar), add:
+
+```rust
+        self.worker_streams.tick_all();
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `cargo test -p spur-tui app_tick_drives_worker_streams_tick_all`
+Expected: PASS. Also: `cargo test -p spur-tui` and `cargo clippy -p spur-tui -- -D warnings`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/spur-tui/src/app.rs
+git commit -m "feat(spur-tui): App::tick drives WorkerStreams::tick_all for spinners"
+```
+
+---
+
 ## Phase 2 — Cutover the Stream tab
 
 ### Task 2.1: Pipe `&ReactTrace` into `DetailPane::render`
@@ -1275,7 +1568,7 @@ to:
     ) {
 ```
 
-- [ ] **Step 2: Replace `render_stream` call with delegation + fallback**
+- [ ] **Step 2: Replace `render_stream` call with `render_compact` delegation + fallback**
 
 Inside `render`, locate:
 
@@ -1291,20 +1584,42 @@ Replace the `DetailTab::Stream` arm with a branch:
 ```rust
             DetailTab::Stream => {
                 if let Some(trace) = stream_trace {
-                    // Delegate to compact ReactTrace render. The trace
-                    // owns its own Paragraph + scroll machinery; we hand
-                    // it our body area and return early.
-                    trace.render(frame, body_area);
-                    // scroll_offset / is_following on DetailPane are
-                    // unused in this branch; follow mode is managed by
-                    // the trace's ScrollAnchor.
+                    // Delegate to the compact ReactTrace body renderer.
+                    // `render_compact` paints ONLY the body (no block,
+                    // no border, no title) — DetailPane owns the outer
+                    // block already. Do NOT call `ReactTrace::render`
+                    // here: its signature is
+                    // `(&mut self, &mut Frame, Rect, Option<&ExecutorLineage>)`
+                    // and it draws its own block, which would collide
+                    // with our outer block.
+                    trace.render_compact(frame, body_area);
+                    // DetailPane's scroll_offset / is_following are
+                    // NOT consulted for the Stream tab anymore — scroll
+                    // state lives on trace.anchor. Other tabs still use
+                    // DetailPane::scroll_offset.
                     return;
                 }
                 self.render_stream(node, body_area.width)
             }
 ```
 
-> `ReactTrace::render` takes `(&mut self, &mut Frame, Rect)`. Verify the exact signature in `crates/spur-tui/src/components/react_trace/render.rs`. If it also takes a spinner frame or lineage, pass placeholders consistent with compact-mode (e.g., `""` spinner, `None` lineage).
+**Scroll key routing (P2a).** Today `DetailPane::scroll_up / scroll_down / scroll_to_top / scroll_to_bottom` mutate `self.scroll_offset`. When the Stream tab is active and a trace exists, those calls must drive the trace's anchor instead. Modify each method to accept an `Option<&mut ReactTrace>` parameter (or thread it via a single new `scroll_action(&mut self, action, stream_trace)` method). Example replacement for `scroll_down`:
+
+```rust
+    pub fn scroll_down(&mut self, stream_trace: Option<&mut crate::components::react_trace::ReactTrace>) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_down();
+                return;
+            }
+        }
+        self.scroll_offset = self.scroll_offset.saturating_add(1);
+    }
+```
+
+Apply the same pattern to `scroll_up`, `scroll_to_top`, `scroll_to_bottom`. Update every call site in `app.rs` / `dashboard.rs` to pass the trace lookup result (same pattern as Step 3 below).
+
+**Tab-cycle preservation (P2b).** `cycle_tab` today resets `self.scroll_offset = 0; self.is_following = true;`. That's still correct for the non-Stream tabs. It must NOT touch the trace's anchor — preserve per-executor scroll position across tab cycles. No code change needed as long as `cycle_tab` only touches `self.*` fields and the trace's `scroll_*` methods are not called from here. Verify by reading `cycle_tab` after the Step 2 edit.
 
 - [ ] **Step 3: Update call site in `dashboard.rs`**
 
@@ -1566,16 +1881,29 @@ git commit -m "docs: document post-unification stream pipeline"
 
 ---
 
+## Risk Register (plan-level, supplements spec)
+
+| # | Risk | Mitigation |
+|---|---|---|
+| PR1 | **Orphan WorkerNotifications** (events before `ExecutorSpawned`) would materialize traces with `AgentKind::Generic` — permanent mis-coloring | Task 1.4 routing drops WorkerNotifications whose executor is not yet in the lineage. Matches brain view's "events before SessionDetailView construction are lost" ceiling |
+| PR2 | **Retry stale data** — without resetting the trace on `ExecutorRetryStarted`, the pane shows both attempts concatenated | Task 1.4 routes `ExecutorRetryStarted` → `WorkerStreams::reset`; Task 1.3 keeps the slot + AgentKind for reuse |
+| PR3 | **Spinners freeze** without tick drive | Task 1.6 wires `WorkerStreams::tick_all` into `App::tick` |
+| PR4 | **Unscrollable Stream tab** if key routing isn't rewired | Task 2.1 routes `scroll_up/down/top/bottom` to `trace.scroll_*` when Stream is active and trace exists |
+| PR5 | **Executor GC absent** — traces accumulate for the session lifetime | Accept. Bounded by `MAX_LOG_ENTRIES` per trace (`crates/spur-tui/src/components/mod.rs:84`); add `WorkerStreams::remove` (Task 1.3) for manual cleanup |
+| PR6 | **No WorkerHistory replay** across process restart | Task 1.5 seed from `stream_buffer` yields coarse 3-kind preamble; live fidelity resumes once new `WorkerNotification`s flow |
+| PR7 | **`render_compact` anchor resolution for `ScrollAnchor::Row`** is approximate (entry_idx + row_within_entry clamped) | Acceptable in compact mode where rows ≈ entries. If precision becomes an issue, refine to per-entry row starts |
+
 ## Self-Review Checklist
 
 Before handing off to executor or reviewer, verify:
 
 - [ ] **Spec coverage.** Every Goal (§Goals 1–5) is implemented by at least one task. Every Non-goal is not violated by any task.
 - [ ] **Phase ordering.** Phase 3 tasks do not reference code that Phase 1/2 has not yet introduced. Phase 0 tasks do not depend on anything.
-- [ ] **Type consistency.** `WorkerStreams::route` signature matches its call sites in Tasks 1.4, 1.5, 2.1, 2.2. `dispatch_session_update` signature matches Tasks 1.1, 1.2, 1.3.
+- [ ] **Type consistency.** `WorkerStreams::route` signature matches its call sites in Tasks 1.4, 1.5, 2.1, 2.2. `dispatch_session_update` signature matches Tasks 1.1, 1.2, 1.3. `render_compact` (not `render`) is the entry point used in Task 2.1.
 - [ ] **Placeholder scan.** No "TBD", no "add error handling", no "similar to Task N".
 - [ ] **Commands are concrete.** Every test run specifies the crate (`-p spur-tui`) and, where scoped, the test name.
 - [ ] **Back-out plan.** Phases 0–2 are pure additions; Phase 3 can be reverted independently if a late-surfacing `stream_buffer` consumer is discovered.
+- [ ] **Integration seams closed.** PR1–PR4 (orphan drop, retry reset, tick drive, scroll routing) are each implemented by a specific task.
 
 ---
 
