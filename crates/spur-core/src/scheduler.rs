@@ -12,11 +12,31 @@ use crate::orchestrator::InteractiveInput;
 
 /// Owns the split-lane queues and scheduling policy for brain turns.
 pub struct BrainScheduler {
+    /// FIFO queue of user-originated inputs (from the TUI). Always drains
+    /// before continuations (INV-C4 human-priority).
     pending_user:          VecDeque<InteractiveInput>,
+    /// FIFO queue of detached worker outcomes awaiting a safe scheduling
+    /// window. Populated via `push_continuation`; drained in coalesced
+    /// batches by `next()` (Task 4).
     pending_continuations: VecDeque<BrainContinuation>,
+    /// Already-delivered delegation IDs for dedup (INV-C5 idempotency).
+    /// Grows without a cap in v1 — long-lived sessions with many async
+    /// delegations will accumulate entries. Bound is a future concern
+    /// (e.g. LRU cap at 2048) if observed; N for a typical session is
+    /// small. Migrates to `HashSet<DelegationId>` when INV-1 lands.
     delivered_ids:         HashSet<String>,
+    /// Active brain session guard for G2 session-swap eviction. `None`
+    /// before the first brain spawns. Uses `SessionId` to match the
+    /// orchestrator's `brain.acp_session_id` idiom; will migrate to
+    /// `BrainSessionId` as part of the broader INV-2 orchestrator
+    /// migration (not this spec).
     active_session:        Option<SessionId>,
+    /// INV-C6: at most one `session/prompt` in flight per brain session.
+    /// When `true`, `next()` (Task 4) returns `ScheduledAction::Idle`.
     turn_in_flight:        bool,
+    /// G5 post-cancel grace: autonomous continuation turns are suppressed
+    /// until this instant elapses. A user prompt arriving during grace
+    /// clears the window (user intent trumps grace).
     cancel_grace_until:    Option<Instant>,
 }
 
