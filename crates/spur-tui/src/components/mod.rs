@@ -11,6 +11,7 @@ pub mod input_bar_wrap;
 pub mod issue_detail_pane;
 pub mod issues_panel;
 pub mod line_wrap;
+pub mod mini_input;
 #[cfg(feature = "markdown")]
 pub mod markdown_stream;
 #[cfg(feature = "markdown")]
