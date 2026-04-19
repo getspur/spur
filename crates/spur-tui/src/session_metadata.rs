@@ -146,6 +146,23 @@ impl SessionMetadataStore {
         self.metadata.last_active_at = None;
     }
 
+    /// Clear every `last_active_*` pointer — including the ACP id and
+    /// brain that drive `spur-cli`'s auto-resume gate. Used by the TUI
+    /// `BrainRetired` arm so that `/clear` followed by a process quit
+    /// before the next prompt does not auto-resume the just-retired
+    /// session on the next launch.
+    ///
+    /// Distinct from [`clear_last_active`] which nulls only the
+    /// TUI-local pointers (`last_active_session_id` + `last_active_at`);
+    /// that method is used to suppress the one-shot resume banner and
+    /// must not disable auto-resume.
+    pub fn clear_last_active_full(&mut self) {
+        self.metadata.last_active_session_id = None;
+        self.metadata.last_active_at = None;
+        self.metadata.last_active_acp_session_id = None;
+        self.metadata.last_active_brain = None;
+    }
+
     /// Remove entries for sessions no longer present in `live_ids`. If the
     /// `last_active_session_id` points to a removed entry, clear it too.
     /// Returns the session ids that were removed.

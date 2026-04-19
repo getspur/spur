@@ -1174,6 +1174,25 @@ impl View for DashboardView {
                 });
             }
 
+            SpurEventBody::BrainRetired { session, reason } => {
+                // Pair the earlier "Brain agent spawned" entry with an
+                // explicit retirement line so the activity log does not
+                // show a dangling spawn after `/clear` or session switch.
+                let prefix = Self::prefix_for_session(&session.0);
+                let reason_label = match reason {
+                    spur_acp::domain::events::BrainRetireReason::UserClear => "cleared",
+                    spur_acp::domain::events::BrainRetireReason::ResumeSwitch => "switched",
+                    spur_acp::domain::events::BrainRetireReason::Shutdown => "shutdown",
+                    _ => "retired",
+                };
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix,
+                    message: format!("Brain session retired ({})", reason_label),
+                    kind: LogEntryKind::Info,
+                });
+            }
+
             SpurEventBody::RateLimitDetected { agent, retry_after } => {
                 let msg = match retry_after {
                     Some(d) => format!("Rate limited (retry after {}s)", d.as_secs()),

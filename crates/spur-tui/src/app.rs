@@ -856,6 +856,28 @@ impl App {
             SpurEventBody::SessionCompleted { .. } => {
                 self.brain_status = BrainStatus::Idle;
             }
+            SpurEventBody::BrainRetired { .. } => {
+                // Null per-App state that was tied to the retired session.
+                // `brain_status` is intentionally NOT touched here:
+                //  - UserClear: already set to Idle by the ClearSession
+                //    action handler before the event round-trips back.
+                //  - ResumeSwitch: the orchestrator's ResumeSession arm
+                //    is already loading the next brain; overriding to
+                //    Idle would race that transition.
+                self.brain_name = None;
+                // Clear auto-resume pointers so /clear followed by a
+                // process quit before the next prompt does not cause
+                // spur-cli to auto-resume the just-retired session on
+                // the next launch. The next `AgentSessionReady` (on the
+                // next prompt) repopulates these via `set_acp_mapping`.
+                self.metadata_store.clear_last_active_full();
+                if let Err(e) = self.metadata_store.save() {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to persist cleared last_active on BrainRetired"
+                    );
+                }
+            }
             SpurEventBody::LicenseUpdated { state } => {
                 self.update_license_state(state.clone());
             }
@@ -2278,5 +2300,80 @@ mod worker_stream_routing_tests {
         app.tick();
         app.tick();
         assert!(app.worker_streams().get("exec-tick").is_some());
+    }
+}
+
+#[cfg(test)]
+mod brain_retired_tests {
+    //! Second-order consumers of `SpurEventBody::BrainRetired` on the App
+    //! side. Commit 1 wired the lineage projection; these tests cover the
+    //! App-level state that must also react, namely:
+    //!
+    //! - `brain_name` must null out on retire so readbacks between `/clear`
+    //!   and the next prompt are not stale (R5).
+    //! - `metadata_store.last_active_*` must be cleared so `/clear` followed
+    //!   by a process quit does NOT auto-resume the retired session on the
+    //!   next `spur watch` launch (R7; the real user-visible bug).
+    //!
+    //! These tests exercise private fields, so they live in-module.
+    use super::*;
+    use spur_acp::domain::events::{BrainRetireReason, SpurEvent, SpurEventBody};
+    use spur_acp::SessionId;
+
+    fn wrap(body: SpurEventBody) -> SpurEvent {
+        SpurEvent::now(body)
+    }
+
+    #[test]
+    fn brain_retired_nulls_brain_name() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b1".into()),
+        }));
+        assert_eq!(app.brain_name.as_deref(), Some("kiro"));
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainRetired {
+            session: SessionId("b1".into()),
+            reason: BrainRetireReason::UserClear,
+        }));
+
+        assert!(
+            app.brain_name.is_none(),
+            "brain_name must null on retire so readbacks aren't stale"
+        );
+    }
+
+    #[test]
+    fn brain_retired_clears_last_active_auto_resume_pointers() {
+        // Simulates: BrainSpawned → AgentSessionReady writes last_active_*
+        // → /clear emits BrainRetired → arm clears last_active_*.
+        // Result: spur-cli's `last_active_acp()` returns None on relaunch.
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b1".into()),
+        }));
+        app.handle_spur_event(wrap(SpurEventBody::AgentSessionReady {
+            session: SessionId("b1".into()),
+            acp_session_id: "acp-b1".into(),
+            brain: "kiro".into(),
+            resumed: false,
+            cancel_mode: spur_acp::CancelMode::AcpSoft,
+        }));
+        assert!(
+            app.metadata_store.last_active_acp().is_some(),
+            "precondition: AgentSessionReady seeds last_active_acp"
+        );
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainRetired {
+            session: SessionId("b1".into()),
+            reason: BrainRetireReason::UserClear,
+        }));
+
+        assert!(
+            app.metadata_store.last_active_acp().is_none(),
+            "last_active_acp must be cleared on retire so /clear+quit doesn't auto-resume"
+        );
     }
 }

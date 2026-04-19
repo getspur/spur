@@ -12,5 +12,7 @@ python/dist/
 **/.spur/events/**
 **/.spur/logs/**
 .spur/session_metadata.json
+**/.spur/session_metadata.json
+**/.spur/session_metadata.json.tmp
 /.beads/
 /resource/superpowers/
