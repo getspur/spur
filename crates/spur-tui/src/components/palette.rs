@@ -70,6 +70,41 @@ impl PaletteState {
         }
         self.cursor = self.cursor.min(self.ranked.len().saturating_sub(1));
     }
+
+    pub fn set_query(&mut self, q: impl Into<String>) {
+        self.query = q.into();
+        self.rerank();
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.query.push(c);
+        self.rerank();
+    }
+
+    pub fn pop_char(&mut self) {
+        self.query.pop();
+        self.rerank();
+    }
+
+    pub fn cursor_down(&mut self) {
+        if self.ranked.is_empty() { return; }
+        self.cursor = (self.cursor + 1).min(self.ranked.len() - 1);
+    }
+
+    pub fn cursor_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn selected(&self) -> Option<&PaletteResult> {
+        self.ranked.get(self.cursor)
+    }
+
+    pub fn reset(&mut self) {
+        self.query.clear();
+        self.raw.clear();
+        self.ranked.clear();
+        self.cursor = 0;
+    }
 }
 
 impl Default for PaletteState {
