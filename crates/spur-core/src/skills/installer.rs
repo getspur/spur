@@ -1,7 +1,9 @@
 //! Skills installer: renders bundled+override skills into per-adapter
 //! agent dirs, protects user hand-edits via an in-file marker + sha256.
 
+use crate::skills::adapters::{render_kiro_steering_pointer, Adapter};
 use crate::skills::adapters::RenderedFile;
+use crate::skills::list_active_skills;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::path::PathBuf;
@@ -172,6 +174,35 @@ fn iter_lines_with_positions(text: &str) -> impl Iterator<Item = (&str, usize)> 
     })
 }
 
+fn rendered_without_marker(rf: &RenderedFile) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(&rf.bytes).ok()?;
+    let mut out = Vec::with_capacity(rf.bytes.len());
+    let mut line_start = 0usize;
+
+    for (line, rest_start) in iter_lines_with_positions(text) {
+        if parse_marker(line).is_some() {
+            out.extend_from_slice(&rf.bytes[..line_start]);
+            out.extend_from_slice(&rf.bytes[rest_start..]);
+            return Some(out);
+        }
+        line_start = rest_start;
+    }
+
+    None
+}
+
+fn is_unmanaged_spur_override(rf: &RenderedFile, disk: &[u8]) -> bool {
+    let components: Vec<_> = rf.path.iter().collect();
+    if !components
+        .windows(2)
+        .any(|window| window[0] == ".spur" && window[1] == "skills")
+    {
+        return false;
+    }
+
+    rendered_without_marker(rf).is_some_and(|bytes| bytes == disk)
+}
+
 pub(crate) fn decide(rf: &RenderedFile) -> Result<Decision, InstallError> {
     if !rf.path.exists() {
         return Ok(Decision::Create);
@@ -184,6 +215,9 @@ pub(crate) fn decide(rf: &RenderedFile) -> Result<Decision, InstallError> {
         return Ok(Decision::NoOp);
     }
     let Some((marker, body)) = body_after_marker(&disk) else {
+        if is_unmanaged_spur_override(rf, &disk) {
+            return Ok(Decision::Update);
+        }
         return Ok(Decision::Skip(SkipReason::NoMarker));
     };
     let disk_hash = sha256_hex(body);
@@ -192,6 +226,43 @@ pub(crate) fn decide(rf: &RenderedFile) -> Result<Decision, InstallError> {
     } else {
         Ok(Decision::Skip(SkipReason::UserEdited))
     }
+}
+
+/// Render the active skill set into every known agent directory under
+/// `repo_root`. Returns a structured Summary of what was written, what
+/// was unchanged, and what was skipped.
+pub fn run(repo_root: &Path) -> Result<Summary, InstallError> {
+    let skills = list_active_skills(repo_root)?;
+    let mut summary = Summary::default();
+
+    // Per-skill × per-adapter fanout.
+    for skill in &skills {
+        for adapter in Adapter::all() {
+            let rf = adapter.render(skill, repo_root);
+            apply(&rf, &mut summary)?;
+        }
+    }
+
+    // Once-per-run files (currently only Kiro steering pointer).
+    apply(&render_kiro_steering_pointer(repo_root), &mut summary)?;
+
+    Ok(summary)
+}
+
+fn apply(rf: &RenderedFile, summary: &mut Summary) -> Result<(), InstallError> {
+    match decide(rf)? {
+        Decision::Create | Decision::Update => {
+            atomic_write(&rf.path, &rf.bytes)?;
+            summary.written.push(rf.path.clone());
+        }
+        Decision::NoOp => {
+            summary.unchanged.push(rf.path.clone());
+        }
+        Decision::Skip(reason) => {
+            summary.skipped.push((rf.path.clone(), reason));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -354,5 +425,35 @@ mod tests {
             decide(&rf).unwrap(),
             Decision::Skip(SkipReason::UserEdited),
         );
+    }
+
+    #[test]
+    fn run_creates_all_seven_adapter_files_for_one_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let override_dir = dir.path().join(".spur/skills/my-skill");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nMy body\n",
+        )
+        .unwrap();
+        // Clear bundled set by not relying on it — bundled skills will also
+        // be written, but we only assert our override landed.
+        let summary = run(dir.path()).unwrap();
+        // Expected paths for `my-skill` (override) across 7 adapters + Kiro pointer.
+        for expected in [
+            ".spur/skills/my-skill/SKILL.md",
+            ".claude/skills/spurpower-my-skill/SKILL.md",
+            ".codex/skills/spurpower-my-skill/SKILL.md",
+            ".gemini/skills/spurpower-my-skill/SKILL.md",
+            ".kiro/skills/spurpower-my-skill/SKILL.md",
+            ".opencode/skills/spurpower-my-skill/SKILL.md",
+            ".cursor/rules/spurpower-my-skill.mdc",
+            ".kiro/steering/spurpower-pointer.md",
+        ] {
+            let p = dir.path().join(expected);
+            assert!(p.exists(), "missing {expected}");
+            assert!(summary.written.contains(&p), "not in summary.written: {expected}");
+        }
     }
 }
