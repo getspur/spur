@@ -399,6 +399,11 @@ fn should_preserve_worktree_matches_expected_variants() {
         waited_for: std::time::Duration::from_secs(60),
         fallback: TimeoutFallback::Approve,
     }));
+
+    // Cancelled (INV-6): preserve partial work for inspection.
+    assert!(should_preserve_worktree(&DelegationStatus::Cancelled {
+        reason: "brain requested cancel".into(),
+    }));
 }
 
 #[test]
@@ -442,6 +447,11 @@ fn should_commit_worker_diff_matches_expected_variants() {
         files: vec![PathBuf::from("a")]
     }));
     assert!(!should_commit_worker_diff(&DelegationStatus::Timeout));
+
+    // No commit: Cancelled (INV-6) — partial work preserved but not merged.
+    assert!(!should_commit_worker_diff(&DelegationStatus::Cancelled {
+        reason: "brain requested cancel".into(),
+    }));
 }
 
 // ─── Fix 1: ExecutorReviewCancelled on timeout / sender-drop ─────────
