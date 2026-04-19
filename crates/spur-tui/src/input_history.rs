@@ -1,0 +1,104 @@
+use serde::{Deserialize, Serialize};
+use spur_acp::ContentBlock;
+
+use crate::components::input_bar::ProtectedRange;
+
+/// Exact restorable input state for the composer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InputStateSnapshot {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub protected_ranges: Vec<ProtectedRange>,
+}
+
+impl InputStateSnapshot {
+    pub fn new(text: String, protected_ranges: Vec<ProtectedRange>) -> Self {
+        Self {
+            text,
+            protected_ranges,
+        }
+    }
+
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self::new(text.into(), Vec::new())
+    }
+
+    /// Rebuild a restorable input snapshot from outbound content blocks.
+    pub fn from_blocks(blocks: &[ContentBlock]) -> Self {
+        let mut text = String::new();
+        let mut protected_ranges = Vec::new();
+
+        for block in blocks {
+            match block {
+                ContentBlock::Text(t) => text.push_str(&t.text),
+                ContentBlock::ResourceLink(r) => {
+                    let start = text.len();
+                    text.push('@');
+                    text.push_str(&r.name);
+                    let end = text.len();
+                    protected_ranges.push(ProtectedRange {
+                        start,
+                        end,
+                        uri: r.uri.clone(),
+                        name: r.name.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            text,
+            protected_ranges,
+        }
+    }
+}
+
+/// Persisted input-history entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InputHistoryEntry {
+    #[serde(flatten)]
+    pub snapshot: InputStateSnapshot,
+    #[serde(default)]
+    pub submitted_at: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+impl InputHistoryEntry {
+    pub fn new(snapshot: InputStateSnapshot) -> Self {
+        Self {
+            snapshot,
+            submitted_at: None,
+            session_id: None,
+            agent: None,
+        }
+    }
+
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self::new(InputStateSnapshot::from_text(text))
+    }
+
+    pub fn from_blocks(blocks: &[ContentBlock]) -> Self {
+        Self::new(InputStateSnapshot::from_blocks(blocks))
+    }
+
+    pub fn with_context(
+        mut self,
+        submitted_at: Option<String>,
+        session_id: Option<String>,
+        agent: Option<String>,
+    ) -> Self {
+        self.submitted_at = submitted_at;
+        self.session_id = session_id;
+        self.agent = agent;
+        self
+    }
+
+    pub fn same_recall_state(&self, other: &Self) -> bool {
+        self.snapshot == other.snapshot
+    }
+}

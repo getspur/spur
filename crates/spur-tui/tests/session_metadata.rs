@@ -1,3 +1,5 @@
+use spur_tui::components::input_bar::ProtectedRange;
+use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 use spur_tui::session_metadata::{SessionEntry, SessionMetadataStore};
 use tempfile::tempdir;
 
@@ -59,6 +61,53 @@ fn load_malformed_file_returns_empty_store() {
     std::fs::write(&path, "{not json").unwrap();
     let store = SessionMetadataStore::load(&path);
     assert!(store.metadata().sessions.is_empty());
+}
+
+#[test]
+fn load_legacy_string_input_history_upgrades_to_structured_entries() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"sessions":{},"input_history":["look at @src/foo.rs"]}"#,
+    )
+    .unwrap();
+
+    let store = SessionMetadataStore::load(&path);
+    assert_eq!(store.metadata().input_history.len(), 1);
+    assert_eq!(
+        store.metadata().input_history[0].snapshot.text,
+        "look at @src/foo.rs"
+    );
+    assert!(store.metadata().input_history[0]
+        .snapshot
+        .protected_ranges
+        .is_empty());
+}
+
+#[test]
+fn save_then_load_roundtrip_structured_input_history() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+
+    let mut store = SessionMetadataStore::load(&path);
+    store.metadata_mut().input_history = vec![InputHistoryEntry::new(InputStateSnapshot::new(
+        "check @src/foo.rs".into(),
+        vec![ProtectedRange {
+            start: 6,
+            end: 17,
+            uri: "file:///abs/src/foo.rs".into(),
+            name: "src/foo.rs".into(),
+        }],
+    ))];
+    store.save().unwrap();
+
+    let store2 = SessionMetadataStore::load(&path);
+    assert_eq!(store2.metadata().input_history.len(), 1);
+    let restored = &store2.metadata().input_history[0].snapshot;
+    assert_eq!(restored.text, "check @src/foo.rs");
+    assert_eq!(restored.protected_ranges.len(), 1);
+    assert_eq!(restored.protected_ranges[0].uri, "file:///abs/src/foo.rs");
 }
 
 #[test]

@@ -15,6 +15,7 @@ use crate::action::{Action, ViewId};
 use crate::components::input_bar::{EditMode, InputBar};
 use crate::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
 use crate::components::status_bar::{StatusBar, StatusBarProps};
+use crate::input_history::InputHistoryEntry;
 
 use super::View;
 
@@ -101,8 +102,8 @@ pub struct SessionDetailView {
 
     /// Active fuzzy history search query (`Ctrl+R`).  `None` = inactive.
     history_search: Option<String>,
-    /// Full history texts parallel to the popup rows during history search.
-    history_search_hits: Vec<String>,
+    /// Full history entries parallel to the popup rows during history search.
+    history_search_hits: Vec<InputHistoryEntry>,
     /// Whether the inline workers panel is collapsed. Toggled by Alt+D.
     workers_panel_collapsed: bool,
     /// Maps ToolCall id -> render depth for subagent nesting.
@@ -239,7 +240,7 @@ impl SessionDetailView {
     }
 
     /// Seed the InputBar with global input history (loaded from metadata).
-    pub fn seed_input_history(&mut self, entries: Vec<String>) {
+    pub fn seed_input_history(&mut self, entries: Vec<InputHistoryEntry>) {
         self.input_bar.seed_history(entries);
     }
 
@@ -639,28 +640,30 @@ impl SessionDetailView {
         use nucleo_matcher::{Config, Matcher, Utf32Str};
 
         let history = self.input_bar.history();
-        let hits: Vec<&str> = if query.is_empty() {
-            history.iter().rev().take(20).map(|s| s.as_str()).collect()
+        let hits: Vec<InputHistoryEntry> = if query.is_empty() {
+            history.iter().rev().take(20).cloned().collect()
         } else {
             let mut matcher = Matcher::new(Config::DEFAULT);
             let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
             let mut buf = Vec::new();
-            let mut scored: Vec<(u32, &str)> = history
+            let mut scored: Vec<(u32, InputHistoryEntry)> = history
                 .iter()
                 .filter_map(|h| {
                     buf.clear();
-                    let score = pattern.score(Utf32Str::new(h, &mut buf), &mut matcher)?;
-                    Some((score, h.as_str()))
+                    let score =
+                        pattern.score(Utf32Str::new(&h.snapshot.text, &mut buf), &mut matcher)?;
+                    Some((score, h.clone()))
                 })
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0));
             scored.into_iter().take(20).map(|(_, h)| h).collect()
         };
 
-        self.history_search_hits = hits.iter().map(|s| s.to_string()).collect();
+        self.history_search_hits = hits.clone();
         let rows: Vec<PopupRow> = hits
             .iter()
-            .map(|h| {
+            .map(|entry| {
+                let h = &entry.snapshot.text;
                 // Truncate at char boundary to avoid panic on multi-byte UTF-8.
                 let display = if h.len() > 80 {
                     let mut end = 80;
@@ -671,10 +674,23 @@ impl SessionDetailView {
                 } else {
                     h
                 };
+                let mention_count = entry.snapshot.protected_ranges.len();
+                let description = if mention_count == 0 {
+                    String::new()
+                } else if mention_count == 1 {
+                    "1 mention".to_string()
+                } else {
+                    format!("{mention_count} mentions")
+                };
+                let source_tag = entry
+                    .agent
+                    .as_ref()
+                    .map(|agent| format!("⟨{}⟩", agent))
+                    .unwrap_or_default();
                 PopupRow {
                     label: display.replace('\n', " ↵ "),
-                    description: String::new(),
-                    source_tag: String::new(),
+                    description,
+                    source_tag,
                 }
             })
             .collect();
@@ -919,10 +935,9 @@ impl SessionDetailView {
                 }
                 KeyCode::Enter | KeyCode::Tab => {
                     if let Some(idx) = self.completion_popup.borrow().selected() {
-                        if let Some(full) = self.history_search_hits.get(idx) {
-                            let text = full.clone();
-                            let len = text.len();
-                            self.input_bar.set_text(text, len);
+                        if let Some(entry) = self.history_search_hits.get(idx) {
+                            let len = entry.snapshot.text.len();
+                            self.input_bar.set_state(entry.snapshot.clone(), len);
                         }
                     }
                     self.history_search = None;

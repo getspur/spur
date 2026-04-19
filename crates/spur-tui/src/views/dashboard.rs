@@ -22,6 +22,7 @@ use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issues_panel::IssuesPanel;
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 use crate::components::{LogEntry, LogEntryKind};
+use crate::input_history::InputHistoryEntry;
 
 use super::View;
 
@@ -245,7 +246,7 @@ impl DashboardView {
     }
 
     /// Seed the InputBar with global input history (loaded from metadata).
-    pub fn seed_input_history(&mut self, entries: Vec<String>) {
+    pub fn seed_input_history(&mut self, entries: Vec<InputHistoryEntry>) {
         self.input_bar.seed_history(entries);
     }
 

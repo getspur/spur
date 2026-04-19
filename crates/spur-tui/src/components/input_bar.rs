@@ -6,12 +6,15 @@ use ratatui::{
     widgets::{Block, Borders},
     Frame,
 };
+use serde::{Deserialize, Serialize};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
+
+use crate::input_history::{InputHistoryEntry, InputStateSnapshot};
 
 /// A protected byte range inside the text representing an atomic token
 /// (e.g., a resource mention). These ranges are skipped atomically by
 /// cursor movement and deleted as a unit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtectedRange {
     pub start: usize,
     pub end: usize,
@@ -57,11 +60,11 @@ pub struct InputBar {
     /// Capture of the most recent Enter-submit: `(text, ranges, interrupt)`.
     submit_capture: Option<(String, Vec<ProtectedRange>, bool)>,
     /// Submitted input history, oldest first. Capped at [`HISTORY_CAP`].
-    history: Vec<String>,
+    history: Vec<InputHistoryEntry>,
     /// `None` = editing live draft; `Some(i)` = browsing `history[i]`.
     history_cursor: Option<usize>,
     /// Stashed live input when the user enters history-browsing mode.
-    draft: String,
+    draft: InputStateSnapshot,
     /// Last inner width observed in `render()`; updated via interior mutation
     /// so `render(&self, ...)` can record the width without requiring `&mut self`.
     last_inner_width: std::cell::Cell<u16>,
@@ -88,7 +91,7 @@ impl InputBar {
             submit_capture: None,
             history: Vec::new(),
             history_cursor: None,
-            draft: String::new(),
+            draft: InputStateSnapshot::default(),
             last_inner_width: std::cell::Cell::new(80),
             goal_vcol: None,
         }
@@ -991,6 +994,24 @@ impl InputBar {
         self.goal_vcol = None;
     }
 
+    fn snapshot(&self) -> InputStateSnapshot {
+        InputStateSnapshot::new(self.text(), self.protected_ranges.clone())
+    }
+
+    fn restore_snapshot(&mut self, snapshot: &InputStateSnapshot, cursor: usize) {
+        let mode = self.mode;
+        let last_w = self.last_inner_width.get();
+        let lines: Vec<String> = snapshot.text.split('\n').map(|s| s.to_string()).collect();
+        self.textarea = TextArea::new(lines);
+        self.textarea.set_cursor_line_style(Style::default());
+        self.rebuild_line_cache();
+        self.move_cursor_to_byte(cursor.min(snapshot.text.len()));
+        self.protected_ranges = snapshot.protected_ranges.clone();
+        self.last_inner_width.set(last_w);
+        self.goal_vcol = None;
+        self.set_mode(mode);
+    }
+
     /// Submit the current text.
     fn submit(&mut self) -> Option<(String, bool)> {
         self.goal_vcol = None;
@@ -1000,15 +1021,19 @@ impl InputBar {
         }
         let interrupt = text.starts_with('!');
         let ranges = self.protected_ranges.clone();
-        self.submit_capture = Some((text.clone(), ranges, interrupt));
+        self.submit_capture = Some((text.clone(), ranges.clone(), interrupt));
 
         // Push to history
-        self.history.push(text.clone());
+        self.history
+            .push(InputHistoryEntry::new(InputStateSnapshot::new(
+                text.clone(),
+                ranges,
+            )));
         if self.history.len() > HISTORY_CAP {
             self.history.remove(0);
         }
         self.history_cursor = None;
-        self.draft.clear();
+        self.draft = InputStateSnapshot::default();
         self.clear();
 
         Some((text, interrupt))
@@ -1107,17 +1132,12 @@ impl InputBar {
 
     /// Replace text and cursor wholesale.
     pub fn set_text(&mut self, text: String, cursor: usize) {
-        let mode = self.mode;
-        let last_w = self.last_inner_width.get();
-        let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
-        self.textarea = TextArea::new(lines);
-        self.textarea.set_cursor_line_style(Style::default());
-        self.rebuild_line_cache();
-        self.move_cursor_to_byte(cursor);
-        self.protected_ranges.clear();
-        self.last_inner_width.set(last_w);
-        self.goal_vcol = None;
-        self.set_mode(mode);
+        self.restore_snapshot(&InputStateSnapshot::from_text(text), cursor);
+    }
+
+    /// Replace text, protected ranges, and cursor wholesale.
+    pub fn set_state(&mut self, snapshot: InputStateSnapshot, cursor: usize) {
+        self.restore_snapshot(&snapshot, cursor);
     }
 
     fn last_inner_width(&self) -> u16 {
@@ -1143,13 +1163,13 @@ impl InputBar {
 
     /// Replace the in-memory history with persisted entries (e.g. loaded
     /// from `session_metadata.json` at startup).
-    pub fn seed_history(&mut self, entries: Vec<String>) {
+    pub fn seed_history(&mut self, entries: Vec<InputHistoryEntry>) {
         self.history = entries;
         self.history_cursor = None;
     }
 
     /// Current history entries (for persistence).
-    pub fn history(&self) -> &[String] {
+    pub fn history(&self) -> &[InputHistoryEntry] {
         &self.history
     }
 
@@ -1160,7 +1180,7 @@ impl InputBar {
         }
         match self.history_cursor {
             None => {
-                self.draft = self.text();
+                self.draft = self.snapshot();
                 let idx = self.history.len() - 1;
                 self.history_cursor = Some(idx);
                 self.load_history_entry(idx);
@@ -1183,18 +1203,17 @@ impl InputBar {
             Some(_) => {
                 self.history_cursor = None;
                 let draft = std::mem::take(&mut self.draft);
-                let len = draft.len();
-                self.set_text(draft, len);
+                let len = draft.text.len();
+                self.restore_snapshot(&draft, len);
             }
             None => {}
         }
     }
 
     fn load_history_entry(&mut self, idx: usize) {
-        let entry = self.history[idx].clone();
-        let len = entry.len();
-        self.protected_ranges.clear();
-        self.set_text(entry, len);
+        let snapshot = self.history[idx].snapshot.clone();
+        let len = snapshot.text.len();
+        self.restore_snapshot(&snapshot, len);
     }
 
     /// Test-only: set cursor position.
