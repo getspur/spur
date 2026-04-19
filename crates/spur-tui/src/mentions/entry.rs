@@ -28,6 +28,7 @@ pub trait MentionSource: Send {
 }
 
 /// Convert an absolute path under cwd into a `MentionEntry`.
+/// Only produces `File` and `Directory` kinds; never `Worker`.
 pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
     let rel = abs.strip_prefix(cwd).ok()?;
     let rel_str = rel.to_str()?;

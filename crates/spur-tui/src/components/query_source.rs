@@ -304,6 +304,7 @@ impl QuerySource for MentionQuerySource {
                 let icon = match m.kind {
                     MentionKind::Directory => "\u{1F4C1}",
                     MentionKind::File => "\u{1F4C4}",
+                    // TODO(worker-mentions Task 5): wire MentionEntry.{secondary, tag} into RetrievalRow for worker rows.
                     MentionKind::Worker => "\u{1F916}",
                 };
                 RetrievalRow {
