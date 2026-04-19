@@ -1,0 +1,19 @@
+name: Lint invariants
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # git grep needs the full tree
+
+      - name: INV-C1 — only run_interactive calls brain.prompt()
+        run: ./scripts/lint_prompt_call_sites.sh
+
+      - name: INV-C2 — only TUI translation constructs InteractiveInput::Message
+        run: ./scripts/lint_message_construction_sites.sh
