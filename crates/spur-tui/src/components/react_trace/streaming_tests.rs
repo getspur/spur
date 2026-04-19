@@ -2021,5 +2021,5 @@ fn render_compact_incremental_rebuild_on_new_entry() {
     term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
     // After adding one new entry, total_lines should grow by at least 1
     // (plus possibly a separator line for the kind transition).
-    assert!(t.last_total_lines >= lines_before + 1, "expected at least {} lines, got {}", lines_before + 1, t.last_total_lines);
+    assert!(t.last_total_lines > lines_before, "expected at least {} lines, got {}", lines_before + 1, t.last_total_lines);
 }
