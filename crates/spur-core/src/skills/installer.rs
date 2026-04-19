@@ -1,6 +1,7 @@
 //! Skills installer: renders bundled+override skills into per-adapter
 //! agent dirs, protects user hand-edits via an in-file marker + sha256.
 
+use crate::skills::adapters::RenderedFile;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::path::PathBuf;
@@ -138,9 +139,80 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), InstallError
     Ok(())
 }
 
+/// Outcome of `decide()` for a single target file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Decision {
+    Create,
+    Update,
+    NoOp,
+    Skip(SkipReason),
+}
+
+/// Return the bytes after the SPUR-MANAGED marker line, if present.
+/// Searches the first few lines (tolerates optional YAML frontmatter).
+fn body_after_marker(bytes: &[u8]) -> Option<(Marker, &[u8])> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    for (line, rest_start) in iter_lines_with_positions(text) {
+        if let Some(m) = parse_marker(line) {
+            return Some((m, &bytes[rest_start..]));
+        }
+        // Optimization: bail after ~20 lines; marker should be near the top.
+        if rest_start > 2048 {
+            break;
+        }
+    }
+    None
+}
+
+fn iter_lines_with_positions(text: &str) -> impl Iterator<Item = (&str, usize)> {
+    text.split_inclusive('\n').scan(0usize, |pos, line| {
+        let start = *pos;
+        *pos += line.len();
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        Some((trimmed, *pos))
+    })
+}
+
+pub(crate) fn decide(rf: &RenderedFile) -> Result<Decision, InstallError> {
+    if !rf.path.exists() {
+        return Ok(Decision::Create);
+    }
+    let disk = std::fs::read(&rf.path).map_err(|source| InstallError::Io {
+        path: rf.path.clone(),
+        source,
+    })?;
+    if disk == rf.bytes {
+        return Ok(Decision::NoOp);
+    }
+    let Some((marker, body)) = body_after_marker(&disk) else {
+        return Ok(Decision::Skip(SkipReason::NoMarker));
+    };
+    let disk_hash = sha256_hex(body);
+    if disk_hash == marker.sha256 {
+        Ok(Decision::Update)
+    } else {
+        Ok(Decision::Skip(SkipReason::UserEdited))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::adapters::RenderedFile;
+
+    fn rf_with(path: std::path::PathBuf, bytes: Vec<u8>) -> RenderedFile {
+        RenderedFile { path, bytes }
+    }
+
+    fn wrap_with_marker(body: &str, skill_id: &str) -> Vec<u8> {
+        let marker = Marker {
+            version: 1,
+            skill_id: skill_id.to_string(),
+            sha256: sha256_hex(body.as_bytes()),
+        };
+        format!("---\nfoo: bar\n---\n{m}{body}", m = marker.render())
+            .into_bytes()
+    }
 
     #[test]
     fn marker_roundtrip() {
@@ -217,5 +289,71 @@ mod tests {
         std::fs::write(&target, "old").unwrap();
         atomic_write(&target, b"new").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    #[test]
+    fn decide_create_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let rf = rf_with(dir.path().join("x.md"), b"body".to_vec());
+        assert_eq!(decide(&rf).unwrap(), Decision::Create);
+    }
+
+    #[test]
+    fn decide_noop_when_bytes_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("x.md");
+        let bytes = wrap_with_marker("hello", "tdd");
+        std::fs::write(&target, &bytes).unwrap();
+        let rf = rf_with(target, bytes);
+        assert_eq!(decide(&rf).unwrap(), Decision::NoOp);
+    }
+
+    #[test]
+    fn decide_update_when_marker_body_hash_matches_but_bytes_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("x.md");
+        // Disk: old-version frontmatter + same body.
+        let marker = Marker {
+            version: 1,
+            skill_id: "tdd".to_string(),
+            sha256: sha256_hex(b"hello"),
+        };
+        let on_disk = format!("---\nold: fm\n---\n{m}hello", m = marker.render());
+        std::fs::write(&target, &on_disk).unwrap();
+        // Rendered: new frontmatter + same body + same hash.
+        let rendered = format!("---\nnew: fm\n---\n{m}hello", m = marker.render());
+        let rf = rf_with(target, rendered.into_bytes());
+        assert_eq!(decide(&rf).unwrap(), Decision::Update);
+    }
+
+    #[test]
+    fn decide_skip_usermarker_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("x.md");
+        std::fs::write(&target, "totally user's file").unwrap();
+        let rf = rf_with(target, b"spur version".to_vec());
+        assert_eq!(
+            decide(&rf).unwrap(),
+            Decision::Skip(SkipReason::NoMarker),
+        );
+    }
+
+    #[test]
+    fn decide_skip_user_edited_when_body_hash_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("x.md");
+        // Disk: marker claims body hash of "hello", but body is "edited".
+        let marker = Marker {
+            version: 1,
+            skill_id: "tdd".to_string(),
+            sha256: sha256_hex(b"hello"),
+        };
+        let on_disk = format!("---\nfm: x\n---\n{m}edited body", m = marker.render());
+        std::fs::write(&target, &on_disk).unwrap();
+        let rf = rf_with(target, b"anything".to_vec());
+        assert_eq!(
+            decide(&rf).unwrap(),
+            Decision::Skip(SkipReason::UserEdited),
+        );
     }
 }
