@@ -74,3 +74,21 @@ where
     }
     count
 }
+
+// Regression baseline for C9. The DisabledProvider has no SDK and no bridge,
+// so it must not broadcast on explicit handler calls — if it ever does, the
+// event-duplication class of bugs has migrated into the disabled path.
+#[tokio::test]
+async fn disabled_provider_emits_no_events_on_explicit_calls() {
+    let license = spur_license::SpurLicense::from_env_or_disabled();
+    let mut rx = license.subscribe();
+
+    let _ = license.validate().await;
+    let _ = license.heartbeat().await;
+
+    let got = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
+    assert!(
+        got.is_err(),
+        "DisabledProvider must not broadcast on explicit calls; got {got:?}"
+    );
+}
