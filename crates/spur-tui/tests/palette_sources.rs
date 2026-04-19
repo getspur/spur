@@ -60,3 +60,11 @@ fn worker_source_yields_no_rows_for_empty_lineage() {
     let src = WorkerSource::from_lineage(&lineage);
     assert_eq!(src.collect().len(), 0);
 }
+
+use spur_tui::components::palette_sources::TraceSource;
+
+#[test]
+fn trace_source_handles_empty_trace() {
+    let src = TraceSource::from_empty();
+    assert_eq!(src.collect().len(), 0);
+}
