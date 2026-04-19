@@ -55,10 +55,18 @@ pub struct BrainScheduler {
     /// until this instant elapses. A user prompt arriving during grace
     /// clears the window (user intent trumps grace).
     cancel_grace_until:    Option<Instant>,
+    /// G5: post-cancel grace window duration. Default `CANCEL_GRACE_DEFAULT`
+    /// (750 ms), overridable at construction time via `SPUR_CANCEL_GRACE_MS`.
+    cancel_grace_window:   Duration,
 }
 
 impl BrainScheduler {
     pub fn new(active_session: Option<SessionId>) -> Self {
+        let cancel_grace_window = std::env::var("SPUR_CANCEL_GRACE_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(CANCEL_GRACE_DEFAULT);
         Self {
             pending_user: VecDeque::new(),
             pending_continuations: VecDeque::new(),
@@ -66,6 +74,7 @@ impl BrainScheduler {
             active_session,
             turn_in_flight: false,
             cancel_grace_until: None,
+            cancel_grace_window,
         }
     }
 
@@ -94,10 +103,16 @@ impl BrainScheduler {
 
     /// Call AFTER cancel has fully resolved (stream drained / force-timeout fired).
     pub fn note_cancel_resolved(&mut self, now: Instant) {
-        self.cancel_grace_until = Some(now + CANCEL_GRACE_DEFAULT);
+        self.cancel_grace_until = Some(now + self.cancel_grace_window);
     }
 
-    /// Arriving user prompt during grace clears the grace window.
+    /// Clears the grace window if any user input is queued.
+    ///
+    /// Called at the top of `next()` unconditionally, BEFORE the in-flight
+    /// gate. This is intentional: the grace window represents "do not
+    /// harass the user with autonomous continuations just after cancel";
+    /// once user intent is established by a queued item, grace is stale
+    /// regardless of whether we are currently in-flight or can yet dispatch.
     fn clear_grace_if_user_arrived(&mut self) {
         if !self.pending_user.is_empty() {
             self.cancel_grace_until = None;
@@ -171,6 +186,12 @@ impl BrainScheduler {
 /// RAII guard: sets `turn_in_flight = true` on `arm`, clears on `Drop`.
 /// Task 8 uses this to guarantee `note_turn_finished()` is called on
 /// every exit path from the streaming loop (normal, cancel, error).
+///
+/// **Safety note:** `std::mem::forget(guard)` defeats the guard and leaves
+/// `turn_in_flight == true` permanently, effectively freezing the scheduler
+/// in Idle forever. This is a known Rust RAII limitation — do not `forget`
+/// a TurnGuard.
+#[must_use = "TurnGuard must be bound to a variable; an unbound guard drops immediately and returns turn_in_flight to false"]
 pub struct TurnGuard<'a> {
     sched: &'a mut BrainScheduler,
 }
@@ -298,5 +319,46 @@ mod tests {
             }
             _ => panic!("expected ContinuationPrompt"),
         }
+    }
+
+    #[test]
+    fn grace_cleared_when_user_arrives_during_in_flight_turn() {
+        let now = Instant::now();
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+
+        s.push_continuation(mk_cont("id-1"));
+        s.note_turn_started();              // in-flight
+        s.note_cancel_resolved(now);        // grace armed
+        s.push_user(InteractiveInput::Message { blocks: vec![], interrupt: false });
+
+        // In-flight => Idle, but grace is cleared as a side effect.
+        assert!(matches!(s.next(now + std::time::Duration::from_millis(100)), ScheduledAction::Idle));
+
+        s.note_turn_finished();
+
+        // Grace already cleared: user wins with merged continuation.
+        match s.next(now + std::time::Duration::from_millis(200)) {
+            ScheduledAction::MergedPrompt { continuations, .. } => {
+                assert_eq!(continuations.len(), 1);
+            }
+            other => panic!("expected MergedPrompt, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn push_continuation_after_delivery_is_noop() {
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+        s.push_continuation(mk_cont("id-1"));
+
+        // Drain via next().
+        match s.next(Instant::now()) {
+            ScheduledAction::ContinuationPrompt(cs) => assert_eq!(cs.len(), 1),
+            _ => panic!("expected ContinuationPrompt"),
+        }
+
+        // Re-push the same id — should be a no-op because delivered_ids remembers it.
+        s.push_continuation(mk_cont("id-1"));
+        assert_eq!(s.pending_continuation_len(), 0);
+        assert!(matches!(s.next(Instant::now()), ScheduledAction::Idle));
     }
 }
