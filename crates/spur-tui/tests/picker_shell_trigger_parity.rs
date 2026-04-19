@@ -26,6 +26,7 @@ fn mk_view_in_cwd(cwd: std::path::PathBuf) -> SessionDetailView {
         "brain".into(),
         cwd,
         spur_tui::test_support::default_agent_config("claude"),
+        Vec::new(),
     )
 }
 

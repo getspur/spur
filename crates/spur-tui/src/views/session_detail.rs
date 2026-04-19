@@ -102,6 +102,14 @@ pub struct SessionDetailView {
     /// Populated on each ToolCall; read on subsequent ToolCalls to resolve
     /// the parent's depth. Capped at 8 to prevent runaway indentation.
     tool_depth: std::collections::HashMap<String, u8>,
+    /// Snapshot of worker descriptors used to populate the `@`-picker
+    /// for brain sessions. Empty for direct sessions. Set once at
+    /// construction.
+    worker_snapshot: Vec<crate::mentions::WorkerMentionDescriptor>,
+    /// Derived once from `worker_snapshot`: the set of known worker
+    /// names. Used by `prepend_worker_hint` to filter unknown-name
+    /// atoms out of the hint.
+    known_worker_names: std::collections::HashSet<String>,
 }
 
 impl SessionDetailView {
@@ -111,10 +119,18 @@ impl SessionDetailView {
         role: String,
         cwd: std::path::PathBuf,
         agent_cfg: std::sync::Arc<spur_acp::AgentConfig>,
+        worker_snapshot: Vec<crate::mentions::WorkerMentionDescriptor>,
     ) -> Self {
         let command_registry =
             crate::commands::CommandRegistry::from_configs(std::slice::from_ref(&*agent_cfg));
         let agent_kind = agent_cfg.kind;
+        let known_worker_names: std::collections::HashSet<String> =
+            worker_snapshot.iter().map(|d| d.name.clone()).collect();
+        let mention_registry = if role == "brain" {
+            crate::mentions::MentionRegistry::for_brain_session(worker_snapshot.clone())
+        } else {
+            crate::mentions::MentionRegistry::for_direct_session()
+        };
         Self {
             session_id,
             agent_name,
@@ -130,9 +146,7 @@ impl SessionDetailView {
             context_size: None,
             auth_error: None,
             trigger_detector: crate::components::completion_trigger::TriggerDetector::new(),
-            mention_registry: std::rc::Rc::new(std::cell::RefCell::new(
-                crate::mentions::MentionRegistry::new(),
-            )),
+            mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
             cwd,
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
@@ -149,6 +163,8 @@ impl SessionDetailView {
             picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
+            worker_snapshot,
+            known_worker_names,
         }
     }
 
@@ -1660,6 +1676,7 @@ mod invalidate_protocols_tests {
             "brain".to_string(),
             std::path::PathBuf::from("/tmp"),
             std::sync::Arc::new(spur_acp::AgentConfig::with_defaults("claude")),
+            Vec::new(),
         )
     }
 
@@ -1782,6 +1799,7 @@ mod static_command_seeding_tests {
             "brain".into(),
             std::path::PathBuf::from("."),
             Arc::new(cfg),
+            Vec::new(),
         );
         let names: Vec<_> = view
             .command_registry
@@ -1819,6 +1837,7 @@ mod cancel_state_tests {
             "brain".to_string(),
             std::path::PathBuf::from("/tmp"),
             Arc::new(AgentConfig::with_defaults("claude")),
+            Vec::new(),
         )
     }
 

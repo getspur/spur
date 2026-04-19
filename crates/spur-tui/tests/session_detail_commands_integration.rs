@@ -39,6 +39,7 @@ fn plain_text_submit_produces_text_block() {
         "brain".into(),
         tmp.path().to_path_buf(),
         spur_tui::test_support::default_agent_config("claude"),
+        Vec::new(),
     );
     type_str(&mut v, "hello");
     let act = press(&mut v, KeyCode::Enter).expect("action");
@@ -66,6 +67,7 @@ fn slash_help_fires_show_help_action() {
         "brain".into(),
         tmp.path().to_path_buf(),
         spur_tui::test_support::default_agent_config("claude"),
+        Vec::new(),
     );
     type_str(&mut v, "/");
     // popup is open; Enter accepts the first row (which is /help from spur-local)
@@ -83,6 +85,7 @@ fn ctrl_r_history_restore_preserves_resource_links() {
         "brain".into(),
         tmp.path().to_path_buf(),
         spur_tui::test_support::default_agent_config("claude"),
+        Vec::new(),
     );
     v.seed_input_history(vec![InputHistoryEntry::new(InputStateSnapshot::new(
         "check @src/foo.rs".into(),
