@@ -570,6 +570,8 @@ pub enum SpurEventBody {
         approved: u32,
         rejected: u32,
         failed: u32,
+        #[serde(default)]
+        cancelled: u32,
     },
     /// Emitted when all tasks in a plan are Approved. Distinct from
     /// PlanCompleted (which fires on any terminal state). Brain treats this
