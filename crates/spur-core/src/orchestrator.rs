@@ -2766,11 +2766,12 @@ impl Orchestrator {
                 );
             }
 
-            // Review gate: register FIRST, then emit events.
-            // `ReviewSink` requires register-before-emit so a TUI
-            // cannot race a `SubmitReview` past an unregistered sink.
-            let rx = match register_gate(eid.clone(), attempt_n, &review_sink).await {
-                Ok(rx) => rx,
+            // INV-4: obtain a ReviewHandle first — it is the ONLY way to
+            // emit `ExecutorReviewRequested` for this slot, enforced at
+            // the type level. `register_handle` wraps `ReviewSink::register`
+            // so the ordering invariant (register-before-emit) is preserved.
+            let handle = match review_sink.register_handle(eid.clone(), attempt_n).await {
+                Ok(h) => h,
                 Err(e) => {
                     tracing::error!(
                         executor_id = %eid.0,
@@ -2839,12 +2840,11 @@ impl Orchestrator {
                 delegation_plan: delegation_plan.clone(),
                 chosen_matches_dispatched,
             };
-            funnel.emit(SpurEventBody::ExecutorReviewRequested {
-                id: eid.0.clone(),
-                attempt_n,
-                kind: ReviewKind::Completion,
-                payload: review_payload,
-            });
+            // Emit via the handle — type-enforced: no handle → no emit.
+            handle.emit_requested(&funnel, ReviewKind::Completion, review_payload);
+
+            // Consume the handle to get the receiver for the decision loop.
+            let rx = handle.into_rx();
 
             // Inline decision-loop (so we can intercept Retry before
             // apply_decision_to_candidate maps it to Failed).
