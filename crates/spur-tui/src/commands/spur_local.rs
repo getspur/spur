@@ -1,3 +1,28 @@
+//! Static registry of spur-local slash commands available in every session.
+//!
+//! # Taxonomy
+//!
+//! Slash commands fall into two categories:
+//!
+//! - **Meta commands** (this file): operate on spur's view / session
+//!   lifecycle. Examples: `/clear`, `/sessions`, `/help`, `/quit`,
+//!   `/mode`, `/cost`, `/vim`. They are **client-owned**: spur
+//!   intercepts them before they ever reach the agent. Agent-advertised
+//!   entries with the same name are **shadowed** by these spur-local
+//!   entries (see `CommandRegistry::ensure_cache`).
+//!
+//! - **Conversational commands** (declared in an agent's config under
+//!   `[commands.static]` or advertised at runtime via
+//!   `_<agent>.dev/commands/available`): affect the brain's reasoning
+//!   or context. Examples: `/compact`, `/model`, `/undo`, `/review`.
+//!   These flow through `Dispatch::PromptText` or
+//!   `Dispatch::VendorExec` and are handled by the agent.
+//!
+//! When a name collides between categories, meta wins. This is why
+//! kiro's advertised `/clear` (which does NOT match the client's
+//! expected behavior — see the 2026-04-15 brainstorm docs) is hidden
+//! from the popup in favor of spur's uniform retire+respawn handler.
+
 use super::entry::{CommandEntry, CommandSource, Dispatch};
 use crate::action::Action;
 
@@ -5,6 +30,17 @@ use crate::action::Action;
 pub struct SpurLocalSource;
 
 impl SpurLocalSource {
+    /// Names of spur-local meta-commands that **exclusively** own their
+    /// command name: any agent-advertised entry with the same name is
+    /// suppressed from the registry. Entries NOT in this set can still
+    /// coexist with agent entries of the same name (collision-display
+    /// logic applies). Currently only `/clear` is exclusive because it
+    /// must behave identically across every brain kind and forwarding it
+    /// to the agent produces inconsistent or broken results.
+    pub fn exclusive_names() -> &'static [&'static str] {
+        &["clear"]
+    }
+
     pub fn entries() -> Vec<CommandEntry> {
         vec![
             CommandEntry {
@@ -13,6 +49,13 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ShowHelp),
+            },
+            CommandEntry {
+                name: "clear".into(),
+                description: "Close the current session and start fresh".into(),
+                hint: None,
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::ClearSession),
             },
             CommandEntry {
                 name: "mode".into(),
