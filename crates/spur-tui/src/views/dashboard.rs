@@ -340,12 +340,13 @@ impl DashboardView {
     }
 
     /// Render the dashboard with access to the current lineage projection.
-    fn render_with_lineage(
+    pub fn render_with_lineage(
         &mut self,
         frame: &mut Frame,
         area: Rect,
         lineage: &ExecutorLineage,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+        worker_streams: &mut crate::worker_streams::WorkerStreams,
     ) {
         let node_count = lineage.nodes().count();
 
@@ -493,8 +494,9 @@ impl DashboardView {
                             .issue_id
                             .as_ref()
                             .map(|iid| format_issue_badge(iid, &self.tracked_issues));
+                        let trace = worker_streams.get_mut(&id.0);
                         self.detail_pane
-                            .render(frame, chunks[log_chunk], node, badge.as_deref());
+                            .render(frame, chunks[log_chunk], node, badge.as_deref(), trace);
                     } else {
                         self.activity_log.render(frame, chunks[log_chunk]);
                     }
@@ -533,6 +535,7 @@ impl DashboardView {
         &mut self,
         key: KeyEvent,
         lineage: Option<&ExecutorLineage>,
+        worker_streams: &mut crate::worker_streams::WorkerStreams,
     ) -> Option<Action> {
         let key = super::normalize_macos_option(key);
 
@@ -690,8 +693,9 @@ impl DashboardView {
                         }
                         'j' if self.focused_panel == Panel::Agents => Some(Action::SelectNext),
                         'j' => {
-                            if self.focused_node.is_some() {
-                                self.detail_pane.scroll_down();
+                            if let Some(ref id) = self.focused_node.clone() {
+                                let trace = worker_streams.get_mut(&id.0);
+                                self.detail_pane.scroll_down(trace);
                             } else {
                                 self.activity_log.scroll_down(20);
                             }
@@ -699,8 +703,9 @@ impl DashboardView {
                         }
                         'k' if self.focused_panel == Panel::Agents => Some(Action::SelectPrev),
                         'k' => {
-                            if self.focused_node.is_some() {
-                                self.detail_pane.scroll_up();
+                            if let Some(ref id) = self.focused_node.clone() {
+                                let trace = worker_streams.get_mut(&id.0);
+                                self.detail_pane.scroll_up(trace);
                             } else {
                                 self.activity_log.scroll_up();
                             }
@@ -726,16 +731,18 @@ impl DashboardView {
                         'r' => Some(Action::JumpToReview),
                         'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
                         'g' => {
-                            if self.focused_node.is_some() {
-                                self.detail_pane.scroll_to_top();
+                            if let Some(ref id) = self.focused_node.clone() {
+                                let trace = worker_streams.get_mut(&id.0);
+                                self.detail_pane.scroll_to_top(trace);
                             } else {
                                 self.activity_log.scroll_to_top();
                             }
                             Some(Action::ScrollToTop)
                         }
                         'G' => {
-                            if self.focused_node.is_some() {
-                                self.detail_pane.scroll_to_bottom();
+                            if let Some(ref id) = self.focused_node.clone() {
+                                let trace = worker_streams.get_mut(&id.0);
+                                self.detail_pane.scroll_to_bottom(trace);
                             } else {
                                 self.activity_log.scroll_to_bottom();
                             }
@@ -841,8 +848,9 @@ impl DashboardView {
                     }
                     'j' => {
                         self.input_bar.clear();
-                        if self.focused_node.is_some() {
-                            self.detail_pane.scroll_down();
+                        if let Some(ref id) = self.focused_node.clone() {
+                            let trace = worker_streams.get_mut(&id.0);
+                            self.detail_pane.scroll_down(trace);
                         } else {
                             self.activity_log.scroll_down(20);
                         }
@@ -854,8 +862,9 @@ impl DashboardView {
                     }
                     'k' => {
                         self.input_bar.clear();
-                        if self.focused_node.is_some() {
-                            self.detail_pane.scroll_up();
+                        if let Some(ref id) = self.focused_node.clone() {
+                            let trace = worker_streams.get_mut(&id.0);
+                            self.detail_pane.scroll_up(trace);
                         } else {
                             self.activity_log.scroll_up();
                         }
@@ -871,8 +880,9 @@ impl DashboardView {
                     }
                     'g' => {
                         self.input_bar.clear();
-                        if self.focused_node.is_some() {
-                            self.detail_pane.scroll_to_top();
+                        if let Some(ref id) = self.focused_node.clone() {
+                            let trace = worker_streams.get_mut(&id.0);
+                            self.detail_pane.scroll_to_top(trace);
                         } else {
                             self.activity_log.scroll_to_top();
                         }
@@ -880,8 +890,9 @@ impl DashboardView {
                     }
                     'G' => {
                         self.input_bar.clear();
-                        if self.focused_node.is_some() {
-                            self.detail_pane.scroll_to_bottom();
+                        if let Some(ref id) = self.focused_node.clone() {
+                            let trace = worker_streams.get_mut(&id.0);
+                            self.detail_pane.scroll_to_bottom(trace);
                         } else {
                             self.activity_log.scroll_to_bottom();
                         }
@@ -935,8 +946,9 @@ impl DashboardView {
                 KeyCode::Up => {
                     if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
                         self.issue_detail_pane.scroll_up();
-                    } else if self.focused_node.is_some() {
-                        self.detail_pane.scroll_up();
+                    } else if let Some(ref id) = self.focused_node.clone() {
+                        let trace = worker_streams.get_mut(&id.0);
+                        self.detail_pane.scroll_up(trace);
                     } else {
                         self.activity_log.scroll_up();
                     }
@@ -945,8 +957,9 @@ impl DashboardView {
                 KeyCode::Down => {
                     if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
                         self.issue_detail_pane.scroll_down();
-                    } else if self.focused_node.is_some() {
-                        self.detail_pane.scroll_down();
+                    } else if let Some(ref id) = self.focused_node.clone() {
+                        let trace = worker_streams.get_mut(&id.0);
+                        self.detail_pane.scroll_down(trace);
                     } else {
                         self.activity_log.scroll_down(20);
                     }
@@ -994,7 +1007,11 @@ impl DashboardView {
 
 impl View for DashboardView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
-        self.handle_key_inner(key, Some(ctx.lineage))
+        // NOTE: App bypasses this via handle_key_with_worker_streams to supply
+        // the per-executor traces. This fallback uses an empty map (safe but
+        // won't route scroll to ReactTrace).
+        let mut empty_ws = crate::worker_streams::WorkerStreams::new();
+        self.handle_key_inner(key, Some(ctx.lineage), &mut empty_ws)
     }
 
     fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
@@ -1537,11 +1554,27 @@ impl View for DashboardView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
-        self.render_with_lineage(frame, area, ctx.lineage, ctx.license_badge);
+        // NOTE: App::render bypasses this method and calls render_with_lineage
+        // directly so it can pass worker_streams. This fallback exists only to
+        // satisfy the View trait (e.g., in tests that don't need stream traces).
+        let mut empty_ws = crate::worker_streams::WorkerStreams::new();
+        self.render_with_lineage(frame, area, ctx.lineage, ctx.license_badge, &mut empty_ws);
     }
 }
 
 impl DashboardView {
+    /// Handle a key event with access to per-executor `ReactTrace` instances.
+    /// App calls this directly instead of `View::handle_key` so that scroll
+    /// actions on the Stream tab are routed to the focused executor's trace.
+    pub fn handle_key_with_worker_streams(
+        &mut self,
+        key: KeyEvent,
+        lineage: &spur_core::lineage::projection::ExecutorLineage,
+        worker_streams: &mut crate::worker_streams::WorkerStreams,
+    ) -> Option<crate::action::Action> {
+        self.handle_key_inner(key, Some(lineage), worker_streams)
+    }
+
     /// Tick + flush batched text. Returns true iff at least one batch was
     /// flushed to the activity log (so the caller can mark the TUI dirty).
     pub fn tick_and_report_flush(&mut self) -> bool {

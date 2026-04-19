@@ -493,7 +493,11 @@ impl App {
                     license_badge: self.license_badge.as_ref(),
                 };
                 let action = match self.current_view {
-                    ViewId::Dashboard => self.dashboard.handle_key(key, &ctx),
+                    ViewId::Dashboard => self.dashboard.handle_key_with_worker_streams(
+                        key,
+                        &self.lineage,
+                        &mut self.worker_streams,
+                    ),
                     ViewId::SessionDetail(_) => {
                         if let Some(ref mut detail) = self.session_detail {
                             detail.handle_key(key, &ctx)
@@ -1757,7 +1761,13 @@ impl App {
         };
 
         match self.current_view.clone() {
-            ViewId::Dashboard => self.dashboard.render(frame, area, &ctx),
+            ViewId::Dashboard => self.dashboard.render_with_lineage(
+                frame,
+                area,
+                &self.lineage,
+                self.license_badge.as_ref(),
+                &mut self.worker_streams,
+            ),
             ViewId::SessionDetail(_) => {
                 if let Some(ref mut detail) = self.session_detail {
                     detail.render(frame, area, &ctx);
