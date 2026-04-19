@@ -3,6 +3,11 @@ use spur_acp::ContentBlock;
 
 use crate::components::input_bar::ProtectedRange;
 
+/// Maximum number of submitted-input entries retained in both the in-memory
+/// `InputBar` ring buffer and the persisted `SessionMetadata::input_history`
+/// vector. Single source of truth — do not redefine this number elsewhere.
+pub const HISTORY_CAP: usize = 100;
+
 /// Exact restorable input state for the composer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InputStateSnapshot {

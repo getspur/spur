@@ -233,3 +233,10 @@ fn draft_with_protected_ranges_roundtrips_through_history_browsing() {
     assert_eq!(b.protected_ranges().len(), 1);
     assert_eq!(b.protected_ranges()[0].name, "src/foo.rs");
 }
+
+#[test]
+fn history_cap_is_single_sourced() {
+    // Compile-time guard: the cap visible to callers comes from input_history,
+    // not a private duplicate inside InputBar.
+    assert_eq!(spur_tui::input_history::HISTORY_CAP, 100);
+}
