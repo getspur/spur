@@ -1,4 +1,5 @@
 mod builder;
+mod compact_render;
 mod render;
 mod types;
 
@@ -58,6 +59,10 @@ pub struct ReactTrace {
     /// Cached virtual rows for the markdown render path.
     #[cfg(feature = "markdown")]
     pub(super) line_cache: Option<render::VirtualRowCacheEntry>,
+    /// Cache for the compact render path (`render_compact`).
+    /// Independent from `line_cache` because the two paths produce
+    /// different row layouts. `None` until first compact render.
+    pub(in crate::components::react_trace) compact_cache: Option<compact_render::CompactCacheEntry>,
 }
 
 /// Inverse of `resolve_anchor` for the Row variant: given a row index,
@@ -193,6 +198,7 @@ impl ReactTrace {
             generation: 0,
             dirty_from: None,
             line_cache: None,
+            compact_cache: None,
         }
     }
 
@@ -1022,6 +1028,17 @@ impl ReactTrace {
         }
 
         lines
+    }
+}
+
+#[cfg(test)]
+impl ReactTrace {
+    pub fn generation_for_tests(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn dirty_from_for_tests(&self) -> Option<usize> {
+        self.dirty_from
     }
 }
 

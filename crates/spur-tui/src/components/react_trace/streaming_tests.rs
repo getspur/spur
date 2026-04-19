@@ -1936,3 +1936,90 @@ fn failed_status_renders_failure_glyph_even_with_non_error_payload() {
         "Failed must use ✗ regardless of payload shape: {joined}"
     );
 }
+
+#[test]
+fn compact_render_produces_single_line_per_entry() {
+    use crate::components::react_trace::ReactTrace;
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    t.append_think("thinking about the problem", "12:00".into());
+    t.append_message("hello", "bot", "12:01".into());
+    t.append_user_message("hi", "12:02".into());
+
+    let lines = t.build_compact_lines_for_tests(40);
+    assert!(lines.len() >= 3 && lines.len() <= 5, "expected 3-5 lines, got {}", lines.len());
+    for l in &lines {
+        let cols: usize = l.spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
+        assert!(cols <= 40, "compact line exceeds width: {} cols", cols);
+    }
+}
+
+#[test]
+fn compact_render_truncates_long_text_with_ellipsis() {
+    use crate::components::react_trace::ReactTrace;
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    t.append_message("x".repeat(200).as_str(), "bot", "12:01".into());
+    let lines = t.build_compact_lines_for_tests(20);
+    let rendered: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+        .collect();
+    assert!(rendered.contains('…'), "long text should be truncated with '…'");
+}
+
+#[test]
+fn render_compact_does_not_panic_and_updates_dimensions() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    t.append_message("hello", "bot", "12:00".into());
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+
+    assert_eq!(t.last_render_width, Some(40));
+    assert_eq!(t.last_visible_height, 10);
+    assert!(t.last_total_lines >= 1);
+}
+
+#[test]
+fn render_compact_cache_hits_when_generation_stable() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    t.append_message("a", "bot", "12:00".into());
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    let gen_after_first = t.generation_for_tests();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    assert_eq!(t.generation_for_tests(), gen_after_first);
+    assert!(t.dirty_from_for_tests().is_none());
+}
+
+#[test]
+fn render_compact_incremental_rebuild_on_new_entry() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    // Alternate think/message to avoid coalescing, producing 500 distinct entries.
+    for i in 0..250 {
+        t.append_think(&format!("think-{}", i), "12:00".into());
+        t.append_message(&format!("msg-{}", i), "bot", "12:00".into());
+    }
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    let lines_before = t.last_total_lines;
+    t.append_user_message("hi-new", "12:01".into());
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    // After adding one new entry, total_lines should grow by at least 1
+    // (plus possibly a separator line for the kind transition).
+    assert!(t.last_total_lines >= lines_before + 1, "expected at least {} lines, got {}", lines_before + 1, t.last_total_lines);
+}
