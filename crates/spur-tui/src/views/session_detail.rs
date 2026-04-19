@@ -1647,13 +1647,24 @@ impl SessionDetailView {
         }
 
         // ── Input bar ───────────────────────────────────────────────────
-        self.input_bar.render(frame, chunks[3]);
+        // Render in "inert" style (dimmed border, no terminal cursor) when
+        // a PickerShell has the focus — the shell owns the cursor.
+        if self.picker_shell.is_some() {
+            self.input_bar.render_inert(frame, chunks[3]);
+        } else {
+            self.input_bar.render(frame, chunks[3]);
+        }
 
         // ── Completion popup (overlay above the InputBar) ──────────────
-        if self.popup_open() {
+        if self.picker_shell.is_none() && self.popup_open() {
             self.completion_popup
                 .borrow_mut()
                 .render(frame, chunks[3], area);
+        }
+
+        // ── PickerShell overlay ─────────────────────────────────────────
+        if let Some(ref mut shell) = self.picker_shell {
+            shell.render(frame, chunks[3], area);
         }
 
         // ── Status bar (with live worker counts) ────────────────────────

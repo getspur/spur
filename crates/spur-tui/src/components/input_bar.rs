@@ -1398,6 +1398,64 @@ impl InputBar {
         }
     }
 
+    /// Render variant for when an overlay (e.g. PickerShell) owns the
+    /// terminal cursor. Behaves like `render` but:
+    ///   * the border renders in DarkGray as a "composer inert" cue
+    ///   * `frame.set_cursor_position` is NOT called — the overlay places
+    ///     the cursor.
+    pub fn render_inert(&self, frame: &mut Frame, area: Rect) {
+        let mode_str = match self.mode {
+            EditMode::Emacs => " INSERT ",
+            EditMode::Vim(VimMode::Normal) => " VIM·NORMAL ",
+            EditMode::Vim(VimMode::Insert) => " VIM·INSERT ",
+            EditMode::Vim(VimMode::Visual) => " VIM·VISUAL ",
+            EditMode::Vim(VimMode::Operator(_)) => " VIM·OP ",
+        };
+        let title = if let Some(ref status) = self.status {
+            format!("{} {}", status, mode_str)
+        } else {
+            mode_str.to_string()
+        };
+        let border_color = Color::DarkGray;
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .title(Span::styled(title, Style::default().fg(border_color)));
+        let inner = block.inner(area);
+        self.last_inner_width.set(inner.width);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let lines: Vec<String> = self.textarea.lines().to_vec();
+        let layout = crate::components::input_bar_wrap::wrap(&lines, inner.width);
+        let visible = inner.height as usize;
+        let total = layout.visual_height() as usize;
+        let view_top = if total <= visible { 0 } else { total - visible };
+        let last_vr = (view_top + visible).min(total);
+        let mut out_lines: Vec<ratatui::text::Line<'static>> =
+            Vec::with_capacity(last_vr.saturating_sub(view_top));
+        for vi in view_top..last_vr {
+            let vr = &layout.rows[vi];
+            let logical = &lines[vr.logical_row];
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(vr.graphemes.len());
+            for g in &vr.graphemes {
+                let piece_slice = &logical[g.byte_start..g.byte_end];
+                let piece: String = if piece_slice == "\t" {
+                    " ".repeat(crate::components::input_bar_wrap::TAB_WIDTH)
+                } else {
+                    piece_slice.to_string()
+                };
+                // Inert: no atom highlight, no selection highlight — the
+                // composer is visibly quiescent while the picker owns focus.
+                spans.push(Span::styled(piece, Style::default().fg(Color::DarkGray)));
+            }
+            out_lines.push(ratatui::text::Line::from(spans));
+        }
+        frame.render_widget(ratatui::widgets::Paragraph::new(out_lines), inner);
+        // Intentionally no set_cursor_position — the overlay owns the cursor.
+    }
+
     /// Visual-line Down: move cursor one visual row down, preserving vcol.
     pub fn visual_line_down(&mut self, inner_width: u16) {
         self.visual_line_move(inner_width, 1);
