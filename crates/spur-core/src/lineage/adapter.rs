@@ -85,6 +85,18 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 Some(p) => lineage.attach_child(&p, node),
                 None => lineage.insert_root_node(node),
             }
+            // Drain any `DelegationDispatched` payload that arrived before
+            // this `WorkerSpawned` (orphan-dispatch buffer). The authoritative
+            // request_id→executor_id mapping was stashed at dispatch time.
+            if let Some((task, issue_id)) = lineage
+                .pending_dispatch_by_executor_id_mut()
+                .remove(&session.0)
+            {
+                if let Some(n) = lineage.node_mut_public(&ExecutorId::new(session.0.clone())) {
+                    n.task_spec = task;
+                    n.issue_id = issue_id;
+                }
+            }
         }
 
         SpurEventBody::DelegationRequested {
@@ -100,6 +112,24 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             // carries the authoritative executor_id and drains this buffer.
             // No agent-name heuristics are applied here; they are unsound when
             // multiple workers of the same agent run concurrently.
+            //
+            // Duplicate-payload detection: if an entry already exists for this
+            // request_id with a differing payload, warn and keep the first.
+            // Identical replays stay silent (preserved by `or_insert_with`).
+            if let Some((existing_task, existing_issue_id)) = lineage
+                .pending_task_by_request_id_mut()
+                .get(request_id)
+                .cloned()
+            {
+                if existing_task != *task || existing_issue_id != *issue_id {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        new_task = %task,
+                        existing_task = %existing_task,
+                        "duplicate DelegationRequested with differing payload; keeping first"
+                    );
+                }
+            }
             lineage
                 .pending_task_by_request_id_mut()
                 .entry(request_id.clone())
@@ -117,6 +147,10 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             // overrides any earlier agent-name guess.  Idempotent: subsequent
             // dispatches for the same request_id are no-ops (entry already
             // removed).
+            //
+            // Orphan-dispatch safety: if the executor node does not yet exist
+            // (dispatch observed before `WorkerSpawned`), stash the payload in
+            // `pending_dispatch_by_executor_id` and let the spawn arm drain it.
             if let Some((task, issue_id)) =
                 lineage.pending_task_by_request_id_mut().remove(request_id)
             {
@@ -124,6 +158,10 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 if let Some(n) = lineage.node_mut_public(&eid) {
                     n.task_spec = task;
                     n.issue_id = issue_id;
+                } else {
+                    lineage
+                        .pending_dispatch_by_executor_id_mut()
+                        .insert(executor_id.clone(), (task, issue_id));
                 }
             }
         }
