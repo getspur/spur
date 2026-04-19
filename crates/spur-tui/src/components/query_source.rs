@@ -90,6 +90,14 @@ pub struct HistoryQuerySource {
     /// Snapshots parallel to the rows returned by the most recent `refresh`.
     /// `accept(i)` returns a `ReplaceState(last_snapshots[i].clone())`.
     last_snapshots: Vec<InputStateSnapshot>,
+    /// Single-slot pattern cache, keyed by the query string that produced it.
+    /// Non-empty queries re-parse only when the query string changes; empty
+    /// queries never touch this cache.
+    cached_pattern: Option<(String, Pattern)>,
+    /// Count of `Pattern::parse` calls made so far. Incremented inside
+    /// `ensure_pattern`. Exposed under `cfg(any(test, debug_assertions))`
+    /// via `pattern_parse_count_for_test`.
+    parse_count: usize,
 }
 
 impl HistoryQuerySource {
@@ -98,7 +106,34 @@ impl HistoryQuerySource {
             history,
             matcher: Matcher::new(Config::DEFAULT),
             last_snapshots: Vec::new(),
+            cached_pattern: None,
+            parse_count: 0,
         }
+    }
+
+    /// Test-only: read the number of `Pattern::parse` calls made so far.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn pattern_parse_count_for_test(&self) -> usize {
+        self.parse_count
+    }
+
+    /// Return a reference to a Pattern for `query`, re-using the cache when
+    /// `query` is identical to the last non-empty refresh. Guarantees
+    /// `parse_count` is incremented exactly once per distinct query string
+    /// in the run of refreshes.
+    fn ensure_pattern(&mut self, query: &str) -> &Pattern {
+        let needs_refresh = !matches!(&self.cached_pattern, Some((cached_q, _)) if cached_q == query);
+        if needs_refresh {
+            self.parse_count += 1;
+            let pat = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            self.cached_pattern = Some((query.to_string(), pat));
+        }
+        &self
+            .cached_pattern
+            .as_ref()
+            .expect("cache populated above")
+            .1
     }
 
     fn row_from_entry(entry: &InputHistoryEntry) -> RetrievalRow {
@@ -150,16 +185,21 @@ impl QuerySource for HistoryQuerySource {
         let picked: Vec<usize> = if query.is_empty() {
             (0..self.history.len()).rev().take(20).collect()
         } else {
-            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            self.ensure_pattern(query);
+            let pattern: &Pattern = &self
+                .cached_pattern
+                .as_ref()
+                .expect("ensure_pattern populated the cache")
+                .1;
             let mut buf = Vec::new();
+            let matcher = &mut self.matcher;
             let mut scored: Vec<(u32, usize)> = self
                 .history
                 .iter()
                 .enumerate()
                 .filter_map(|(i, h)| {
                     buf.clear();
-                    let score =
-                        pattern.score(Utf32Str::new(&h.snapshot.text, &mut buf), &mut self.matcher)?;
+                    let score = pattern.score(Utf32Str::new(&h.snapshot.text, &mut buf), matcher)?;
                     Some((score, i))
                 })
                 .collect();
@@ -311,5 +351,37 @@ mod tests {
         let rows2 = src2.refresh("");
         assert_eq!(rows2[0].secondary, "1 mention");
         assert_eq!(rows2[0].atoms, vec![(3, 7)]);
+    }
+
+    #[test]
+    fn same_query_repeated_does_not_reparse_pattern() {
+        let hist = vec![mk_entry("alpha"), mk_entry("beta"), mk_entry("gamma")];
+        let mut src = HistoryQuerySource::new(hist);
+        let _ = src.refresh("a");
+        let base = src.pattern_parse_count_for_test();
+        for _ in 0..99 {
+            let _ = src.refresh("a");
+        }
+        assert_eq!(src.pattern_parse_count_for_test(), base);
+    }
+
+    #[test]
+    fn different_queries_each_reparse_once() {
+        let hist = vec![mk_entry("alpha"), mk_entry("beta")];
+        let mut src = HistoryQuerySource::new(hist);
+        let _ = src.refresh("a");
+        let _ = src.refresh("al");
+        let _ = src.refresh("alp");
+        assert_eq!(src.pattern_parse_count_for_test(), 3);
+    }
+
+    #[test]
+    fn empty_query_does_not_touch_pattern_cache() {
+        let hist = vec![mk_entry("alpha")];
+        let mut src = HistoryQuerySource::new(hist);
+        let _ = src.refresh("");
+        let _ = src.refresh("");
+        let _ = src.refresh("");
+        assert_eq!(src.pattern_parse_count_for_test(), 0);
     }
 }
