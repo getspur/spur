@@ -1116,6 +1116,10 @@ impl View for DashboardView {
                         ),
                         LogEntryKind::Error,
                     ),
+                    DelegationStatus::Cancelled { reason } => (
+                        format!("Delegation cancelled: {}", reason),
+                        LogEntryKind::Error,
+                    ),
                     _ => {
                         tracing::warn!("unknown DelegationStatus variant in dashboard activity log — update needed");
                         ("Delegation completed".to_string(), LogEntryKind::Error)
