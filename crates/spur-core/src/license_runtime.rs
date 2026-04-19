@@ -81,10 +81,22 @@ fn should_heartbeat(state: &LicenseState) -> bool {
 }
 
 fn degraded_from(mut state: LicenseState, message: String) -> LicenseState {
-    if state.is_active() {
-        state.status = LicenseStatus::Degraded;
+    match state.status {
+        LicenseStatus::Active => {
+            state.status = LicenseStatus::Degraded;
+            state.status_text = message;
+        }
+        LicenseStatus::Degraded => {
+            // Already degraded — refresh the transient reason to reflect
+            // the most recent failure.
+            state.status_text = message;
+        }
+        LicenseStatus::Inactive | LicenseStatus::Invalid | LicenseStatus::ConfigError => {
+            // Keep authoritative status and text. A transient network error
+            // must not overwrite a prior hard-fail reason (revoked, expired,
+            // unconfigured, etc.).
+        }
     }
-    state.status_text = message;
     state
 }
 

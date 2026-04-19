@@ -143,3 +143,45 @@ async fn injected_subscription_event_reaches_funnel() {
         "autonomous inject_event must propagate through the runtime relay"
     );
 }
+
+#[tokio::test]
+async fn degraded_from_preserves_invalid_status_text() {
+    let mut invalid = LicenseState::inactive("revoked");
+    invalid.status = LicenseStatus::Invalid;
+    let fake = Arc::new(
+        FakeProvider::new(invalid).with_refresh_policy(
+            spur_license::provider::RefreshPolicy {
+                validate_interval: Duration::from_millis(20),
+                heartbeat_interval: Duration::from_secs(3600),
+            },
+        ),
+    );
+    fake.push_validate_result(Err(LicenseError::Provider("transient".into())));
+
+    let license = SpurLicense::from_provider(fake);
+    let (bcast_tx, mut bcast_rx) = broadcast::channel::<SpurEvent>(64);
+    let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
+    let handle = spawn_license_runtime(license, funnel);
+
+    let mut last_text = String::new();
+    let mut last_status: Option<LicenseStatusEvent> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Ok(Ok(ev)) = tokio::time::timeout(remaining, bcast_rx.recv()).await {
+            if let SpurEventBody::LicenseUpdated { state } = ev.body {
+                last_text = state.status_text;
+                last_status = Some(state.status);
+            }
+        } else {
+            break;
+        }
+    }
+    handle.abort();
+
+    assert_eq!(last_status, Some(LicenseStatusEvent::Invalid), "status must stay Invalid");
+    assert_eq!(
+        last_text, "revoked",
+        "transient validate error must not overwrite prior Invalid text"
+    );
+}
