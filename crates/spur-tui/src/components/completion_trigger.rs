@@ -63,3 +63,166 @@ pub fn detect(text: &str, cursor: usize) -> Option<Trigger> {
 
     None
 }
+
+/// Transition emitted by `TriggerDetector::step` describing what the view
+/// should do with its active `PickerShell`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerTransition {
+    /// No change — neither the previous nor current input state had a
+    /// trigger. The view should do nothing to its picker_shell (it may
+    /// be holding a history shell, which this detector does not manage).
+    None,
+    /// A new trigger appeared (either first-ever or a change in kind /
+    /// prefix_start from the last trigger). The view should open a fresh
+    /// PickerShell with a source matching `trigger.kind`.
+    Open { trigger: Trigger },
+    /// The trigger's kind and prefix_start match the last step's trigger;
+    /// only the query text changed. The view should forward `query` to the
+    /// existing shell via `set_query_from_input_bar`.
+    Update { query: String },
+    /// The last step had a trigger; the current step does not. The view
+    /// should close its trigger-driven PickerShell.
+    Close,
+}
+
+/// Stateful wrapper over `detect()`. Remembers the last-emitted trigger so
+/// consecutive `step` calls can classify transitions. History-mode shells
+/// (`Ctrl+R`, `QueryMode::OwnedByShell`) are NOT managed by this detector —
+/// the view checks shell mode before calling `step`, and the detector only
+/// produces transitions for trigger-driven (`QueryMode::ReadFromInputBar`)
+/// popups.
+#[derive(Debug, Default)]
+pub struct TriggerDetector {
+    last: Option<Trigger>,
+}
+
+impl TriggerDetector {
+    pub fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// Feed current (text, cursor). Returns a transition describing what
+    /// should happen to the trigger-driven shell. Callers invoke this after
+    /// every InputBar text change.
+    pub fn step(&mut self, text: &str, cursor: usize) -> TriggerTransition {
+        let new = detect(text, cursor);
+        let transition = match (&self.last, &new) {
+            (None, None) => TriggerTransition::None,
+            (Some(old), Some(new_t))
+                if old.kind == new_t.kind && old.prefix_start == new_t.prefix_start =>
+            {
+                TriggerTransition::Update {
+                    query: new_t.query.clone(),
+                }
+            }
+            (_, Some(new_t)) => TriggerTransition::Open {
+                trigger: new_t.clone(),
+            },
+            (Some(_), None) => TriggerTransition::Close,
+        };
+        self.last = new;
+        transition
+    }
+
+    /// Reset the detector's memory of the last trigger. Call after the view
+    /// accepts or cancels a trigger-driven shell, so the next `step` treats
+    /// a re-appearing trigger as a fresh Open rather than a spurious Update.
+    pub fn reset(&mut self) {
+        self.last = None;
+    }
+}
+
+#[cfg(test)]
+mod detector_tests {
+    use super::*;
+
+    #[test]
+    fn detector_starts_with_no_trigger() {
+        let mut d = TriggerDetector::new();
+        let t = d.step("", 0);
+        assert!(matches!(t, TriggerTransition::None));
+    }
+
+    #[test]
+    fn detector_reports_open_on_first_trigger_appearance() {
+        let mut d = TriggerDetector::new();
+        let t = d.step("@", 1);
+        match t {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.kind, TriggerKind::Mention);
+                assert_eq!(trigger.prefix_start, 0);
+                assert_eq!(trigger.query, "");
+            }
+            other => panic!("expected Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detector_reports_update_when_query_changes_same_trigger() {
+        let mut d = TriggerDetector::new();
+        let _ = d.step("@", 1);
+        let t = d.step("@f", 2);
+        match t {
+            TriggerTransition::Update { query } => assert_eq!(query, "f"),
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detector_reports_close_when_trigger_goes_away() {
+        let mut d = TriggerDetector::new();
+        let _ = d.step("@foo", 4);
+        let t = d.step("@foo ", 5); // whitespace terminates mention
+        assert!(matches!(t, TriggerTransition::Close));
+    }
+
+    #[test]
+    fn detector_reports_open_on_kind_change_even_if_position_matches() {
+        // '/help' at offset 0, then user deletes and types '@': position
+        // happens to still be 0 but kind flipped from Slash to Mention —
+        // this MUST be an Open (fresh shell), not an Update.
+        let mut d = TriggerDetector::new();
+        let _ = d.step("/", 1);
+        let t = d.step("@", 1);
+        match t {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.kind, TriggerKind::Mention);
+            }
+            other => panic!("expected Open on kind change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detector_reports_open_on_prefix_start_change() {
+        // Mention at offset 0, then a leading space + new mention at offset 1.
+        let mut d = TriggerDetector::new();
+        let _ = d.step("@foo", 4);
+        // After moving to a different mention trigger (e.g. " @bar"):
+        let t = d.step(" @bar", 5);
+        match t {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.prefix_start, 1);
+            }
+            other => panic!("expected Open on prefix_start change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detector_reports_none_when_neither_last_nor_current_has_trigger() {
+        let mut d = TriggerDetector::new();
+        let _ = d.step("hello", 5);
+        let t = d.step("hello world", 11);
+        assert!(matches!(t, TriggerTransition::None));
+    }
+
+    #[test]
+    fn detector_reset_clears_last_trigger_so_next_step_reports_open() {
+        let mut d = TriggerDetector::new();
+        let _ = d.step("@foo", 4);
+        d.reset();
+        // Without reset this would be Update; after reset the detector
+        // treats @foo as a fresh appearance.
+        let t = d.step("@foo", 4);
+        assert!(matches!(t, TriggerTransition::Open { .. }));
+    }
+}
