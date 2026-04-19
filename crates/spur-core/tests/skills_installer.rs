@@ -141,3 +141,33 @@ fn preexisting_user_file_without_marker_is_preserved() {
         .iter()
         .any(|(p, r)| p == &target && *r == SkipReason::NoMarker));
 }
+
+#[test]
+fn override_body_flows_into_every_adapter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let override_dir = tmp.path().join(".spur/skills/test-driven-development");
+    std::fs::create_dir_all(&override_dir).unwrap();
+    std::fs::write(
+        override_dir.join("SKILL.md"),
+        "---\nname: test-driven-development\ndescription: My TDD override\n---\nMY OVERRIDE BODY\n",
+    )
+    .unwrap();
+
+    run(tmp.path()).unwrap();
+
+    for p in [
+        ".spur/skills/test-driven-development/SKILL.md",
+        ".claude/skills/spurpower-test-driven-development/SKILL.md",
+        ".codex/skills/spurpower-test-driven-development/SKILL.md",
+        ".gemini/skills/spurpower-test-driven-development/SKILL.md",
+        ".kiro/skills/spurpower-test-driven-development/SKILL.md",
+        ".opencode/skills/spurpower-test-driven-development/SKILL.md",
+        ".cursor/rules/spurpower-test-driven-development.mdc",
+    ] {
+        let contents = std::fs::read_to_string(tmp.path().join(p)).unwrap();
+        assert!(
+            contents.contains("MY OVERRIDE BODY"),
+            "{p}: override body missing\n{contents}",
+        );
+    }
+}
