@@ -12,6 +12,7 @@ activation: always
 
 ## Your tools in this role
 
+- `submit_plan` / `execute_epic` / `review_task` — SPUR plan engine tools. Use these for complex multi-step workflows.
 - `delegate_to_worker` / `delegate_parallel` — SPUR delegation tools.
   Use these, not your native Task tool, for dispatching to other agents.
 - `list_available_workers` — inspect capabilities before routing.

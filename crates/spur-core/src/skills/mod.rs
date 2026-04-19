@@ -9,30 +9,66 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 static BUNDLED: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+static BUNDLED_RAW: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+
+fn bundled_raw() -> &'static HashMap<&'static str, &'static str> {
+    BUNDLED_RAW.get_or_init(|| {
+        let mut m = HashMap::new();
+        m.insert(
+            "brain-delegation",
+            include_str!("brain-delegation/SKILL.md"),
+        );
+        let claude_skill = include_str!("brain-delegation-claude-code-acp/SKILL.md");
+        m.insert("brain-delegation-claude-code-acp", claude_skill);
+        m.insert("brain-delegation-claude-code", claude_skill);
+        m.insert(
+            "brain-delegation-kiro",
+            include_str!("brain-delegation-kiro/SKILL.md"),
+        );
+        m.insert(
+            "brain-delegation-codex",
+            include_str!("brain-delegation-codex/SKILL.md"),
+        );
+        m.insert(
+            "brain-delegation-gemini",
+            include_str!("brain-delegation-gemini/SKILL.md"),
+        );
+        m.insert(
+            "test-driven-development",
+            include_str!("test-driven-development/SKILL.md"),
+        );
+        m.insert(
+            "systematic-debugging",
+            include_str!("systematic-debugging/SKILL.md"),
+        );
+        m.insert(
+            "verification-before-completion",
+            include_str!("verification-before-completion/SKILL.md"),
+        );
+        m.insert(
+            "receiving-code-review",
+            include_str!("receiving-code-review/SKILL.md"),
+        );
+        m.insert(
+            "requesting-code-review",
+            include_str!("requesting-code-review/SKILL.md"),
+        );
+        m
+    })
+}
+
+/// Returns all bundled skills (raw content including frontmatter) for CLI extraction.
+pub fn all_bundled_raw() -> &'static HashMap<&'static str, &'static str> {
+    bundled_raw()
+}
 
 fn bundled() -> &'static HashMap<&'static str, &'static str> {
     BUNDLED.get_or_init(|| {
         let mut m = HashMap::new();
-        m.insert(
-            "brain-delegation",
-            strip_frontmatter(include_str!("brain-delegation/SKILL.md")),
-        );
-        let claude_skill =
-            strip_frontmatter(include_str!("brain-delegation-claude-code-acp/SKILL.md"));
-        m.insert("brain-delegation-claude-code-acp", claude_skill);
-        m.insert("brain-delegation-claude-code", claude_skill); // deprecated alias
-        m.insert(
-            "brain-delegation-kiro",
-            strip_frontmatter(include_str!("brain-delegation-kiro/SKILL.md")),
-        );
-        m.insert(
-            "brain-delegation-codex",
-            strip_frontmatter(include_str!("brain-delegation-codex/SKILL.md")),
-        );
-        m.insert(
-            "brain-delegation-gemini",
-            strip_frontmatter(include_str!("brain-delegation-gemini/SKILL.md")),
-        );
+        for (k, v) in bundled_raw() {
+            let leaked: &'static str = strip_frontmatter_owned(v).leak();
+            m.insert(*k, leaked);
+        }
         m
     })
 }
