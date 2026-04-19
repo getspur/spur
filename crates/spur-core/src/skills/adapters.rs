@@ -256,4 +256,29 @@ mod tests {
         assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=__pointer sha256="));
         assert!(s.contains(".kiro/skills/spurpower-"));
     }
+
+    #[test]
+    fn adapter_render_all_variants() {
+        let skill = sample_skill();
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let expected_prefixes = [
+            (Adapter::SpurHermetic, "/tmp/repo/.spur/skills/tdd/"),
+            (Adapter::ClaudeCode, "/tmp/repo/.claude/skills/spurpower-tdd/"),
+            (Adapter::Codex, "/tmp/repo/.codex/skills/spurpower-tdd/"),
+            (Adapter::Gemini, "/tmp/repo/.gemini/skills/spurpower-tdd/"),
+            (Adapter::Kiro, "/tmp/repo/.kiro/skills/spurpower-tdd/"),
+            (Adapter::OpenCode, "/tmp/repo/.opencode/skills/spurpower-tdd/"),
+            (Adapter::Cursor, "/tmp/repo/.cursor/rules/"),
+        ];
+        for (a, prefix) in expected_prefixes {
+            let rf = a.render(&skill, &root);
+            assert!(
+                rf.path.to_string_lossy().starts_with(prefix),
+                "{a:?}: got {}, expected prefix {}",
+                rf.path.display(),
+                prefix,
+            );
+            assert!(!rf.bytes.is_empty());
+        }
+    }
 }
