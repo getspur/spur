@@ -20,51 +20,49 @@ pub enum AuthCommands {
 }
 
 pub async fn run(command: AuthCommands) -> Result<()> {
+    run_with_license(command, SpurLicense::from_env_or_disabled()).await
+}
+
+pub async fn run_with_license(command: AuthCommands, license: SpurLicense) -> Result<()> {
     match command {
-        AuthCommands::Login { key } => login(&key).await,
+        AuthCommands::Login { key } => login(&license, &key).await,
         AuthCommands::Status => {
-            let license = license();
             print_state(&license.current_state());
             Ok(())
         }
-        AuthCommands::Refresh => refresh().await,
-        AuthCommands::Logout => logout().await,
+        AuthCommands::Refresh => refresh(&license).await,
+        AuthCommands::Logout => logout(&license).await,
     }
 }
 
-async fn login(key: &str) -> Result<()> {
-    let license = configured_license()?;
+async fn login(license: &SpurLicense, key: &str) -> Result<()> {
+    ensure_configured(license)?;
     let state = license.activate(key).await?;
     print_state(&state);
     Ok(())
 }
 
-async fn refresh() -> Result<()> {
-    let license = configured_license()?;
+async fn refresh(license: &SpurLicense) -> Result<()> {
+    ensure_configured(license)?;
     let state = license.validate().await?;
     print_state(&state);
     Ok(())
 }
 
-async fn logout() -> Result<()> {
-    let license = configured_license()?;
+async fn logout(license: &SpurLicense) -> Result<()> {
+    ensure_configured(license)?;
     let state = license.deactivate().await?;
     print_state(&state);
     Ok(())
 }
 
-fn license() -> SpurLicense {
-    SpurLicense::from_env_or_disabled()
-}
-
-fn configured_license() -> Result<SpurLicense> {
-    let license = license();
+fn ensure_configured(license: &SpurLicense) -> Result<()> {
     if matches!(license.current_state().status, LicenseStatus::ConfigError) {
         return Err(anyhow!(
             "license provider is not configured; set SPUR_LICENSESEAT_API_KEY and SPUR_LICENSESEAT_PRODUCT_SLUG"
         ));
     }
-    Ok(license)
+    Ok(())
 }
 
 fn print_state(state: &LicenseState) {
