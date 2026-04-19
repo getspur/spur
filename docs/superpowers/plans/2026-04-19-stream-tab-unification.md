@@ -252,7 +252,71 @@ fn render_compact_does_not_panic_and_updates_dimensions() {
     assert_eq!(t.last_visible_height, 10);
     assert!(t.last_total_lines >= 1);
 }
+
+#[test]
+fn render_compact_cache_hits_when_generation_stable() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    t.append_message("a", "bot", "12:00".into());
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    let gen_after_first = t.generation_for_tests();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    // No mutations between renders → cache hit → generation unchanged.
+    assert_eq!(t.generation_for_tests(), gen_after_first);
+    // dirty_from consumed on first render.
+    assert!(t.dirty_from_for_tests().is_none());
+}
+
+#[test]
+fn render_compact_cache_invalidates_on_width_change() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    t.append_message(&"x".repeat(100), "bot", "12:00".into());
+    let mut term = Terminal::new(TestBackend::new(120, 10)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    let width_40 = t.last_render_width;
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 80, 10))).unwrap();
+    assert_eq!(width_40, Some(40));
+    assert_eq!(t.last_render_width, Some(80));
+    // Internal cache must have been rebuilt; we can't assert directly
+    // without test hooks, but `last_render_width` changing is enough.
+}
+
+#[test]
+fn render_compact_incremental_rebuild_on_new_entry() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    for i in 0..500 {
+        t.append_message(&format!("msg-{}", i), "bot", "12:00".into());
+    }
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    // Append one more; next render should use the incremental path.
+    t.append_message("msg-new", "bot", "12:01".into());
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    assert_eq!(t.last_total_lines, 501);
+}
 ```
+
+> The `generation_for_tests` and `dirty_from_for_tests` accessors are thin `#[cfg(test)]` getters on `ReactTrace`. Add them under the existing `#[cfg(all(test, feature = "markdown"))]` / `#[cfg(test)]` test-helper blocks in `mod.rs`:
+>
+> ```rust
+> #[cfg(test)]
+> impl ReactTrace {
+>     pub fn generation_for_tests(&self) -> u64 { self.generation }
+>     pub fn dirty_from_for_tests(&self) -> Option<usize> { self.dirty_from }
+> }
+> ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -410,6 +474,18 @@ mod compact_render;
 Append to `crates/spur-tui/src/components/react_trace/compact_render.rs` (after the `build_compact_lines` impl block you wrote above):
 
 ```rust
+/// Cache entry for the compact render path. Keyed by `(generation, width)`.
+/// Independent from the full-render `line_cache` because the two paths
+/// produce different row layouts.
+pub(super) struct CompactCacheEntry {
+    pub generation: u64,
+    pub width: u16,
+    pub lines: Vec<Line<'static>>,
+    /// Number of `ReactTrace.entries` the cache covers. Anything past
+    /// this index is treated as dirty on the next render.
+    pub covered_entries: usize,
+}
+
 impl ReactTrace {
     /// Paint the compact single-line-per-entry body into `area`.
     ///
@@ -417,14 +493,26 @@ impl ReactTrace {
     /// the outer block. Honours the current `ScrollAnchor` for vertical
     /// offset and refreshes `last_total_lines` / `last_visible_height` /
     /// `last_render_width` so scroll helpers stay consistent.
+    ///
+    /// **Caching.** Each call checks `compact_cache`:
+    /// - **Hit** (same generation + same width): O(1) reuse of the cached
+    ///   `Vec<Line>`.
+    /// - **Incremental** (width unchanged, generation advanced by dirty tail):
+    ///   truncate cache at `dirty_from` and rebuild the tail only.
+    /// - **Full rebuild** (width changed OR cold cache): rebuild all lines.
+    ///
+    /// In steady-state streaming this reduces render cost from O(entries)
+    /// per frame to O(entries_since_dirty) per frame (typically 1–5).
     pub fn render_compact(&mut self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         use ratatui::widgets::{Paragraph, Wrap};
 
         let width = area.width;
         self.last_render_width = Some(width);
-        let lines = self.build_compact_lines(width);
-        self.last_total_lines = lines.len();
         self.last_visible_height = area.height as usize;
+        let gen = self.generation;
+
+        let lines = self.compact_lines_for_render(gen, width);
+        self.last_total_lines = lines.len();
 
         // Resolve anchor → scroll offset. Mirrors the logic in `render()`.
         let scroll = match self.anchor {
@@ -449,8 +537,134 @@ impl ReactTrace {
             .scroll((scroll as u16, 0));
         frame.render_widget(p, area);
     }
+
+    /// Internal cache-aware line producer for `render_compact`.
+    /// Returns a clone of the cached `Vec<Line>`; the cache itself owns
+    /// the canonical copy so repeated renders are cheap.
+    fn compact_lines_for_render(&mut self, gen: u64, width: u16) -> Vec<Line<'static>> {
+        let entry_count = self.entries.len();
+        let dirty = self.dirty_from.unwrap_or(entry_count);
+
+        // Cache hit — same generation and width.
+        if let Some(c) = &self.compact_cache {
+            if c.generation == gen && c.width == width && c.covered_entries == entry_count {
+                return c.lines.clone();
+            }
+        }
+
+        // Incremental rebuild — width unchanged, only a tail is dirty.
+        if let Some(c) = self.compact_cache.as_mut() {
+            if c.width == width && dirty < entry_count && dirty <= c.covered_entries {
+                // Rebuild lines for entries [dirty, entry_count).
+                // In compact mode each entry produces exactly one line
+                // (plus up to one kind-transition separator). We rebuild
+                // the full tail from `dirty` for correctness; this is
+                // O(entries_since_dirty), typically 1–5.
+                //
+                // First, locate the line-index corresponding to entry
+                // `dirty`. Walk the cache's first `dirty` entries from
+                // the SAME starting point `build_compact_lines` used.
+                let prefix_row_count = prefix_row_count_for_entries(&self.entries[..dirty]);
+                c.lines.truncate(prefix_row_count);
+                let tail = self.build_compact_lines_tail(dirty, width);
+                c.lines.extend(tail);
+                c.generation = gen;
+                c.covered_entries = entry_count;
+                self.dirty_from = None;
+                return c.lines.clone();
+            }
+        }
+
+        // Full rebuild — width changed, or cold cache, or invariants
+        // broken (e.g., entries shrunk unexpectedly).
+        let lines = self.build_compact_lines(width);
+        self.compact_cache = Some(CompactCacheEntry {
+            generation: gen,
+            width,
+            lines: lines.clone(),
+            covered_entries: entry_count,
+        });
+        self.dirty_from = None;
+        lines
+    }
+
+    /// Rebuild lines for entries `[start..]` only. Mirrors
+    /// `build_compact_lines` but skips `[0..start]`. Used by the
+    /// incremental cache path.
+    fn build_compact_lines_tail(&self, start: usize, width: u16) -> Vec<Line<'static>> {
+        if start >= self.entries.len() {
+            return Vec::new();
+        }
+        // Compute the prev_kind_tag from the entry immediately before `start`
+        // so separator decisions match a full rebuild.
+        let prev_kind_tag = if start > 0 {
+            Some(compact_kind_tag(&self.entries[start - 1].kind))
+        } else {
+            None
+        };
+        build_compact_lines_from(&self.entries[start..], width, prev_kind_tag)
+    }
+
+    /// Drop the compact cache. Called when the owning executor loses
+    /// focus (via `WorkerStreams::drop_compact_cache_for`) to free ~1 MB
+    /// per unfocused trace without losing the entries themselves.
+    pub fn drop_compact_cache(&mut self) {
+        self.compact_cache = None;
+    }
+}
+
+/// Row count produced by rendering `entries` via compact mode — the
+/// one-line-per-entry baseline plus one separator per kind transition.
+/// Used for the truncate point in incremental rebuilds.
+fn prefix_row_count_for_entries(entries: &[crate::components::react_trace::TraceEntry]) -> usize {
+    if entries.is_empty() {
+        return 0;
+    }
+    let mut rows = 0usize;
+    let mut prev_kind_tag: Option<&'static str> = None;
+    for e in entries {
+        let tag = compact_kind_tag(&e.kind);
+        if let Some(pk) = prev_kind_tag {
+            if pk != tag {
+                rows += 1; // separator row
+            }
+        }
+        prev_kind_tag = Some(tag);
+        rows += 1;
+    }
+    rows
+}
+
+/// Shared core of `build_compact_lines` and `build_compact_lines_tail`.
+/// `prev_kind_tag` seeds the kind-transition separator logic so an
+/// incremental rebuild inserts the same leading separator a full
+/// rebuild would have.
+fn build_compact_lines_from(
+    entries: &[crate::components::react_trace::TraceEntry],
+    width: u16,
+    seed_prev_kind_tag: Option<&'static str>,
+) -> Vec<Line<'static>> {
+    // Implementation: move the body of `build_compact_lines` here,
+    // parameterized by `entries` and `seed_prev_kind_tag`. Then have
+    // `build_compact_lines` call this with `&self.entries, width, None`.
+    // Omitted in this plan for brevity — follow the exact shape of the
+    // function you wrote above.
+    todo!("inline the body of build_compact_lines here, parameterized")
 }
 ```
+
+Also add a field on `ReactTrace` in `crates/spur-tui/src/components/react_trace/mod.rs` next to the existing `line_cache`:
+
+```rust
+    /// Cache for the compact render path (used by `render_compact`).
+    /// Independent from `line_cache` because the two paths produce
+    /// different row layouts. `None` until first compact render.
+    pub(super) compact_cache: Option<compact_render::CompactCacheEntry>,
+```
+
+And initialize it `compact_cache: None,` in `ReactTrace::new()`.
+
+> **Note on the `todo!` above.** `build_compact_lines_from` is intentionally left as a `todo!` in this plan to keep the listing short. Implementing it is mechanical: take the body of the `build_compact_lines` function you wrote earlier, replace `&self.entries` with `entries`, replace the initial `let mut prev_kind_tag: Option<&'static str> = None;` with `let mut prev_kind_tag = seed_prev_kind_tag;`, and keep the rest. Then have the original `build_compact_lines` delegate: `fn build_compact_lines(&self, width: u16) -> Vec<Line<'static>> { build_compact_lines_from(&self.entries, width, None) }`.
 
 **Do NOT modify `render.rs`** — the full-screen `render()` entry point is unchanged. The `compact: bool` field from Task 0.2 remains on the struct for documentation/testing purposes, but `render_compact` is the authoritative entry point for the Stream tab.
 
@@ -517,6 +731,146 @@ Create `docs/superpowers/notes/2026-04-19-stream-buffer-audit.md` with a short t
 ```bash
 git add docs/superpowers/notes/2026-04-19-stream-buffer-audit.md
 git commit -m "docs: audit stream_buffer readers ahead of Phase 3 narrowing"
+```
+
+---
+
+### Task 0.5: Criterion benchmark for compact render + append
+
+**Files:**
+- Create: `crates/spur-tui/benches/compact_render.rs`
+- Modify: `crates/spur-tui/Cargo.toml` — add the `[[bench]]` entry
+
+**Why:** The render hot path for the DetailPane Stream tab is O(entries) per frame without caching. PP1 in Task 0.3 adds cache + incremental rebuild; this bench locks in the expected numbers so later changes can't silently regress. It also informs whether Phase 4's optional compact-mode entry cap (MAX_COMPACT_ENTRIES) is warranted.
+
+**Expected numbers (goals, not asserts):**
+- `append_message` single chunk: <1 μs amortized.
+- `render_compact` cache hit at 5000 entries, width 40: <200 μs.
+- `render_compact` incremental rebuild (1-entry dirty tail) at 5000 entries, width 40: <500 μs.
+- `render_compact` cold (width change or cache miss) at 5000 entries, width 40: <25 ms.
+
+- [ ] **Step 1: Add criterion dev-dependency and bench target**
+
+In `crates/spur-tui/Cargo.toml`, ensure:
+
+```toml
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "compact_render"
+harness = false
+```
+
+If `criterion` is already a dev-dependency at the workspace root, use that and skip the `[dev-dependencies]` addition.
+
+- [ ] **Step 2: Write the bench**
+
+Create `crates/spur-tui/benches/compact_render.rs`:
+
+```rust
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use spur_acp::AgentKind;
+use spur_tui::components::react_trace::ReactTrace;
+
+fn bench_append_message(c: &mut Criterion) {
+    c.bench_function("append_message_single", |b| {
+        let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+        b.iter(|| {
+            trace.append_message(black_box("a short streaming chunk"), "bot", "12:00".into());
+        });
+    });
+}
+
+fn bench_render_compact_cold(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_compact_cold");
+    for entries in [500usize, 2000, 5000] {
+        for width in [40u16, 80, 120] {
+            group.bench_with_input(
+                BenchmarkId::from_parameter(format!("{}_entries_w{}", entries, width)),
+                &(entries, width),
+                |b, &(n, w)| {
+                    let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+                    for i in 0..n {
+                        trace.append_message(&format!("streaming chunk {}", i), "bot", "12:00".into());
+                    }
+                    let mut term = Terminal::new(TestBackend::new(w, 24)).unwrap();
+                    b.iter(|| {
+                        // Force cold cache by dropping the cache on every iter.
+                        trace.drop_compact_cache();
+                        term.draw(|f| trace.render_compact(f, Rect::new(0, 0, w, 24))).unwrap();
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+fn bench_render_compact_hit(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_compact_cache_hit");
+    for entries in [500usize, 2000, 5000] {
+        group.bench_with_input(BenchmarkId::from_parameter(entries), &entries, |b, &n| {
+            let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+            for i in 0..n {
+                trace.append_message(&format!("chunk {}", i), "bot", "12:00".into());
+            }
+            let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
+            // Warm the cache.
+            term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24))).unwrap();
+            b.iter(|| {
+                term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24))).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_render_compact_incremental(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_compact_incremental");
+    for entries in [500usize, 2000, 5000] {
+        group.bench_with_input(BenchmarkId::from_parameter(entries), &entries, |b, &n| {
+            let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+            for i in 0..n {
+                trace.append_message(&format!("chunk {}", i), "bot", "12:00".into());
+            }
+            let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
+            term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24))).unwrap();
+            let mut counter = 0usize;
+            b.iter(|| {
+                // Append one chunk to dirty the tail, then render.
+                trace.append_message(&format!("new-{}", counter), "bot", "12:01".into());
+                counter += 1;
+                term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24))).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_append_message,
+    bench_render_compact_cold,
+    bench_render_compact_hit,
+    bench_render_compact_incremental
+);
+criterion_main!(benches);
+```
+
+- [ ] **Step 3: Run the bench to establish a baseline**
+
+Run: `cargo bench -p spur-tui --bench compact_render`
+Expected: all benches compile and run. Record the numbers in the commit message and compare to the goals above.
+
+If any goal is missed by >2×, file a follow-up note in the plan's Risk Register (PR8/PR9…) rather than blocking the cutover — the fallback is PP4 (entry cap) in Phase 4.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/spur-tui/benches/compact_render.rs crates/spur-tui/Cargo.toml
+git commit -m "perf(spur-tui): baseline bench for compact render + append_message"
 ```
 
 ---
@@ -1881,6 +2235,60 @@ git commit -m "docs: document post-unification stream pipeline"
 
 ---
 
+## Phase 4 (deferred) — optimizations + optional schema cleanup
+
+These are NOT required for the cutover. They are driven by bench numbers from Task 0.5 and real-world profiling of the shipped Phase 2/3 build. Each lists a clear trigger condition — ship when (and only when) the trigger fires.
+
+### PP3 — Lazy compact-cache drop on focus change
+
+**What:** Hook DashboardView focus transitions so the previously-focused executor's trace has `ReactTrace::drop_compact_cache()` called. Re-focus pays a one-frame rebuild (<25 ms cold).
+
+**Why:** `compact_cache.lines` holds ~1 MB per rendered trace. At 50 executors with LRU retention, >20 MB can sit in cache slots for invisible traces.
+
+**Trigger:** real-world memory profile shows >20 MB retained in compact caches across traces, OR user-visible memory regression reports.
+
+**Cost:** ~10 LoC. Touch DashboardView focus handler.
+
+### PP4 — Compact-mode entry cap
+
+**What:** Add `const MAX_COMPACT_ENTRIES: usize = 1000;` (tune by bench). `WorkerStreams::route` evicts oldest entries beyond the cap on every push.
+
+**Why:** Worst-case per-trace memory drops from 5000 × ~300 B (1.5 MB) to 1000 × ~300 B (300 KB). Cold render also ~5× faster.
+
+**Trigger:** Task 0.5 cold-render bench at 5000 entries, width 40 exceeds 10 ms on the reference machine, OR memory pressure reports.
+
+**Cost:** ~15 LoC. Add eviction path to `WorkerStreams::route`.
+
+### PP5 — Avoid `String` clone in orphan check
+
+**What:** Add `LineageProjection::node_by_str(&str) -> Option<&ExecutorNode>` — same body as `node`, borrowed-key lookup. `App::handle_spur_event` calls it to drop the per-event `ExecutorId(executor_id.clone())` allocation.
+
+**Why:** ~1500 allocations/sec under 50-executor × 30-chunk/sec load. Micro-opt; compounds with other hot-path work.
+
+**Trigger:** whenever the lineage accessor is touched for other reasons, OR allocator profiling shows `ExecutorId` in the top-20 allocation sites.
+
+**Cost:** ~10 LoC in `spur-core` + 2 LoC call-site change.
+
+### PP2 — Early-return in `ReactTrace::tick`
+
+**What:** Cache `has_active_or_pending: bool` on `ReactTrace`, updated on `push` / `mark_dirty_from` / Permission resolution. `tick()` early-returns for traces where the flag is false.
+
+**Why:** 50 unfocused traces × 5000 entries × 2 scans × 60 Hz ≈ 30M entry checks/sec. ~5-6% of one core wasted.
+
+**Trigger:** profiling shows `ReactTrace::tick` in top-10 CPU samples.
+
+**Cost:** ~20 LoC. Extra state to keep consistent.
+
+### PP6 — Schema cleanup: delete `WorkerStreamEntry` / `stream_buffer`
+
+**What:** Remove the now-dead types from `spur-core`. Bundle with a `SessionHistory` / `session_metadata.json` format version bump. On-disk files pre-bump need a migrator.
+
+**Trigger:** Task 0.4 audit re-run confirms no consumer remains, AND there is a natural format-bump window for another reason.
+
+**Cost:** ~50 LoC + migration test. NOT scheduled.
+
+---
+
 ## Risk Register (plan-level, supplements spec)
 
 | # | Risk | Mitigation |
@@ -1892,6 +2300,10 @@ git commit -m "docs: document post-unification stream pipeline"
 | PR5 | **Executor GC absent** — traces accumulate for the session lifetime | Accept. Bounded by `MAX_LOG_ENTRIES` per trace (`crates/spur-tui/src/components/mod.rs:84`); add `WorkerStreams::remove` (Task 1.3) for manual cleanup |
 | PR6 | **No WorkerHistory replay** across process restart | Task 1.5 seed from `stream_buffer` yields coarse 3-kind preamble; live fidelity resumes once new `WorkerNotification`s flow |
 | PR7 | **`render_compact` anchor resolution for `ScrollAnchor::Row`** is approximate (entry_idx + row_within_entry clamped) | Acceptable in compact mode where rows ≈ entries. If precision becomes an issue, refine to per-entry row starts |
+| PR8 | **Cold-render cost at MAX_LOG_ENTRIES (5000)** can exceed 16 ms → frame drops on width-change or cold cache | Task 0.3 PP1 (line-cache + incremental rebuild) keeps steady-state cost sub-ms. Task 0.5 bench detects regressions. Phase 4 PP4 (entry cap) is the fallback |
+| PR9 | **Memory footprint** at 50 active executors ≈ 75 MB entries + ~1-50 MB caches | Entries are inherent to brain-view parity. Caches mitigated by Phase 4 PP3 (lazy drop) + PP4 (cap) when profiling demands |
+| PR10 | **`tick_all` CPU** ≈ 6% core at 50 unfocused traces × 5000 entries | Accept initially. Phase 4 PP2 (early-return cached flag) is ready when profiling shows it dominating |
+| PR11 | **Allocator pressure** from per-event `ExecutorId(String)` clone at ~1500/sec | Accept initially. Phase 4 PP5 (`node_by_str`) is cheap to land whenever the accessor is touched |
 
 ## Self-Review Checklist
 
