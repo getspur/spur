@@ -44,6 +44,14 @@ pub async fn report_detached_completion(
     _worker_session: SessionId, // kept for future use (correlation logs etc.)
     cont: BrainContinuation,
 ) {
+    tracing::debug!(
+        continuation_probe = true,
+        site = "A_report_detached_completion",
+        delegation_id = %cont.delegation_id,
+        source = ?cont.source,
+        session = %session,
+        "continuation path: entering report_detached_completion"
+    );
     // Route the model-visible continuation (try_send + overflow fallback).
     // DelegationCompleted is emitted by execute_delegation before the oneshot
     // fires — do NOT emit it here to avoid duplicate dashboard entries.
@@ -51,13 +59,33 @@ pub async fn report_detached_completion(
         session: session.clone(),
         continuation: cont.clone(),
     }) {
-        Ok(()) => {}
+        Ok(()) => {
+            tracing::debug!(
+                continuation_probe = true,
+                site = "A_report_detached_completion",
+                delegation_id = %cont.delegation_id,
+                outcome = "try_send_ok",
+                "continuation path: SystemContinuation enqueued on ingress"
+            );
+        }
         Err(TrySendError::Full(_)) => {
-            overflow.lock().await.push_back((session, cont));
+            let mut buf = overflow.lock().await;
+            buf.push_back((session, cont.clone()));
+            tracing::debug!(
+                continuation_probe = true,
+                site = "A_report_detached_completion",
+                delegation_id = %cont.delegation_id,
+                outcome = "overflow_pushed",
+                overflow_depth = buf.len(),
+                "continuation path: ingress full, spilled to overflow deque"
+            );
         }
         Err(TrySendError::Closed(_)) => {
             tracing::warn!(
+                continuation_probe = true,
+                site = "A_report_detached_completion",
                 delegation_id = %cont.delegation_id,
+                outcome = "channel_closed",
                 "continuation channel disconnected — continuation lost (orchestrator shut down)"
             );
         }

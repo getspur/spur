@@ -597,6 +597,21 @@ pub enum SpurEventBody {
         delegation_id: String,
         reason: ContinuationDropReason,
     },
+
+    /// Emitted immediately before the orchestrator calls
+    /// `connection.prompt(...)` for a brain turn. Pairs with
+    /// `DelegationCompleted` to make INV-C3 (UI-visible event precedes
+    /// model-visible continuation) directly verifiable via `seq` ordering.
+    ///
+    /// `turn_kind` is one of `"user_only" | "merged" | "continuation_only"`;
+    /// `continuations_count` is the number of `BrainContinuation`s
+    /// materialized as self-describing `spur://continuation/{id}` blocks
+    /// for this turn (0 for `user_only`).
+    PromptDispatched {
+        session: SessionId,
+        turn_kind: String,
+        continuations_count: usize,
+    },
 }
 
 /// A single entry in a replayed conversation history.

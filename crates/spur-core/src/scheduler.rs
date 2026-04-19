@@ -85,12 +85,37 @@ impl BrainScheduler {
     /// Idempotent: duplicate `delegation_id` pushes are dropped silently.
     pub fn push_continuation(&mut self, c: BrainContinuation) {
         if self.delivered_ids.contains(&c.delegation_id) {
+            tracing::debug!(
+                continuation_probe = true,
+                site = "B_push_continuation",
+                delegation_id = %c.delegation_id,
+                outcome = "dedup_delivered",
+                "scheduler: drop (already delivered)"
+            );
             return;
         }
         if self.pending_continuations.iter().any(|q| q.delegation_id == c.delegation_id) {
+            tracing::debug!(
+                continuation_probe = true,
+                site = "B_push_continuation",
+                delegation_id = %c.delegation_id,
+                outcome = "dedup_pending",
+                "scheduler: drop (already pending)"
+            );
             return;
         }
+        let delegation_id = c.delegation_id.clone();
         self.pending_continuations.push_back(c);
+        tracing::debug!(
+            continuation_probe = true,
+            site = "B_push_continuation",
+            delegation_id = %delegation_id,
+            outcome = "enqueued",
+            pending_depth = self.pending_continuations.len(),
+            user_depth = self.pending_user.len(),
+            turn_in_flight = self.turn_in_flight,
+            "scheduler: continuation enqueued"
+        );
     }
 
     pub fn note_turn_started(&mut self) {
@@ -140,6 +165,14 @@ impl BrainScheduler {
         self.clear_grace_if_user_arrived();
 
         if self.turn_in_flight {
+            tracing::debug!(
+                continuation_probe = true,
+                site = "C_scheduler_next",
+                decision = "idle_turn_in_flight",
+                pending_user = self.pending_user.len(),
+                pending_continuations = self.pending_continuations.len(),
+                "scheduler.next -> Idle (INV-C6 turn_in_flight)"
+            );
             return ScheduledAction::Idle;
         }
 
@@ -151,19 +184,54 @@ impl BrainScheduler {
                 self.drain_continuations_for_delivery()
             };
             if continuations.is_empty() {
+                tracing::debug!(
+                    continuation_probe = true,
+                    site = "C_scheduler_next",
+                    decision = "user_prompt",
+                    continuations = 0,
+                    "scheduler.next -> UserPrompt"
+                );
                 return ScheduledAction::UserPrompt(user);
             }
+            tracing::debug!(
+                continuation_probe = true,
+                site = "C_scheduler_next",
+                decision = "merged_prompt",
+                continuations = continuations.len(),
+                "scheduler.next -> MergedPrompt (user + N continuations)"
+            );
             return ScheduledAction::MergedPrompt { user, continuations };
         }
 
         // No user queued: can we fire an autonomous continuation?
         if self.pending_continuations.is_empty() {
+            tracing::debug!(
+                continuation_probe = true,
+                site = "C_scheduler_next",
+                decision = "idle_empty",
+                "scheduler.next -> Idle (no work)"
+            );
             return ScheduledAction::Idle;
         }
         if self.in_cancel_grace(now) {
+            tracing::debug!(
+                continuation_probe = true,
+                site = "C_scheduler_next",
+                decision = "idle_cancel_grace",
+                pending_continuations = self.pending_continuations.len(),
+                "scheduler.next -> Idle (G5 cancel grace window)"
+            );
             return ScheduledAction::Idle;
         }
-        ScheduledAction::ContinuationPrompt(self.drain_continuations_for_delivery())
+        let batch = self.drain_continuations_for_delivery();
+        tracing::debug!(
+            continuation_probe = true,
+            site = "C_scheduler_next",
+            decision = "continuation_prompt",
+            continuations = batch.len(),
+            "scheduler.next -> ContinuationPrompt (autonomous turn)"
+        );
+        ScheduledAction::ContinuationPrompt(batch)
     }
 
     /// Drains ALL pending continuations. Merge-byte-budget enforcement
