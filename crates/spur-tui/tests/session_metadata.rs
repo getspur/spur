@@ -138,3 +138,30 @@ fn gc_clears_last_active_when_that_session_is_orphaned() {
     store.gc_orphans(&[]);
     assert!(store.metadata().last_active_session_id.is_none());
 }
+
+#[test]
+fn clear_last_active_full_nulls_all_auto_resume_pointers() {
+    // After BrainRetired, the TUI must null every `last_active_*` field
+    // — not just `last_active_session_id`. Otherwise spur-cli's
+    // `last_active_acp()` still returns (acp_id, brain) for the retired
+    // session and auto-resumes it on the next launch, contradicting the
+    // user's /clear intent.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    let mut store = SessionMetadataStore::load(&path);
+
+    store.set_acp_mapping("spur-1", "acp-abc", "claude-code-acp");
+    store.set_last_active("spur-1".into(), "2026-04-20T00:00:00Z".into());
+    assert!(store.last_active_acp().is_some(), "precondition");
+
+    store.clear_last_active_full();
+
+    assert!(store.metadata().last_active_session_id.is_none());
+    assert!(store.metadata().last_active_at.is_none());
+    assert!(store.metadata().last_active_acp_session_id.is_none());
+    assert!(store.metadata().last_active_brain.is_none());
+    assert!(
+        store.last_active_acp().is_none(),
+        "spur-cli must see no auto-resume target after full clear"
+    );
+}
