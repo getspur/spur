@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus};
@@ -739,13 +739,21 @@ pub async fn run_plan(
                 }
                 PlanTaskStatus::Approved { .. }
                 | PlanTaskStatus::Rejected { .. }
-                | PlanTaskStatus::Failed { .. } => {}
+                | PlanTaskStatus::Failed { .. }
+                | PlanTaskStatus::Cancelled { .. } => {}
             }
         }
     }
 
     // INV-7: Compute terminal counts and emit lifecycle events OUTSIDE the lock.
-    let (approved_count, rejected_count, failed_count, cancelled_count, awaiting_review_count, all_approved) = {
+    let (
+        approved_count,
+        rejected_count,
+        failed_count,
+        cancelled_count,
+        awaiting_review_count,
+        all_approved,
+    ) = {
         let p = plan.lock().await;
         let mut a = 0u32;
         let mut r = 0u32;
@@ -884,7 +892,11 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                         .filter(|d| {
                             !state.tasks.iter().any(|o| {
                                 o.spec.task_id == **d
-                                    && matches!(o.status, PlanTaskStatus::Approved { .. } | PlanTaskStatus::Cancelled { .. })
+                                    && matches!(
+                                        o.status,
+                                        PlanTaskStatus::Approved { .. }
+                                            | PlanTaskStatus::Cancelled { .. }
+                                    )
                             })
                         })
                         .map(|d| d.as_str())
@@ -2018,7 +2030,11 @@ fn dispatch_newly_ready(
         .filter(|t| {
             t.spec.depends_on.iter().all(|dep| {
                 state.tasks.iter().any(|o| {
-                    o.spec.task_id == *dep && matches!(o.status, PlanTaskStatus::Approved { .. } | PlanTaskStatus::Cancelled { .. })
+                    o.spec.task_id == *dep
+                        && matches!(
+                            o.status,
+                            PlanTaskStatus::Approved { .. } | PlanTaskStatus::Cancelled { .. }
+                        )
                 })
             })
         })

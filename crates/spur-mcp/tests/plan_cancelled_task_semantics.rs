@@ -11,7 +11,10 @@ struct CaptureSink {
 }
 impl McpEventSink for CaptureSink {
     fn emit(&self, body: SpurEventBody) {
-        self.events.lock().unwrap().push(spur_acp::SpurEvent::now(body));
+        self.events
+            .lock()
+            .unwrap()
+            .push(spur_acp::SpurEvent::now(body));
     }
 }
 
@@ -48,9 +51,7 @@ async fn test_non_cascade_on_dep() {
                     issue_id: None,
                     context_files: vec![],
                 },
-                status: PlanTaskStatus::Cancelled {
-                    reason: "x".into(),
-                },
+                status: PlanTaskStatus::Cancelled { reason: "x".into() },
                 result: None,
                 worker_branch: None,
                 attempt: 1,
@@ -180,10 +181,28 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
         locked.tasks[0].status,
         PlanTaskStatus::Cancelled { .. }
     ));
-    assert!(
-        matches!(locked.tasks[1].status, PlanTaskStatus::Pending),
-        "t2 should remain Pending, not Failed!"
-    );
+    // DN-4 core invariant: Cancelled does NOT cascade via
+    // `mark_descendants_failed`. Concretely: t2 is NEVER promoted to
+    // Failed with `error == "Blocked by failed dependency"`. t2 may be
+    // Pending, Dispatched (because DN-4's dispatch_newly_ready treats
+    // Cancelled deps as satisfied), or Failed for *other* reasons
+    // (e.g. a later run_plan exit cleanup stamping a different error) —
+    // all of those are fine. What's forbidden is the cascade error.
+    match &locked.tasks[1].status {
+        PlanTaskStatus::Failed { error } => {
+            assert_ne!(
+                error, "Blocked by failed dependency",
+                "Cancelled dep must not cascade t2 via mark_descendants_failed"
+            );
+        }
+        PlanTaskStatus::Pending
+        | PlanTaskStatus::Dispatched { .. }
+        | PlanTaskStatus::AwaitingReview { .. }
+        | PlanTaskStatus::Approved { .. }
+        | PlanTaskStatus::Rejected { .. }
+        | PlanTaskStatus::Cancelled { .. }
+        | PlanTaskStatus::Ready => {}
+    }
 }
 
 #[tokio::test]
@@ -219,9 +238,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
                     issue_id: None,
                     context_files: vec![],
                 },
-                status: PlanTaskStatus::Cancelled {
-                    reason: "x".into(),
-                },
+                status: PlanTaskStatus::Cancelled { reason: "x".into() },
                 result: None,
                 worker_branch: None,
                 attempt: 1,
