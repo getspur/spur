@@ -19,7 +19,14 @@ pub fn spawn_license_runtime(license: SpurLicense, funnel: FunnelHandle) -> Join
         let mut current_validate_delay = policy.validate_interval;
         let mut current_heartbeat_delay = policy.heartbeat_interval;
 
-        let mut validate_sleep = Box::pin(tokio::time::sleep(current_validate_delay));
+        // D3: clamp the initial validate sleep to 30s (or less if the
+        // configured interval is already shorter) so a stale cached license
+        // isn't trusted for up to `validate_interval` after boot. Subsequent
+        // ticks use the full configured cadence via the `validate_sleep.reset()`
+        // calls below.
+        let initial_validate_delay =
+            std::cmp::min(current_validate_delay, std::time::Duration::from_secs(30));
+        let mut validate_sleep = Box::pin(tokio::time::sleep(initial_validate_delay));
         let mut heartbeat_sleep = Box::pin(tokio::time::sleep(current_heartbeat_delay));
         let mut updates = license.subscribe();
 

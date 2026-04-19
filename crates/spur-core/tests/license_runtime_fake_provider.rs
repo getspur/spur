@@ -185,3 +185,46 @@ async fn degraded_from_preserves_invalid_status_text() {
         "transient validate error must not overwrite prior Invalid text"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn runtime_validates_within_first_minute_after_boot() {
+    let seed = LicenseState::active_validated(Plan::Pro, Default::default());
+    let fake = Arc::new(
+        FakeProvider::new(seed).with_refresh_policy(
+            spur_license::provider::RefreshPolicy {
+                validate_interval: Duration::from_secs(3600),
+                heartbeat_interval: Duration::from_secs(3600),
+            },
+        ),
+    );
+    fake.push_validate_result(Ok(LicenseState::active_validated(
+        Plan::Pro,
+        Default::default(),
+    )));
+
+    let license = SpurLicense::from_provider(fake.clone());
+    let (bcast_tx, _rx) = broadcast::channel::<SpurEvent>(64);
+    let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
+    let handle = spawn_license_runtime(license, funnel);
+
+    // Yield to let the spawned runtime task start and register its timers.
+    tokio::task::yield_now().await;
+
+    // Advance virtual time past the 30s initial clamp (but well under the
+    // configured 3600s interval). The runtime's validate arm must fire.
+    tokio::time::advance(Duration::from_secs(60)).await;
+    // Give the runtime task multiple yield points to drive the select arm
+    // and complete the validate() call.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    handle.abort();
+
+    assert_eq!(
+        fake.validate_call_count(),
+        1,
+        "runtime must perform an initial validate shortly after startup \
+         even when validate_interval is an hour"
+    );
+}
