@@ -2526,11 +2526,19 @@ impl Orchestrator {
                 let (result, executor_id_opt) = tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
+                        let status = DelegationStatus::Cancelled {
+                            reason: "brain requested cancel".into(),
+                        };
+                        // Emit DelegationCompleted so TUI, lineage, and
+                        // other funnel subscribers don't see a stale
+                        // "active" entry for this delegation.
+                        funnel.emit(SpurEventBody::DelegationCompleted {
+                            worker_session: spur_acp::types::SessionId(request_id.clone()),
+                            status: status.clone(),
+                        });
                         (
                             DelegationResult {
-                                status: DelegationStatus::Cancelled {
-                                    reason: "brain requested cancel".into(),
-                                },
+                                status,
                                 diff: None,
                                 diff_summary: None,
                                 summary: None,
