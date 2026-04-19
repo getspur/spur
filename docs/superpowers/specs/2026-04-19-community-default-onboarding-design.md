@@ -11,15 +11,16 @@
 - Replace the silent `ConfigError` dead-end on a fresh install with a working **Community** tier so first-run users get a tool that does something useful before they're asked to authenticate.
 - Collapse the activation flow from three distinct verbs (set env vars + `spur auth login` + `spur watch`) to **one** verb (`spur watch`, with an inline paste prompt on first run).
 - Establish a **typed, signed, embedded `PolicyDocument`** as the source of truth for what each tier (`community`, `pro`, `team`, `enterprise`) includes, so the Community feature list can change per release without touching call sites.
+- **Establish Day-1 runtime feature-flag (FF) capability** — kill switches, gradual rollouts, tier targeting — so risky autonomous-agent rollouts can be safely managed without shipping a follow-up release. Implemented as a **custom local evaluator** over the same signed `PolicyDocument`, NOT as an OpenFeature/flagd adoption.
 - Give prospective Pro evaluators a frictionless taste path via a **public, rate-limited, server-issued demo key** — no per-user trial enrollment, no email collection, no anti-abuse infrastructure.
 - Replace the verbose 5-line `spur auth status` output with a single-line summary appropriate for first-time users; preserve the `--format json` schema unchanged.
 
 ## Non-goals
 
-- 7-day per-user trial. Deferred with explicit revisit trigger (see Deferred section).
-- Remote signed policy refresh from a CDN. Deferred (V2 in the V1/V2/V3 roadmap below).
+- 7-day per-user trial. Deferred with explicit revisit trigger (see Deferred section). With Day-1 flags now in scope, trial collapses to a flag config (~1 day) when revisited, not a code change.
+- Remote signed policy refresh from a CDN. Deferred (V2 in the V1/V2/V3 roadmap below). Local signed overlay (`~/.spur/policy-overlay.json`) IS in scope as the V1 hot-swap mechanism for both entitlements and flags.
 - Quota / rate-limit primitive (counters, windows). Deferred (V3).
-- OpenFeature / Flipt / Unleash adoption for runtime feature toggles (the G2 problem, distinct from G1 entitlements addressed here). Deferred.
+- **OpenFeature / Flipt / Unleash adoption.** Day-1 FF capability is in scope (above), but via a custom local evaluator. The standard's overhead (pre-1.0 SDK churn, JsonLogic review pain, 10–15 transitive crates, two artifacts to sign) exceeds today's value of vendor neutrality. Migration to OpenFeature later is bounded: implement a `FeatureProvider` over our local evaluator (~200 LoC) when ecosystem benefits actually matter (e.g., when telemetry lands and we want PostHog experimentation).
 - Conversion telemetry. Deferred to its own spec; opt-in design.
 - Multi-provider rollout (self-hosted, enterprise tenants). Already deferred by the hardening spec.
 - Typed-state-machine refactor of `LicenseState`. Already deferred by the hardening spec.
@@ -46,10 +47,15 @@ flowchart TB
     end
 
     subgraph new_policy["NEW policy module"]
-      PD["PolicyDocument<br/>(SignedPolicy wrapper)"]
-      PR["PolicyResolver<br/>(embedded baseline only in V1)"]
+      PD["PolicyDocument<br/>(SignedPolicy wrapper;<br/>tier_policies + flags)"]
+      PR["PolicyResolver (G1)<br/>tier entitlements"]
+      FE["FlagEvaluator (G2)<br/>NEW: kill switch + rollout + tier targeting"]
       FK["FeatureKey newtype<br/>(typed const registry)"]
+      GH["feature_enabled(license, flags, key)<br/>NEW: FLOOR ∧ GATE gating contract"]
       PD --owned by--> PR
+      PD --owned by--> FE
+      GH --consults--> PR
+      GH --consults--> FE
     end
 
     SL --Arc<dyn>--> LP
@@ -60,10 +66,16 @@ flowchart TB
     LSP --consults as fallback--> PR
   end
 
-  EmbeddedJSON["resources/default_policy.json<br/>(signed, include_bytes!, build.rs verified)"]
-  EmbeddedJSON --LazyLock--> PR
+  EmbeddedJSON["resources/default_policy.json<br/>(signed, include_bytes!, build.rs verified;<br/>carries G1 tiers AND G2 flags)"]
+  EmbeddedJSON --LazyLock--> PD
 
-  Cargo["spur-license/Cargo.toml<br/>+ ed25519-dalek = '2'"]
+  OverlayJSON["~/.spur/policy-overlay.json<br/>(NEW: optional signed overlay,<br/>fail-closed; supersedes embedded)"]
+  OverlayJSON -.optional.-> PD
+
+  InstallID["~/.spur/install-id<br/>(NEW: anonymous UUID for rollout bucketing)"]
+  InstallID --used by--> FE
+
+  Cargo["spur-license/Cargo.toml<br/>+ ed25519-dalek = '2'<br/>+ uuid = '1'"]
 ```
 
 **Double-evaluation — Diagram 1 → code mapping**
@@ -76,7 +88,12 @@ flowchart TB
 | `DisabledProvider` | [`crates/spur-license/src/licenseseat.rs:288-344`](/Volumes/Projects/spur/crates/spur-license/src/licenseseat.rs:288) | unchanged; reused only for partial-env case |
 | `CommunityProvider` | new file `crates/spur-license/src/community.rs` | NEW |
 | `PolicyDocument` / `PolicyResolver` / `FeatureKey` | new module `crates/spur-license/src/policy/` (`mod.rs`, `feature_key.rs`) | NEW |
-| `default_policy.json` | new file `crates/spur-license/resources/default_policy.json` | NEW |
+| `FlagSpec` / `FlagEvaluator` / `InstallId` (G2) | new file `crates/spur-license/src/policy/flags.rs` | NEW |
+| `feature_enabled(license, flags, key)` gating helper | exposed from `crates/spur-license/src/lib.rs` | NEW |
+| `spur flags list` subcommand | new file `crates/spur-cli/src/commands/flags.rs` | NEW |
+| `default_policy.json` (entitlements + flags) | new file `crates/spur-license/resources/default_policy.json` | NEW |
+| `~/.spur/policy-overlay.json` (signed runtime overlay) | runtime artifact | NEW |
+| `~/.spur/install-id` (anonymous UUID for bucketing) | runtime artifact | NEW |
 | `build.rs` policy-signature compile-time check | new file `crates/spur-license/build.rs` | NEW |
 | `from_env_or_disabled` dispatch update | [`crates/spur-license/src/licenseseat.rs:31-46`](/Volumes/Projects/spur/crates/spur-license/src/licenseseat.rs:31) | 5-LoC match-arm change |
 
@@ -144,21 +161,32 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The wire format. Always wrapped in SignedPolicy on disk and over the wire.
+/// Carries TWO orthogonal namespaces: `tier_policies` (G1 — entitlements) and
+/// `flags` (G2 — runtime toggles). They share the document because they share
+/// the signing/distribution flow, NOT because they are the same concept.
+/// Code-side, `PolicyResolver` handles G1 and `FlagEvaluator` handles G2; the
+/// `feature_enabled(license, flags, key)` helper combines them via the
+/// FLOOR ∧ GATE rule.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PolicyDocument {
     /// Major schema version. Code refuses load if `schema_version > CODE_SUPPORTED_MAJOR`.
     pub schema_version: u32,
 
-    /// Monotonic; newer issued_at wins when comparing embedded vs cached (V2).
+    /// Monotonic; newer issued_at wins when comparing embedded vs overlay/cached.
     pub issued_at: DateTime<Utc>,
 
-    /// Optional expiry. Embedded baseline has None; remote overlays (V2) have Some.
+    /// Optional expiry. Embedded baseline has None; overlays have Some.
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
 
-    /// Per-tier policy. Tier names: "community", "pro", "team", "enterprise".
+    /// G1 — Per-tier entitlement policy. Tier names: "community", "pro", "team", "enterprise".
     /// Unknown tiers in the document are ignored at lookup time (fail-closed).
     pub tier_policies: BTreeMap<String, TierPolicy>,
+
+    /// G2 — Runtime feature flags. Empty map is valid (FF capability optional).
+    /// Unknown flag keys at lookup time return `false` (fail-closed).
+    #[serde(default)]
+    pub flags: BTreeMap<String, FlagSpec>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -174,6 +202,42 @@ pub struct TierPolicy {
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
 }
+
+/// G2 — runtime flag specification. Intentionally minimal in V1 (kill switch +
+/// rollout + tier targeting). Extensions (variants, segments, dependencies)
+/// flow into `extensions` until they earn typed fields with a schema_version
+/// minor bump.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FlagSpec {
+    /// Master switch. Default `true` so existing flag keys are "on" by default,
+    /// matching the "ship behavior, then add a kill switch" pattern. A "dark"
+    /// flag awaiting rollout sets `enabled: false` explicitly.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Percentage rollout 0.0..=100.0. None means 100% (always on if `enabled`).
+    /// Determinism: stable bucket = SipHash(install_id || flag_key) % 100,
+    /// then bucket < rollout_percent → on.
+    #[serde(default)]
+    pub rollout_percent: Option<f32>,
+
+    /// Restrict to users on these license tiers (matched against
+    /// `LicenseState::plan.label_lowercase()`). None means all tiers.
+    /// Example: `["pro", "team", "enterprise"]` for a Pro-only beta.
+    #[serde(default)]
+    pub tier_filter: Option<Vec<String>>,
+
+    /// Human description for PR review and `spur flags list` introspection.
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// Forward-compat catch-all. Unknown fields land here so V1 binaries can
+    /// still load V1.5 policies that introduce variants/segments/etc.
+    #[serde(default, flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_true() -> bool { true }
 
 /// Wrapper that carries the signature. The payload is canonical JSON of
 /// PolicyDocument so signature verification is independent of serde
@@ -192,8 +256,10 @@ pub struct SignedPolicy {
 2. **`#[serde(default)]` on every optional field.** Old binaries accept new policies that omit fields they don't know about.
 3. **`BTreeMap<String, serde_json::Value>` for `quotas`.** V1 ignores quota contents entirely (no schema for quotas yet); V3 introduces a typed schema. Using `Value` means V1 binaries don't fail on V3 quotas — they just don't enforce them.
 4. **`#[serde(other)]` on enums.** When V1 introduces enums (none today; V3 adds `WindowSpec` and `ExceedAction`), unit variants get an `Unknown` carrier so unknown variants degrade gracefully.
-5. **Asymmetric defaults**:
+5. **`#[serde(flatten)] extensions: BTreeMap<String, Value>`** on `FlagSpec`. Future flag features (variants, segments, dependencies) deserialize into `extensions` on V1 binaries; V1.5 binaries that know those fields read them directly. No data loss; no parse failure.
+6. **Asymmetric defaults**:
    - Unknown FEATURE in `has_entitlement(unknown_key)` → **fail-closed** (return `false`). Caller asked about something not policied; safe default is deny.
+   - Unknown FLAG in `is_enabled(unknown_key, _)` → **fail-closed** (return `false`). Same reasoning. A missing flag spec means "feature is gated off" until policy is updated.
    - Unknown ACTION on a quota (V3) → **fail-open** (allow). Policy author bug; wrong to punish user.
 
 ### Signature trust model
@@ -258,7 +324,152 @@ Callers use `license.has_entitlement(FeatureKey::ADVANCED_AGENTS.as_str())`. Add
 
 ---
 
-## The four coordinated changes
+## The Day-1 FF capability — `FlagEvaluator` and the gating contract
+
+### Why custom over OpenFeature
+
+After multi-round analysis (see commit history of this spec), the design space is `{defer, OpenFeature+flagd, custom-over-PolicyDocument}`. **Custom (K3) is strictly better than OpenFeature+flagd (K1) for spur today** on cost, maintenance burden, review ergonomics, single-signing-flow operations, and bus factor. K1's only durable advantage is vendor neutrality — a **hypothetical future** benefit (matters when we adopt a SaaS for collaborative flag UIs / experimentation stats engines, neither of which spur has near-term need for). Migration K3 → K1 later is bounded: implement a custom OpenFeature `FeatureProvider` over our local `FlagEvaluator` (~200 LoC), swap the wrapper. That migration cost is the SAME cost K1 forces today; we defer it to when there's an actual reason.
+
+### `FlagEvaluator` (~150 LoC, sync, deterministic)
+
+```rust
+// crates/spur-license/src/policy/flags.rs
+
+use crate::LicenseState;
+use crate::policy::{FlagSpec, PolicyDocument};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+/// Stable per-machine anonymous identifier. Generated on first run, persisted
+/// at `~/.spur/install-id`. NOT correlated with user identity. Used solely
+/// as the bucket-stable input for percentage rollouts.
+#[derive(Clone, Debug)]
+pub struct InstallId(pub String);
+
+pub struct FlagEvaluator {
+    document: Arc<PolicyDocument>,
+    install_id: InstallId,
+}
+
+impl FlagEvaluator {
+    pub fn new(document: Arc<PolicyDocument>, install_id: InstallId) -> Self {
+        Self { document, install_id }
+    }
+
+    /// Returns true if the flag is enabled for THIS install + license combination.
+    /// Unknown flag → false (fail-closed).
+    pub fn is_enabled(&self, flag_key: &str, license: &LicenseState) -> bool {
+        let Some(spec) = self.document.flags.get(flag_key) else {
+            return false; // unknown flag = off
+        };
+        if !spec.enabled { return false; }
+
+        if let Some(filter) = &spec.tier_filter {
+            let tier = license.plan.label().to_ascii_lowercase();
+            if !filter.iter().any(|t| t.to_ascii_lowercase() == tier) {
+                return false;
+            }
+        }
+
+        if let Some(pct) = spec.rollout_percent {
+            let bucket = self.bucket(flag_key);
+            if (bucket as f32) >= pct { return false; }
+        }
+
+        true
+    }
+
+    /// Stable bucket 0..100 from (install_id, flag_key). SipHash via std's
+    /// DefaultHasher — not cryptographic, but stable across processes on the
+    /// same install for the same flag key. Sufficient for rollout determinism.
+    fn bucket(&self, flag_key: &str) -> u32 {
+        let mut h = std::hash::DefaultHasher::new();
+        self.install_id.0.hash(&mut h);
+        flag_key.hash(&mut h);
+        (h.finish() % 100) as u32
+    }
+
+    /// Introspection for `spur flags list`. Returns evaluation + spec.
+    pub fn explain(&self, flag_key: &str, license: &LicenseState) -> FlagExplanation { /* … */ }
+}
+```
+
+### The gating contract — FLOOR ∧ GATE
+
+**Single helper, used at every gating callsite:**
+
+```rust
+// crates/spur-license/src/lib.rs (or a new gating.rs module)
+
+/// Returns true iff the user is BOTH contractually allowed (license entitlement)
+/// AND operationally enabled (flag evaluation) to use `key`.
+///
+/// FLOOR: `license.has_entitlement` — does the user's tier include this feature?
+/// GATE:  `flags.is_enabled` — is the rollout open to this user right now?
+///
+/// Both must be true. Conjunction makes the system safe-by-default:
+/// a misconfigured flag cannot grant entitlements you don't have;
+/// a misconfigured license cannot expose features that aren't safe to
+/// expose yet.
+pub fn feature_enabled(
+    license: &SpurLicense,
+    flags: &FlagEvaluator,
+    key: FeatureKey,
+) -> bool {
+    license.has_entitlement(key.as_str())
+        && flags.is_enabled(key.as_str(), &license.current_state())
+}
+```
+
+This is **THE callsite contract** for gating. Every new gated feature uses it. Reviewers see both checks together. Reversing this rule = workspace refactor — committed as **invariant #9** below.
+
+### `InstallId` lifecycle
+
+- Generate on first run: `uuid::Uuid::new_v4().to_string()` written to `~/.spur/install-id`. Single line, no schema.
+- Same machine, same install: stable across sessions.
+- Reset by `rm ~/.spur/install-id` — user gets a new bucket on next start. Documented as a "reset rollout" mechanism for power users debugging gradual-rollout edge cases.
+- NOT correlated with LicenseSeat machine fingerprint, license key, or any user identity. Anonymous bucket-stability only.
+
+### Local signed overlay — `~/.spur/policy-overlay.json`
+
+Hot-swap path WITHOUT shipping a new release. Same `SignedPolicy` wrapper, same Ed25519 trust map.
+
+- Loaded at startup if present; signature-verified; fail-closed on bad signature (overlay ignored, embedded baseline used; warning logged).
+- Loaded once per process; no file-watch in V1. Hot-reload is a future affordance; for now, restart `spur watch` to pick up overlay changes. (Acceptable for V1 since `spur watch` is the long-running surface and is restart-cheap.)
+- Distribution: ops can drop a signed overlay onto user machines via any channel (auto-updater, support Slack, doc instructions). Overlay's `expires_at` SHOULD be set (e.g., 30 days) so a stale overlay doesn't outlive its intent.
+- Embedded baseline always present as floor; overlay only ADDS or modifies; cannot remove tiers/features.
+
+### Initial flag inventory (V1, all default ON — behavior-neutral commit)
+
+Spec commits to the mechanism; product input refines the list during Phase 0. Suggested starting set:
+
+| Flag key | Default | Purpose |
+|---|---|---|
+| `kill_advanced_planner` | `true` | Kill switch on the new agent planner. Flip `false` to fall back to the previous planner. |
+| `enable_browser_tool` | `true` | Gradual ramp candidate. Add `rollout_percent: 50.0` to expose to half of installs. |
+| `enable_compaction_v2` | `true` | Kill switch on the V2 compaction logic. |
+| `enable_telemetry` | `false` | OFF until the telemetry spec lands; flip ON to begin opt-in capture. |
+
+All four exist as `pub const` in the `FeatureKey` registry alongside the entitlement keys. Same namespace; one place to grep.
+
+### `spur flags list` subcommand
+
+CLI introspection, ~30 LoC:
+
+```
+$ spur flags list
+FLAG                       ENABLED  ROLLOUT  TIER FILTER     RESULT
+kill_advanced_planner      true     —        —               on
+enable_browser_tool        true     50%      —               off (bucket 73)
+enable_compaction_v2       true     —        —               on
+enable_telemetry           false    —        —               off
+```
+
+`--verbose` prints spec details (description, extensions). Useful for debugging "why didn't I see feature X?" support questions.
+
+---
+
+## The five coordinated changes
 
 ### 1. `CommunityProvider` (B2′)
 
@@ -390,7 +601,22 @@ Rotation cadence: monthly. New key, new doc revision. Old key continues to work 
 
 **Note:** B9 requires Option A for B6 to be useful — without baked-in publishable credentials, users would also need to set env vars before the demo key works, which defeats its frictionless premise.
 
-### 4. CLI output redesign
+### 4. Day-1 FF capability (`FlagEvaluator` + `feature_enabled` + `spur flags list`)
+
+Detailed design above in the **"The Day-1 FF capability"** section. Concrete deltas:
+
+- New module `crates/spur-license/src/policy/flags.rs` (~150 LoC) with `FlagEvaluator`, `InstallId`, `FlagExplanation`.
+- Extend `PolicyDocument` with `flags: BTreeMap<String, FlagSpec>` (already in the schema section above).
+- New helper `feature_enabled(license, flags, key)` exposed from `spur-license::lib`.
+- `~/.spur/install-id` UUID lifecycle (~30 LoC).
+- `~/.spur/policy-overlay.json` signed-overlay loader (~80 LoC; reuses `SignedPolicy` verification).
+- `spur flags list` CLI subcommand in `spur-cli/src/commands/flags.rs` (~30 LoC).
+- 4 placeholder flags in `default_policy.json` (`kill_advanced_planner`, `enable_browser_tool`, `enable_compaction_v2`, `enable_telemetry`), all default-ON for behavior-neutral V1.
+- Tests: evaluator returns `false` for unknown flag (fail-closed); rollout determinism (same install_id + flag_key → same bucket across processes); tier_filter respects `LicenseState::plan`; overlay supersedes embedded when newer & signed; bad-signature overlay falls back to embedded.
+
+**Placement (E3 from analysis):** lives in `crates/spur-license/src/policy/flags.rs` — same crate as `PolicyResolver`, separate module. Two reasons: (a) shares the `PolicyDocument`, signing infrastructure, and `FeatureKey` registry without crate-boundary friction; (b) physical separation (`policy/mod.rs` for G1 entitlements, `policy/flags.rs` for G2 toggles) preserves the conceptual G1/G2 distinction without splitting the crate. A future `spur-flags` crate split is bounded if the surface grows (just move the module + re-export).
+
+### 5. CLI output redesign
 
 Replace the 5-line `print_state` in [`crates/spur-cli/src/commands/auth.rs:108-118`](/Volumes/Projects/spur/crates/spur-cli/src/commands/auth.rs:108) with a single-line summary keyed on tier and status:
 
@@ -420,7 +646,10 @@ Replace the 5-line `print_state` in [`crates/spur-cli/src/commands/auth.rs:108-1
 
 6. **Embedded policy compile-time validity.** `build.rs` runs `verify(SignedPolicy)` on the embedded `default_policy.json`. CI cannot ship a binary with an unsigned, malformed, or future-versioned policy.
 7. **Policy schema forward-compat.** Tests assert that a v1 binary deserializes a hypothetical v1.5 policy (extra fields ignored), AND that a v1 binary refuses a v2 policy (`schema_version` check fires) and falls back to embedded.
-8. **Asymmetric default safety.** Tests assert `unknown_feature → false` (fail-closed) and `unknown_quota_action → allow` (fail-open) at the resolver layer.
+8. **Asymmetric default safety.** Tests assert `unknown_feature → false` (fail-closed), `unknown_flag → false` (fail-closed), and `unknown_quota_action → allow` (fail-open) at the resolver/evaluator layer.
+9. **FLOOR ∧ GATE gating contract.** Every gated feature uses `feature_enabled(license, flags, key)` — license entitlement is FLOOR, flag is GATE, both must be true. Tests assert: an entitled user with a flag at `enabled: false` sees the feature off; a non-entitled user with a flag at `enabled: true` also sees it off; only the conjunction exposes. Code-search invariant in CI (`grep`-based deny-list against direct `has_entitlement` calls in caller crates) — direct calls are allowed only inside the gating helper.
+10. **Rollout determinism.** Tests assert that `FlagEvaluator::is_enabled` for a fixed `(install_id, flag_key, FlagSpec)` returns the SAME boolean across process restarts. Property test: for any `install_id`, the empirical bucket distribution across 10000 random flag_keys is uniform within tolerance.
+11. **Overlay safety.** Tests assert: a signed overlay with `issued_at > embedded.issued_at` and valid signature wins; a tampered overlay is silently ignored (warning logged) and embedded is used; an expired overlay is ignored.
 
 ---
 
@@ -450,17 +679,31 @@ Replace the 5-line `print_state` in [`crates/spur-cli/src/commands/auth.rs:108-1
 - `LicenseSeatProvider::has_entitlement` resolver fallback in `licenseseat.rs`.
 - Tests: `CommunityProvider` returns correct entitlements; `LicenseSeatProvider` consults resolver for unknown SDK keys; existing `FakeProvider` tests still pass.
 
-### Phase 3 — CLI onboarding + output (~0.5 day)
+### Phase 3 — Day-1 FF capability (~0.5 day)
+
+Implements change #4 per the spec sections above. Concrete deliverables:
+
+- `crates/spur-license/src/policy/flags.rs` (`FlagEvaluator`, `InstallId`, `FlagExplanation`).
+- Extend `PolicyDocument` with `flags: BTreeMap<String, FlagSpec>`.
+- `feature_enabled(license, flags, key)` exposed from `spur-license::lib`.
+- `~/.spur/install-id` UUID lifecycle, `~/.spur/policy-overlay.json` signed-overlay loader.
+- 4 placeholder flags in `default_policy.json`.
+- Add `uuid = { version = "1", features = ["v4"] }` to `spur-license/Cargo.toml`.
+- Tests for invariants #9–#11 (FLOOR ∧ GATE, rollout determinism, overlay safety).
+
+### Phase 4 — CLI onboarding + flags subcommand + output (~0.5 day)
 
 - `maybe_prompt_first_run` in `spur-cli/src/main.rs` per the contract above.
 - `~/.spur/onboarded` marker schema documented in a 10-line module comment.
+- `spur flags list` subcommand in `spur-cli/src/commands/flags.rs` (~30 LoC + tests).
 - `print_state` redesign in `auth.rs`.
-- Tests: TTY-skip behavior, marker creation, prompt flow with valid key, prompt flow with Enter, output format for each (status, plan) pair.
+- Tests: TTY-skip behavior, marker creation, prompt flow with valid key, prompt flow with Enter, output format for each (status, plan) pair, `spur flags list` rendering.
 
-### Phase 4 — Docs + tenant config (hours)
+### Phase 5 — Docs + tenant config (hours)
 
 - `docs/onboarding/try-pro.md` documenting the demo key.
 - `docs/onboarding/community-tier.md` with the auto-derivable feature matrix from `default_policy.json` metadata.
+- `docs/contributing/flag-conventions.md` documenting: when to add a flag, how to add one, the FLOOR ∧ GATE rule, the four initial flags' purposes, the overlay rotation policy.
 - README onboarding section updated.
 - Tenant-side: configure rate-limited demo key.
 
@@ -468,13 +711,14 @@ Replace the 5-line `print_state` in [`crates/spur-cli/src/commands/auth.rs:108-1
 
 ## Exit criteria
 
-- All four phases land; CI green (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo fmt --all --check`).
+- All five phases land; CI green (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo fmt --all --check`).
 - `default_policy.json` signature verified at compile time AND at runtime in tests.
 - A fresh `cargo install --path crates/spur-cli` (no env vars) followed by `spur watch` runs the tool with `Plan::Community`; `spur auth status` shows the Community single-line summary.
 - A `spur auth login --key DEMO-SPUR-2026-Q2` against the configured tenant transitions to Pro.
+- `spur flags list` prints the 4 placeholder flags with correct `RESULT` columns for the current install + license combination.
 - Hardening spec's invariants #1–#5 pass their existing tests unchanged.
-- New invariants #6–#8 (compile-time validity, forward-compat, asymmetric defaults) covered by tests.
-- README and onboarding docs updated.
+- New invariants #6–#11 covered by tests.
+- README, onboarding docs, and `flag-conventions.md` updated.
 
 ---
 
@@ -485,7 +729,7 @@ Replace the 5-line `print_state` in [`crates/spur-cli/src/commands/auth.rs:108-1
 | 7-day per-user trial | 3+ months of conversion telemetry shows the Community → Pro funnel is bottlenecked **specifically** on lack of Pro evaluation, AND the demo key (B9) hasn't already addressed it | Sibling spec; ~5–8 engineer-days plus product/legal review |
 | Remote signed policy refresh (V2) | Product wants to change Community feature list **without** shipping a release | Sibling spec; ~1 engineer-day plus CDN setup |
 | Quotas (V3) | A real product gate where boolean entitlement isn't expressive enough (e.g., per-day token caps) | Sibling spec; ~2 engineer-days plus product-policy decisions |
-| OpenFeature / Flipt adoption (G2) | spur needs kill switches, A/B tests, or percentage rollouts on non-licensing features | Sibling spec; OpenFeature SDK + flagd-file-mode is the recommended starting point |
+| OpenFeature / Flipt adoption (vendor-neutral standard) | spur adopts a SaaS for collaborative flag management OR experimentation stats engine (e.g., PostHog) AND wants the standardized integration surface. Day-1 capability is already provided by the local `FlagEvaluator`; this trigger is purely about adopting the standard. | Sibling spec; ~1 engineer-day to implement a custom `FeatureProvider` over the local `FlagEvaluator`, swap the wrapper, keep policy distribution unchanged |
 | Conversion telemetry | After this lands; product wants data on the Community → Pro funnel | Separate spec; opt-in design; minimum-surface |
 | Constructor/background-start split (`SpurLicense::new` + `start_background`) | Already deferred by hardening spec | Unchanged |
 | `parking_lot::RwLock` migration | Already deferred by hardening spec | Unchanged |
