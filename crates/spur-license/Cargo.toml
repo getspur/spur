@@ -19,6 +19,7 @@ licenseseat = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+proptest = "1"
 
 [features]
 test-support = []
