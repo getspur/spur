@@ -1,6 +1,9 @@
 mod licenseseat;
 pub mod provider;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
