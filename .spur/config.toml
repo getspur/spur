@@ -1,57 +1,94 @@
 [brain]
-# To try the new ACP-based Claude transport, flip `default` to
-# "claude-code-acp". Keeping the stream-json one as default during rollout.
-default = "claude-code-acp"
-fallback = ["claude-code-acp", "kiro"]
+default = "claude-code"
+fallback = [
+    "kiro",
+    "claude-code-acp",
+    "codex-acp",
+    "opencode-acp",
+]
 
 [brain.prompt]
 
-# Gemini CLI via native ACP mode. Requires `gemini` on PATH.
-# As of gemini-cli 0.35.3, `--acp` is the current flag and
-# `--experimental-acp` is a deprecated alias.
-# Current ACP surface includes initialize/authenticate/newSession/
-# loadSession/prompt/cancel/setSessionMode/unstable_setSessionModel,
-# `available_commands_update`, prompt image/audio/embedded-context
-# capabilities, and MCP HTTP/SSE passthrough.
+[brain.delegation]
+framework = "v1"
+
 [[agents.entries]]
-name = "gemini"
-command = "gemini"
-args = ["--acp"]
-transport = "acp"
-kind = "generic"
+name = "claude-code"
+command = "claude"
+args = [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--permission-mode",
+    "acceptEdits",
+]
+transport = "stream-json"
+kind = "claude-stream-json"
 role = "both"
 capabilities = []
-cost_tier = "low"
+cost_tier = "medium"
+skip_permissions = false
+skip_permissions_args = []
+
+[agents.entries.review]
+review_required = false
+review_timeout_secs = 1800
+max_review_retries = 3
+
+[agents.entries.review.review_timeout_default.Reject]
+reason = "review timeout"
 
 [agents.entries.display]
-handle = "gemini"
+handle = "claude-sj"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
+args_template = "raw_rest"
+ingest = []
+response = []
+static = []
 
 [agents.entries.permissions]
-skip = true
-session_mode = "yolo"
+skip = false
+args = ["--dangerously-skip-permissions"]
 
-# DEPRECATED: prefer the `claude-code-acp` profile below. This stream-json
-# transport is feature-capped (no plan mode, no slash-command discovery,
-# no UsageUpdate) and will be removed in a future release. Kept for
-# environments without Node.js, which should be rare since Claude Code
-# itself requires Node.
+[agents.entries.delegation]
+good_for = []
+avoid_for = []
+strengths = []
+limitations = []
+inherit_defaults = true
+
 [[agents.entries]]
 name = "kiro"
 command = "kiro-cli"
 args = ["acp"]
 transport = "acp"
+kind = "kiro"
 role = "both"
 capabilities = []
 cost_tier = "medium"
+skip_permissions = false
+skip_permissions_args = []
+
+[agents.entries.review]
+review_required = false
+review_timeout_secs = 1800
+max_review_retries = 3
+
+[agents.entries.review.review_timeout_default.Reject]
+reason = "review timeout"
 
 [agents.entries.display]
 handle = "kiro"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
+args_template = "raw_rest"
+response = []
+static = []
 
 [[agents.entries.commands.ingest]]
 method = "_kiro.dev/commands/available"
@@ -60,102 +97,188 @@ path = "commands"
 item_schema = "acp_available_command"
 
 [agents.entries.permissions]
-skip = true
+skip = false
 args = ["--trust-all-tools"]
 
-# Claude Code via the upstream ACP wrapper. Preferred transport: gives us
-# plan mode, usage tracking, slash-command discovery, and full permission
-# gating via the SDK. Requires Node.js on PATH.
-#
-# The pinned version is critical — @latest would silently pull breaking
-# changes mid-session. Bump deliberately and retest after each bump.
+[agents.entries.delegation]
+good_for = []
+avoid_for = []
+strengths = []
+limitations = []
+inherit_defaults = true
+
 [[agents.entries]]
 name = "claude-code-acp"
 command = "npx"
-args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
+args = [
+    "--yes",
+    "@agentclientprotocol/claude-agent-acp@0.26.0",
+]
 transport = "acp"
+kind = "claude-code-acp"
 role = "both"
 capabilities = []
 cost_tier = "medium"
+skip_permissions = false
+skip_permissions_args = []
+
+[agents.entries.review]
+review_required = false
+review_timeout_secs = 1800
+max_review_retries = 3
+
+[agents.entries.review.review_timeout_default.Reject]
+reason = "review timeout"
+
+[agents.entries.display]
+handle = "claude"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+args_template = "raw_rest"
+ingest = []
+response = []
+static = []
 
 [agents.entries.permissions]
-skip = true
+skip = false
+args = []
 session_mode = "bypassPermissions"
 
-# Codex via zed-industries/codex-acp — ACP adapter for OpenAI Codex.
-# Install binary from https://github.com/zed-industries/codex-acp/releases
-# or use the codex-acp npx entry below instead.
+[agents.entries.delegation]
+good_for = []
+avoid_for = []
+strengths = []
+limitations = []
+inherit_defaults = true
+
 [[agents.entries]]
-name = "codex"
-command = "codex-acp"
-args = []
-transport = "acp"
-role = "both"
-capabilities = []
-cost_tier = "low"
-
-[agents.entries.display]
-handle = "codex"
-
-[agents.entries.commands]
-dispatch = "prompt_text"
-
-[[agents.entries.commands.static]]
-name = "review"
-description = "Review current changes and find issues"
-hint = "[optional instructions]"
-
-[[agents.entries.commands.static]]
-name = "review-branch"
-description = "Review code changes against a specific branch"
-hint = "[branch name]"
-
-[[agents.entries.commands.static]]
-name = "review-commit"
-description = "Review code changes introduced by a commit"
-hint = "[commit sha]"
-
-[[agents.entries.commands.static]]
-name = "init"
-description = "Create an AGENTS.md with repository guidance"
-
-[[agents.entries.commands.static]]
-name = "compact"
-description = "Summarize conversation to prevent hitting context limit"
-
-[[agents.entries.commands.static]]
-name = "undo"
-description = "Undo Codex's most recent turn"
-
-[[agents.entries.commands.static]]
-name = "logout"
-description = "Logout of Codex"
-
-[agents.entries.permissions]
-skip = true
-session_mode = "full-auto"
-
-# Codex via npx wrapper — no pre-installed binary needed, version-pinned.
-# Pinned version is critical: @latest would silently pull breaking
-# changes mid-session. Bump deliberately and retest after each bump.
-[[agents.entries]]
-name = "codex"
+name = "codex-acp"
 command = "npx"
-args = ["--yes", "@zed-industries/codex-acp@0.11.1"]
+args = [
+    "--yes",
+    "@zed-industries/codex-acp@0.11.1",
+]
 transport = "acp"
+kind = "codex-acp"
 role = "both"
 capabilities = []
 cost_tier = "low"
+skip_permissions = false
+skip_permissions_args = []
+
+[agents.entries.review]
+review_required = false
+review_timeout_secs = 1800
+max_review_retries = 3
+
+[agents.entries.review.review_timeout_default.Reject]
+reason = "review timeout"
 
 [agents.entries.display]
 handle = "codex"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
+args_template = "raw_rest"
+ingest = []
+response = []
+static = []
 
 [agents.entries.permissions]
-skip = true
+skip = false
+args = []
 session_mode = "full-auto"
+
+[agents.entries.delegation]
+good_for = []
+avoid_for = []
+strengths = []
+limitations = []
+inherit_defaults = true
+
+[[agents.entries]]
+name = "gemini"
+command = "gemini"
+args = []
+transport = "cli-wrap"
+kind = "generic"
+role = "worker"
+capabilities = []
+cost_tier = "low"
+skip_permissions = false
+skip_permissions_args = []
+
+[agents.entries.review]
+review_required = false
+review_timeout_secs = 1800
+max_review_retries = 3
+
+[agents.entries.review.review_timeout_default.Reject]
+reason = "review timeout"
+
+[agents.entries.display]
+handle = "gemini"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+args_template = "raw_rest"
+ingest = []
+response = []
+static = []
+
+[agents.entries.permissions]
+skip = false
+args = []
+
+[agents.entries.delegation]
+good_for = []
+avoid_for = []
+strengths = []
+limitations = []
+inherit_defaults = true
+
+[[agents.entries]]
+name = "opencode-acp"
+command = "opencode"
+args = ["acp"]
+transport = "acp"
+kind = "generic"
+role = "both"
+capabilities = []
+cost_tier = "medium"
+skip_permissions = false
+skip_permissions_args = []
+
+[agents.entries.review]
+review_required = false
+review_timeout_secs = 1800
+max_review_retries = 3
+
+[agents.entries.review.review_timeout_default.Reject]
+reason = "review timeout"
+
+[agents.entries.display]
+handle = "opencode"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+args_template = "raw_rest"
+ingest = []
+response = []
+static = []
+
+[agents.entries.permissions]
+skip = false
+args = []
+session_mode = "full-auto"
+
+[agents.entries.delegation]
+good_for = []
+avoid_for = []
+strengths = []
+limitations = []
+inherit_defaults = true
 
 [failover]
 cooldown_minutes = 30
