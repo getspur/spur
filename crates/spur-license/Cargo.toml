@@ -15,3 +15,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 licenseseat = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
