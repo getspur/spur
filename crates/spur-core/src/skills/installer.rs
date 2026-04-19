@@ -166,7 +166,6 @@ fn body_after_marker(bytes: &[u8]) -> Option<(Marker, &[u8])> {
 
 fn iter_lines_with_positions(text: &str) -> impl Iterator<Item = (&str, usize)> {
     text.split_inclusive('\n').scan(0usize, |pos, line| {
-        let start = *pos;
         *pos += line.len();
         let trimmed = line.strip_suffix('\n').unwrap_or(line);
         Some((trimmed, *pos))
