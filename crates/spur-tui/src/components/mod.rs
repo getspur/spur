@@ -26,6 +26,9 @@ pub mod session_preview;
 pub mod status_bar;
 pub(crate) mod trace_format;
 pub mod workers_panel;
+pub mod palette;
+pub mod palette_overlay;
+pub mod palette_sources;
 
 use ratatui::style::{Color, Style};
 use std::time::Instant;
