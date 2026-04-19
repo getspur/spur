@@ -192,6 +192,17 @@ pub fn validate_parallel_args(args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+pub fn parse_delegation_plan(
+    container: &Value,
+) -> Result<Option<spur_acp::DelegationPlan>, String> {
+    match container.get("delegation_plan") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| format!("invalid delegation_plan: {error}")),
+    }
+}
+
 /// Parse the `tasks` array from a `delegate_parallel` args payload into
 /// a list of partially-populated `DelegationRequest` skeletons. Public
 /// (crate-level) so integration tests can exercise the parse logic
@@ -227,9 +238,7 @@ pub fn parse_parallel_tasks(
             .get("issue_id")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let delegation_plan: Option<spur_acp::DelegationPlan> = task_obj
-            .get("delegation_plan")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let delegation_plan = parse_delegation_plan(task_obj)?;
         let (tx, _rx) = tokio::sync::oneshot::channel();
         out.push(DelegationRequest {
             id: uuid::Uuid::new_v4().to_string(),
@@ -756,6 +765,7 @@ impl McpCallbackServer {
     // ─── Tool handlers ────────────────────────────────────────────────
 
     async fn handle_delegate_to_worker(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let bad_params = |message| JsonRpcResponse::invalid_params(id.clone(), message);
         let agent = match args.get("agent").and_then(|v| v.as_str()) {
             Some(a) => a.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'agent'"),
@@ -768,9 +778,10 @@ impl McpCallbackServer {
             .get("context_files")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        let delegation_plan: Option<spur_acp::DelegationPlan> = args
-            .get("delegation_plan")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let delegation_plan = match parse_delegation_plan(&args).map_err(bad_params) {
+            Ok(plan) => plan,
+            Err(response) => return response,
+        };
         let issue_id = args
             .get("issue_id")
             .and_then(|v| v.as_str())
@@ -2042,6 +2053,7 @@ impl McpCallbackServer {
     }
 
     async fn handle_delegate_async(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let bad_params = |message| JsonRpcResponse::invalid_params(id.clone(), message);
         let agent = match args.get("agent").and_then(|v| v.as_str()) {
             Some(a) => a.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'agent'"),
@@ -2054,9 +2066,10 @@ impl McpCallbackServer {
             .get("context_files")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        let delegation_plan: Option<spur_acp::DelegationPlan> = args
-            .get("delegation_plan")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let delegation_plan = match parse_delegation_plan(&args).map_err(bad_params) {
+            Ok(plan) => plan,
+            Err(response) => return response,
+        };
         let issue_id = args
             .get("issue_id")
             .and_then(|v| v.as_str())

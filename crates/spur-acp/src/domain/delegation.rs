@@ -87,7 +87,7 @@ pub struct DelegationResult {
 /// Structured reasoning trace the brain passes alongside each
 /// `delegate_to_worker` / `delegate_parallel` call. All fields optional;
 /// permissive schema. See design spec section C.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct DelegationPlan {
     /// Candidate agents the brain considered.
     #[serde(default)]
@@ -101,13 +101,13 @@ pub struct DelegationPlan {
     pub rationale: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct PlanCandidate {
     pub agent: Option<String>,
     pub rationale: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct PlanSubtask {
     pub subtask: Option<String>,
     #[serde(default)]

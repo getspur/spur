@@ -312,3 +312,75 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
         .expect("approve task panicked")
         .expect("approve returned Err");
 }
+
+/// DN-6: verify that `run_plan`, on terminal loop exit, promotes ANY
+/// non-terminal task (not just Pending-with-failed-dep) to Failed — including a
+/// Pending task whose declared dependency does not exist in the plan at all.
+#[tokio::test]
+async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+    use spur_mcp::plan::{run_plan, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+    use spur_mcp::McpEventSink;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    struct CaptureSink {
+        events: std::sync::Mutex<Vec<SpurEvent>>,
+    }
+    impl McpEventSink for CaptureSink {
+        fn emit(&self, body: SpurEventBody) {
+            self.events.lock().unwrap().push(SpurEvent::now(body));
+        }
+    }
+
+    let state = PlanState {
+        plan_id: "p1".into(),
+        tasks: vec![PlanTaskEntry {
+            spec: PlanTask {
+                task_id: "t1".into(),
+                agent: "a".into(),
+                task: "T".into(),
+                depends_on: vec!["missing-dep".into()],
+                issue_id: None,
+                context_files: vec![],
+            },
+            status: PlanTaskStatus::Pending,
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+        }],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
+        epic_id: None,
+    };
+
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
+    let (dtx, _drx) = mpsc::channel(8);
+    let plan_arc = Arc::new(Mutex::new(state));
+
+    run_plan(Arc::clone(&plan_arc), dtx, Some(sink_ref)).await;
+
+    let st = plan_arc.lock().await;
+    assert!(
+        matches!(st.tasks[0].status, PlanTaskStatus::Failed { .. }),
+        "stuck Pending task must become Failed on terminal exit, got {:?}",
+        st.tasks[0].status
+    );
+    drop(st);
+
+    let events = sink.events.lock().unwrap();
+    let pc = events
+        .iter()
+        .find_map(|e| match &e.body {
+            SpurEventBody::PlanCompleted { failed, .. } => Some(*failed),
+            _ => None,
+        })
+        .expect("PlanCompleted must be emitted");
+    assert_eq!(
+        pc, 1,
+        "stuck Pending task must be counted as failed in PlanCompleted"
+    );
+}

@@ -51,6 +51,10 @@ pub struct ExecutorLineage {
     /// `DelegationDispatched` counterpart.  Key is `request_id`.
     /// Value is `(task_spec, issue_id)`.
     pending_task_by_request_id: HashMap<String, (String, Option<String>)>,
+    /// Buffer for `DelegationDispatched` events that arrive before the
+    /// corresponding `WorkerSpawned`/`ExecutorSpawned`. Key is `executor_id`.
+    /// Value is `(task_spec, issue_id)` drained when the node appears.
+    pending_dispatch_by_executor_id: HashMap<String, (String, Option<String>)>,
 }
 
 impl ExecutorLineage {
@@ -423,6 +427,16 @@ impl ExecutorLineage {
         &mut self,
     ) -> &mut HashMap<String, (String, Option<String>)> {
         &mut self.pending_task_by_request_id
+    }
+
+    /// Mutable access to the orphan-dispatch buffer, keyed by `executor_id`.
+    /// Used by the legacy adapter to stash `DelegationDispatched` payloads
+    /// that arrive before the executor's node exists, so they can be drained
+    /// on `WorkerSpawned`/`ExecutorSpawned` arrival.
+    pub(crate) fn pending_dispatch_by_executor_id_mut(
+        &mut self,
+    ) -> &mut HashMap<String, (String, Option<String>)> {
+        &mut self.pending_dispatch_by_executor_id
     }
 }
 
