@@ -869,7 +869,12 @@ impl SessionDetailView {
                             let len = snap.text.len();
                             self.input_bar.set_state(snap, len);
                         }
-                        RetrievalAccept::InsertAtom { text, uri, name } => {
+                        RetrievalAccept::InsertAtom {
+                            text,
+                            uri,
+                            name,
+                            replace_from: _,
+                        } => {
                             self.input_bar.insert_atom(text, uri, name);
                         }
                         RetrievalAccept::ReplaceTriggerToken {
