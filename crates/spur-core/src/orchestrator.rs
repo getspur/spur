@@ -387,6 +387,13 @@ pub struct Orchestrator {
     pub pm_service: Option<Arc<PmService>>,
     /// INV-6: per-delegation cancellation token registry.
     cancellation_control: CancellationControl,
+    /// Sender half of the `run_interactive` ingress channel.  Set by
+    /// `set_continuation_tx` so the MCP server can route detached
+    /// delegation completions back to the orchestrator.
+    continuation_tx: Option<mpsc::Sender<InteractiveInput>>,
+    /// Overflow buffer for detached continuations.  Mirrors the buffer
+    /// passed to `run_interactive`; set alongside `continuation_tx`.
+    continuation_overflow: Option<crate::continuation_bridge::OverflowBuf>,
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -476,6 +483,8 @@ impl Orchestrator {
             repo_root,
             pm_service: None,
             cancellation_control: CancellationControl::new(),
+            continuation_tx: None,
+            continuation_overflow: None,
         })
     }
 
@@ -483,6 +492,72 @@ impl Orchestrator {
     pub fn with_pm_service(mut self, pm: Arc<PmService>) -> Self {
         self.pm_service = Some(pm);
         self
+    }
+
+    /// Wire in the sender half of the `run_interactive` ingress channel so
+    /// the MCP server can route detached delegation completions back to the
+    /// orchestrator. Call this before `run_interactive`.
+    pub fn set_continuation_tx(
+        &mut self,
+        tx: mpsc::Sender<InteractiveInput>,
+        overflow: crate::continuation_bridge::OverflowBuf,
+    ) {
+        self.continuation_tx = Some(tx);
+        self.continuation_overflow = Some(overflow);
+    }
+
+    /// Build a `DetachedContinuationCtx` for `McpCallbackServer::new`.
+    ///
+    /// Wires the `on_complete` async callback to `report_detached_completion`,
+    /// capturing the funnel handle (for UI event emission) and the
+    /// orchestrator ingress sender + overflow (for model-visible continuation).
+    ///
+    /// If no `continuation_tx` has been wired (e.g. `run_adhoc`), the
+    /// callback is a no-op — continuations are silently dropped, which is
+    /// correct for the one-shot batch path.
+    fn build_continuation_ctx(
+        &self,
+        brain_session_id: spur_acp::types::SessionId,
+    ) -> spur_mcp::server::DetachedContinuationCtx {
+        let funnel = self.funnel.clone();
+        match (self.continuation_tx.clone(), self.continuation_overflow.clone()) {
+            (Some(tx), Some(overflow)) => {
+                let session = brain_session_id.clone();
+                spur_mcp::server::DetachedContinuationCtx {
+                    on_complete: std::sync::Arc::new(move |cont, worker_session_str| {
+                        let tx = tx.clone();
+                        let overflow = overflow.clone();
+                        let session = session.clone();
+                        let funnel = funnel.clone();
+                        let worker_session =
+                            spur_acp::types::SessionId(worker_session_str);
+                        Box::pin(async move {
+                            // INV-C3: UI event BEFORE model-visible ingress.
+                            // FunnelHandle already implements ContinuationEventSink
+                            // (see continuation_bridge.rs).
+                            crate::continuation_bridge::report_detached_completion(
+                                &funnel,
+                                &tx,
+                                &overflow,
+                                session,
+                                worker_session,
+                                cont,
+                            )
+                            .await;
+                        })
+                    }),
+                }
+            }
+            _ => {
+                // No ingress channel wired — produce a no-op ctx so the
+                // constructor signature is satisfied (run_adhoc path).
+                spur_mcp::server::DetachedContinuationCtx {
+                    on_complete: std::sync::Arc::new(|_cont, _worker| {
+                        Box::pin(async {})
+                    }),
+                }
+            }
+        }
     }
 
     /// Subscribe to orchestrator events (for TUI, logging, etc.).
@@ -590,8 +665,9 @@ impl Orchestrator {
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
+        let adhoc_ctx = self.build_continuation_ctx(session_id.clone());
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink, adhoc_ctx);
         let mut mcp_server = mcp_server;
 
         // Populate available workers.
@@ -1639,8 +1715,9 @@ impl Orchestrator {
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
+        let cont_ctx = self.build_continuation_ctx(session_id.clone());
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink, cont_ctx);
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
@@ -1796,8 +1873,9 @@ impl Orchestrator {
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
+        let cont_ctx = self.build_continuation_ctx(session_id.clone());
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink, cont_ctx);
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self

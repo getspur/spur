@@ -2,13 +2,20 @@ use std::sync::Arc;
 
 use rmcp::{model::CallToolRequestParams, transport::StreamableHttpClientTransport, ServiceExt};
 use spur_acp::{BrainSessionId, SessionId};
-use spur_mcp::{McpCallbackServer, WorkerInfo};
+use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer, WorkerInfo};
+
+fn test_continuation_ctx() -> DetachedContinuationCtx {
+    // No-op on_complete: test harnesses don't route continuations.
+    DetachedContinuationCtx {
+        on_complete: Arc::new(|_cont, _worker| Box::pin(async {})),
+    }
+}
 
 #[tokio::test]
 async fn rmcp_client_can_initialize_list_tools_and_call_tool(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let brain_sid = BrainSessionId::new(SessionId::new());
-    let (mut server, _channel) = McpCallbackServer::new(&brain_sid, None, None);
+    let (mut server, _channel) = McpCallbackServer::new(&brain_sid, None, None, test_continuation_ctx());
     server.set_workers(vec![WorkerInfo {
         name: "worker-a".into(),
         tier: Some("generalist".into()),
