@@ -106,6 +106,45 @@ fn strip_frontmatter_owned(s: &str) -> String {
     strip_frontmatter(s).to_string()
 }
 
+static SKILL_ID_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+fn skill_id_regex() -> &'static regex::Regex {
+    SKILL_ID_RE.get_or_init(|| {
+        regex::Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").expect("static regex")
+    })
+}
+
+/// Error returned when a skill directory name violates the naming rules.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("invalid skill id `{id}`: {reason}")]
+pub struct InvalidSkillId {
+    pub id: String,
+    pub reason: &'static str,
+}
+
+/// Validate a skill id: regex `^[a-z0-9]+(-[a-z0-9]+)*$`, length 1..=54.
+///
+/// The 54-char cap is OpenCode's 64-char skill-name limit minus the
+/// `spurpower-` 10-char prefix we add in adapter output.
+pub fn validate_id(id: &str) -> Result<(), InvalidSkillId> {
+    if id.is_empty() {
+        return Err(InvalidSkillId { id: id.to_string(), reason: "empty" });
+    }
+    if id.len() > 54 {
+        return Err(InvalidSkillId {
+            id: id.to_string(),
+            reason: "longer than 54 characters",
+        });
+    }
+    if !skill_id_regex().is_match(id) {
+        return Err(InvalidSkillId {
+            id: id.to_string(),
+            reason: "must match ^[a-z0-9]+(-[a-z0-9]+)*$",
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +229,43 @@ mod tests {
         let acp = load_skill("brain-delegation-claude-code-acp", &fake).unwrap();
         let alias = load_skill("brain-delegation-claude-code", &fake).unwrap();
         assert_eq!(acp, alias);
+    }
+
+    #[test]
+    fn validate_id_accepts_standard_names() {
+        for ok in [
+            "tdd",
+            "test-driven-development",
+            "a",
+            "verification-before-completion",
+        ] {
+            assert!(validate_id(ok).is_ok(), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn validate_id_rejects_bad_names() {
+        for bad in [
+            "",
+            "Uppercase",
+            "has space",
+            "has_underscore",
+            "trailing-",
+            "-leading",
+            "double--hyphen",
+            "with/slash",
+            "..",
+            "../evil",
+        ] {
+            assert!(validate_id(bad).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn validate_id_enforces_length_cap() {
+        let ok_54 = "a".to_string() + &"b".repeat(53);
+        let too_long_55 = "a".to_string() + &"b".repeat(54);
+        assert!(validate_id(&ok_54).is_ok());
+        assert!(validate_id(&too_long_55).is_err());
     }
 }
