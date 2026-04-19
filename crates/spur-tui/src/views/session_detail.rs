@@ -1051,161 +1051,31 @@ impl View for SessionDetailView {
                 // match so we always capture it regardless of whether a
                 // display arm fires below.
                 crate::app::apply_session_update(self, &notification.update);
+
+                // Flag streaming state for live content chunks. This is the
+                // caller's responsibility — the shared dispatcher is agnostic
+                // to session lifecycle state.
                 match &notification.update {
-                    spur_acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                    spur_acp::SessionUpdate::AgentThoughtChunk(_)
+                    | spur_acp::SessionUpdate::AgentMessageChunk(_) => {
                         self.stream_in_flight = true;
-                        if let Some(text) = extract_text(chunk) {
-                            if !text.is_empty() {
-                                self.react_trace.append_think(text, Self::now_stamp());
-                            }
-                        }
-                    }
-                    spur_acp::SessionUpdate::AgentMessageChunk(chunk) => {
-                        self.stream_in_flight = true;
-                        if let Some(text) = extract_text(chunk) {
-                            if !text.is_empty() {
-                                self.react_trace.append_message(
-                                    text,
-                                    &self.agent_name,
-                                    Self::now_stamp(),
-                                );
-                            }
-                        }
-                    }
-                    spur_acp::SessionUpdate::UserMessageChunk(chunk) => {
-                        if let spur_acp::ContentBlock::Text(tc) = &chunk.content {
-                            self.react_trace
-                                .append_user_message(&tc.text, Self::now_stamp());
-                        }
-                        // Do NOT set stream_in_flight = true here.
-                        // UserMessageChunk is a replay-only variant (emitted
-                        // during loadSession history replay, not live streaming).
-                        // Setting the flag would light a spurious streaming
-                        // indicator that never clears if the replayed history
-                        // has no corresponding TurnComplete.
-                    }
-                    spur_acp::SessionUpdate::ToolCall(tc) => {
-                        use spur_acp::adapter::{self, ToolInputDisplay};
-                        let kind = self.agent_kind();
-                        let meta = spur_acp::adapter::extract_tool_meta(tc, kind);
-                        let display_name = meta.tool_name.as_deref().unwrap_or(tc.title.as_str());
-                        let depth = meta
-                            .parent_tool_use_id
-                            .as_ref()
-                            .and_then(|pid| self.tool_depth.get(pid).copied())
-                            .map(|d| d.saturating_add(1).min(8))
-                            .unwrap_or(0);
-                        self.tool_depth.insert(tc.tool_call_id.0.to_string(), depth);
-                        let indent = "  ".repeat(depth as usize);
-                        let tool = format!("{}{}", indent, display_name);
-                        let family = adapter::classify_tool(tc, kind);
-                        let input = tc
-                            .raw_input
-                            .as_ref()
-                            .map(|v| adapter::format_input(v, kind))
-                            .unwrap_or(ToolInputDisplay::Empty);
-                        let fallback_text = extract_tool_call_text(&tc.content)
-                            .or_else(|| tc.raw_input.as_ref().map(format_tool_args))
-                            .unwrap_or_default();
-                        let status = crate::components::react_trace::map_initial_status(
-                            tc.status,
-                            tc.raw_output.as_ref(),
-                            kind,
-                        );
-                        self.react_trace.push(TraceEntry {
-                            kind: TraceKind::Act {
-                                tool,
-                                family,
-                                input,
-                                tool_call_id: Some(tc.tool_call_id.clone()),
-                                status,
-                            },
-                            text: fallback_text,
-                            timestamp: Self::now_stamp(),
-                            #[cfg(feature = "markdown")]
-                            markdown: None,
-                        });
-                    }
-                    spur_acp::SessionUpdate::ToolCallUpdate(tcu) => {
-                        let kind = self.agent_kind();
-                        if let Some((idx, act_entry)) =
-                            self.react_trace.find_act_by_id_mut(&tcu.tool_call_id)
-                        {
-                            let new_status = if let TraceKind::Act { status, .. } = &act_entry.kind
-                            {
-                                crate::components::react_trace::merge_status(
-                                    status,
-                                    tcu.fields.status,
-                                    tcu.fields.raw_output.as_ref(),
-                                    kind,
-                                )
-                            } else {
-                                unreachable!("find_act_by_id_mut only returns Act entries")
-                            };
-                            if let TraceKind::Act { status, .. } = &mut act_entry.kind {
-                                *status = new_status;
-                            }
-                            self.react_trace.mark_dirty_from_for_update(idx);
-                        } else if tcu.fields.title.is_some() || tcu.fields.kind.is_some() {
-                            // Out-of-order update arriving before ToolCall — synthesize.
-                            tracing::debug!(
-                                id = ?tcu.tool_call_id,
-                                "ToolCallUpdate before ToolCall; synthesizing Act"
-                            );
-                            let tool = tcu.fields.title.clone().unwrap_or_else(|| "unknown".into());
-                            let family = spur_acp::adapter::ToolFamily::Unknown;
-                            let input = spur_acp::adapter::ToolInputDisplay::Empty;
-                            let status = crate::components::react_trace::map_initial_status(
-                                tcu.fields
-                                    .status
-                                    .unwrap_or(spur_acp::ToolCallStatus::Pending),
-                                tcu.fields.raw_output.as_ref(),
-                                kind,
-                            );
-                            self.react_trace.push(TraceEntry {
-                                kind: TraceKind::Act {
-                                    tool,
-                                    family,
-                                    input,
-                                    tool_call_id: Some(tcu.tool_call_id.clone()),
-                                    status,
-                                },
-                                text: String::new(),
-                                timestamp: Self::now_stamp(),
-                                #[cfg(feature = "markdown")]
-                                markdown: None,
-                            });
-                        } else {
-                            tracing::debug!(
-                                id = ?tcu.tool_call_id,
-                                "dropping ToolCallUpdate with no matching Act and no title/kind"
-                            );
-                        }
-                    }
-                    spur_acp::SessionUpdate::Plan(plan) => {
-                        let text = plan
-                            .entries
-                            .iter()
-                            .map(|e| {
-                                let marker = match &e.status {
-                                    spur_acp::PlanEntryStatus::Completed => "[x]",
-                                    spur_acp::PlanEntryStatus::InProgress => "[~]",
-                                    _ => "[ ]",
-                                };
-                                format!("{} {}", marker, e.content)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        self.react_trace.push(TraceEntry {
-                            kind: TraceKind::Think,
-                            text,
-                            timestamp: Self::now_stamp(),
-                            #[cfg(feature = "markdown")]
-                            markdown: None,
-                        });
                     }
                     _ => {}
                 }
+
+                let agent_name = self.agent_name.clone();
+                let agent_kind = self.agent_kind();
+                let mut ctx = crate::components::react_trace::dispatch::DispatchCtx {
+                    agent_name: agent_name.as_str(),
+                    agent_kind,
+                    now_stamp: Self::now_stamp,
+                    tool_depth: &mut self.tool_depth,
+                };
+                crate::components::react_trace::dispatch::dispatch_session_update(
+                    &mut self.react_trace,
+                    &notification.update,
+                    &mut ctx,
+                );
             }
 
             SpurEventBody::DelegationRequested {
@@ -1678,16 +1548,9 @@ impl SessionDetailView {
     }
 }
 
-// ─── Formatting helpers ─────────────────────────────────────────────────
+// ─── Formatting helpers (test-only; production path uses dispatch.rs) ───
 
-/// Extract the text content from a `ContentChunk`, if it contains text.
-fn extract_text(chunk: &spur_acp::ContentChunk) -> Option<&str> {
-    match &chunk.content {
-        spur_acp::ContentBlock::Text(tc) => Some(&tc.text),
-        _ => None,
-    }
-}
-
+#[cfg(test)]
 /// Extract renderable text from a `ToolCallContent` slice.
 ///
 /// Handles all known variants:
@@ -1731,6 +1594,7 @@ fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<Strin
     }
 }
 
+#[cfg(test)]
 const DIFF_MAX_LINES: usize = 40;
 
 /// Format a diff as a simplified unified-diff string, capped at `DIFF_MAX_LINES` body lines.
@@ -1738,6 +1602,7 @@ const DIFF_MAX_LINES: usize = 40;
 /// Old lines are prefixed with `-`, new lines with `+`. This is NOT an LCS diff;
 /// it renders the old text as all-deletions and the new text as all-additions,
 /// matching how `ObservePayload::EditResult.diff` is rendered elsewhere in the TUI.
+#[cfg(test)]
 fn format_diff_truncated(path: &str, old: Option<&str>, new_: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("--- a/{}\n", path));
@@ -1770,43 +1635,6 @@ fn format_diff_truncated(path: &str, old: Option<&str>, new_: &str) -> String {
     out
 }
 
-/// Format tool call args for display. Extracts purpose or key args,
-/// falls back to truncated JSON.
-fn format_tool_args(input: &serde_json::Value) -> String {
-    if input.is_null() {
-        return String::new();
-    }
-    if let Some(obj) = input.as_object() {
-        if obj.is_empty() {
-            return String::new();
-        }
-        // Kiro includes __tool_use_purpose — use it if available
-        if let Some(purpose) = obj.get("__tool_use_purpose").and_then(|v| v.as_str()) {
-            return purpose.to_string();
-        }
-        // Try common meaningful keys
-        for key in &["path", "file", "command", "query", "url", "pattern"] {
-            if let Some(val) = obj.get(*key).and_then(|v| v.as_str()) {
-                return format!("{}: {}", key, val);
-            }
-        }
-    }
-    // Fallback: truncate JSON to single line
-    let s = input.to_string();
-    truncate_str(&s, 80)
-}
-
-/// Truncate a string to max_len chars, respecting UTF-8 boundaries.
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        return s.to_string();
-    }
-    let mut end = max_len;
-    while !s.is_char_boundary(end) && end > 0 {
-        end -= 1;
-    }
-    format!("{}...", &s[..end])
-}
 
 #[cfg(all(test, feature = "markdown"))]
 mod invalidate_protocols_tests {

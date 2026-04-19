@@ -1,4 +1,6 @@
 mod builder;
+mod compact_render;
+pub mod dispatch;
 mod render;
 mod types;
 
@@ -43,6 +45,11 @@ pub struct ReactTrace {
     pub(super) current_mode: Option<String>,
     /// When true (default), Observe entries show a truncated preview.
     pub(super) observe_collapsed: bool,
+    /// When true, `render_compact` will be the authoritative entry
+    /// point used by the DetailPane Stream tab. Set at construction via
+    /// `with_kind_compact`. Task 0.3 adds the render branch; this flag
+    /// is currently a marker.
+    pub(super) compact: bool,
     /// Generation counter bumped on every content mutation.
     pub(super) generation: u64,
     /// Index of the first entry needing row rebuild.
@@ -53,6 +60,10 @@ pub struct ReactTrace {
     /// Cached virtual rows for the markdown render path.
     #[cfg(feature = "markdown")]
     pub(super) line_cache: Option<render::VirtualRowCacheEntry>,
+    /// Cache for the compact render path (`render_compact`).
+    /// Independent from `line_cache` because the two paths produce
+    /// different row layouts. `None` until first compact render.
+    pub(in crate::components::react_trace) compact_cache: Option<compact_render::CompactCacheEntry>,
 }
 
 /// Inverse of `resolve_anchor` for the Row variant: given a row index,
@@ -184,9 +195,11 @@ impl ReactTrace {
             agent_kind: AgentKind::Generic,
             current_mode: None,
             observe_collapsed: true,
+            compact: false,
             generation: 0,
             dirty_from: None,
             line_cache: None,
+            compact_cache: None,
         }
     }
 
@@ -196,6 +209,22 @@ impl ReactTrace {
             agent_kind: kind,
             ..Self::new()
         }
+    }
+
+    /// Create a `ReactTrace` with a compact render mode suitable for
+    /// narrow panes (≈40 cols). Disables markdown/mermaid implicitly in
+    /// the render branch added by Task 0.3.
+    pub fn with_kind_compact(kind: AgentKind) -> Self {
+        Self {
+            agent_kind: kind,
+            compact: true,
+            ..Self::new()
+        }
+    }
+
+    /// True if this trace was constructed with `with_kind_compact`.
+    pub fn is_compact(&self) -> bool {
+        self.compact
     }
 
     /// Store the current session mode id (e.g. "plan", "acceptEdits").
@@ -1000,6 +1029,17 @@ impl ReactTrace {
         }
 
         lines
+    }
+}
+
+#[cfg(test)]
+impl ReactTrace {
+    pub fn generation_for_tests(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn dirty_from_for_tests(&self) -> Option<usize> {
+        self.dirty_from
     }
 }
 

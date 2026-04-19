@@ -8,6 +8,7 @@ pub mod mentions;
 pub mod session_metadata;
 pub mod tui;
 pub mod views;
+pub mod worker_streams;
 
 pub use app::{run_tui, UserInput};
 

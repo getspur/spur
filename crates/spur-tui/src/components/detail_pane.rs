@@ -5,9 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Tabs, Wrap},
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
-
-use spur_core::{Artifact, ExecutorNode, WorkerStreamKind};
+use spur_core::{Artifact, ExecutorNode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailTab {
@@ -74,21 +72,57 @@ impl DetailPane {
         self.is_following = true;
     }
 
-    pub fn scroll_up(&mut self) {
+    pub fn scroll_up(
+        &mut self,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_up();
+                return;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
         self.is_following = false;
     }
 
-    pub fn scroll_down(&mut self) {
+    pub fn scroll_down(
+        &mut self,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_down();
+                return;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_add(1);
     }
 
-    pub fn scroll_to_top(&mut self) {
+    pub fn scroll_to_top(
+        &mut self,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_to_top();
+                return;
+            }
+        }
         self.scroll_offset = 0;
         self.is_following = false;
     }
 
-    pub fn scroll_to_bottom(&mut self) {
+    pub fn scroll_to_bottom(
+        &mut self,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_to_bottom();
+                return;
+            }
+        }
         self.is_following = true;
     }
 
@@ -98,6 +132,7 @@ impl DetailPane {
         area: Rect,
         node: &ExecutorNode,
         issue_badge: Option<&str>,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
     ) {
         let following_indicator = if self.is_following {
             " ▼ following "
@@ -148,8 +183,30 @@ impl DetailPane {
         let body_area = chunks[1];
         let visible_h = body_area.height as usize;
 
+        // For the Stream tab, delegate to ReactTrace when available.
+        if self.current_tab == DetailTab::Stream {
+            if let Some(trace) = stream_trace {
+                // Delegate to the compact ReactTrace body renderer.
+                // `render_compact` paints ONLY the body — DetailPane
+                // owns the outer block. Using `ReactTrace::render`
+                // here would double-draw borders.
+                trace.render_compact(frame, body_area);
+                // Scroll state lives on trace.anchor, not DetailPane's
+                // scroll_offset. Other tabs still use scroll_offset.
+                return;
+            }
+        }
+
         let body_lines = match self.current_tab {
-            DetailTab::Stream => self.render_stream(node, body_area.width),
+            DetailTab::Stream => {
+                // No trace materialized yet (orphan event or first-load race).
+                // Placeholder; production code paths always produce a trace
+                // via App::handle_spur_event.
+                vec![Line::from(Span::styled(
+                    "(no stream yet)",
+                    Style::default().fg(Color::DarkGray),
+                ))]
+            }
             DetailTab::Artifacts => self.render_artifacts(node),
             DetailTab::Attempts => self.render_attempts(node),
             DetailTab::Task => self.render_task(node),
@@ -172,102 +229,6 @@ impl DetailPane {
             .wrap(Wrap { trim: false })
             .scroll((self.scroll_offset as u16, 0));
         frame.render_widget(p, body_area);
-    }
-
-    fn render_stream(&self, node: &ExecutorNode, width: u16) -> Vec<Line<'static>> {
-        if node.stream_buffer.is_empty() {
-            return vec![Line::from(Span::styled(
-                "(waiting for worker output…)",
-                Style::default().fg(Color::DarkGray),
-            ))];
-        }
-
-        // Coalesce consecutive same-kind Thought/Message chunks into blocks.
-        // ToolCall entries are never merged — each is its own line.
-        let mut blocks: Vec<(WorkerStreamKind, String, std::time::SystemTime)> = Vec::new();
-        for entry in &node.stream_buffer {
-            let text: String = entry
-                .text
-                .chars()
-                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-                .collect();
-
-            let should_merge = matches!(
-                entry.kind,
-                WorkerStreamKind::Thought | WorkerStreamKind::Message
-            ) && blocks.last().is_some_and(|(k, _, _)| *k == entry.kind);
-
-            if should_merge {
-                let last = blocks.last_mut().unwrap();
-                last.1.push_str(&text);
-                last.2 = entry.occurred_at; // update timestamp to latest chunk
-            } else {
-                blocks.push((entry.kind, text, entry.occurred_at));
-            }
-        }
-
-        let now = std::time::SystemTime::now();
-        let w = width as usize;
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let mut prev_kind: Option<WorkerStreamKind> = None;
-
-        for (kind, text, occurred_at) in &blocks {
-            // Separator on kind transition
-            if let Some(pk) = prev_kind {
-                if pk != *kind {
-                    let sep: String = " ─"
-                        .chars()
-                        .chain(std::iter::repeat_n('─', w.saturating_sub(3)))
-                        .collect();
-                    lines.push(Line::from(Span::styled(
-                        sep,
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-            }
-            prev_kind = Some(*kind);
-
-            let (prefix, style) = match kind {
-                WorkerStreamKind::Thought => ("  · ", Style::default().fg(Color::DarkGray)),
-                WorkerStreamKind::Message => ("  ▸ ", Style::default().fg(Color::White)),
-                WorkerStreamKind::ToolCall => (
-                    "  ▶ ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            };
-
-            let ago = now
-                .duration_since(*occurred_at)
-                .unwrap_or_default()
-                .as_secs();
-            let ts = if ago < 60 {
-                format!("{}s", ago)
-            } else {
-                format!("{}m", ago / 60)
-            };
-            let ts_display = format!(" {}", ts);
-
-            let prefix_cols = UnicodeWidthStr::width(prefix);
-            let ts_cols = UnicodeWidthStr::width(ts_display.as_str());
-            let text_budget = w.saturating_sub(prefix_cols + ts_cols + 1);
-
-            let display_text = truncate_to_width(text, text_budget);
-            let display_cols = UnicodeWidthStr::width(display_text.as_str());
-
-            let pad = w.saturating_sub(prefix_cols + display_cols + ts_cols);
-            let padding: String = " ".repeat(pad);
-
-            lines.push(Line::from(vec![
-                Span::styled(prefix.to_string(), style),
-                Span::styled(display_text, style),
-                Span::raw(padding),
-                Span::styled(ts_display, Style::default().fg(Color::DarkGray)),
-            ]));
-        }
-
-        lines
     }
 
     fn render_artifacts<'a>(&self, node: &'a ExecutorNode) -> Vec<Line<'a>> {
@@ -339,27 +300,3 @@ impl DetailPane {
     }
 }
 
-/// Truncate a string to fit within `max_cols` display columns (UTF-8 safe).
-/// Appends '…' if truncated.
-fn truncate_to_width(s: &str, max_cols: usize) -> String {
-    if max_cols == 0 {
-        return String::new();
-    }
-    let full_width = UnicodeWidthStr::width(s);
-    if full_width <= max_cols {
-        return s.to_string();
-    }
-    // Need to truncate — reserve 1 col for '…'
-    let target = max_cols.saturating_sub(1);
-    let mut cols = 0;
-    let mut end = 0;
-    for (i, ch) in s.char_indices() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if cols + cw > target {
-            break;
-        }
-        cols += cw;
-        end = i + ch.len_utf8();
-    }
-    format!("{}…", &s[..end])
-}
