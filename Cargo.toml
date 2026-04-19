@@ -65,6 +65,8 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
 directories = "5"
+regex = "1"
+sha2 = "0.10"
 
 # ACP SDK
 agent-client-protocol = { version = "0.10", features = ["unstable_session_usage"] }

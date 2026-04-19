@@ -8,6 +8,8 @@ license.workspace = true
 
 [dependencies]
 rand = "0.8"
+regex = { workspace = true }
+sha2 = { workspace = true }
 spur-acp = { workspace = true }
 spur-mcp = { workspace = true }
 spur-pm = { workspace = true }
