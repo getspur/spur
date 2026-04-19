@@ -2,6 +2,7 @@
 //! agent dirs, protects user hand-edits via an in-file marker + sha256.
 
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -112,6 +113,31 @@ impl From<crate::skills::InvalidSkillId> for InstallError {
     }
 }
 
+/// Atomic write: write to a sibling tempfile, then rename(2) over the
+/// target. Creates parent directories as needed.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), InstallError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| InstallError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|source| {
+        InstallError::Io { path: parent.to_path_buf(), source }
+    })?;
+    use std::io::Write as _;
+    tmp.write_all(bytes).map_err(|source| InstallError::Io {
+        path: tmp.path().to_path_buf(),
+        source,
+    })?;
+    tmp.persist(path).map_err(|e| InstallError::Io {
+        path: path.to_path_buf(),
+        source: e.error,
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +199,23 @@ mod tests {
         assert!(rendered.contains("wrote 1"));
         assert!(rendered.contains("skipped 2"));
         assert!(rendered.contains("/x/b"));
+    }
+
+    #[test]
+    fn atomic_write_creates_missing_dirs_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a/b/c/file.md");
+        atomic_write(&target, b"hello world").unwrap();
+        let read = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(read, "hello world");
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("file.md");
+        std::fs::write(&target, "old").unwrap();
+        atomic_write(&target, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
     }
 }
