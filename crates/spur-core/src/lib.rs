@@ -1,3 +1,6 @@
+pub mod scheduler;
+pub use scheduler::BrainScheduler;
+
 pub mod event_funnel;
 pub mod event_sink;
 pub mod license_runtime;
