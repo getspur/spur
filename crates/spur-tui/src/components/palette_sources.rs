@@ -36,3 +36,41 @@ impl<'a> PaletteSource for CommandSource<'a> {
             .collect()
     }
 }
+
+use crate::session_metadata::SessionMetadata;
+
+pub struct SessionSource {
+    /// Snapshot taken at palette-open time. Owned to avoid lifetime gymnastics.
+    entries: Vec<(String, String)>, // (session_id, display_label)
+}
+
+impl SessionSource {
+    pub fn from_metadata(meta: &SessionMetadata) -> Self {
+        let entries = meta
+            .sessions
+            .iter()
+            .map(|(id, entry)| {
+                let label = entry
+                    .title_override
+                    .clone()
+                    .unwrap_or_else(|| id.clone());
+                (id.clone(), label)
+            })
+            .collect();
+        Self { entries }
+    }
+}
+
+impl PaletteSource for SessionSource {
+    fn collect(&self) -> Vec<PaletteResult> {
+        self.entries
+            .iter()
+            .map(|(id, label)| PaletteResult {
+                kind: PaletteKind::Session,
+                label: label.clone(),
+                subtitle: format!("session · {}", id),
+                payload: PalettePayload::Session { session_id: id.clone() },
+            })
+            .collect()
+    }
+}
