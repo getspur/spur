@@ -1,6 +1,9 @@
 mod licenseseat;
 pub mod provider;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -180,6 +183,13 @@ pub struct SpurLicense {
 }
 
 impl SpurLicense {
+    /// Construct a facade backed by an arbitrary provider. Primary use is
+    /// test injection via `FakeProvider`; production paths should prefer
+    /// `from_env` / `from_env_or_disabled`.
+    pub fn from_provider(provider: std::sync::Arc<dyn crate::provider::LicenseProvider>) -> Self {
+        Self { provider }
+    }
+
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             provider: Arc::new(crate::licenseseat::from_env()?),
@@ -202,6 +212,10 @@ impl SpurLicense {
 
     pub fn refresh_policy(&self) -> RefreshPolicy {
         self.provider.refresh_policy()
+    }
+
+    pub fn requires_heartbeat(&self) -> bool {
+        self.provider.requires_heartbeat()
     }
 
     pub fn has_entitlement(&self, feature: &str) -> bool {
