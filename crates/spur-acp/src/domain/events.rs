@@ -228,8 +228,19 @@ pub enum LicensePlan {
     Unknown,
 }
 
+/// Reason a pending system continuation was evicted without being delivered.
+/// See async-continuation design spec §Failure Cases.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContinuationDropReason {
+    BrainDisconnected,
+    SessionSwap,
+    Shutdown,
+}
+
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SpurEventBody {
     BrainSpawned {
         agent: String,
@@ -578,6 +589,13 @@ pub enum SpurEventBody {
     /// as the merge-authorization signal.
     PlanReadyToMerge {
         plan_id: String,
+    },
+
+    /// A pending system continuation was evicted without being delivered
+    /// to the brain. See async-continuation design spec §Failure Cases.
+    ContinuationDropped {
+        delegation_id: String,
+        reason: ContinuationDropReason,
     },
 }
 
