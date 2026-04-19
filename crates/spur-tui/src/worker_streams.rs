@@ -226,7 +226,7 @@ mod tests {
         use std::time::SystemTime;
 
         let mut ws = WorkerStreams::new();
-        let entries = vec![
+        let entries = [
             WorkerStreamEntry {
                 kind: WorkerStreamKind::Thought,
                 text: "plan".into(),
