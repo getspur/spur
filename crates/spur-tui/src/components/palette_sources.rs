@@ -74,3 +74,36 @@ impl PaletteSource for SessionSource {
             .collect()
     }
 }
+
+use spur_core::lineage::projection::ExecutorLineage;
+
+pub struct WorkerSource {
+    entries: Vec<(spur_acp::SessionId, String, String)>, // (session_id, agent, phase_label)
+}
+
+impl WorkerSource {
+    pub fn from_lineage(lineage: &ExecutorLineage) -> Self {
+        let entries = lineage
+            .nodes()
+            .filter_map(|n| {
+                let sid = n.current_attempt().map(|a| a.session_id.clone())?;
+                Some((sid, n.agent.clone(), format!("{:?}", n.phase).to_lowercase()))
+            })
+            .collect();
+        Self { entries }
+    }
+}
+
+impl PaletteSource for WorkerSource {
+    fn collect(&self) -> Vec<PaletteResult> {
+        self.entries
+            .iter()
+            .map(|(sid, agent, phase)| PaletteResult {
+                kind: PaletteKind::Worker,
+                label: agent.clone(),
+                subtitle: format!("worker · {}", phase),
+                payload: PalettePayload::Worker { session_id: sid.clone() },
+            })
+            .collect()
+    }
+}
