@@ -47,20 +47,13 @@ pub struct SessionDetailView {
     /// Most recent auth-required error for this session. Rendered as a red
     /// banner at the top of the view. Dismissed on the next keystroke.
     pub auth_error: Option<String>,
-    /// Autocomplete popup for `/` slash-commands (and later `@` mentions).
-    /// Wrapped in `RefCell` because `View::render` takes `&self` but the
-    /// popup needs `&mut` access for its internal `ListState`.
-    completion_popup: std::cell::RefCell<crate::components::completion_popup::CompletionPopup>,
     /// Currently active popup trigger (if any), derived from the InputBar
     /// text + cursor.
     active_trigger: Option<crate::components::completion_trigger::Trigger>,
     /// Registry of `@`-mention sources (files, directories).
-    mention_registry: crate::mentions::MentionRegistry,
+    mention_registry: std::rc::Rc<std::cell::RefCell<crate::mentions::MentionRegistry>>,
     /// Working directory used to resolve file mentions.
     cwd: std::path::PathBuf,
-    /// Mention hits currently shown in the popup, parallel to popup rows.
-    /// Used on accept to retrieve the URI/display name.
-    active_mention_hits: Vec<crate::mentions::MentionEntry>,
     #[cfg(feature = "markdown")]
     pub(crate) mermaid_registry: std::collections::HashMap<
         crate::components::mermaid::MermaidId,
@@ -135,13 +128,11 @@ impl SessionDetailView {
             context_used: None,
             context_size: None,
             auth_error: None,
-            completion_popup: std::cell::RefCell::new(
-                crate::components::completion_popup::CompletionPopup::new(),
-            ),
             active_trigger: None,
-            mention_registry: crate::mentions::MentionRegistry::new(),
+            mention_registry: std::rc::Rc::new(std::cell::RefCell::new(
+                crate::mentions::MentionRegistry::new(),
+            )),
             cwd,
-            active_mention_hits: Vec::new(),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
@@ -566,70 +557,82 @@ impl SessionDetailView {
     // ── Completion popup wiring ─────────────────────────────────────────
 
     fn refresh_popup(&mut self) {
-        use crate::commands::fuzzy;
-        use crate::components::completion_popup::PopupRow;
         use crate::components::completion_trigger::{detect, TriggerKind};
+        use crate::components::picker_shell::PickerShell;
+        use crate::components::query_source::{
+            MentionQuerySource, QuerySource, SlashQuerySource, SlashRow,
+        };
 
         let text = self.input_bar.text();
         let cursor = self.input_bar.cursor();
-        let trig = detect(&text, cursor);
-        self.active_trigger = trig.clone();
+        let new_trig = detect(&text, cursor);
 
-        match trig {
-            Some(t) if t.kind == TriggerKind::Slash => {
-                let entries = self.command_registry.list();
-                let ranked = fuzzy::rank(&entries, &t.query);
-                let rows: Vec<PopupRow> = ranked
-                    .iter()
-                    .map(|e| PopupRow {
-                        label: self.command_registry.canonical_typed_form(e),
-                        description: e.description.clone(),
-                        source_tag: match &e.source {
-                            crate::commands::CommandSource::Spur => "⟨spur⟩".into(),
-                            crate::commands::CommandSource::Agent { handle } => {
-                                format!("⟨{}⟩", handle)
-                            }
-                        },
-                    })
-                    .collect();
-                self.completion_popup.borrow_mut().set_rows(rows);
-                self.active_mention_hits.clear();
+        // Do NOT disturb a history-search shell (Ctrl+R) which is
+        // identified by `active_trigger` being None while `picker_shell`
+        // is Some. Only manage the trigger-driven shell here.
+        let history_shell_active = self.picker_shell.is_some() && self.active_trigger.is_none();
+        if history_shell_active {
+            // Keep active_trigger in sync with current text (always None
+            // here — history shell stole focus) and return.
+            self.active_trigger = None;
+            return;
+        }
+
+        match (&self.active_trigger, &new_trig) {
+            (Some(old), Some(new))
+                if old.kind == new.kind && old.prefix_start == new.prefix_start =>
+            {
+                // Same trigger, new query — just update the shell's query
+                // from the InputBar trigger prefix.
+                if let Some(shell) = self.picker_shell.as_mut() {
+                    shell.set_query_from_input_bar(&new.query);
+                }
+                self.active_trigger = Some(new.clone());
             }
-            Some(t) if t.kind == TriggerKind::Mention => {
-                let hits = self
-                    .mention_registry
-                    .query(&self.session_id, &self.cwd, &t.query, 20);
-                let rows: Vec<PopupRow> = hits
-                    .iter()
-                    .map(|m| {
-                        let icon = match m.kind {
-                            crate::mentions::MentionKind::Directory => "\u{1F4C1}",
-                            crate::mentions::MentionKind::File => "\u{1F4C4}",
-                        };
-                        PopupRow {
-                            label: format!("{} @{}", icon, m.display),
-                            description: String::new(),
-                            source_tag: String::new(),
-                        }
-                    })
-                    .collect();
-                self.completion_popup.borrow_mut().set_rows(rows);
-                self.active_mention_hits = hits;
+            (_, Some(new)) => {
+                // Trigger transition (fresh open, or kind/prefix changed):
+                // build the appropriate source and open a new shell.
+                let shell = match new.kind {
+                    TriggerKind::Slash => {
+                        let entries = self.command_registry.list();
+                        let rows: Vec<SlashRow> = entries
+                            .iter()
+                            .map(|e| SlashRow {
+                                canonical: self.command_registry.canonical_typed_form(e),
+                                description: e.description.clone(),
+                                tag: match &e.source {
+                                    crate::commands::CommandSource::Spur => "⟨spur⟩".into(),
+                                    crate::commands::CommandSource::Agent { handle } => {
+                                        format!("⟨{}⟩", handle)
+                                    }
+                                },
+                            })
+                            .collect();
+                        let mut src = SlashQuerySource::new(rows, new.prefix_start);
+                        let _ = src.refresh(&new.query);
+                        PickerShell::open_with_query(Box::new(src), &new.query)
+                    }
+                    TriggerKind::Mention => {
+                        let src = MentionQuerySource::new(
+                            std::rc::Rc::clone(&self.mention_registry),
+                            self.session_id.clone(),
+                            self.cwd.clone(),
+                            new.prefix_start,
+                        );
+                        PickerShell::open_with_query(Box::new(src), &new.query)
+                    }
+                };
+                self.picker_shell = Some(shell);
+                self.active_trigger = Some(new.clone());
             }
-            _ => {
-                self.completion_popup.borrow_mut().set_rows(Vec::new());
-                self.active_mention_hits.clear();
+            (_, None) => {
+                // No active trigger — close any trigger-driven shell.
+                if self.active_trigger.is_some() {
+                    self.picker_shell = None;
+                }
+                self.active_trigger = None;
             }
         }
-    }
-
-    fn popup_open(&self) -> bool {
-        if self.picker_shell.is_some() {
-            return true;
-        }
-        let popup_has_rows = !self.completion_popup.borrow().is_empty();
-        let trigger_active = self.active_trigger.is_some();
-        trigger_active && popup_has_rows
     }
 
     /// Replace the range [prefix_start..cursor] in the InputBar with `replacement`.
@@ -643,39 +646,6 @@ impl SessionDetailView {
         new_text.push_str(&current[cursor..]);
         let new_cursor = prefix_start + replacement.len();
         self.input_bar.set_text(new_text, new_cursor);
-    }
-
-    fn accept_completion(&mut self) -> Option<crate::action::Action> {
-        use crate::components::completion_trigger::TriggerKind;
-
-        let trig = self.active_trigger.clone()?;
-        let idx = self.completion_popup.borrow().selected()?;
-        let rows = self.completion_popup.borrow().rows().to_vec();
-        let row = rows.get(idx)?.clone();
-
-        match trig.kind {
-            TriggerKind::Slash => {
-                // row.label is the canonical typed form (e.g. "/help" or "/claude:help").
-                let insertion = format!("{} ", row.label);
-                self.replace_trigger_token(trig.prefix_start, &insertion);
-                self.active_trigger = None;
-                self.completion_popup.borrow_mut().set_rows(Vec::new());
-                None
-            }
-            TriggerKind::Mention => {
-                let idx = self.completion_popup.borrow().selected()?;
-                let hit = self.active_mention_hits.get(idx)?.clone();
-
-                // Clear the `@query` range, then insert the atom at the vacated position.
-                self.replace_trigger_token(trig.prefix_start, "");
-                let atom = format!("@{}", hit.display);
-                self.input_bar.insert_atom(atom, hit.uri, hit.display);
-                self.active_trigger = None;
-                self.completion_popup.borrow_mut().set_rows(Vec::new());
-                self.active_mention_hits.clear();
-                None
-            }
-        }
     }
 
     /// Build (error_ids, pending_ids) sets from the mermaid registry for use
@@ -862,6 +832,7 @@ impl SessionDetailView {
                 PickerAction::None => {}
                 PickerAction::Cancel => {
                     self.picker_shell = None;
+                    self.active_trigger = None;
                 }
                 PickerAction::Accept(accept) => {
                     match accept {
@@ -873,25 +844,22 @@ impl SessionDetailView {
                             text,
                             uri,
                             name,
-                            replace_from: _,
+                            replace_from,
                         } => {
+                            if let Some(prefix_start) = replace_from {
+                                self.replace_trigger_token(prefix_start, "");
+                            }
                             self.input_bar.insert_atom(text, uri, name);
                         }
                         RetrievalAccept::ReplaceTriggerToken {
                             prefix_start,
                             replacement,
                         } => {
-                            let current = self.input_bar.text().to_string();
-                            let cursor = self.input_bar.cursor();
-                            let mut new_text = String::with_capacity(current.len());
-                            new_text.push_str(&current[..prefix_start]);
-                            new_text.push_str(&replacement);
-                            new_text.push_str(&current[cursor..]);
-                            let new_cursor = prefix_start + replacement.len();
-                            self.input_bar.set_text(new_text, new_cursor);
+                            self.replace_trigger_token(prefix_start, &replacement);
                         }
                     }
                     self.picker_shell = None;
+                    self.active_trigger = None;
                 }
             }
             return None;
@@ -902,7 +870,7 @@ impl SessionDetailView {
         if matches!(key.code, KeyCode::Char('r'))
             && (key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT))
-            && self.active_trigger.is_none()
+            && self.picker_shell.is_none()
         {
             use crate::components::picker_shell::PickerShell;
             use crate::components::query_source::HistoryQuerySource;
@@ -911,37 +879,6 @@ impl SessionDetailView {
                 history,
             ))));
             return None;
-        }
-
-        // Priority 1.5: popup is open — route navigation/accept/dismiss keys.
-        if self.popup_open() {
-            match key.code {
-                KeyCode::Up => {
-                    self.completion_popup.borrow_mut().select_prev();
-                    return None;
-                }
-                KeyCode::Down => {
-                    self.completion_popup.borrow_mut().select_next();
-                    return None;
-                }
-                KeyCode::Esc => {
-                    self.active_trigger = None;
-                    self.completion_popup.borrow_mut().set_rows(Vec::new());
-                    return None;
-                }
-                KeyCode::Enter if key.modifiers.is_empty() => {
-                    return self.accept_completion();
-                }
-                KeyCode::Tab => {
-                    return self.accept_completion();
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.active_trigger = None;
-                    self.completion_popup.borrow_mut().set_rows(Vec::new());
-                    return None;
-                }
-                _ => { /* fall through to editing */ }
-            }
         }
 
         // Priority 2: If the key is a printable char or an editing key, route to input_bar.
@@ -1658,13 +1595,6 @@ impl SessionDetailView {
             self.input_bar.render_inert(frame, chunks[3]);
         } else {
             self.input_bar.render(frame, chunks[3]);
-        }
-
-        // ── Completion popup (overlay above the InputBar) ──────────────
-        if self.picker_shell.is_none() && self.popup_open() {
-            self.completion_popup
-                .borrow_mut()
-                .render(frame, chunks[3], area);
         }
 
         // ── PickerShell overlay ─────────────────────────────────────────
