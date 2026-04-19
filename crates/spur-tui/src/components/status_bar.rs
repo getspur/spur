@@ -160,6 +160,7 @@ impl StatusBar {
             ),
             Span::styled(mode_text, Style::default().fg(Color::Magenta)),
             Span::styled(usage_text, Style::default().fg(Color::LightBlue)),
+            Span::styled("[Ctrl+K: go] ", Style::default().fg(Color::DarkGray)),
             Span::styled("?: help", Style::default().fg(Color::DarkGray)),
             Span::raw(" "),
             Span::styled(
