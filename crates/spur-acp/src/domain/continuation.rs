@@ -1,6 +1,7 @@
-use crate::domain::events::DiffSummary;
-use crate::domain::delegation::DelegationStatus;
 use std::time::Instant;
+
+use crate::domain::delegation::DelegationStatus;
+use crate::domain::events::DiffSummary;
 
 /// Why SPUR is re-entering the brain with a continuation turn.
 ///
@@ -39,9 +40,12 @@ pub struct ContinuationPayload {
 pub struct BrainContinuation {
     /// Correlation key (UUID string; migrates to `DelegationId` newtype when INV-1 lands).
     pub delegation_id: String,
+    /// Why this continuation fired.
     pub source:        ContinuationSource,
+    /// Narrow projection of the worker outcome.
     pub payload:       ContinuationPayload,
     /// Monotonic creation time; not persisted across process restart.
+    /// Equality on `BrainContinuation` should be done via `delegation_id`, not this field.
     pub created_at:    Instant,
 }
 
@@ -65,7 +69,7 @@ mod tests {
 
     #[test]
     fn continuation_source_variants_exhaustive() {
-        // Compile-time check: every variant must be listed.
+        // Manual count guard: update when adding ContinuationSource variants (#[non_exhaustive] means the compiler won't flag omissions here).
         let vs = [
             ContinuationSource::AsyncRequested,
             ContinuationSource::BlockTimeout,
