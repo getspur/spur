@@ -2191,7 +2191,7 @@ mod worker_stream_routing_tests {
         use std::time::SystemTime;
 
         let mut ws = crate::worker_streams::WorkerStreams::new();
-        let entries = vec![
+        let entries = [
             WorkerStreamEntry {
                 kind: WorkerStreamKind::Message,
                 text: "restored".into(),
