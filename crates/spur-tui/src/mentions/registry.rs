@@ -7,10 +7,21 @@ use nucleo_matcher::{
 };
 use spur_acp::SessionId;
 
-use super::entry::{MentionEntry, MentionSource};
+use super::entry::{MentionEntry, MentionKind, MentionSource};
 use super::file_source::FileMentionSource;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Maximum number of worker rows pinned to the top of the empty-query
+/// picker view. See design spec §4.4 / §10.1.
+pub(super) const WORKER_PIN_CAP: usize = 6;
+
+/// Multiplicative boost numerator for worker entries in the typed-query
+/// branch. With `WORKER_SCORE_DEN = 4` this yields a +25 % bias, enough
+/// to surface workers above tied file matches without overriding strong
+/// file-specific matches. Empirically validated; see design spec §10.1.
+pub(super) const WORKER_SCORE_NUM: u32 = 5;
+pub(super) const WORKER_SCORE_DEN: u32 = 4;
 
 struct CachedIndex {
     entries: Vec<MentionEntry>,
@@ -63,7 +74,6 @@ impl MentionRegistry {
         query: &str,
         limit: usize,
     ) -> Vec<MentionEntry> {
-        // … existing body unchanged in this task; ranking changes happen in Task 4.
         let key = session_key(session);
         let needs_rebuild = match self.cache.get(&key) {
             Some(c) => c.built_at.elapsed() > CACHE_TTL,
@@ -85,21 +95,52 @@ impl MentionRegistry {
             );
         }
         let entries = &self.cache[&key].entries;
+
         if query.is_empty() {
-            let mut out: Vec<MentionEntry> = entries.iter().take(limit).cloned().collect();
-            out.sort_by_key(|e| e.display.len());
-            return out.into_iter().take(limit).collect();
+            // Empty-query branch: pin up to WORKER_PIN_CAP workers, then
+            // fill remaining slots with files sorted by display length.
+            let mut workers: Vec<MentionEntry> = entries
+                .iter()
+                .filter(|e| e.kind == MentionKind::Worker)
+                .cloned()
+                .collect();
+            workers.sort_by(|a, b| {
+                a.display
+                    .len()
+                    .cmp(&b.display.len())
+                    .then(a.display.cmp(&b.display))
+            });
+            workers.truncate(WORKER_PIN_CAP.min(limit));
+
+            let remaining = limit.saturating_sub(workers.len());
+            let mut files: Vec<MentionEntry> = entries
+                .iter()
+                .filter(|e| e.kind != MentionKind::Worker)
+                .cloned()
+                .collect();
+            files.sort_by_key(|e| e.display.len());
+            files.truncate(remaining);
+
+            workers.extend(files);
+            return workers;
         }
+
+        // Typed-query branch: nucleo score with a +25 % boost for workers.
         let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
         let mut scored: Vec<(u32, MentionEntry)> = entries
             .iter()
             .filter_map(|e| {
-                let score = pattern.score(
+                let raw = pattern.score(
                     nucleo_matcher::Utf32Str::new(&e.display, &mut Vec::new()),
                     &mut matcher,
                 )?;
-                Some((score, e.clone()))
+                let boosted = if e.kind == MentionKind::Worker {
+                    raw.saturating_mul(WORKER_SCORE_NUM) / WORKER_SCORE_DEN
+                } else {
+                    raw
+                };
+                Some((boosted, e.clone()))
             })
             .collect();
         scored.sort_by(|a, b| {

@@ -57,3 +57,71 @@ fn direct_session_excludes_workers() {
         "direct session should not surface worker entries"
     );
 }
+
+#[test]
+fn empty_query_pins_workers_first() {
+    let workers: Vec<WorkerMentionDescriptor> = (0..6)
+        .map(|i| WorkerMentionDescriptor {
+            name: format!("worker-{}", i),
+            description: None,
+            tier: None,
+        })
+        .collect();
+    let mut reg = MentionRegistry::for_brain_session(workers);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let hits = reg.query(&sid, tmp.path(), "", 20);
+    // First 6 must all be Worker kind.
+    let worker_count = hits
+        .iter()
+        .take(6)
+        .filter(|h| h.kind == MentionKind::Worker)
+        .count();
+    assert_eq!(
+        worker_count, 6,
+        "expected first 6 rows to be workers, got {:?}",
+        hits.iter().take(6).map(|h| (&h.kind, &h.display)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn empty_query_caps_workers_at_pin_cap() {
+    // Provide 10 workers — only 6 (WORKER_PIN_CAP) should appear at the top.
+    let workers: Vec<WorkerMentionDescriptor> = (0..10)
+        .map(|i| WorkerMentionDescriptor {
+            name: format!("w{:02}", i),
+            description: None,
+            tier: None,
+        })
+        .collect();
+    let mut reg = MentionRegistry::for_brain_session(workers);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let hits = reg.query(&sid, tmp.path(), "", 20);
+    let head_workers = hits
+        .iter()
+        .take(6)
+        .filter(|h| h.kind == MentionKind::Worker)
+        .count();
+    assert_eq!(head_workers, 6);
+}
+
+#[test]
+fn typed_query_boosts_worker_in_ambiguous_match() {
+    let mut reg = MentionRegistry::for_brain_session(vec![
+        WorkerMentionDescriptor {
+            name: "claude-code".into(),
+            description: None,
+            tier: None,
+        },
+    ]);
+    let sid = SessionId::new();
+    // Use a real workspace dir so FileMentionSource has files to compete.
+    let cwd = std::env::current_dir().unwrap();
+    let hits = reg.query(&sid, &cwd, "cla", 5);
+    assert!(
+        hits.first().map(|h| h.kind == MentionKind::Worker).unwrap_or(false),
+        "expected worker:claude-code at row 0 for 'cla', got {:?}",
+        hits.iter().map(|h| (&h.kind, &h.display)).collect::<Vec<_>>()
+    );
+}
