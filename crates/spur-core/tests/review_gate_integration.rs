@@ -6,7 +6,7 @@ use spur_core::{review_dispatcher_loop, ExecutorId, InteractiveInput, ReviewSink
 #[tokio::test(start_paused = true)]
 async fn approve_decision_produces_success_status() {
     use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
-    use spur_core::orchestrator::run_gate_for_candidate;
+    use spur_core::test_support::run_gate_for_candidate;
 
     let sink = ReviewSink::new();
     let sink_for_test = sink.clone();
@@ -41,7 +41,7 @@ async fn approve_decision_produces_success_status() {
 #[tokio::test(start_paused = true)]
 async fn timeout_produces_timed_out_status_and_removes_entry() {
     use spur_acp::{DelegationStatus, TimeoutFallback};
-    use spur_core::orchestrator::run_gate_for_candidate;
+    use spur_core::test_support::run_gate_for_candidate;
 
     let sink = ReviewSink::new();
     let sink_for_test = sink.clone();
@@ -88,7 +88,7 @@ async fn timeout_produces_timed_out_status_and_removes_entry() {
 #[tokio::test(start_paused = true)]
 async fn reject_decision_produces_rejected_status() {
     use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
-    use spur_core::orchestrator::run_gate_for_candidate;
+    use spur_core::test_support::run_gate_for_candidate;
 
     let sink = ReviewSink::new();
     let sink_for_test = sink.clone();
@@ -128,7 +128,7 @@ async fn reject_decision_produces_rejected_status() {
 #[tokio::test(start_paused = true)]
 async fn modify_decision_produces_modified_status() {
     use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
-    use spur_core::orchestrator::run_gate_for_candidate;
+    use spur_core::test_support::run_gate_for_candidate;
 
     let sink = ReviewSink::new();
     let sink_for_test = sink.clone();
@@ -172,7 +172,7 @@ async fn retry_then_approve_produces_success() {
     // 2 Retrys then Approve. With max_review_retries = 3 and `>` check:
     // attempts 1 (Retry→2), 2 (Retry→3), 3 (Approve). Final status: Success.
     use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
-    use spur_core::{orchestrator::run_gate_with_retries, ExecutorId, ReviewSink};
+    use spur_core::{test_support::run_gate_with_retries, ExecutorId, ReviewSink};
     use std::time::Duration;
 
     let sink = ReviewSink::new();
@@ -227,7 +227,7 @@ async fn retry_then_approve_produces_success() {
 #[tokio::test(start_paused = true)]
 async fn retry_limit_exceeded_produces_failed() {
     use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
-    use spur_core::{orchestrator::run_gate_with_retries, ExecutorId, ReviewSink};
+    use spur_core::{test_support::run_gate_with_retries, ExecutorId, ReviewSink};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -303,9 +303,10 @@ async fn retry_limit_exceeded_produces_failed() {
 async fn dispatcher_routes_submit_review_to_sink() {
     let sink = ReviewSink::new();
     let rx = sink
-        .register(ExecutorId::new("e1"), 1)
+        .register_handle(ExecutorId::new("e1"), 1)
         .await
-        .expect("registered");
+        .expect("registered")
+        .into_rx();
     let (tx, input_rx) = tokio::sync::mpsc::channel::<InteractiveInput>(4);
 
     let sink_for_task = sink.clone();
@@ -398,6 +399,11 @@ fn should_preserve_worktree_matches_expected_variants() {
         waited_for: std::time::Duration::from_secs(60),
         fallback: TimeoutFallback::Approve,
     }));
+
+    // Cancelled (INV-6): preserve partial work for inspection.
+    assert!(should_preserve_worktree(&DelegationStatus::Cancelled {
+        reason: "brain requested cancel".into(),
+    }));
 }
 
 #[test]
@@ -441,6 +447,11 @@ fn should_commit_worker_diff_matches_expected_variants() {
         files: vec![PathBuf::from("a")]
     }));
     assert!(!should_commit_worker_diff(&DelegationStatus::Timeout));
+
+    // No commit: Cancelled (INV-6) — partial work preserved but not merged.
+    assert!(!should_commit_worker_diff(&DelegationStatus::Cancelled {
+        reason: "brain requested cancel".into(),
+    }));
 }
 
 // ─── Fix 1: ExecutorReviewCancelled on timeout / sender-drop ─────────
@@ -571,7 +582,10 @@ async fn brain_cancellation_during_review_emits_review_cancelled() {
 
     let sink = ReviewSink::new();
     // Register a pending review so the helper has something to clean up.
-    let _rx = sink.register(ExecutorId::new("e1"), 1).await.unwrap();
+    let _handle = sink
+        .register_handle(ExecutorId::new("e1"), 1)
+        .await
+        .unwrap();
 
     let (tx, mut event_rx) = broadcast::channel::<SpurEvent>(8);
     // Build a funnel pointing at `tx` so the test can observe the

@@ -141,8 +141,8 @@ pub struct McpCallbackServer {
     delegation_tx: mpsc::Sender<DelegationRequest>,
     /// Available worker agents (set once at creation).
     workers: Vec<WorkerInfo>,
-    /// Brain session this server belongs to.
-    brain_session_id: SessionId,
+    /// Brain session this server belongs to. INV-2: typed as BrainSessionId.
+    brain_session_id: spur_acp::BrainSessionId,
     /// Delegation IDs whose background collector is still awaiting a result.
     active_delegations: Arc<tokio::sync::Mutex<HashSet<String>>>,
     /// Results that a background collector has received but the brain has
@@ -165,6 +165,9 @@ pub struct McpCallbackServer {
     /// `execute_epic` calls from racing into double-dispatch. Terminal plans
     /// are cleared lazily on the next `execute_epic` call for the same epic.
     plan_registry: Arc<tokio::sync::Mutex<crate::plan::PlanRegistry>>,
+    /// INV-6: handle to the orchestrator's per-delegation cancellation token
+    /// registry. `None` in test harnesses that don't wire a real orchestrator.
+    cancellation_control: Option<CancellationControl>,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -196,7 +199,10 @@ pub fn validate_parallel_args(args: &Value) -> Result<(), String> {
 ///
 /// The returned requests have dummy oneshot senders — do not dispatch
 /// them; they are for field-value assertions only.
-pub fn parse_parallel_tasks(args: &Value) -> Result<Vec<DelegationRequest>, String> {
+pub fn parse_parallel_tasks(
+    args: &Value,
+    brain_session_id: &spur_acp::BrainSessionId,
+) -> Result<Vec<DelegationRequest>, String> {
     let tasks = args
         .get("tasks")
         .and_then(|v| v.as_array())
@@ -231,7 +237,7 @@ pub fn parse_parallel_tasks(args: &Value) -> Result<Vec<DelegationRequest>, Stri
             task,
             context_files,
             respond_to: tx,
-            brain_session_id: SessionId::new(),
+            brain_session_id: brain_session_id.clone(),
             delegation_plan,
             issue_id,
         });
@@ -462,7 +468,7 @@ impl McpCallbackServer {
     /// Returns the server instance and a `DelegationChannel` that the
     /// orchestrator uses to receive requests and send responses.
     pub fn new(
-        session_id: &SessionId,
+        session_id: &spur_acp::BrainSessionId,
         pm_service: Option<Arc<PmService>>,
         event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     ) -> (Self, DelegationChannel) {
@@ -479,10 +485,18 @@ impl McpCallbackServer {
             event_sink,
             active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             plan_registry: Arc::new(tokio::sync::Mutex::new(crate::plan::PlanRegistry::default())),
+            cancellation_control: None,
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
         (server, channel)
+    }
+
+    /// INV-6: Wire the orchestrator's `CancellationControl` handle into this
+    /// server so `handle_cancel_delegation` can cancel active delegations
+    /// directly rather than routing through the delegation channel.
+    pub fn set_cancellation_control(&mut self, cc: CancellationControl) {
+        self.cancellation_control = Some(cc);
     }
 
     /// Spawn a background task that awaits a delegation oneshot and stores
@@ -860,7 +874,7 @@ impl McpCallbackServer {
             return JsonRpcResponse::invalid_params(id, e);
         }
 
-        let skeletons = match parse_parallel_tasks(&args) {
+        let skeletons = match parse_parallel_tasks(&args, &self.brain_session_id) {
             Ok(s) => s,
             Err(e) => return JsonRpcResponse::invalid_params(id, e),
         };
@@ -872,7 +886,6 @@ impl McpCallbackServer {
             let agent = skeleton.agent.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             skeleton.respond_to = tx;
-            skeleton.brain_session_id = self.brain_session_id.clone();
 
             info!(agent = %agent, request_id = %request_id, "Sending parallel delegation request");
 
@@ -991,28 +1004,6 @@ impl McpCallbackServer {
         JsonRpcResponse::error(id, -32602, format!("Unknown delegation: {delegation_id}"))
     }
 
-    /// Translate a `DelegationResult` from the orchestrator's `__cancel_delegation`
-    /// stub into a JSON-RPC response. Extracted as a free function so it can
-    /// be unit-tested without a live channel. When the status is `Failed`,
-    /// the response is a JSON-RPC error (code -32601, "Method not
-    /// implemented") carrying the orchestrator's error message. Any other
-    /// status is surfaced as success; the body is `result.summary` when
-    /// present, else a debug-rendered status.
-    #[allow(private_interfaces)]
-    pub(crate) fn cancel_result_to_response(
-        id: Value,
-        result: DelegationResult,
-    ) -> JsonRpcResponse {
-        if let DelegationStatus::Failed { ref error } = result.status {
-            return JsonRpcResponse::error(id, -32601, format!("cancel_delegation: {error}"));
-        }
-        let text = result
-            .summary
-            .clone()
-            .unwrap_or_else(|| format!("{:?}", result.status));
-        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
-    }
-
     async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
         let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
             Some(d) => d.to_string(),
@@ -1044,45 +1035,47 @@ impl McpCallbackServer {
             );
         }
 
-        // Active — send cancellation sentinel to orchestrator and await response.
+        // Active — use the CancellationControl side-channel (INV-6).
         if self
             .active_delegations
             .lock()
             .await
             .contains(&delegation_id)
         {
-            let request_id = uuid::Uuid::new_v4().to_string();
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let delegation = DelegationRequest {
-                id: request_id,
-                agent: "__cancel_delegation".into(),
-                task: delegation_id.clone(),
-                context_files: Vec::new(),
-                respond_to: tx,
-                brain_session_id: self.brain_session_id.clone(),
-                delegation_plan: None,
-                issue_id: None,
-            };
-
-            if let Err(_e) = self.delegation_tx.send(delegation).await {
-                return JsonRpcResponse::internal_error(id, "Failed to send cancellation request");
-            }
-
-            info!(delegation_id = %delegation_id, "Cancellation requested");
-
-            // Await the orchestrator's response. Today this returns
-            // "not yet wired"; once the orchestrator adds a handler it
-            // will return the actual cancellation result.
-            match rx.await {
-                Ok(result) => {
-                    return Self::cancel_result_to_response(id, result);
+            if let Some(ref cc) = self.cancellation_control {
+                let outcome = cc.cancel(&delegation_id).await;
+                info!(delegation_id = %delegation_id, ?outcome, "Cancellation requested via CancellationControl");
+                match outcome {
+                    CancelOutcome::Cancelled => {
+                        return JsonRpcResponse::success(
+                            id,
+                            json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!("Delegation {} cancelled", delegation_id)
+                                }]
+                            }),
+                        );
+                    }
+                    CancelOutcome::NotFound => {
+                        // Token was already removed (delegation completed between
+                        // the active_delegations check and the cancel call).
+                        return JsonRpcResponse::success(
+                            id,
+                            json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!("Delegation {} already completed", delegation_id)
+                                }]
+                            }),
+                        );
+                    }
                 }
-                Err(_) => {
-                    return JsonRpcResponse::internal_error(
-                        id,
-                        "cancel_delegation failed: orchestrator disconnected",
-                    );
-                }
+            } else {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    "cancel_delegation: no cancellation control wired",
+                );
             }
         }
 
@@ -1604,8 +1597,9 @@ impl McpCallbackServer {
 
         // Spawn the plan executor.
         let delegation_tx = self.delegation_tx.clone();
+        let plan_sink = self.event_sink.clone();
         self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx));
+            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink));
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
@@ -1830,8 +1824,9 @@ impl McpCallbackServer {
             );
         }
         let delegation_tx = self.delegation_tx.clone();
+        let plan_sink = self.event_sink.clone();
         self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx));
+            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink));
 
         info!(
             plan_id = %plan_id,
@@ -2020,24 +2015,28 @@ impl McpCallbackServer {
                 .ok_or_else(|| format!("unknown plan '{plan_id}'"))?
         };
 
-        let pm = self.pm_service.as_deref();
         let sink: Option<&dyn crate::events::McpEventSink> = self.event_sink.as_deref();
 
-        let mut state = plan_arc.lock().await;
-        let result = crate::plan::review_task(
+        // INV-5: use handle_review_task so the plan lock is dropped before
+        // pm.update_issue() is called.  The pm_service field stores a concrete
+        // Arc<PmService>; deref as &dyn PmLike for the call.
+        let pm_like: Option<&dyn crate::plan::PmLike> = self
+            .pm_service
+            .as_deref()
+            .map(|s| s as &dyn crate::plan::PmLike);
+
+        let result = crate::plan::handle_review_task(
+            plan_arc,
             &plan_id,
             &task_id,
             decision,
             feedback,
-            &mut state,
-            pm,
+            pm_like,
             sink,
             Some(&self.delegation_tx),
             Some(&self.task_tracker),
-            Some(plan_arc.clone()),
         )
         .await?;
-        drop(state);
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -2236,58 +2235,46 @@ transport = "acp""#,
 
 #[cfg(test)]
 mod cancel_delegation_tests {
-    use super::*;
-    use serde_json::json;
-    use spur_acp::{DelegationResult, DelegationStatus};
+    use spur_acp::{CancelOutcome, CancellationControl};
 
-    /// Simulated orchestrator response shape for the `__cancel_delegation`
-    /// stub: status=Failed, summary=None. The test only exercises the
-    /// pure translation from `DelegationResult` to `JsonRpcResponse` —
-    /// extract this into a pure helper fn on McpCallbackServer so the
-    /// test doesn't need a live channel.
-    #[test]
-    fn failed_result_maps_to_jsonrpc_error() {
-        let id = json!(1);
-        let result = DelegationResult {
-            status: DelegationStatus::Failed {
-                error: "Internal operation not yet wired: __cancel_delegation".into(),
-            },
-            diff: None,
-            diff_summary: None,
-            summary: None,
-            estimated_cost_usd: 0.0,
-            worker_branch: None,
-        };
+    /// INV-6: CancellationControl.cancel returns Cancelled the first time
+    /// and NotFound on a second call (token was removed on first cancel).
+    #[tokio::test]
+    async fn cancel_returns_cancelled_then_not_found() {
+        let cc = CancellationControl::new();
+        let token = cc.register("req-1".into()).await;
 
-        let resp = McpCallbackServer::cancel_result_to_response(id.clone(), result);
+        assert!(!token.is_cancelled(), "token should not be cancelled yet");
 
-        // MUST be a JSON-RPC error, not success.
+        let outcome = cc.cancel("req-1").await;
+        assert_eq!(outcome, CancelOutcome::Cancelled);
         assert!(
-            resp.error.is_some(),
-            "cancel_delegation stub-Failed must become JSON-RPC error, got success: {resp:?}",
+            token.is_cancelled(),
+            "token must be cancelled after cancel()"
         );
-        let err = resp.error.as_ref().unwrap();
-        assert_eq!(err.code, -32601);
-        assert!(
-            err.message.contains("cancel_delegation"),
-            "error message should reference the tool: {}",
-            err.message,
-        );
+
+        // Second cancel: token was removed, so NotFound.
+        let outcome2 = cc.cancel("req-1").await;
+        assert_eq!(outcome2, CancelOutcome::NotFound);
     }
 
-    #[test]
-    fn successful_result_stays_success() {
-        let id = json!(1);
-        let result = DelegationResult {
-            status: DelegationStatus::Success,
-            diff: None,
-            diff_summary: None,
-            summary: Some("cancelled".into()),
-            estimated_cost_usd: 0.0,
-            worker_branch: None,
-        };
+    /// INV-6: cancel on an unknown id returns NotFound.
+    #[tokio::test]
+    async fn cancel_unknown_id_returns_not_found() {
+        let cc = CancellationControl::new();
+        let outcome = cc.cancel("no-such-id").await;
+        assert_eq!(outcome, CancelOutcome::NotFound);
+    }
 
-        let resp = McpCallbackServer::cancel_result_to_response(id, result);
-        assert!(resp.error.is_none(), "success result must stay success");
+    /// INV-6: remove() cleans up without cancelling the token.
+    #[tokio::test]
+    async fn remove_cleans_up_without_cancelling() {
+        let cc = CancellationControl::new();
+        let token = cc.register("req-2".into()).await;
+        cc.remove("req-2").await;
+        assert!(!token.is_cancelled(), "remove must not cancel the token");
+        // After remove, cancel returns NotFound.
+        let outcome = cc.cancel("req-2").await;
+        assert_eq!(outcome, CancelOutcome::NotFound);
     }
 }

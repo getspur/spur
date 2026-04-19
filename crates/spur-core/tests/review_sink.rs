@@ -4,10 +4,11 @@ use spur_core::{ExecutorId, ReviewSink};
 #[tokio::test]
 async fn register_then_submit_delivers_decision() {
     let sink = ReviewSink::new();
-    let rx = sink
-        .register(ExecutorId("e1".into()), 1)
+    let handle = sink
+        .register_handle(ExecutorId("e1".into()), 1)
         .await
         .expect("registered");
+    let rx = handle.into_rx();
     let submitted = sink
         .submit(ExecutorId("e1".into()), 1, ReviewDecision::Approve)
         .await;
@@ -19,10 +20,11 @@ async fn register_then_submit_delivers_decision() {
 #[tokio::test]
 async fn attempt_n_mismatch_drops_decision() {
     let sink = ReviewSink::new();
-    let rx = sink
-        .register(ExecutorId("e1".into()), 2)
+    let handle = sink
+        .register_handle(ExecutorId("e1".into()), 2)
         .await
         .expect("registered");
+    let rx = handle.into_rx();
     let submitted = sink
         .submit(
             ExecutorId("e1".into()),
@@ -52,8 +54,8 @@ async fn unknown_executor_id_is_dropped() {
 #[tokio::test]
 async fn remove_cleans_up_entry() {
     let sink = ReviewSink::new();
-    let _rx = sink
-        .register(ExecutorId("e1".into()), 1)
+    let _handle = sink
+        .register_handle(ExecutorId("e1".into()), 1)
         .await
         .expect("registered");
     sink.remove(&ExecutorId("e1".into())).await;
@@ -66,10 +68,10 @@ async fn remove_cleans_up_entry() {
 #[tokio::test]
 async fn double_register_fails() {
     let sink = ReviewSink::new();
-    let _rx1 = sink
-        .register(ExecutorId("e1".into()), 1)
+    let _handle1 = sink
+        .register_handle(ExecutorId("e1".into()), 1)
         .await
         .expect("first");
-    let second = sink.register(ExecutorId("e1".into()), 2).await;
+    let second = sink.register_handle(ExecutorId("e1".into()), 2).await;
     assert!(second.is_err(), "must not overwrite active entry");
 }

@@ -153,7 +153,7 @@ mod tests {
 
     /// Helper: open a `SinkState` with an explicit `max_bytes`, bypassing
     /// `SPUR_EVENT_LOG_MAX_BYTES` so tests don't race on the process env.
-    fn open_with_max(dir: &PathBuf, max_bytes: u64) -> SinkState {
+    fn open_with_max(dir: &std::path::Path, max_bytes: u64) -> SinkState {
         let path = rotated_path(dir);
         let file = OpenOptions::new()
             .create(true)
@@ -162,7 +162,7 @@ mod tests {
             .unwrap();
         let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
         SinkState {
-            dir: dir.clone(),
+            dir: dir.to_path_buf(),
             writer: BufWriter::with_capacity(FLUSH_BYTES, file),
             current_path: path,
             bytes_in_file: bytes,

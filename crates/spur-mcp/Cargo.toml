@@ -22,3 +22,5 @@ uuid = { workspace = true }
 [dev-dependencies]
 toml = { workspace = true }
 chrono = { workspace = true }
+# start_paused = true on #[tokio::test] requires test-util feature.
+tokio = { version = "1", features = ["full", "test-util"] }

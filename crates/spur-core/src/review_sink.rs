@@ -40,7 +40,9 @@ impl ReviewSink {
 
     /// Register a pending review. Returns the receiver the caller awaits.
     /// Errors if an entry already exists for this executor_id.
-    pub async fn register(
+    ///
+    /// `pub(crate)` — external callers must use `register_handle` (INV-4).
+    pub(crate) async fn register(
         &self,
         executor_id: ExecutorId,
         attempt_n: u32,
@@ -103,6 +105,62 @@ impl ReviewSink {
 impl Default for ReviewSink {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// INV-4: only a registered review slot can emit
+/// `ExecutorReviewRequested`. Construction goes exclusively through
+/// `ReviewSink::register_handle`.
+pub struct ReviewHandle {
+    eid: ExecutorId,
+    attempt_n: u32,
+    rx: oneshot::Receiver<ReviewDecision>,
+}
+
+impl ReviewHandle {
+    /// Emit `ExecutorReviewRequested` for this registered review.
+    /// Takes the funnel by shared reference — the handle does NOT own it.
+    pub fn emit_requested(
+        &self,
+        funnel: &crate::event_funnel::FunnelHandle,
+        kind: spur_acp::ReviewKind,
+        payload: spur_acp::ReviewPayload,
+    ) {
+        funnel.emit(spur_acp::SpurEventBody::ExecutorReviewRequested {
+            id: self.eid.0.clone(),
+            attempt_n: self.attempt_n,
+            kind,
+            payload,
+        });
+    }
+
+    pub fn executor_id(&self) -> &ExecutorId {
+        &self.eid
+    }
+
+    pub fn attempt_n(&self) -> u32 {
+        self.attempt_n
+    }
+
+    /// Consume the handle and yield the receiver for the caller to
+    /// `select!` on. After this call, the handle is gone — so no further
+    /// `emit_requested` can fire for the same registration.
+    pub fn into_rx(self) -> oneshot::Receiver<ReviewDecision> {
+        self.rx
+    }
+}
+
+impl ReviewSink {
+    /// INV-4: register a pending review and return a `ReviewHandle` that
+    /// is the ONLY way to emit `ExecutorReviewRequested` for this slot.
+    /// Errors if an entry already exists for this executor_id.
+    pub async fn register_handle(
+        &self,
+        eid: ExecutorId,
+        attempt_n: u32,
+    ) -> Result<ReviewHandle, ReviewSinkError> {
+        let rx = self.register(eid.clone(), attempt_n).await?;
+        Ok(ReviewHandle { eid, attempt_n, rx })
     }
 }
 
