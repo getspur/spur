@@ -1,3 +1,6 @@
+pub mod continuation_bridge;
+pub use continuation_bridge::{new_overflow_buf, OverflowBuf};
+
 pub mod scheduler;
 pub use scheduler::{BrainScheduler, ScheduledAction};
 
