@@ -54,11 +54,17 @@ Not supported in this rollout. `spur auth login --key <KEY>` performs a network 
 Captured on 2026-04-19 at HEAD `b454293` (fmt touch-ups commit, preceding the Task 15 docs commit):
 
 ```
-### spur-license default
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+### spur-license default (unit + integration)
+test result: ok. 2 passed; 0 failed (lib)
+test result: ok. 1 passed; 0 failed; 1 ignored (emission_audit)
+test result: ok. 5 passed; 0 failed; 2 ignored (licenseseat_probe)
 
 ### spur-license --features test-support
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed (lib)
+test result: ok. 1 passed; 0 failed; 1 ignored (emission_audit)
+test result: ok. 3 passed; 0 failed (fake_provider)
+test result: ok. 1 passed; 0 failed (invariants, 64 proptest cases)
+test result: ok. 5 passed; 0 failed; 2 ignored (licenseseat_probe)
 
 ### spur-acp license_events_roundtrip
 test license_updated_roundtrips ... ok
