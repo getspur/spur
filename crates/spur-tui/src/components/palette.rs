@@ -51,6 +51,15 @@ impl PaletteState {
         self.rerank();
     }
 
+    /// Append multiple source batches and rerank exactly once at the end.
+    /// Use this in preference to repeated `push_raw` when loading all sources at open.
+    pub fn extend_raw(&mut self, batches: impl IntoIterator<Item = Vec<PaletteResult>>) {
+        for mut batch in batches {
+            self.raw.append(&mut batch);
+        }
+        self.rerank();
+    }
+
     /// Pull results from every registered source. Convenience for tests and
     /// for the App-level open path.
     pub fn load_from_sources(&mut self, sources: &[Box<dyn PaletteSource>]) {

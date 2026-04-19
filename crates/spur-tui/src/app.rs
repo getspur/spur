@@ -337,23 +337,27 @@ impl App {
     }
 
     fn open_palette(&mut self) {
+        if self.help_visible || self.quit_confirm_visible {
+            return; // palette won't open while a higher-priority overlay is up
+        }
         self.palette_state.reset();
 
         // Load sources: Commands, Sessions, Workers, Trace.
         let cmd_registry = crate::commands::registry::CommandRegistry::new();
         let cmd_src = CommandSource::new(&cmd_registry);
-        self.palette_state.push_raw(cmd_src.collect());
-
         let sess_src = SessionSource::from_metadata(self.metadata_store.metadata());
-        self.palette_state.push_raw(sess_src.collect());
-
         let worker_src = WorkerSource::from_lineage(&self.lineage);
-        self.palette_state.push_raw(worker_src.collect());
 
+        let mut batches = vec![
+            cmd_src.collect(),
+            sess_src.collect(),
+            worker_src.collect(),
+        ];
         if let Some(view) = self.session_detail.as_ref() {
             let trace_src = TraceSource::from_trace(view.react_trace());
-            self.palette_state.push_raw(trace_src.collect());
+            batches.push(trace_src.collect());
         }
+        self.palette_state.extend_raw(batches);
 
         self.palette_visible = true;
         self.dirty = true;
@@ -362,6 +366,11 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn is_palette_visible(&self) -> bool {
         self.palette_visible
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn try_open_palette_for_test(&mut self) {
+        self.open_palette();
     }
 
     #[cfg(any(test, debug_assertions))]
