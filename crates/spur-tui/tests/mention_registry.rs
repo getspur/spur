@@ -50,8 +50,8 @@ fn brain_session_includes_workers_in_empty_query() {
 fn direct_session_excludes_workers() {
     let mut reg = MentionRegistry::for_direct_session();
     let sid = SessionId::new();
-    let cwd = std::env::current_dir().unwrap();
-    let hits = reg.query(&sid, &cwd, "", 50);
+    let tmp = tempfile::tempdir().unwrap();
+    let hits = reg.query(&sid, tmp.path(), "", 50);
     assert!(
         !hits.iter().any(|h| h.kind == MentionKind::Worker),
         "direct session should not surface worker entries"
