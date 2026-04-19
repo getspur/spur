@@ -343,7 +343,6 @@ impl ReactTrace {
                 timestamp,
                 markdown: Some(stream),
             });
-            return;
         }
         #[cfg(not(feature = "markdown"))]
         {
@@ -499,6 +498,7 @@ impl ReactTrace {
     ///    coordinate system render painted with),
     /// 2. computing the target row,
     /// 3. converting back to a Row anchor at the target row.
+    ///
     /// If `line_cache` is `None` (first tick before any render), this is a
     /// no-op — anchor remains in its initial state.
     /// If the target row is the last visible row, transitions to Following.
@@ -1015,7 +1015,7 @@ impl ReactTrace {
     }
 
     #[cfg(feature = "markdown")]
-    pub fn build_virtual_rows_for_tests(
+    pub(crate) fn build_virtual_rows_for_tests(
         &self,
         from: usize,
         width: u16,

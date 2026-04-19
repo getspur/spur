@@ -1660,7 +1660,7 @@ impl App {
                 }
             }
             ViewId::SessionPicker => {
-                self.session_picker.as_mut().map(|p| p.tick());
+                if let Some(p) = self.session_picker.as_mut() { p.tick() }
             }
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {
@@ -1832,14 +1832,9 @@ pub async fn run_tui_with_license(
 
         // Phase 2: Drain all remaining crossterm events (non-blocking).
         // This collapses bursts of mouse scroll events into one render pass.
-        loop {
-            match timeout(Duration::ZERO, event_stream.next()).await {
-                Ok(Some(Ok(ev))) => {
-                    crossterm_drained += 1;
-                    app.handle_crossterm_event(ev);
-                }
-                _ => break,
-            }
+        while let Ok(Some(Ok(ev))) = timeout(Duration::ZERO, event_stream.next()).await {
+            crossterm_drained += 1;
+            app.handle_crossterm_event(ev);
         }
 
         // Phase 3: Drain remaining spur events (non-blocking), capped per frame.

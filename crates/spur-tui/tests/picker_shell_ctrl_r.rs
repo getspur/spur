@@ -11,7 +11,7 @@ use spur_tui::views::{session_detail::SessionDetailView, View};
 
 fn test_ctx() -> spur_tui::views::ViewContext<'static> {
     static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
-        std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+        std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
     spur_tui::test_support::test_view_ctx(&LINEAGE)
 }
 
@@ -116,5 +116,5 @@ fn ctrl_r_on_empty_history_opens_empty_shell_and_esc_closes() {
     // No panic, no state change. Follow-up Enter should behave like a
     // regular empty-composer Enter (no action).
     let act = press(&mut v, KeyCode::Enter);
-    assert!(act.is_none() || matches!(act, Some(_))); // any behavior OK so long as no panic
+    assert!(act.is_none() || act.is_some()); // any behavior OK so long as no panic
 }

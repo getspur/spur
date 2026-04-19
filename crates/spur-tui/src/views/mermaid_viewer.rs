@@ -59,10 +59,10 @@ impl MermaidViewerView {
         }
         if let (Some(id), Some(picker)) = (self.focused, picker) {
             if self.protocol.is_none() {
-                if let Some(state) = entries.iter().find(|(i, _)| *i == id).map(|(_, s)| *s) {
-                    if let MermaidState::Ready { image, .. } = state {
-                        self.protocol = Some(picker.new_resize_protocol((**image).clone()));
-                    }
+                if let Some(MermaidState::Ready { image, .. }) =
+                    entries.iter().find(|(i, _)| *i == id).map(|(_, s)| *s)
+                {
+                    self.protocol = Some(picker.new_resize_protocol((**image).clone()));
                 }
             }
         }

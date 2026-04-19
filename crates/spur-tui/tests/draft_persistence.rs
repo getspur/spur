@@ -6,7 +6,7 @@ use std::time::Duration;
 
 fn test_ctx() -> spur_tui::views::ViewContext<'static> {
     static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
-        std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+        std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
     spur_tui::test_support::test_view_ctx(&LINEAGE)
 }
 

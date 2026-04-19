@@ -303,7 +303,7 @@ impl ReactTrace {
                         ]));
                     }
                     let effective_status = derive_delegate_status(executor_id.as_deref(), lineage)
-                        .unwrap_or_else(|| status.as_str());
+                        .unwrap_or(status.as_str());
                     if !effective_status.is_empty() {
                         let is_active =
                             effective_status == "spawning" || effective_status == "running";
@@ -930,7 +930,7 @@ impl ReactTrace {
                         );
                     }
                     let effective_status = derive_delegate_status(executor_id.as_deref(), lineage)
-                        .unwrap_or_else(|| status.as_str());
+                        .unwrap_or(status.as_str());
                     if !effective_status.is_empty() {
                         let is_active =
                             effective_status == "spawning" || effective_status == "running";

@@ -314,7 +314,7 @@ mod builder_tests {
         let big = "x".repeat(4096);
         let conts: Vec<_> = (0..10).map(|i| mk_cont(&format!("id-{i}"), &big)).collect();
         let (merged, spilled) = render_merged_turn_with_spill(&user_blocks, &conts, 4096);
-        assert!(spilled.len() > 0, "budget should force spill");
+        assert!(!spilled.is_empty(), "budget should force spill");
         // User block still present and still byte-exact.
         assert_eq!(merged[0], user_blocks[0]);
     }

@@ -223,7 +223,7 @@ fn build_markdown_trace(entries: usize, finalize: bool) -> ReactTrace {
 }
 
 fn alternating_agent(i: usize) -> &'static str {
-    if i % 2 == 0 {
+    if i.is_multiple_of(2) {
         "claude"
     } else {
         "codex"
