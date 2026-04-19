@@ -9,7 +9,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
-use crate::input_history::{InputHistoryEntry, InputStateSnapshot};
+use crate::input_history::{HISTORY_CAP, InputHistoryEntry, InputStateSnapshot};
 
 /// A protected byte range inside the text representing an atomic token
 /// (e.g., a resource mention). These ranges are skipped atomically by
@@ -40,8 +40,6 @@ pub enum VimMode {
     Visual,
     Operator(char),
 }
-
-const HISTORY_CAP: usize = 100;
 
 /// A text input widget for chatting with the brain agent, built on tui-textarea.
 pub struct InputBar {

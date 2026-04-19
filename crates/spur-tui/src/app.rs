@@ -20,7 +20,7 @@ use crate::components::help_overlay::HelpOverlay;
 use crate::components::input_bar::EditMode;
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
-use crate::input_history::InputHistoryEntry;
+use crate::input_history::{HISTORY_CAP, InputHistoryEntry};
 use crate::session_metadata::SessionMetadataStore;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
@@ -1414,7 +1414,7 @@ impl App {
         }
         hist.retain(|existing| !existing.same_recall_state(&entry));
         hist.push(entry);
-        if hist.len() > 100 {
+        if hist.len() > HISTORY_CAP {
             hist.remove(0);
         }
         true
