@@ -1,6 +1,6 @@
 //! End-to-end installer tests using tempdir roots.
 
-use spur_core::skills::installer::run;
+use spur_core::skills::installer::{run, SkipReason};
 use spur_core::skills::SkillSource;
 use std::path::Path;
 
@@ -93,4 +93,51 @@ fn rerun_is_idempotent_no_writes() {
         second.skipped,
     );
     assert!(!second.unchanged.is_empty(), "expected some NoOps");
+}
+
+#[test]
+fn user_hand_edit_is_preserved() {
+    let tmp = tempfile::tempdir().unwrap();
+    run(tmp.path()).unwrap();
+
+    // Pick one adapter file and edit its body.
+    let target = tmp
+        .path()
+        .join(".cursor/rules/spurpower-test-driven-development.mdc");
+    let original = std::fs::read_to_string(&target).unwrap();
+    let edited = format!("{original}\n\nUSER ADDITION\n");
+    std::fs::write(&target, &edited).unwrap();
+
+    // Re-run: should not clobber.
+    let summary = run(tmp.path()).unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), edited);
+    let skipped_paths: Vec<_> = summary.skipped.iter().map(|(p, _)| p.clone()).collect();
+    assert!(
+        skipped_paths.contains(&target),
+        "expected target in skipped list: {skipped_paths:?}",
+    );
+    assert!(summary
+        .skipped
+        .iter()
+        .any(|(p, r)| p == &target && *r == SkipReason::UserEdited));
+}
+
+#[test]
+fn preexisting_user_file_without_marker_is_preserved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp
+        .path()
+        .join(".cursor/rules/spurpower-test-driven-development.mdc");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "totally user-authored, no SPUR marker").unwrap();
+
+    let summary = run(tmp.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "totally user-authored, no SPUR marker",
+    );
+    assert!(summary
+        .skipped
+        .iter()
+        .any(|(p, r)| p == &target && *r == SkipReason::NoMarker));
 }
