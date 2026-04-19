@@ -40,7 +40,9 @@ impl ReviewSink {
 
     /// Register a pending review. Returns the receiver the caller awaits.
     /// Errors if an entry already exists for this executor_id.
-    pub async fn register(
+    ///
+    /// `pub(crate)` — external callers must use `register_handle` (INV-4).
+    pub(crate) async fn register(
         &self,
         executor_id: ExecutorId,
         attempt_n: u32,

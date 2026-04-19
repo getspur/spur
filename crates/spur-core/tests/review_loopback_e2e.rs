@@ -15,7 +15,7 @@
 //! cancellation audit events, etc.) live in `review_gate_integration.rs`.
 
 use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
-use spur_core::{orchestrator::run_gate_with_retries, ExecutorId, ReviewSink};
+use spur_core::{test_support::run_gate_with_retries, ExecutorId, ReviewSink};
 use std::time::Duration;
 
 /// Shared driver: spawns a background task that delivers `decisions` to the
