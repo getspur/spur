@@ -47,9 +47,10 @@ pub struct SessionDetailView {
     /// Most recent auth-required error for this session. Rendered as a red
     /// banner at the top of the view. Dismissed on the next keystroke.
     pub auth_error: Option<String>,
-    /// Currently active popup trigger (if any), derived from the InputBar
-    /// text + cursor.
-    active_trigger: Option<crate::components::completion_trigger::Trigger>,
+    /// Stateful trigger-transition detector. Replaces the former
+    /// trigger state field (retired in Phase 4). History shells are
+    /// not managed through this detector; see refresh_popup.
+    trigger_detector: crate::components::completion_trigger::TriggerDetector,
     /// Registry of `@`-mention sources (files, directories).
     mention_registry: std::rc::Rc<std::cell::RefCell<crate::mentions::MentionRegistry>>,
     /// Working directory used to resolve file mentions.
@@ -128,7 +129,7 @@ impl SessionDetailView {
             context_used: None,
             context_size: None,
             auth_error: None,
-            active_trigger: None,
+            trigger_detector: crate::components::completion_trigger::TriggerDetector::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(
                 crate::mentions::MentionRegistry::new(),
             )),
@@ -557,40 +558,35 @@ impl SessionDetailView {
     // ── Completion popup wiring ─────────────────────────────────────────
 
     fn refresh_popup(&mut self) {
-        use crate::components::completion_trigger::{detect, TriggerKind};
+        use crate::components::completion_trigger::{TriggerKind, TriggerTransition};
         use crate::components::picker_shell::PickerShell;
-        use crate::components::query_source::{MentionQuerySource, SlashQuerySource, SlashRow};
+        use crate::components::query_source::{
+            MentionQuerySource, QueryMode, SlashQuerySource, SlashRow,
+        };
 
         let text = self.input_bar.text();
         let cursor = self.input_bar.cursor();
-        let new_trig = detect(&text, cursor);
 
-        // Do NOT disturb a history-search shell (Ctrl+R) which is
-        // identified by `active_trigger` being None while `picker_shell`
-        // is Some. Only manage the trigger-driven shell here.
-        let history_shell_active = self.picker_shell.is_some() && self.active_trigger.is_none();
-        if history_shell_active {
-            // Keep active_trigger in sync with current text (always None
-            // here — history shell stole focus) and return.
-            self.active_trigger = None;
-            return;
+        // If a history shell (OwnedByShell) is open, it steals focus from
+        // the trigger-driven state machine. Do NOT feed the detector while
+        // that's true, and ensure any previous trigger state is cleared.
+        if let Some(shell) = self.picker_shell.as_ref() {
+            if shell.query_mode() == QueryMode::OwnedByShell {
+                self.trigger_detector.reset();
+                return;
+            }
         }
 
-        match (&self.active_trigger, &new_trig) {
-            (Some(old), Some(new))
-                if old.kind == new.kind && old.prefix_start == new.prefix_start =>
-            {
-                // Same trigger, new query — just update the shell's query
-                // from the InputBar trigger prefix.
+        let transition = self.trigger_detector.step(&text, cursor);
+        match transition {
+            TriggerTransition::None => {}
+            TriggerTransition::Update { query } => {
                 if let Some(shell) = self.picker_shell.as_mut() {
-                    shell.set_query_from_input_bar(&new.query);
+                    shell.set_query_from_input_bar(&query);
                 }
-                self.active_trigger = Some(new.clone());
             }
-            (_, Some(new)) => {
-                // Trigger transition (fresh open, or kind/prefix changed):
-                // build the appropriate source and open a new shell.
-                let shell = match new.kind {
+            TriggerTransition::Open { trigger } => {
+                let shell = match trigger.kind {
                     TriggerKind::Slash => {
                         let entries = self.command_registry.list();
                         let rows: Vec<SlashRow> = entries
@@ -606,28 +602,25 @@ impl SessionDetailView {
                                 },
                             })
                             .collect();
-                        let src = SlashQuerySource::new(rows, new.prefix_start);
-                        PickerShell::open_with_query(Box::new(src), &new.query)
+                        let src = SlashQuerySource::new(rows, trigger.prefix_start);
+                        PickerShell::open_with_query(Box::new(src), &trigger.query)
                     }
                     TriggerKind::Mention => {
                         let src = MentionQuerySource::new(
                             std::rc::Rc::clone(&self.mention_registry),
                             self.session_id.clone(),
                             self.cwd.clone(),
-                            new.prefix_start,
+                            trigger.prefix_start,
                         );
-                        PickerShell::open_with_query(Box::new(src), &new.query)
+                        PickerShell::open_with_query(Box::new(src), &trigger.query)
                     }
                 };
                 self.picker_shell = Some(shell);
-                self.active_trigger = Some(new.clone());
             }
-            (_, None) => {
-                // No active trigger — close any trigger-driven shell.
-                if self.active_trigger.is_some() {
-                    self.picker_shell = None;
-                }
-                self.active_trigger = None;
+            TriggerTransition::Close => {
+                // Close the trigger-driven shell. The detector has already
+                // cleared its last-trigger state inside step().
+                self.picker_shell = None;
             }
         }
     }
@@ -821,13 +814,19 @@ impl SessionDetailView {
         }
 
         // Priority 1.4: picker shell (history via Ctrl+R, or trigger-driven
-        // @mention / /slash). Trigger-driven shells (active_trigger.is_some())
-        // read their query from the InputBar, so editing keys must fall
-        // through to input_bar; only navigation/accept/cancel keys are
-        // consumed here. History shells (active_trigger.is_none()) own their
-        // own MiniInput and receive ALL keys.
+        // @mention / /slash). Trigger-driven shells (ReadFromInputBar) read
+        // their query from the InputBar, so editing keys must fall through
+        // to input_bar; only navigation/accept/cancel keys are consumed
+        // here. History shells (OwnedByShell) own their own MiniInput and
+        // receive ALL keys.
         if self.picker_shell.is_some() {
-            let is_trigger_driven = self.active_trigger.is_some();
+            use crate::components::query_source::QueryMode;
+            let shell_mode = self
+                .picker_shell
+                .as_ref()
+                .map(|s| s.query_mode())
+                .expect("is_some checked");
+            let is_trigger_driven = shell_mode == QueryMode::ReadFromInputBar;
             let shell_consumes = if is_trigger_driven {
                 matches!(
                     key.code,
@@ -846,7 +845,7 @@ impl SessionDetailView {
                     PickerAction::None => {}
                     PickerAction::Cancel => {
                         self.picker_shell = None;
-                        self.active_trigger = None;
+                        self.trigger_detector.reset();
                     }
                     PickerAction::Accept(accept) => {
                         match accept {
@@ -873,7 +872,7 @@ impl SessionDetailView {
                             }
                         }
                         self.picker_shell = None;
-                        self.active_trigger = None;
+                        self.trigger_detector.reset();
                     }
                 }
                 return None;

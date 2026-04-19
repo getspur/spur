@@ -214,7 +214,7 @@ impl PickerShell {
     /// The underlying source's query mode. Used by the view's key-routing
     /// branch to distinguish trigger-driven (`ReadFromInputBar`) shells
     /// from history (`OwnedByShell`) shells without maintaining a parallel
-    /// `active_trigger` field.
+    /// trigger-state field.
     pub fn query_mode(&self) -> crate::components::query_source::QueryMode {
         self.source.query_mode()
     }
