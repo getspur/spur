@@ -92,7 +92,7 @@ fn continuation_resource_block(c: &BrainContinuation) -> ContentBlock {
     let json = serde_json::json!({
         "delegation_id": c.delegation_id,
         "source": format!("{:?}", c.source),
-        "status": format!("{:?}", c.payload.status),
+        "status": serde_json::to_value(&c.payload.status).unwrap_or(serde_json::Value::Null),
         "summary": c.payload.summary,
         "diff_summary": c.payload.diff_summary,
         "worker_branch": c.payload.worker_branch,
@@ -154,6 +154,12 @@ pub fn render_merged_turn_with_spill(
     let mut separator_accounted = false;
 
     for c in conts {
+        if !spilled.is_empty() {
+            // Oldest-first strict: once one continuation spills, all subsequent
+            // continuations must also spill to preserve delivery order.
+            spilled.push(c.clone());
+            continue;
+        }
         let block = continuation_resource_block(c);
         let cost = block_byte_cost(&block);
         let with_sep_if_first = if !separator_accounted { separator_cost } else { 0 };
@@ -307,5 +313,33 @@ mod builder_tests {
         assert!(spilled.len() > 0, "budget should force spill");
         // User block still present and still byte-exact.
         assert_eq!(merged[0], user_blocks[0]);
+    }
+
+    #[test]
+    fn merged_turn_spill_is_oldest_first_strict() {
+        let user_blocks = vec![ContentBlock::Text(agent_client_protocol::TextContent::new("hi"))];
+        // Continuation order: tiny, huge, tiny. With strict oldest-first,
+        // once the huge one overflows, the following tiny must ALSO spill —
+        // no gap-fill delivery out of order.
+        let small1 = mk_cont("id-small-1", "x");
+        let huge = mk_cont("id-huge", &"y".repeat(4096));
+        let small2 = mk_cont("id-small-2", "z");
+
+        // Budget leaves room for the small blocks individually but not for huge.
+        let (merged, spilled) = render_merged_turn_with_spill(
+            &user_blocks,
+            &[small1, huge, small2],
+            /* budget_bytes = */ 1024,
+        );
+
+        // small-1 delivers; huge spills; small-2 ALSO spills (oldest-first strict).
+        assert_eq!(spilled.len(), 2);
+        assert_eq!(spilled[0].delegation_id, "id-huge");
+        assert_eq!(spilled[1].delegation_id, "id-small-2");
+
+        // Merged output must contain small-1's resource but NOT small-2's.
+        let joined = format!("{:?}", merged);
+        assert!(joined.contains("spur://continuation/id-small-1"));
+        assert!(!joined.contains("spur://continuation/id-small-2"));
     }
 }
