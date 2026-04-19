@@ -1,6 +1,6 @@
 //! End-to-end installer tests using tempdir roots.
 
-use spur_core::skills::installer::{run, SkipReason};
+use spur_core::skills::installer::run;
 use spur_core::skills::SkillSource;
 use std::path::Path;
 
@@ -31,14 +31,20 @@ fn walkdir_shim(dir: &Path) -> Box<dyn Iterator<Item = std::path::PathBuf>> {
 fn fresh_install_creates_all_expected_files() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let summary = run(tmp.path()).unwrap();
-
-    // Every bundled skill × 7 adapters should be written, + Kiro pointer.
-    let bundled_count = spur_core::skills::list_active_skills(tmp.path())
+    // Snapshot skill IDs BEFORE run(): running the installer writes
+    // .spur/skills/<id>/SKILL.md for every bundled skill, after which
+    // list_active_skills would reclassify those same skills as Override.
+    let bundled_ids: Vec<String> = spur_core::skills::list_active_skills(tmp.path())
         .unwrap()
         .iter()
         .filter(|s| matches!(s.source, SkillSource::Bundled))
-        .count();
+        .map(|s| s.id.clone())
+        .collect();
+    let bundled_count = bundled_ids.len();
+
+    let summary = run(tmp.path()).unwrap();
+
+    // Every bundled skill × 7 adapters should be written, + Kiro pointer.
     let expected = bundled_count * 7 + 1; // +1 for Kiro pointer
     assert_eq!(
         summary.written.len(),
@@ -48,8 +54,8 @@ fn fresh_install_creates_all_expected_files() {
     );
 
     // Every bundled skill should have a file under `.spur/skills/<id>/`.
-    for skill in spur_core::skills::list_active_skills(tmp.path()).unwrap() {
-        let p = tmp.path().join(".spur/skills").join(&skill.id).join("SKILL.md");
+    for id in &bundled_ids {
+        let p = tmp.path().join(".spur/skills").join(id).join("SKILL.md");
         assert!(p.exists(), "missing {}", p.display());
     }
 
