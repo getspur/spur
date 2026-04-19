@@ -132,6 +132,7 @@ pub struct BrainSession {
 }
 
 /// A user input message from the TUI.
+#[non_exhaustive]
 pub enum InteractiveInput {
     Message {
         blocks: Vec<ContentBlock>,
@@ -190,6 +191,21 @@ pub enum InteractiveInput {
         id: String,
         update: spur_pm::IssueUpdate,
     },
+    /// Detached delegation completion returned to the orchestrator for
+    /// scheduled brain re-entry. Never constructed by the TUI. See
+    /// `docs/superpowers/specs/2026-04-19-brain-async-continuation-design.md`.
+    SystemContinuation {
+        session: SessionId,
+        continuation: spur_acp::domain::BrainContinuation,
+    },
+}
+
+#[inline]
+fn ignore_system_continuation_unexpected_site(site: &'static str) {
+    tracing::debug!(
+        site = %site,
+        "SystemContinuation reached unexpected match arm — routed via BrainScheduler in run_interactive only"
+    );
 }
 
 /// Convert spur_pm::IssueSummary to the spur_acp mirror type for event bus transmission.
@@ -1328,6 +1344,12 @@ impl Orchestrator {
                 // it somehow arrives here (e.g., in tests that send directly
                 // to user_rx), we silently discard it to avoid double-routing.
                 InteractiveInput::SubmitReview { .. } => {}
+
+                // ── SystemContinuation ───────────────────────────────────
+                // Task 8 wires this into BrainScheduler. For now, log and drop.
+                InteractiveInput::SystemContinuation { .. } => {
+                    ignore_system_continuation_unexpected_site(concat!(file!(), ":", line!()));
+                }
             }
         }
 
@@ -5004,5 +5026,35 @@ mod context_files_wiring_tests {
     fn format_worker_task_is_available_in_orchestrator_module() {
         let out = format_worker_task("t", &["x".into()]);
         assert!(out.contains("## Relevant Files"));
+    }
+}
+
+#[cfg(test)]
+mod interactive_input_tests {
+    use super::InteractiveInput;
+    use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
+    use spur_acp::domain::delegation::DelegationStatus;
+    use spur_acp::types::SessionId;
+    use std::time::Instant;
+
+    #[test]
+    fn system_continuation_variant_constructs() {
+        let c = BrainContinuation {
+            delegation_id: "abc".into(),
+            source: ContinuationSource::AsyncRequested,
+            payload: ContinuationPayload {
+                status: DelegationStatus::Success,
+                summary: None, diff_summary: None, worker_branch: None,
+            },
+            created_at: Instant::now(),
+        };
+        let input = InteractiveInput::SystemContinuation {
+            session: SessionId::new(),
+            continuation: c,
+        };
+        match input {
+            InteractiveInput::SystemContinuation { .. } => (),
+            _ => panic!("expected SystemContinuation variant"),
+        }
     }
 }
