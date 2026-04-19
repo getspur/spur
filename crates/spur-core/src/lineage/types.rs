@@ -106,9 +106,15 @@ pub struct ExecutorNode {
     /// Most recent error message, if any. Derived from the current
     /// attempt's error field.
     pub last_error: Option<String>,
-    /// Bounded ring buffer of live worker stream entries. Populated by
-    /// the lineage projection from `WorkerNotification` events. Cleared
-    /// on `ExecutorRetryStarted`. Capped at `STREAM_BUFFER_CAP`.
+    /// Bounded ring buffer of live worker stream entries.
+    ///
+    /// Retained for serde backward compatibility with pre-unification
+    /// `session_metadata.json` files. The lineage projection no longer
+    /// writes to this from `WorkerNotification` events — the DetailPane
+    /// Stream tab consumes `WorkerNotification`s directly via
+    /// `spur-tui/src/worker_streams.rs` (see
+    /// `docs/superpowers/architecture/stream-pipeline.md`). Still
+    /// cleared defensively on `ExecutorRetryStarted`.
     #[serde(default)]
     pub stream_buffer: VecDeque<WorkerStreamEntry>,
     /// Issue ID linked to this executor via delegation (if any).

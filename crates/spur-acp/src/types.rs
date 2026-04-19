@@ -176,6 +176,25 @@ pub enum AgentKind {
     Generic,
 }
 
+impl AgentKind {
+    /// Parse an agent identifier string (TOML name, display label, or
+    /// serde kebab-case form) into an `AgentKind`. Unknown inputs return
+    /// `AgentKind::Generic`.
+    ///
+    /// Used by the TUI to style per-executor traces and session panes
+    /// when only the `ExecutorNode.agent: String` is in hand.
+    pub fn from_name(name: &str) -> AgentKind {
+        let norm = name.trim().to_ascii_lowercase();
+        match norm.as_str() {
+            "claude-stream-json" => AgentKind::ClaudeStreamJson,
+            "claude-code-acp" | "claude" | "claude code" | "claude-code" => AgentKind::ClaudeCodeAcp,
+            "codex-acp" | "codex" => AgentKind::CodexAcp,
+            "kiro" => AgentKind::Kiro,
+            _ => AgentKind::Generic,
+        }
+    }
+}
+
 // ─── Cancel Mode ───────────────────────────────────────────────────────
 
 /// How `AgentConnection::cancel` behaves for a given transport.
@@ -223,5 +242,32 @@ mod cancel_mode_tests {
         let b = a; // Copy
         assert_eq!(a, b);
         assert_ne!(CancelMode::AcpSoft, CancelMode::ProcessKill);
+    }
+}
+
+#[cfg(test)]
+mod agent_kind_tests {
+    use super::AgentKind;
+
+    #[test]
+    fn from_name_matches_kebab_case_serde_repr() {
+        assert_eq!(AgentKind::from_name("claude-stream-json"), AgentKind::ClaudeStreamJson);
+        assert_eq!(AgentKind::from_name("claude-code-acp"), AgentKind::ClaudeCodeAcp);
+        assert_eq!(AgentKind::from_name("codex-acp"), AgentKind::CodexAcp);
+        assert_eq!(AgentKind::from_name("kiro"), AgentKind::Kiro);
+        assert_eq!(AgentKind::from_name("generic"), AgentKind::Generic);
+    }
+
+    #[test]
+    fn from_name_accepts_human_aliases() {
+        assert_eq!(AgentKind::from_name("claude"), AgentKind::ClaudeCodeAcp);
+        assert_eq!(AgentKind::from_name("Claude Code"), AgentKind::ClaudeCodeAcp);
+        assert_eq!(AgentKind::from_name("codex"), AgentKind::CodexAcp);
+    }
+
+    #[test]
+    fn from_name_unknown_defaults_to_generic() {
+        assert_eq!(AgentKind::from_name("ollama-wizard"), AgentKind::Generic);
+        assert_eq!(AgentKind::from_name(""), AgentKind::Generic);
     }
 }
