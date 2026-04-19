@@ -1320,6 +1320,32 @@ impl Orchestrator {
             let prompt_request = PromptRequest::new(b.acp_session_id.clone(), prompt_blocks);
             let spur_sid_for_log = b.spur_session_id.clone();
 
+            let turn_kind = match (&user_input_opt, continuations.is_empty()) {
+                (Some(_), true)  => "user_only",
+                (Some(_), false) => "merged",
+                (None, false)    => "continuation_only",
+                (None, true)     => "empty_defensive",
+            };
+            tracing::debug!(
+                continuation_probe = true,
+                site = "D_prompt_dispatch",
+                turn_kind = turn_kind,
+                continuations = continuations.len(),
+                acp_session = %b.acp_session_id,
+                spur_session = %spur_sid_for_log,
+                "orchestrator: dispatching session/prompt"
+            );
+            // INV-C3 observable half: publish PromptDispatched on the funnel
+            // BEFORE the transport call. Pairs with upstream DelegationCompleted
+            // so subscribers can verify UI-before-model ordering via `seq`.
+            // Emitted for every dispatch (including `user_only`) so the event
+            // stream reflects every turn boundary.
+            self.funnel.emit(SpurEventBody::PromptDispatched {
+                session: spur_sid_for_log.clone(),
+                turn_kind: turn_kind.to_string(),
+                continuations_count: continuations.len(),
+            });
+
             let prompt_started_at = std::time::Instant::now();
             let mut stream = match b.connection.prompt(prompt_request).await {
                 Ok(s) => s,
