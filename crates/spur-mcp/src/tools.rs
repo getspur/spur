@@ -57,57 +57,7 @@ fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
         description: "Delegate a task to a worker agent. Blocks until the worker completes or a 90-second safety timeout is reached. If the worker is still running at timeout, returns a delegation_id — call check_delegation_status to poll for the result. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Use `list_available_workers` when routing is ambiguous.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "agent": {
-                    "type": "string",
-                    "description": "Name of the worker agent to delegate to"
-                },
-                "task": {
-                    "type": "string",
-                    "description": "Task description for the worker. Structure as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT."
-                },
-                "context_files": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional supplementary file paths. Prefer inlining relevant excerpts in the task field's CONTEXT section."
-                },
-                "delegation_plan": {
-                    "type": "object",
-                    "description": "Structured reasoning for this delegation. At minimum pass {chosen, rationale}. For 2+ subtasks or >3 files, include candidates and decomposition.",
-                    "properties": {
-                        "candidates": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "agent":     { "type": "string" },
-                                    "rationale": { "type": "string" }
-                                }
-                            }
-                        },
-                        "decomposition": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "subtask":             { "type": "string" },
-                                    "parallelizable_with": { "type": "array", "items": { "type": "string" } }
-                                }
-                            }
-                        },
-                        "chosen":    { "type": "string" },
-                        "rationale": { "type": "string" }
-                    }
-                },
-                "issue_id": {
-                    "type": "string",
-                    "description": "Optional beads issue ID to auto-track"
-                }
-            },
-            "required": ["agent", "task"]
-        }),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateToWorkerInput>(),
     }
 }
 
@@ -115,47 +65,7 @@ fn delegate_parallel_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_parallel".into(),
         description: "Delegate multiple tasks in parallel. Blocks until all complete. The `delegation_plan.decomposition` field MUST demonstrate subtasks are independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "tasks": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "agent": { "type": "string", "description": "Worker agent name" },
-                            "task":  { "type": "string", "description": "Task description" },
-                            "context_files": {
-                                "type": "array",
-                                "items": { "type": "string" },
-                                "description": "Optional supplementary file paths for this task. Prepended as a '## Relevant Files' section in the worker prompt."
-                            },
-                            "issue_id": {
-                                "type": "string",
-                                "description": "Optional beads issue ID to auto-track for this task. Must be unique across tasks in a single batch."
-                            },
-                            "delegation_plan": {
-                                "type": "object",
-                                "description": "Per-task structured reasoning. Used for reviewer mismatch detection. Takes precedence over the batch-level delegation_plan."
-                            }
-                        },
-                        "required": ["agent", "task"]
-                    },
-                    "description": "List of tasks to delegate in parallel. Each task carries its own context_files, issue_id, and delegation_plan."
-                },
-                "delegation_plan": {
-                    "type": "object",
-                    "description": "Batch-level decomposition rationale. Documents why these N subtasks together and how they are independent. Per-task delegation_plan (inside tasks[]) takes precedence for reviewer mismatch checks.",
-                    "properties": {
-                        "candidates":    { "type": "array" },
-                        "decomposition": { "type": "array" },
-                        "chosen":        { "type": "string" },
-                        "rationale":     { "type": "string" }
-                    }
-                }
-            },
-            "required": ["tasks"]
-        }),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateParallelInput>(),
     }
 }
 
@@ -307,57 +217,7 @@ fn delegate_async_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_async".into(),
         description: "Delegate a task to a worker agent without blocking. Returns a delegation_id that can be collected later with wait_delegation.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "agent": {
-                    "type": "string",
-                    "description": "Name of the worker agent to delegate to"
-                },
-                "task": {
-                    "type": "string",
-                    "description": "Task description for the worker"
-                },
-                "context_files": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional list of file paths to provide as context"
-                },
-                "delegation_plan": {
-                    "type": "object",
-                    "description": "Structured reasoning for this delegation. At minimum pass {chosen, rationale}. For 2+ subtasks or >3 files, include candidates and decomposition.",
-                    "properties": {
-                        "candidates": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "agent":     { "type": "string" },
-                                    "rationale": { "type": "string" }
-                                }
-                            }
-                        },
-                        "decomposition": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "subtask":             { "type": "string" },
-                                    "parallelizable_with": { "type": "array", "items": { "type": "string" } }
-                                }
-                            }
-                        },
-                        "chosen":    { "type": "string" },
-                        "rationale": { "type": "string" }
-                    }
-                },
-                "issue_id": {
-                    "type": "string",
-                    "description": "Optional beads issue ID to auto-track"
-                }
-            },
-            "required": ["agent", "task"]
-        }),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateAsyncInput>(),
     }
 }
 
