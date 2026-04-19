@@ -328,6 +328,90 @@ impl QuerySource for MentionQuerySource {
     }
 }
 
+/// Minimal display-oriented row supplied to `SlashQuerySource`. The view
+/// pre-computes these from its `CommandRegistry` at shell-open time so the
+/// source doesn't take a live registry reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashRow {
+    /// Canonical typed form of the command, e.g. "/help" or "/claude:help".
+    pub canonical: String,
+    pub description: String,
+    /// Right-aligned provenance tag, e.g. "⟨spur⟩" or "⟨claude⟩". Empty for none.
+    pub tag: String,
+}
+
+/// QuerySource for /slash completions. Holds a pre-computed `Vec<SlashRow>`
+/// and a `prefix_start` captured at shell-open time (byte offset of the '/').
+pub struct SlashQuerySource {
+    rows: Vec<SlashRow>,
+    matcher: Matcher,
+    last_picked: Vec<SlashRow>,
+    prefix_start: usize,
+}
+
+impl SlashQuerySource {
+    pub fn new(rows: Vec<SlashRow>, prefix_start: usize) -> Self {
+        Self {
+            rows,
+            matcher: Matcher::new(Config::DEFAULT),
+            last_picked: Vec::new(),
+            prefix_start,
+        }
+    }
+}
+
+impl QuerySource for SlashQuerySource {
+    fn title(&self) -> &str {
+        "Commands · /"
+    }
+
+    fn query_mode(&self) -> QueryMode {
+        QueryMode::ReadFromInputBar
+    }
+
+    fn refresh(&mut self, query: &str) -> Vec<RetrievalRow> {
+        let picked: Vec<SlashRow> = if query.is_empty() {
+            self.rows.iter().take(20).cloned().collect()
+        } else {
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut buf = Vec::new();
+            let mut scored: Vec<(u32, SlashRow)> = self
+                .rows
+                .iter()
+                .filter_map(|r| {
+                    buf.clear();
+                    let score = pattern.score(
+                        Utf32Str::new(&r.canonical, &mut buf),
+                        &mut self.matcher,
+                    )?;
+                    Some((score, r.clone()))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.into_iter().take(20).map(|(_, r)| r).collect()
+        };
+        let out: Vec<RetrievalRow> = picked
+            .iter()
+            .map(|r| RetrievalRow {
+                primary: r.canonical.clone(),
+                secondary: r.description.clone(),
+                tag: r.tag.clone(),
+                atoms: Vec::new(),
+            })
+            .collect();
+        self.last_picked = picked;
+        out
+    }
+
+    fn accept(&self, row_idx: usize) -> Option<RetrievalAccept> {
+        let row = self.last_picked.get(row_idx)?;
+        Some(RetrievalAccept::ReplaceTriggerToken {
+            prefix_start: self.prefix_start,
+            replacement: format!("{} ", row.canonical),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +720,78 @@ mod tests {
             "primary missing icon prefix: {:?}",
             rows[0].primary
         );
+    }
+
+    #[test]
+    fn slash_source_title_is_slash_command() {
+        let src = SlashQuerySource::new(Vec::new(), 0);
+        assert_eq!(src.title(), "Commands · /");
+    }
+
+    #[test]
+    fn slash_source_query_mode_is_read_from_input_bar() {
+        let src = SlashQuerySource::new(Vec::new(), 0);
+        assert_eq!(src.query_mode(), QueryMode::ReadFromInputBar);
+    }
+
+    #[test]
+    fn slash_source_accept_returns_replace_trigger_token() {
+        let entries = vec![SlashRow {
+            canonical: "/help".to_string(),
+            description: "Show help".to_string(),
+            tag: "⟨spur⟩".to_string(),
+        }];
+        let mut src = SlashQuerySource::new(entries, 0);
+        let _ = src.refresh("");
+        let accept = src.accept(0).expect("row 0 exists");
+        match accept {
+            RetrievalAccept::ReplaceTriggerToken {
+                prefix_start,
+                replacement,
+            } => {
+                assert_eq!(prefix_start, 0);
+                assert_eq!(replacement, "/help ");
+            }
+            other => panic!("expected ReplaceTriggerToken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_source_refresh_ranks_by_fuzzy_match_on_canonical() {
+        let rows = vec![
+            SlashRow {
+                canonical: "/help".to_string(),
+                description: "".to_string(),
+                tag: "⟨spur⟩".to_string(),
+            },
+            SlashRow {
+                canonical: "/mode".to_string(),
+                description: "".to_string(),
+                tag: "⟨spur⟩".to_string(),
+            },
+            SlashRow {
+                canonical: "/claude:help".to_string(),
+                description: "".to_string(),
+                tag: "⟨claude⟩".to_string(),
+            },
+        ];
+        let mut src = SlashQuerySource::new(rows, 0);
+        let res = src.refresh("hel");
+        assert!(res.iter().any(|r| r.primary == "/help"));
+        assert!(res.iter().any(|r| r.primary == "/claude:help"));
+        assert!(!res.iter().any(|r| r.primary == "/mode"));
+    }
+
+    #[test]
+    fn slash_source_row_carries_tag() {
+        let rows = vec![SlashRow {
+            canonical: "/help".to_string(),
+            description: "Show help".to_string(),
+            tag: "⟨spur⟩".to_string(),
+        }];
+        let mut src = SlashQuerySource::new(rows, 0);
+        let res = src.refresh("");
+        assert_eq!(res[0].tag, "⟨spur⟩");
+        assert_eq!(res[0].secondary, "Show help");
     }
 }
