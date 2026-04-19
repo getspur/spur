@@ -211,6 +211,14 @@ impl PickerShell {
         self.refilter();
     }
 
+    /// The underlying source's query mode. Used by the view's key-routing
+    /// branch to distinguish trigger-driven (`ReadFromInputBar`) shells
+    /// from history (`OwnedByShell`) shells without maintaining a parallel
+    /// `active_trigger` field.
+    pub fn query_mode(&self) -> crate::components::query_source::QueryMode {
+        self.source.query_mode()
+    }
+
     // ── Rendering ──────────────────────────────────────────────────────
 
     /// Render above `anchor` (the InputBar's rect), clipped to `container`.
@@ -457,6 +465,14 @@ mod tests {
         shell.handle_key(key(KeyCode::Char('b')));
         shell.handle_key(key(KeyCode::Backspace));
         assert_eq!(shell.query(), "a");
+    }
+
+    #[test]
+    fn query_mode_accessor_matches_underlying_source() {
+        use crate::components::query_source::QueryMode;
+        let hist_src = HistoryQuerySource::new(vec![mk("a")]);
+        let shell = PickerShell::open(Box::new(hist_src));
+        assert_eq!(shell.query_mode(), QueryMode::OwnedByShell);
     }
 
     #[test]
