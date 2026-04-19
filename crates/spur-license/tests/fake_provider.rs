@@ -47,3 +47,12 @@ async fn fake_provider_simulated_network_error_preserves_active_state() {
         LicenseStatus::Active
     ));
 }
+
+#[tokio::test]
+async fn initial_active_state_carries_non_unknown_plan_when_seeded() {
+    let mut seed = LicenseState::active_validated(Plan::Pro, Default::default());
+    seed.status_text = "Cached Pro".into();
+    let fake = Arc::new(FakeProvider::new(seed));
+    let license = SpurLicense::from_provider(fake);
+    assert!(matches!(license.current_state().plan, Plan::Pro));
+}

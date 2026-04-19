@@ -65,10 +65,9 @@ impl LicenseSeatProvider {
         };
 
         let sdk = LicenseSeat::new(config);
-        let initial_state = if sdk.current_license().is_some() {
-            LicenseState::active_cached()
-        } else {
-            LicenseState::inactive("No active license")
+        let initial_state = match sdk.current_license() {
+            Some(cached) => hydrate_from_cached(&cached),
+            None => LicenseState::inactive("No active license"),
         };
 
         let (events_tx, _) = broadcast::channel(64);
@@ -359,5 +358,33 @@ pub fn classify_subject(active: bool) -> SubjectKind {
         SubjectKind::User
     } else {
         SubjectKind::Unknown
+    }
+}
+
+fn hydrate_from_cached(cached: &licenseseat::License) -> LicenseState {
+    // Phase-0 Gate 3 confirmed `current_license()` returns a cached License
+    // that wraps `trusted_license: Option<LicenseResponse>`, which carries
+    // `plan_key` and `active_entitlements`. If `trusted_license` is absent
+    // (e.g., cache stale or minimal), fall back to the prior behavior.
+    let (plan, features, expires_at) = match cached.trusted_license.as_ref() {
+        Some(resp) => (
+            Plan::from_key(&resp.plan_key),
+            resp.active_entitlements
+                .iter()
+                .map(|e| e.key.clone())
+                .collect::<BTreeSet<String>>(),
+            resp.expires_at,
+        ),
+        None => (Plan::Unknown, BTreeSet::new(), None),
+    };
+    LicenseState {
+        status: LicenseStatus::Active,
+        subject_kind: SubjectKind::User,
+        plan,
+        features,
+        expires_at,
+        binding_mode: BindingMode::NodeLocked,
+        offline_ok: true,
+        status_text: "Cached license available".into(),
     }
 }
