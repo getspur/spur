@@ -89,8 +89,17 @@ fn render_agentskills(
     RenderedFile { path, bytes }
 }
 
-fn render_codex(_skill: &SkillPayload, _repo_root: &Path) -> RenderedFile {
-    unimplemented!("Task 8")
+fn render_codex(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
+    use crate::skills::installer::{sha256_hex, Marker};
+    let id = format!("spurpower-{}", skill.id);
+    let path = repo_root.join(".codex/skills").join(&id).join("SKILL.md");
+    let marker = Marker {
+        version: 1,
+        skill_id: id.clone(),
+        sha256: sha256_hex(skill.body.as_bytes()),
+    };
+    let bytes = format!("{}{}", marker.render(), skill.body).into_bytes();
+    RenderedFile { path, bytes }
 }
 
 fn render_cursor(_skill: &SkillPayload, _repo_root: &Path) -> RenderedFile {
@@ -156,5 +165,22 @@ mod tests {
         let a = render_agentskills(&skill, &root.join(".claude/skills"), "spurpower-");
         let b = render_agentskills(&skill, &root.join(".claude/skills"), "spurpower-");
         assert_eq!(a.bytes, b.bytes);
+    }
+
+    #[test]
+    fn codex_render_has_no_frontmatter_and_marker_on_line_one() {
+        let skill = sample_skill();
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let rf = render_codex(&skill, &root);
+        assert_eq!(
+            rf.path,
+            std::path::PathBuf::from("/tmp/repo/.codex/skills/spurpower-tdd/SKILL.md"),
+        );
+        let s = std::str::from_utf8(&rf.bytes).unwrap();
+        assert!(
+            s.starts_with("<!-- SPUR-MANAGED v=1 skill=spurpower-tdd sha256="),
+            "marker must be on line 1, got: {s:?}",
+        );
+        assert!(s.contains("Write the test first."));
     }
 }
