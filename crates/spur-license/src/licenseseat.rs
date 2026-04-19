@@ -65,10 +65,9 @@ impl LicenseSeatProvider {
         };
 
         let sdk = LicenseSeat::new(config);
-        let initial_state = if sdk.current_license().is_some() {
-            LicenseState::active_cached()
-        } else {
-            LicenseState::inactive("No active license")
+        let initial_state = match sdk.current_license() {
+            Some(cached) => hydrate_from_cached(&cached),
+            None => LicenseState::inactive("No active license"),
         };
 
         let (events_tx, _) = broadcast::channel(64);
@@ -102,6 +101,18 @@ impl LicenseSeatProvider {
         let tx = self.events_tx.clone();
         handle.spawn(async move {
             while let Ok(event) = rx.recv().await {
+                // C9 dedup (see docs/rca/2026-04-19-licenseseat-emission-audit.md
+                // Gate 1). The explicit activate/validate/heartbeat/deactivate
+                // handlers ALREADY broadcast via `replace_state` with an
+                // authoritative post-mutation snapshot. The SDK also fires
+                // these kinds synchronously during each explicit call, so
+                // forwarding them here produces a stale-then-fresh duplicate.
+                // Drop the handler-originated kinds; keep autonomous / server-
+                // push kinds (revocation, offline-verification failures,
+                // license-loaded).
+                if is_handler_originated(&event.kind) {
+                    continue;
+                }
                 let kind = map_event_kind(event.kind);
                 let snapshot = state
                     .read()
@@ -156,6 +167,14 @@ impl LicenseProvider for LicenseSeatProvider {
 
     fn refresh_policy(&self) -> RefreshPolicy {
         self.refresh_policy
+    }
+
+    fn requires_heartbeat(&self) -> bool {
+        // Upstream licenseseat 0.5.3 has no per-mode heartbeat policy;
+        // the SPUR-layer coarse gate (state.is_active() &&
+        // binding_mode != Unknown) drives suppression. See
+        // docs/rca/2026-04-19-licenseseat-emission-audit.md Gate 2.
+        true
     }
 
     fn has_entitlement(&self, feature: &str) -> bool {
@@ -324,6 +343,33 @@ impl LicenseProvider for DisabledProvider {
     }
 }
 
+/// Returns `true` for `EventKind`s that are emitted synchronously inside
+/// the explicit handler methods (`activate`, `validate`, `heartbeat`,
+/// `deactivate`) and therefore already covered by a `replace_state` broadcast.
+/// Forwarding these from the bridge would produce a stale-then-fresh duplicate
+/// pair on every explicit call (C9).
+///
+/// Verified against upstream enum in `licenseseat-0.5.3/src/events.rs`.
+/// See: docs/rca/2026-04-19-licenseseat-emission-audit.md Gate 1 dedup table.
+fn is_handler_originated(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::ActivationStart
+            | EventKind::ActivationSuccess
+            | EventKind::ActivationError
+            | EventKind::ValidationStart
+            | EventKind::ValidationSuccess
+            | EventKind::ValidationFailed
+            | EventKind::ValidationError
+            | EventKind::ValidationAuthFailed
+            | EventKind::HeartbeatSuccess
+            | EventKind::HeartbeatError
+            | EventKind::DeactivationStart
+            | EventKind::DeactivationSuccess
+            | EventKind::DeactivationError
+    )
+}
+
 fn map_event_kind(kind: EventKind) -> LicenseEventKind {
     match kind {
         EventKind::ActivationSuccess => LicenseEventKind::Activated,
@@ -359,5 +405,82 @@ pub fn classify_subject(active: bool) -> SubjectKind {
         SubjectKind::User
     } else {
         SubjectKind::Unknown
+    }
+}
+
+fn hydrate_from_cached(cached: &licenseseat::License) -> LicenseState {
+    // Phase-0 Gate 3 confirmed `current_license()` returns a cached License
+    // that wraps `trusted_license: Option<LicenseResponse>`, which carries
+    // `plan_key` and `active_entitlements`. If `trusted_license` is absent
+    // (e.g., cache stale or minimal), fall back to the prior behavior.
+    let (plan, features, expires_at) = match cached.trusted_license.as_ref() {
+        Some(resp) => (
+            Plan::from_key(&resp.plan_key),
+            resp.active_entitlements
+                .iter()
+                .map(|e| e.key.clone())
+                .collect::<BTreeSet<String>>(),
+            resp.expires_at,
+        ),
+        None => (Plan::Unknown, BTreeSet::new(), None),
+    };
+    LicenseState {
+        status: LicenseStatus::Active,
+        subject_kind: SubjectKind::User,
+        plan,
+        features,
+        expires_at,
+        binding_mode: BindingMode::NodeLocked,
+        offline_ok: true,
+        status_text: "Cached license available".into(),
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::is_handler_originated;
+    use licenseseat::EventKind;
+
+    #[test]
+    fn handler_originated_covers_all_explicit_kinds() {
+        for kind in [
+            EventKind::ActivationStart,
+            EventKind::ActivationSuccess,
+            EventKind::ActivationError,
+            EventKind::ValidationStart,
+            EventKind::ValidationSuccess,
+            EventKind::ValidationFailed,
+            EventKind::ValidationError,
+            EventKind::ValidationAuthFailed,
+            EventKind::HeartbeatSuccess,
+            EventKind::HeartbeatError,
+            EventKind::DeactivationStart,
+            EventKind::DeactivationSuccess,
+            EventKind::DeactivationError,
+        ] {
+            assert!(
+                is_handler_originated(&kind),
+                "expected {:?} to be classified as handler-originated",
+                kind,
+            );
+        }
+    }
+
+    #[test]
+    fn handler_originated_excludes_autonomous_kinds() {
+        // Autonomous/server-push kinds must NOT be dropped by the bridge.
+        // If this test fails, the bridge will silence revocations and
+        // offline-validation failures — a severe regression.
+        for kind in [
+            EventKind::LicenseRevoked,
+            EventKind::LicenseLoaded,
+            EventKind::ValidationAutoFailed,
+        ] {
+            assert!(
+                !is_handler_originated(&kind),
+                "autonomous kind {:?} must NOT be classified as handler-originated",
+                kind,
+            );
+        }
     }
 }

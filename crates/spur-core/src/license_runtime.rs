@@ -19,7 +19,14 @@ pub fn spawn_license_runtime(license: SpurLicense, funnel: FunnelHandle) -> Join
         let mut current_validate_delay = policy.validate_interval;
         let mut current_heartbeat_delay = policy.heartbeat_interval;
 
-        let mut validate_sleep = Box::pin(tokio::time::sleep(current_validate_delay));
+        // D3: clamp the initial validate sleep to 30s (or less if the
+        // configured interval is already shorter) so a stale cached license
+        // isn't trusted for up to `validate_interval` after boot. Subsequent
+        // ticks use the full configured cadence via the `validate_sleep.reset()`
+        // calls below.
+        let initial_validate_delay =
+            std::cmp::min(current_validate_delay, std::time::Duration::from_secs(30));
+        let mut validate_sleep = Box::pin(tokio::time::sleep(initial_validate_delay));
         let mut heartbeat_sleep = Box::pin(tokio::time::sleep(current_heartbeat_delay));
         let mut updates = license.subscribe();
 
@@ -45,7 +52,7 @@ pub fn spawn_license_runtime(license: SpurLicense, funnel: FunnelHandle) -> Join
                     let jittered_delay = current_validate_delay.mul_f64(1.0 + jitter_ms);
                     validate_sleep.as_mut().reset(tokio::time::Instant::now() + jittered_delay);
                 }
-                _ = &mut heartbeat_sleep, if should_heartbeat(&license.current_state()) => {
+                _ = &mut heartbeat_sleep, if should_heartbeat(&license) => {
                     match license.heartbeat().await {
                         Ok(_) => {
                             current_heartbeat_delay = policy.heartbeat_interval;
@@ -76,15 +83,30 @@ pub fn spawn_license_runtime(license: SpurLicense, funnel: FunnelHandle) -> Join
     })
 }
 
-fn should_heartbeat(state: &LicenseState) -> bool {
-    state.is_active() && !matches!(state.binding_mode, BindingMode::Unknown)
+fn should_heartbeat(license: &SpurLicense) -> bool {
+    let state = license.current_state();
+    state.is_active()
+        && !matches!(state.binding_mode, BindingMode::Unknown)
+        && license.requires_heartbeat()
 }
 
 fn degraded_from(mut state: LicenseState, message: String) -> LicenseState {
-    if state.is_active() {
-        state.status = LicenseStatus::Degraded;
+    match state.status {
+        LicenseStatus::Active => {
+            state.status = LicenseStatus::Degraded;
+            state.status_text = message;
+        }
+        LicenseStatus::Degraded => {
+            // Already degraded — refresh the transient reason to reflect
+            // the most recent failure.
+            state.status_text = message;
+        }
+        LicenseStatus::Inactive | LicenseStatus::Invalid | LicenseStatus::ConfigError => {
+            // Keep authoritative status and text. A transient network error
+            // must not overwrite a prior hard-fail reason (revoked, expired,
+            // unconfigured, etc.).
+        }
     }
-    state.status_text = message;
     state
 }
 
