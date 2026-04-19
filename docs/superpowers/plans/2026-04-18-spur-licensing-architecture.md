@@ -328,11 +328,11 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all --check
 ```
 
-- [ ] **Step 2: Reconcile code and docs**
+- [x] **Step 2: Reconcile code and docs**
 
 If the final implementation differs from the spec in any material way, update the spec immediately so the design record remains truthful.
 
-- [ ] **Step 3: Capture rollout notes**
+- [x] **Step 3: Capture rollout notes**
 
 Document:
 
