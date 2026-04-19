@@ -145,6 +145,79 @@ pub fn validate_id(id: &str) -> Result<(), InvalidSkillId> {
     Ok(())
 }
 
+/// Where a skill's body came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillSource {
+    Bundled,
+    Override,
+}
+
+/// A resolved skill ready for rendering across adapters.
+#[derive(Debug, Clone)]
+pub struct SkillPayload {
+    pub id: String,
+    pub description: String,
+    pub body: String,
+    pub source: SkillSource,
+}
+
+/// Resolve the active skill set: bundled corpus merged with
+/// `.spur/skills/<id>/SKILL.md` overrides (override wins per id).
+///
+/// Validates every skill id (bundled and override) through `validate_id`.
+pub fn list_active_skills(repo_root: &Path) -> Result<Vec<SkillPayload>, InvalidSkillId> {
+    let mut by_id: std::collections::BTreeMap<String, SkillPayload> =
+        std::collections::BTreeMap::new();
+
+    // Bundled first.
+    for (id, raw) in bundled_raw() {
+        validate_id(id)?;
+        let parsed = frontmatter::parse_source(raw);
+        by_id.insert(
+            id.to_string(),
+            SkillPayload {
+                id: id.to_string(),
+                description: parsed.description.unwrap_or("").to_string(),
+                body: parsed.body.to_string(),
+                source: SkillSource::Bundled,
+            },
+        );
+    }
+
+    // Overrides.
+    let override_dir = repo_root.join(".spur/skills");
+    if override_dir.is_dir() {
+        let entries = match std::fs::read_dir(&override_dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(by_id.into_values().collect()),
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            validate_id(&id)?;
+            let skill_md = entry.path().join("SKILL.md");
+            let raw = match std::fs::read_to_string(&skill_md) {
+                Ok(r) => r,
+                Err(_) => continue, // no SKILL.md in that dir
+            };
+            let parsed = frontmatter::parse_source(&raw);
+            by_id.insert(
+                id.clone(),
+                SkillPayload {
+                    id,
+                    description: parsed.description.unwrap_or("").to_string(),
+                    body: parsed.body.to_string(),
+                    source: SkillSource::Override,
+                },
+            );
+        }
+    }
+
+    Ok(by_id.into_values().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +340,54 @@ mod tests {
         let too_long_55 = "a".to_string() + &"b".repeat(54);
         assert!(validate_id(&ok_54).is_ok());
         assert!(validate_id(&too_long_55).is_err());
+    }
+
+    #[test]
+    fn list_active_skills_returns_bundled_when_no_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = list_active_skills(dir.path()).unwrap();
+        let ids: Vec<&str> = skills.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"test-driven-development"));
+        assert!(ids.contains(&"brain-delegation"));
+        // All bundled entries should have non-empty body.
+        for s in &skills {
+            assert!(!s.body.is_empty(), "{}: empty body", s.id);
+        }
+    }
+
+    #[test]
+    fn list_active_skills_override_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let override_dir = dir.path().join(".spur/skills/test-driven-development");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("SKILL.md"),
+            "---\nname: test-driven-development\ndescription: MY OVERRIDE\n---\nMy body here\n",
+        )
+        .unwrap();
+
+        let skills = list_active_skills(dir.path()).unwrap();
+        let tdd = skills
+            .iter()
+            .find(|s| s.id == "test-driven-development")
+            .unwrap();
+        assert_eq!(tdd.description, "MY OVERRIDE");
+        assert_eq!(tdd.body, "My body here\n");
+        assert!(matches!(tdd.source, SkillSource::Override));
+    }
+
+    #[test]
+    fn list_active_skills_rejects_invalid_override_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_override = dir.path().join(".spur/skills/Bad_Name");
+        std::fs::create_dir_all(&bad_override).unwrap();
+        std::fs::write(
+            bad_override.join("SKILL.md"),
+            "---\nname: bad\ndescription: x\n---\nbody",
+        )
+        .unwrap();
+
+        let err = list_active_skills(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("Bad_Name"));
     }
 }
