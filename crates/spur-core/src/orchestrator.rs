@@ -16,8 +16,8 @@ use spur_acp::connection::{
 use spur_acp::registry::AgentRegistry;
 use spur_acp::types::*;
 use spur_acp::{
-    DelegationResult, DelegationStatus, LifecycleState, ReviewKind, ReviewPayload, SpurEvent,
-    SpurEventBody, TimeoutFallback,
+    CancellationControl, DelegationResult, DelegationStatus, LifecycleState, ReviewKind,
+    ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
 };
 use spur_pm::Issue;
 
@@ -377,6 +377,8 @@ pub struct Orchestrator {
     pub review_sink: ReviewSink, // Clone type, shares inner Arc<Mutex>
     repo_root: PathBuf,
     pub pm_service: Option<Arc<PmService>>,
+    /// INV-6: per-delegation cancellation token registry.
+    cancellation_control: CancellationControl,
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -465,6 +467,7 @@ impl Orchestrator {
             review_sink,
             repo_root,
             pm_service: None,
+            cancellation_control: CancellationControl::new(),
         })
     }
 
@@ -477,6 +480,13 @@ impl Orchestrator {
     /// Subscribe to orchestrator events (for TUI, logging, etc.).
     pub fn subscribe(&self) -> broadcast::Receiver<SpurEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// INV-6: Return a clonable handle to the cancellation token registry.
+    /// Pass a clone to `McpCallbackServer` so `handle_cancel_delegation` can
+    /// signal running delegations without routing through the delegation channel.
+    pub fn cancellation_control(&self) -> CancellationControl {
+        self.cancellation_control.clone()
     }
 
     /// Spawn the licensing runtime helper against this orchestrator's event funnel.
@@ -584,6 +594,8 @@ impl Orchestrator {
             .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
+        // INV-6: wire the cancellation side-channel.
+        mcp_server.set_cancellation_control(self.cancellation_control.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -652,6 +664,7 @@ impl Orchestrator {
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
+            self.cancellation_control.clone(),
         ));
 
         // Stream brain output. For native (ACP-transport) agents prompt()
@@ -1564,6 +1577,8 @@ impl Orchestrator {
             .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
+        // INV-6: wire the cancellation side-channel.
+        mcp_server.set_cancellation_control(self.cancellation_control.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1621,6 +1636,7 @@ impl Orchestrator {
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
+            self.cancellation_control.clone(),
         ));
 
         // Spawn the vendor-extension notification pump (if the transport
@@ -1718,6 +1734,8 @@ impl Orchestrator {
             .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
+        // INV-6: wire the cancellation side-channel.
+        mcp_server.set_cancellation_control(self.cancellation_control.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1830,6 +1848,7 @@ impl Orchestrator {
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
+            self.cancellation_control.clone(),
         ));
 
         // Pump vendor-extension notifications onto the event stream.
@@ -2390,6 +2409,7 @@ impl Orchestrator {
     /// Spawns each delegation as a separate tokio task, allowing multiple
     /// workers to run concurrently. A semaphore limits the number of
     /// simultaneous workers to `max_concurrent`.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_delegations(
         mut channel: DelegationChannel,
         repo_root: PathBuf,
@@ -2398,6 +2418,7 @@ impl Orchestrator {
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
         pm_service: Option<Arc<PmService>>,
+        cancellation_control: CancellationControl,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
         // Debounce: skip post-delegation refresh if another completed <3s ago.
@@ -2433,6 +2454,14 @@ impl Orchestrator {
             let pm_service = pm_service.clone();
             let last_refresh_at = Arc::clone(&last_refresh_at);
 
+            // INV-6: register a cancellation token BEFORE spawning so
+            // cancel() arriving between dispatch and spawn still works.
+            let cancel_token = {
+                let cc = cancellation_control.clone();
+                cc.register(request_id.clone()).await
+            };
+            let cancellation_control_for_task = cancellation_control.clone();
+
             tokio::spawn(async move {
                 let mut guard = DelegationGuard {
                     funnel: funnel.clone(),
@@ -2446,6 +2475,8 @@ impl Orchestrator {
                     Ok(permit) => permit,
                     Err(_) => {
                         error!("Semaphore closed — aborting delegation");
+                        // Clean up the token if we abort early.
+                        cancellation_control_for_task.remove(&request_id).await;
                         return; // guard fires DelegationCompleted(Failed)
                     }
                 };
@@ -2488,20 +2519,44 @@ impl Orchestrator {
                 // `DelegationCompleted` was never emitted for the right
                 // session. v1 accepts that worker-hang detection is not
                 // automatic — separate concern, separate fix.
-                let (result, executor_id_opt) = Self::execute_delegation(
-                    agent,
-                    task,
-                    context_files,
-                    request_id.clone(),
-                    brain_session_id,
-                    delegation_plan,
-                    issue_id.clone(),
-                    repo_root,
-                    agent_configs,
-                    funnel.clone(),
-                    review_sink.clone(),
-                )
-                .await;
+                //
+                // INV-6: race execute_delegation against the per-delegation
+                // cancellation token. If cancel() arrives first, we return
+                // DelegationStatus::Cancelled without waiting for the worker.
+                let (result, executor_id_opt) = tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        (
+                            DelegationResult {
+                                status: DelegationStatus::Cancelled {
+                                    reason: "brain requested cancel".into(),
+                                },
+                                diff: None,
+                                diff_summary: None,
+                                summary: None,
+                                estimated_cost_usd: 0.0,
+                                worker_branch: None,
+                            },
+                            None,
+                        )
+                    }
+                    r = Self::execute_delegation(
+                        agent,
+                        task,
+                        context_files,
+                        request_id.clone(),
+                        brain_session_id,
+                        delegation_plan,
+                        issue_id.clone(),
+                        repo_root,
+                        agent_configs,
+                        funnel.clone(),
+                        review_sink.clone(),
+                    ) => r,
+                };
+                // Always clean up the token entry (avoids stale entries
+                // when the delegation completes normally before cancel fires).
+                cancellation_control_for_task.remove(&request_id).await;
 
                 // Comment on / revert issue on completion (10g).
                 if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
@@ -2617,20 +2672,16 @@ impl Orchestrator {
         // so retry loops at orchestrator.rs:3013 reuse the formatted
         // base. No-op when context_files is empty.
         let original_task = format_worker_task(&original_task, &context_files);
-        // Internal operation: __cancel_delegation. Still stubbed until a
-        // real orchestrator-side cancellation handler lands. Any other
-        // `__`-prefixed agent name is an error (no longer reachable from
-        // the MCP server — report_progress and get_session_cost were
-        // removed in T1).
+        // `__`-prefixed agent names are reserved for internal operations.
+        // __cancel_delegation no longer routes through this path (INV-6 —
+        // cancellation now goes through CancellationControl). Any other
+        // `__`-prefixed name is an unsupported internal operation.
         if agent.starts_with("__") {
-            let error = if agent == "__cancel_delegation" {
-                "Internal operation not yet wired: __cancel_delegation".to_string()
-            } else {
-                format!("Unsupported internal operation: {agent}")
-            };
             return (
                 DelegationResult {
-                    status: DelegationStatus::Failed { error },
+                    status: DelegationStatus::Failed {
+                        error: format!("Unsupported internal operation: {agent}"),
+                    },
                     diff: None,
                     diff_summary: None,
                     summary: None,
@@ -3188,6 +3239,9 @@ pub fn should_preserve_worktree(status: &DelegationStatus) -> bool {
                 fallback: TimeoutFallback::Reject { .. } | TimeoutFallback::Abandon,
                 ..
             }
+            // INV-6: preserve partial work for cancelled delegations so
+            // the brain/user can inspect what was done before cancellation.
+            | DelegationStatus::Cancelled { .. }
     )
 }
 
