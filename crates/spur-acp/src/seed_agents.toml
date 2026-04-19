@@ -163,3 +163,23 @@ handle = "gemini"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
+
+# ── opencode-acp ──────────────────────────────────────────────────
+[[agents.entries]]
+name = "opencode-acp"
+command = "opencode"
+args = ["acp"]
+transport = "acp"
+kind = "generic"
+role = "both"
+cost_tier = "medium"
+
+[agents.entries.display]
+handle = "opencode"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[agents.entries.permissions]
+session_mode = "full-auto"
+
