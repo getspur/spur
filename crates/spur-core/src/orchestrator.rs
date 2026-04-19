@@ -4099,6 +4099,169 @@ pub mod test_support {
             .collect();
         super::render_retry_context(&internal, original_task, current_feedback)
     }
+
+    // ─── Review gate helpers ──────────────────────────────────────────
+    // Test-only. Production code uses ReviewSink::register_handle (INV-4).
+
+    use super::{
+        apply_decision_to_candidate, DelegationStatus, ExecutorId, ReviewSink, ReviewSinkError,
+        TimeoutFallback,
+    };
+
+    /// Register a pending review on the sink. Returns the receiver the
+    /// caller awaits.
+    ///
+    /// **Test-only** — production code uses `ReviewSink::register_handle` (INV-4).
+    pub async fn register_gate(
+        executor_id: ExecutorId,
+        attempt_n: u32,
+        review_sink: &ReviewSink,
+    ) -> Result<tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>, ReviewSinkError> {
+        review_sink.register(executor_id, attempt_n).await
+    }
+
+    /// Wait for a review decision (or timeout) and shape the final
+    /// `DelegationStatus`.
+    ///
+    /// **Does NOT handle `Retry`** — returns `Failed` if Retry arrives.
+    ///
+    /// **Test-only** — production code uses `ReviewHandle::into_rx` (INV-4).
+    pub async fn wait_gate(
+        rx: tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>,
+        executor_id: ExecutorId,
+        candidate_status: DelegationStatus,
+        review_timeout: std::time::Duration,
+        timeout_fallback: TimeoutFallback,
+        review_sink: ReviewSink,
+    ) -> DelegationStatus {
+        tokio::select! {
+            recv_result = rx => {
+                match recv_result {
+                    Ok(decision) => apply_decision_to_candidate(decision, candidate_status),
+                    Err(_) => {
+                        review_sink.remove(&executor_id).await;
+                        DelegationStatus::TimedOut {
+                            waited_for: review_timeout,
+                            fallback: timeout_fallback,
+                        }
+                    }
+                }
+            }
+            _ = tokio::time::sleep(review_timeout) => {
+                review_sink.remove(&executor_id).await;
+                DelegationStatus::TimedOut {
+                    waited_for: review_timeout,
+                    fallback: timeout_fallback,
+                }
+            }
+        }
+    }
+
+    /// Register + wait composition.
+    ///
+    /// **Test-only** — production code uses `ReviewSink::register_handle` (INV-4).
+    pub async fn run_gate_for_candidate(
+        executor_id: ExecutorId,
+        attempt_n: u32,
+        candidate_status: DelegationStatus,
+        review_timeout: std::time::Duration,
+        timeout_fallback: TimeoutFallback,
+        review_sink: ReviewSink,
+    ) -> DelegationStatus {
+        let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::error!(
+                    executor_id = %executor_id.0,
+                    error = %e,
+                    "review_sink registration failed"
+                );
+                return DelegationStatus::Failed {
+                    error: format!("review registration failed: {e}"),
+                };
+            }
+        };
+        wait_gate(
+            rx,
+            executor_id,
+            candidate_status,
+            review_timeout,
+            timeout_fallback,
+            review_sink,
+        )
+        .await
+    }
+
+    /// Wraps `register_gate` + `wait_gate` in a retry loop.
+    ///
+    /// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
+    /// `max_review_retries`.
+    ///
+    /// NOTE: mirrors execute_delegation's production retry loop — drift
+    /// hazard. Changes to retry semantics should touch both.
+    ///
+    /// **Test-only** — production code uses `ReviewSink::register_handle` (INV-4).
+    pub async fn run_gate_with_retries(
+        executor_id: ExecutorId,
+        candidate_status: DelegationStatus,
+        review_timeout: std::time::Duration,
+        timeout_fallback: TimeoutFallback,
+        max_review_retries: u32,
+        review_sink: ReviewSink,
+    ) -> DelegationStatus {
+        let mut attempt_n: u32 = 1;
+        loop {
+            let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    return DelegationStatus::Failed {
+                        error: format!("review registration failed: {e}"),
+                    };
+                }
+            };
+
+            use spur_acp::ReviewDecision;
+            let decision_result = tokio::select! {
+                r = rx => r.ok(),
+                _ = tokio::time::sleep(review_timeout) => {
+                    review_sink.remove(&executor_id).await;
+                    return DelegationStatus::TimedOut {
+                        waited_for: review_timeout,
+                        fallback: timeout_fallback,
+                    };
+                }
+            };
+
+            match decision_result {
+                Some(ReviewDecision::Approve) => return candidate_status,
+                Some(ReviewDecision::Reject { reason }) => {
+                    return DelegationStatus::Rejected { reason }
+                }
+                Some(ReviewDecision::Modify { note }) => {
+                    return DelegationStatus::Modified {
+                        reviewer_note: note,
+                    }
+                }
+                Some(ReviewDecision::Retry { .. }) => {
+                    // `>` (not `>=`): see execute_delegation for rationale.
+                    if attempt_n > max_review_retries {
+                        return DelegationStatus::Failed {
+                            error: format!("retry limit exceeded after {} attempts", attempt_n),
+                        };
+                    }
+                    attempt_n += 1;
+                    continue;
+                }
+                None => {
+                    review_sink.remove(&executor_id).await;
+                    return DelegationStatus::TimedOut {
+                        waited_for: review_timeout,
+                        fallback: timeout_fallback,
+                    };
+                }
+            }
+        }
+    }
 }
 
 /// Strip a leading `!` from the first text block in `blocks`, if any.
@@ -4137,195 +4300,6 @@ pub async fn review_dispatcher_loop(mut rx: mpsc::Receiver<InteractiveInput>, si
                 .await;
         }
         // All other variants: noop in this loop.
-    }
-}
-
-// ─── Review gate helper ───────────────────────────────────────────────
-
-/// Register a pending review on the sink. Returns the receiver the
-/// caller awaits.
-///
-/// MUST be called BEFORE emitting `ExecutorReviewRequested` so the TUI
-/// cannot race a `SubmitReview` past an unregistered sink — see
-/// `ReviewSink` docs for the invariant.
-pub async fn register_gate(
-    executor_id: ExecutorId,
-    attempt_n: u32,
-    review_sink: &ReviewSink,
-) -> Result<tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>, ReviewSinkError> {
-    review_sink.register(executor_id, attempt_n).await
-}
-
-/// Wait for a review decision (or timeout) and shape the final
-/// `DelegationStatus`. The caller MUST have already called
-/// `register_gate` and MUST pass the receiver returned from that call.
-///
-/// **Does NOT handle `Retry`** — if a `ReviewDecision::Retry` arrives,
-/// this function returns a `DelegationStatus::Failed` with an
-/// explanatory message. Task 10 wraps this helper in a retry loop that
-/// intercepts `Retry` decisions before they reach this function, so in
-/// practice this arm is unreachable once Task 10 is integrated; the
-/// explicit arm exists for safety if someone calls this helper
-/// directly without a wrapper.
-///
-/// On timeout or sender-drop: explicitly removes the sink entry (to
-/// prevent stale entries per the spec's error-handling
-/// "explicit-remove" contract) and returns
-/// `TimedOut { waited_for, fallback }`.
-pub async fn wait_gate(
-    rx: tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>,
-    executor_id: ExecutorId,
-    candidate_status: DelegationStatus,
-    review_timeout: std::time::Duration,
-    timeout_fallback: TimeoutFallback,
-    review_sink: ReviewSink,
-) -> DelegationStatus {
-    tokio::select! {
-        recv_result = rx => {
-            match recv_result {
-                Ok(decision) => apply_decision_to_candidate(decision, candidate_status),
-                Err(_) => {
-                    // Sender dropped before sending — treat as timeout.
-                    review_sink.remove(&executor_id).await;
-                    DelegationStatus::TimedOut {
-                        waited_for: review_timeout,
-                        fallback: timeout_fallback,
-                    }
-                }
-            }
-        }
-        _ = tokio::time::sleep(review_timeout) => {
-            // Explicit-remove contract (spec error-handling section).
-            review_sink.remove(&executor_id).await;
-            DelegationStatus::TimedOut {
-                waited_for: review_timeout,
-                fallback: timeout_fallback,
-            }
-        }
-    }
-}
-
-/// Register + wait composition. Exists primarily for unit tests that
-/// want to exercise the full gate shape in one call; production code
-/// in `execute_delegation` calls `register_gate` and `wait_gate`
-/// separately so event emission can be sequenced between them (the
-/// register-before-emit ordering the `ReviewSink` invariant requires).
-///
-/// On register failure (already-registered double-register): returns
-/// `Failed` with an explanatory error.
-pub async fn run_gate_for_candidate(
-    executor_id: ExecutorId,
-    attempt_n: u32,
-    candidate_status: DelegationStatus,
-    review_timeout: std::time::Duration,
-    timeout_fallback: TimeoutFallback,
-    review_sink: ReviewSink,
-) -> DelegationStatus {
-    let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(
-                executor_id = %executor_id.0,
-                error = %e,
-                "review_sink registration failed"
-            );
-            return DelegationStatus::Failed {
-                error: format!("review registration failed: {e}"),
-            };
-        }
-    };
-    wait_gate(
-        rx,
-        executor_id,
-        candidate_status,
-        review_timeout,
-        timeout_fallback,
-        review_sink,
-    )
-    .await
-}
-
-/// Test helper: wraps `register_gate` + `wait_gate` in a retry loop,
-/// re-using the same `candidate_status` for each attempt (since this
-/// helper doesn't spawn workers — production code in `execute_delegation`
-/// respawns the worker and produces a fresh candidate each iteration).
-///
-/// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
-/// `max_review_retries`. On exceed, returns
-/// `Failed { error: "retry limit exceeded after N attempts" }`.
-///
-/// NOTE: this mirrors execute_delegation's production retry loop. See
-/// the cross-reference comment at the Retry match arm there for
-/// invariants. Drift hazard: tests passing here do not guarantee the
-/// production loop behaves the same. Changes to retry semantics
-/// should touch both.
-pub async fn run_gate_with_retries(
-    executor_id: ExecutorId,
-    candidate_status: DelegationStatus,
-    review_timeout: std::time::Duration,
-    timeout_fallback: TimeoutFallback,
-    max_review_retries: u32,
-    review_sink: ReviewSink,
-) -> DelegationStatus {
-    let mut attempt_n: u32 = 1;
-    loop {
-        let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
-            Ok(rx) => rx,
-            Err(e) => {
-                return DelegationStatus::Failed {
-                    error: format!("review registration failed: {e}"),
-                };
-            }
-        };
-
-        // One iteration of the gate. We inline the select! here (rather than
-        // calling wait_gate) so we can intercept Retry BEFORE it gets mapped
-        // to Failed by apply_decision_to_candidate.
-        use spur_acp::ReviewDecision;
-        let decision_result = tokio::select! {
-            r = rx => r.ok(),
-            _ = tokio::time::sleep(review_timeout) => {
-                review_sink.remove(&executor_id).await;
-                return DelegationStatus::TimedOut {
-                    waited_for: review_timeout,
-                    fallback: timeout_fallback,
-                };
-            }
-        };
-
-        match decision_result {
-            Some(ReviewDecision::Approve) => return candidate_status,
-            Some(ReviewDecision::Reject { reason }) => {
-                return DelegationStatus::Rejected { reason }
-            }
-            Some(ReviewDecision::Modify { note }) => {
-                return DelegationStatus::Modified {
-                    reviewer_note: note,
-                }
-            }
-            Some(ReviewDecision::Retry { .. }) => {
-                // `>` (not `>=`): see execute_delegation for rationale.
-                // Error message reports `attempt_n` (the actual attempt
-                // count that ran), NOT `max_review_retries`. See the
-                // execute_delegation cross-reference for the worked
-                // example.
-                if attempt_n > max_review_retries {
-                    return DelegationStatus::Failed {
-                        error: format!("retry limit exceeded after {} attempts", attempt_n),
-                    };
-                }
-                attempt_n += 1;
-                continue;
-            }
-            None => {
-                // Sender dropped — treat as timeout.
-                review_sink.remove(&executor_id).await;
-                return DelegationStatus::TimedOut {
-                    waited_for: review_timeout,
-                    fallback: timeout_fallback,
-                };
-            }
-        }
     }
 }
 
