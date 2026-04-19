@@ -160,6 +160,7 @@ pub async fn run(repo_root: PathBuf, force: bool) -> Result<()> {
         Ok(summary) => {
             println!();
             print!("{summary}");
+            print_gitattributes_advisory_if_needed(&repo_root);
         }
         Err(e) => {
             eprintln!("[spur] skills install failed: {e}");
@@ -206,4 +207,20 @@ pub async fn run(repo_root: PathBuf, force: bool) -> Result<()> {
     println!("  spur config check                            # validate your setup");
 
     Ok(())
+}
+
+fn print_gitattributes_advisory_if_needed(repo_root: &std::path::Path) {
+    let path = repo_root.join(".gitattributes");
+    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+    // Advisory if the file doesn't mention LF normalization for .md files.
+    if !(contents.contains("*.md") && contents.contains("eol=lf")) {
+        println!();
+        println!(
+            "Tip: add `*.md text eol=lf` to .gitattributes for cross-platform"
+        );
+        println!(
+            "     teammates. SpurPower marker files may thrash across CRLF/LF"
+        );
+        println!("     systems otherwise.");
+    }
 }
