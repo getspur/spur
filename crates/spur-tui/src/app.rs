@@ -630,6 +630,21 @@ impl App {
             }
         }
 
+        // Seed the per-executor trace from its stream_buffer on spawn.
+        // For a fresh live ExecutorSpawned the buffer is empty (harmless no-op).
+        // On replay the buffer may already be populated from subsequent replayed
+        // events, so the Stream tab has content for pre-existing executors before
+        // new WorkerNotifications arrive. One-time per executor — subsequent
+        // WorkerNotification events append on top of the seeded entries.
+        if let spur_acp::domain::events::SpurEventBody::ExecutorSpawned { id, .. } = &event.body {
+            let exec_id = spur_core::lineage::types::ExecutorId::new(id);
+            if let Some(node) = self.lineage.node(&exec_id) {
+                let agent = node.agent.clone();
+                let entries: Vec<_> = node.stream_buffer.iter().cloned().collect();
+                self.worker_streams.seed_from_stream_buffer(id, &agent, entries.iter());
+            }
+        }
+
         // Reset per-executor trace on retry. Mirrors the lineage
         // projection's `node.stream_buffer.clear()` on the same event.
         if let spur_acp::domain::events::SpurEventBody::ExecutorRetryStarted {
@@ -2153,6 +2168,29 @@ mod worker_stream_routing_tests {
             app.worker_streams().get("orphan-exec").is_none(),
             "orphan events must not materialize a trace"
         );
+    }
+
+    #[test]
+    fn seed_from_stream_buffer_on_rehydrate() {
+        use spur_core::lineage::types::{WorkerStreamEntry, WorkerStreamKind};
+        use std::time::SystemTime;
+
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let entries = vec![
+            WorkerStreamEntry {
+                kind: WorkerStreamKind::Message,
+                text: "restored".into(),
+                occurred_at: SystemTime::now(),
+            },
+            WorkerStreamEntry {
+                kind: WorkerStreamKind::Thought,
+                text: "restored-2".into(),
+                occurred_at: SystemTime::now(),
+            },
+        ];
+        ws.seed_from_stream_buffer("restored-exec", "claude", entries.iter());
+        let trace = ws.get("restored-exec").expect("seeded trace");
+        assert_eq!(trace.entry_count(), 2);
     }
 
     #[test]
