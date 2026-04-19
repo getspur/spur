@@ -43,11 +43,15 @@ pub enum RetrievalAccept {
     ReplaceState(InputStateSnapshot),
     /// Insert a protected atom at the `InputBar` cursor. Used by @mention.
     /// (Not constructed by Phase 1 sources; reserved for Phase 3.)
-    #[allow(dead_code)]
     InsertAtom {
         text: String,
         uri: String,
         name: String,
+        /// If `Some(p)`, the view clears bytes `[p..cursor]` before
+        /// inserting the atom at position `p`. Used by `@mention` accept
+        /// to drop the `@query` prefix that drove the popup. MUST be on
+        /// a UTF-8 char boundary of the InputBar text at accept time.
+        replace_from: Option<usize>,
     },
     /// Replace the text between `prefix_start` and the cursor with
     /// `replacement`. Used by /slash.
@@ -240,6 +244,87 @@ impl QuerySource for HistoryQuerySource {
             .get(row_idx)
             .cloned()
             .map(RetrievalAccept::ReplaceState)
+    }
+}
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// QuerySource backed by a shared `MentionRegistry` handle. Each `refresh`
+/// call re-queries the registry with the current query, so the source
+/// sees fresh filesystem cache contents. Cheap handle clones; no moves.
+pub struct MentionQuerySource {
+    registry: Rc<RefCell<crate::mentions::MentionRegistry>>,
+    session_id: spur_acp::SessionId,
+    cwd: std::path::PathBuf,
+    /// Byte offset in the InputBar text where the trigger's '@' lives.
+    /// Captured at shell-open time, passed into `InsertAtom.replace_from`
+    /// on accept so the view clears `[prefix_start..cursor]` before
+    /// inserting the atom.
+    prefix_start: usize,
+    /// Entries parallel to the rows returned by the most recent `refresh`.
+    last_hits: Vec<crate::mentions::MentionEntry>,
+}
+
+impl MentionQuerySource {
+    pub fn new(
+        registry: Rc<RefCell<crate::mentions::MentionRegistry>>,
+        session_id: spur_acp::SessionId,
+        cwd: std::path::PathBuf,
+        prefix_start: usize,
+    ) -> Self {
+        Self {
+            registry,
+            session_id,
+            cwd,
+            prefix_start,
+            last_hits: Vec::new(),
+        }
+    }
+}
+
+impl QuerySource for MentionQuerySource {
+    fn title(&self) -> &str {
+        "Mentions · @"
+    }
+
+    fn query_mode(&self) -> QueryMode {
+        QueryMode::ReadFromInputBar
+    }
+
+    fn refresh(&mut self, query: &str) -> Vec<RetrievalRow> {
+        use crate::mentions::MentionKind;
+        let hits = self
+            .registry
+            .borrow_mut()
+            .query(&self.session_id, &self.cwd, query, 20);
+        let rows: Vec<RetrievalRow> = hits
+            .iter()
+            .map(|m| {
+                let icon = match m.kind {
+                    MentionKind::Directory => "\u{1F4C1}",
+                    MentionKind::File => "\u{1F4C4}",
+                };
+                RetrievalRow {
+                    primary: format!("{} @{}", icon, m.display),
+                    secondary: String::new(),
+                    tag: String::new(),
+                    atoms: Vec::new(),
+                }
+            })
+            .collect();
+        self.last_hits = hits;
+        rows
+    }
+
+    fn accept(&self, row_idx: usize) -> Option<RetrievalAccept> {
+        let hit = self.last_hits.get(row_idx)?;
+        Some(RetrievalAccept::InsertAtom {
+            text: format!("@{}", hit.display),
+            uri: hit.uri.clone(),
+            name: hit.display.clone(),
+            replace_from: Some(self.prefix_start),
+        })
     }
 }
 
@@ -449,5 +534,107 @@ mod tests {
         let row = HistoryQuerySource::row_from_entry(&entry);
         let (a, b) = row.atoms[0];
         assert_eq!(&row.primary[a..b], "@foo");
+    }
+
+    use crate::mentions::MentionRegistry;
+    use spur_acp::SessionId;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn make_mention_registry_with_cwd(cwd: &std::path::Path) -> Rc<RefCell<MentionRegistry>> {
+        let mut r = MentionRegistry::new();
+        // Prime the cache by running one query; cwd must actually exist so
+        // FileMentionSource returns something deterministic in tests.
+        let _ = r.query(&SessionId::new(), cwd, "", 5);
+        Rc::new(RefCell::new(r))
+    }
+
+    #[test]
+    fn mention_source_title_is_at_mention() {
+        let registry = make_mention_registry_with_cwd(std::path::Path::new("."));
+        let src = MentionQuerySource::new(
+            Rc::clone(&registry),
+            SessionId::new(),
+            std::path::PathBuf::from("."),
+            1, // prefix_start — the '@' byte
+        );
+        assert_eq!(src.title(), "Mentions · @");
+    }
+
+    #[test]
+    fn mention_source_query_mode_is_read_from_input_bar() {
+        let registry = make_mention_registry_with_cwd(std::path::Path::new("."));
+        let src = MentionQuerySource::new(
+            Rc::clone(&registry),
+            SessionId::new(),
+            std::path::PathBuf::from("."),
+            0,
+        );
+        assert_eq!(src.query_mode(), QueryMode::ReadFromInputBar);
+    }
+
+    #[test]
+    fn mention_source_accept_returns_insert_atom_with_replace_from() {
+        // Inject a fake mention entry by preloading the registry cache
+        // manually. Since that's private, we instead use a real registry
+        // over a fixed tmpdir with one file.
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("README.md");
+        std::fs::write(&file_path, "x").unwrap();
+
+        let registry = make_mention_registry_with_cwd(tmp.path());
+        let mut src = MentionQuerySource::new(
+            Rc::clone(&registry),
+            SessionId::new(),
+            tmp.path().to_path_buf(),
+            1, // '@' at byte 1
+        );
+        let rows = src.refresh("READ");
+        assert!(
+            !rows.is_empty(),
+            "expected at least one match for 'READ' against README.md"
+        );
+        let accept = src.accept(0).expect("row 0 exists");
+        match accept {
+            RetrievalAccept::InsertAtom {
+                text,
+                uri,
+                name,
+                replace_from,
+            } => {
+                assert_eq!(replace_from, Some(1));
+                assert!(text.starts_with('@'));
+                assert!(!uri.is_empty());
+                assert!(!name.is_empty());
+            }
+            other => panic!("expected InsertAtom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mention_source_row_label_carries_icon_and_at_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("foo.txt"), "x").unwrap();
+        let registry = make_mention_registry_with_cwd(tmp.path());
+        let mut src = MentionQuerySource::new(
+            Rc::clone(&registry),
+            SessionId::new(),
+            tmp.path().to_path_buf(),
+            0,
+        );
+        let rows = src.refresh("foo");
+        assert!(!rows.is_empty());
+        // Label format matches today's legacy format: "<icon> @<display>"
+        // so visual parity is preserved.
+        assert!(
+            rows[0].primary.contains("@foo"),
+            "primary missing @foo: {:?}",
+            rows[0].primary
+        );
+        assert!(
+            rows[0].primary.starts_with(|c: char| c == '📁' || c == '📄'),
+            "primary missing icon prefix: {:?}",
+            rows[0].primary
+        );
     }
 }
