@@ -10,6 +10,9 @@ use std::sync::OnceLock;
 
 mod frontmatter;
 
+pub mod adapters;
+pub mod installer;
+
 static BUNDLED: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 static BUNDLED_RAW: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 
