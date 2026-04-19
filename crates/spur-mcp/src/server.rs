@@ -138,6 +138,25 @@ pub fn build_worker_info(cfg: &spur_acp::config::AgentConfig) -> WorkerInfo {
 
 // ─── Detached continuation types ─────────────────────────────────────
 
+/// Boxed async callback invoked by `spawn_result_collector` when a detached
+/// delegation finishes.
+///
+/// Arguments:
+/// - `BrainContinuation` — the completed delegation result.
+/// - `String` — worker-session identifier (delegation UUID used as proxy for
+///   the `DelegationCompleted` UI event; unique per delegation).
+///
+/// Implementer routes the continuation back to the orchestrator ingress
+/// (emit UI event first, then try_send / overflow — INV-C3).
+pub type DetachedCompletionCallback = Arc<
+    dyn Fn(
+            spur_acp::domain::BrainContinuation,
+            String, // worker_session proxy
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Bundle of handles required to funnel detached delegation completions back
 /// into the orchestrator's ingress channel.
 ///
@@ -146,24 +165,8 @@ pub fn build_worker_info(cfg: &spur_acp::config::AgentConfig) -> WorkerInfo {
 /// the real `report_detached_completion` implementation in
 /// `Orchestrator::build_continuation_ctx`.
 pub struct DetachedContinuationCtx {
-    /// Called by `spawn_result_collector` when a detached delegation finishes.
-    ///
-    /// Arguments:
-    /// - `BrainContinuation` — the completed delegation result.
-    /// - `String` — worker-session identifier (delegation UUID used as proxy
-    ///   for the `DelegationCompleted` UI event; unique per delegation).
-    ///
-    /// Implementer routes the continuation back to the orchestrator ingress
-    /// (emit UI event first, then try_send / overflow — INV-C3).
-    pub on_complete: Arc<
-        dyn Fn(
-                spur_acp::domain::BrainContinuation,
-                String, // worker_session proxy
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = ()> + Send>,
-            > + Send
-            + Sync,
-    >,
+    /// See [`DetachedCompletionCallback`] for the callback contract.
+    pub on_complete: DetachedCompletionCallback,
 }
 
 /// Why a delegation went detached (used to set `ContinuationSource`).
