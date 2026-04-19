@@ -1711,6 +1711,20 @@ impl SessionDetailView {
             banner.render(frame, rect);
         }
     }
+
+    /// Test-only: read current InputBar text.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn input_bar_text_for_test(&self) -> String {
+        self.input_bar.text()
+    }
+
+    /// Test-only: mutable InputBar access for seeding history in tests.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn input_bar_mut_for_test(&mut self) -> &mut crate::components::input_bar::InputBar {
+        &mut self.input_bar
+    }
 }
 
 // ─── Formatting helpers ─────────────────────────────────────────────────
