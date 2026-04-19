@@ -1738,6 +1738,11 @@ impl App {
                 }
             }
         }
+
+        // Advance spinner frames on all per-executor traces every tick,
+        // regardless of which view is focused.  Keeps traces ready when the
+        // user navigates to them (risk-register PR10: O(entries) per trace).
+        self.worker_streams.tick_all();
     }
 
     /// Render the active view, then overlay help if visible.
@@ -2221,5 +2226,28 @@ mod worker_stream_routing_tests {
             0,
             "retry clears the per-executor trace"
         );
+    }
+
+    #[test]
+    fn app_tick_drives_worker_streams_tick_all() {
+        let mut app = test_app();
+        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+            id: "exec-tick".into(),
+            session_id: spur_acp::SessionId("s".into()),
+            parent_id: None,
+            agent: "claude".into(),
+            role: spur_acp::Role::Executor,
+            task_spec: String::new(),
+        }));
+        app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
+            brain_session_id: spur_acp::SessionId("brain-1".into()),
+            executor_id: "exec-tick".into(),
+            notification: Box::new(spur_acp::SessionNotification::new("s", msg_update("x"))),
+        }));
+
+        // Ticking must not panic and must leave the trace queryable.
+        app.tick();
+        app.tick();
+        assert!(app.worker_streams().get("exec-tick").is_some());
     }
 }
