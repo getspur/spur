@@ -677,7 +677,38 @@ pub async fn run_plan(
 
         // ── Wait for next completion ─────────────────────────────────
         if in_flight.is_empty() {
-            break; // Nothing in flight, nothing to dispatch → done.
+            // B0: exit only when no further progression is possible. The
+            // three states that can still drive new transitions are:
+            //   - Dispatched: a worker may produce a result (via the
+            //     handle_review_task → dispatch_newly_ready post-review
+            //     path, whose completion futures live on a separate
+            //     TaskTracker and are not tracked in run_plan's in_flight).
+            //   - Ready: scheduled but not yet sent — next iteration
+            //     will dispatch.
+            //   - AwaitingReview: the brain may yet approve / reject /
+            //     request_changes. Exiting here would race with
+            //     handle_review_task and cause DN-6 cleanup to stamp the
+            //     task as Failed with "Plan exited with task awaiting
+            //     review" — exactly the phase-3b dispatch failure.
+            // Pending with only-terminal deps is truly stuck and should
+            // fall through to DN-6 cleanup. Reviews are human-paced, so
+            // the poll interval is coarse.
+            let any_progressable = {
+                let p = plan.lock().await;
+                p.tasks.iter().any(|t| {
+                    matches!(
+                        t.status,
+                        PlanTaskStatus::Dispatched { .. }
+                            | PlanTaskStatus::Ready
+                            | PlanTaskStatus::AwaitingReview { .. }
+                    )
+                })
+            };
+            if !any_progressable {
+                break; // DN-6 cleanup will stamp any Pending orphans.
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
         }
 
         // Await the next completed task.
