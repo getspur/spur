@@ -1,6 +1,7 @@
 pub mod events;
 pub mod plan;
 pub mod server;
+pub mod tool_schemas;
 pub mod tools;
 
 pub use plan::test_support;
