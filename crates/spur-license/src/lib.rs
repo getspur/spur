@@ -180,6 +180,13 @@ pub struct SpurLicense {
 }
 
 impl SpurLicense {
+    /// Construct a facade backed by an arbitrary provider. Primary use is
+    /// test injection via `FakeProvider`; production paths should prefer
+    /// `from_env` / `from_env_or_disabled`.
+    pub fn from_provider(provider: std::sync::Arc<dyn crate::provider::LicenseProvider>) -> Self {
+        Self { provider }
+    }
+
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             provider: Arc::new(crate::licenseseat::from_env()?),
