@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus};
@@ -695,7 +695,10 @@ pub async fn run_plan(
         }
     }
 
-    // ── Mark unreachable tasks (blocked by failed dependencies) ──────
+    // DN-6: On terminal loop exit, promote all non-terminal tasks to Failed with
+    // a specific error. Originally this block only caught Pending-with-failed-dep;
+    // now it also catches Pending with missing deps, stuck Ready, stuck Dispatched,
+    // and stuck AwaitingReview. Approved / Rejected / Failed pass through unchanged.
     {
         let mut p = plan.lock().await;
         let failed_ids: HashSet<String> = p
@@ -706,13 +709,37 @@ pub async fn run_plan(
             .collect();
 
         for entry in &mut p.tasks {
-            #[allow(clippy::collapsible_if)]
-            if matches!(entry.status, PlanTaskStatus::Pending) {
-                if entry.spec.depends_on.iter().any(|d| failed_ids.contains(d)) {
+            match &entry.status {
+                PlanTaskStatus::Pending
+                    if entry.spec.depends_on.iter().any(|d| failed_ids.contains(d)) =>
+                {
                     entry.status = PlanTaskStatus::Failed {
                         error: "Blocked by failed dependency".into(),
                     };
                 }
+                PlanTaskStatus::Pending => {
+                    entry.status = PlanTaskStatus::Failed {
+                        error: "Plan exited with task still pending (dep never satisfied)".into(),
+                    };
+                }
+                PlanTaskStatus::Ready => {
+                    entry.status = PlanTaskStatus::Failed {
+                        error: "Plan exited with task ready but never dispatched".into(),
+                    };
+                }
+                PlanTaskStatus::Dispatched { delegation_id } => {
+                    let err =
+                        format!("Plan exited with task still running (delegation {delegation_id})");
+                    entry.status = PlanTaskStatus::Failed { error: err };
+                }
+                PlanTaskStatus::AwaitingReview { .. } => {
+                    entry.status = PlanTaskStatus::Failed {
+                        error: "Plan exited with task awaiting review".into(),
+                    };
+                }
+                PlanTaskStatus::Approved { .. }
+                | PlanTaskStatus::Rejected { .. }
+                | PlanTaskStatus::Failed { .. } => {}
             }
         }
     }
