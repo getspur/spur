@@ -121,6 +121,33 @@ fn render_cursor(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
     RenderedFile { path, bytes }
 }
 
+/// Single per-run steering file that points Kiro's default agent at
+/// `.kiro/skills/spurpower-*`. Emitted once per installer run, not per
+/// skill. Uses the reserved skill id `__pointer` in its marker.
+pub fn render_kiro_steering_pointer(repo_root: &Path) -> RenderedFile {
+    use crate::skills::installer::{sha256_hex, Marker};
+    let path = repo_root.join(".kiro/steering/spurpower-pointer.md");
+    let body = "SpurPower tactical skills live in \
+                `.kiro/skills/spurpower-*/SKILL.md` and are also available \
+                as editable workspace overrides in `.spur/skills/<id>/`. \
+                Use them for TDD, systematic debugging, code review, and \
+                brain-delegation workflows.\n";
+    let marker = Marker {
+        version: 1,
+        skill_id: "__pointer".to_string(),
+        sha256: sha256_hex(body.as_bytes()),
+    };
+    let bytes = format!(
+        "---\ninclusion: always\nname: spurpower-pointer\n\
+         description: Pointer to SpurPower tactical skills in .kiro/skills/spurpower-*\n\
+         ---\n{marker}{body}",
+        marker = marker.render(),
+        body = body,
+    )
+    .into_bytes();
+    RenderedFile { path, bytes }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +240,20 @@ mod tests {
         assert!(!s.contains("globs:"));
         assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=spurpower-tdd sha256="));
         assert!(s.contains("Write the test first."));
+    }
+
+    #[test]
+    fn kiro_steering_pointer_renders_once() {
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let rf = render_kiro_steering_pointer(&root);
+        assert_eq!(
+            rf.path,
+            std::path::PathBuf::from("/tmp/repo/.kiro/steering/spurpower-pointer.md"),
+        );
+        let s = std::str::from_utf8(&rf.bytes).unwrap();
+        assert!(s.starts_with("---\ninclusion: always\n"));
+        assert!(s.contains("name: spurpower-pointer"));
+        assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=__pointer sha256="));
+        assert!(s.contains(".kiro/skills/spurpower-"));
     }
 }
