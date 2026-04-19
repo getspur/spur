@@ -1,6 +1,7 @@
 use spur_tui::commands::registry::CommandRegistry;
 use spur_tui::components::palette::{PaletteKind, PalettePayload};
-use spur_tui::components::palette_sources::{CommandSource, PaletteSource};
+use spur_tui::components::palette_sources::{CommandSource, PaletteSource, SessionSource};
+use spur_tui::session_metadata::{SessionEntry, SessionMetadata};
 
 #[test]
 fn command_source_yields_all_registered_commands_as_command_kind() {
@@ -17,5 +18,36 @@ fn command_source_yields_all_registered_commands_as_command_kind() {
             PalettePayload::Command { name } => assert!(!name.is_empty()),
             _ => panic!("expected Command payload, got {:?}", r.payload),
         }
+    }
+}
+
+#[test]
+fn session_source_yields_session_kind_rows_with_title_as_label() {
+    let mut meta = SessionMetadata::default();
+    meta.sessions.insert(
+        "sess-1".to_string(),
+        SessionEntry {
+            title_override: Some("refactor-auth".to_string()),
+            ..Default::default()
+        },
+    );
+    meta.sessions.insert(
+        "sess-2".to_string(),
+        SessionEntry {
+            title_override: None, // falls back to session_id as label
+            ..Default::default()
+        },
+    );
+
+    let src = SessionSource::from_metadata(&meta);
+    let results = src.collect();
+    assert_eq!(results.len(), 2);
+
+    let labels: Vec<&str> = results.iter().map(|r| r.label.as_str()).collect();
+    assert!(labels.contains(&"refactor-auth"));
+    assert!(labels.contains(&"sess-2"));
+
+    for r in &results {
+        assert!(matches!(r.kind, spur_tui::components::palette::PaletteKind::Session));
     }
 }
