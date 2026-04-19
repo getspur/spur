@@ -370,19 +370,20 @@ and are listed here so subsequent work cannot lose track of them.
    the exact invariant the original author called out. Fix: re-apply
    `set_max_histories(0)` inside `restore_snapshot`.
 
-2. **Persisted `metadata.input_history` is unbounded.** `InputBar` caps
-   in-memory history at `HISTORY_CAP = 100` (`input_bar.rs:1032-1034`), but
-   `App::merge_input_history_entry` (`app.rs:1408+`) only deduplicates;
-   nothing truncates `metadata.input_history` before `save()`. Long-lived
-   users get a monotonically growing `.spur/session_metadata.json`. Fix:
-   lift `HISTORY_CAP` to a shared const and truncate the persisted vector
-   on every save.
+2. **`HISTORY_CAP` magic number was duplicated.** The cap lived as
+   `HISTORY_CAP = 100` at `input_bar.rs:44` and as a hardcoded `100` at
+   `app.rs:1417`. The two could drift independently, causing the in-memory
+   and persisted caps to disagree. The 2026-04-19 review's earlier framing
+   ("persisted history is unbounded") was inaccurate — every writer to
+   `metadata.input_history` already routed through `merge_input_history_entry`
+   which truncates on every push. Fix: lift `HISTORY_CAP` to
+   `crate::input_history` and reference it from both sites.
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| Metadata size grows because history now stores `ProtectedRange`s and provenance | **Currently UNMITIGATED at the persisted layer** (see Defect #2). In-memory `InputBar` history is capped at 100; the JSON-backed vector is not. Must be fixed before stage 2. |
+| Metadata size grows because history now stores `ProtectedRange`s and provenance | Capped at `HISTORY_CAP` (single-sourced from `input_history.rs`) at every push site. Earlier review wording suggesting the persisted layer was unbounded was incorrect; corrected after grounding `app.rs:1417`. |
 | Replay-imported prompts still lose mention atoms | Explicitly documented as an ACP history limitation. |
 | Replay backfill produces text-only twins of structured entries | `same_recall_state` dedup compares full snapshots, so a structured `"hello @foo"` with ranges and an ACP-replayed `"hello @foo"` without ranges are different entries and both persist. Acknowledged limitation; a future merge step could collapse text-equal pairs by preferring the ranges-bearing snapshot. |
 | Duplicate history entries become harder to reason about | Dedup is defined in terms of exact recall state (`snapshot` equality), including `ProtectedRange.uri` — i.e. two prompts that *display* as `@foo` but resolve to different URIs are intentionally distinct. |
