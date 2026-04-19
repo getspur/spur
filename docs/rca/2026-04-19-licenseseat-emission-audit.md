@@ -77,6 +77,40 @@ Relevant code excerpts:
 
 **Consequence:** When SPUR calls any of these four methods explicitly, the SDK fires events through `event_tx` before returning. If `spawn_sdk_event_bridge` is already subscribed via `sdk.subscribe()`, it receives those same events. SPUR's `replace_state` also sends on the same SPUR-level broadcast channel after the explicit call returns. The C9 duplicate-emission concern is real: every explicit `activate`/`validate`/`heartbeat`/`deactivate` will fire both the SDK-bridge path and the `replace_state` path.
 
+**EventKind deduplication reference for Task 7's implementer:**
+
+Kinds that explicit handlers already broadcast via `replace_state` (bridge must drop these — they are emitted inside the four public API methods, all of which SPUR calls explicitly):
+
+| EventKind | Upstream emit site | SPUR mapping (`map_event_kind`) |
+|---|---|---|
+| `ActivationSuccess` | `src/client.rs:193` | `LicenseEventKind::Activated` |
+| `ActivationError` | `src/client.rs:216` | `LicenseEventKind::ActivationFailed` |
+| `ValidationSuccess` | `src/client.rs:275` | `LicenseEventKind::Validated` |
+| `ValidationFailed` | `src/client.rs:281` | `LicenseEventKind::ValidationFailed` |
+| `ValidationError` | `src/client.rs:297` | `LicenseEventKind::ValidationFailed` |
+| `ValidationAuthFailed` | `src/client.rs:292` (inside `validate_key`) | `LicenseEventKind::ValidationFailed` |
+| `HeartbeatSuccess` | `src/client.rs:448` | `LicenseEventKind::HeartbeatOk` |
+| `HeartbeatError` | `src/client.rs:458` | `LicenseEventKind::HeartbeatFailed` |
+| `DeactivationSuccess` | `src/client.rs:370`, `381`, `399` | `LicenseEventKind::Deactivated` |
+| `DeactivationError` | `src/client.rs:406` | `LicenseEventKind::DeactivationFailed` |
+
+Note: `ActivationStart`, `ValidationStart`, and `DeactivationStart` are also emitted inside the explicit handler calls but have no SPUR `replace_state` equivalent — the bridge may forward or drop them as informational only (they carry no state transition).
+
+Kinds the bridge **must** forward (autonomous / server-push — emitted outside the four explicit handler methods, in background threads or startup):
+
+| EventKind | Upstream emit site | Origin | SPUR mapping |
+|---|---|---|---|
+| `LicenseRevoked` | `src/client.rs:301` (inside `validate_key`, called by the auto-validation loop) | Server push detected during background auto-validation | `LicenseEventKind::ValidationFailed` |
+| `ValidationAutoFailed` | `src/client.rs:981`, `992` (inside `start_auto_validation` background thread) | Autonomous background check | `LicenseEventKind::ValidationFailed` |
+| `OfflineValidationFailed` | `src/client.rs:1751` (inside `validate_offline`, triggered by auto-validation fallback) | Autonomous background check | `LicenseEventKind::ValidationFailed` |
+| `ValidationOfflineFailed` | `src/client.rs:1755` (co-emitted with `OfflineValidationFailed`) | Autonomous background check | `LicenseEventKind::ValidationFailed` |
+| `MachineFileVerificationFailed` | `src/client.rs:1533` (inside `verify_machine_file`, called from offline validation path) | Autonomous background check | `LicenseEventKind::ValidationFailed` |
+| `OfflineTokenVerificationFailed` | `src/client.rs:1473` (inside `verify_offline_token`, called from offline validation path) | Autonomous background check | `LicenseEventKind::ValidationFailed` |
+| `LicenseLoaded` | `src/client.rs:116` (SDK constructor, on cold-start cache hit) | SDK startup | `_` (wildcard → `LicenseEventKind::Validated`) |
+| `NetworkOnline` / `NetworkOffline` | `src/client.rs:1635-1638` (inside `set_online`, called from background support tasks and on network-error detection) | Autonomous network monitor | `_` (wildcard → `LicenseEventKind::Validated`) |
+
+The `_` wildcard arm in `map_event_kind` (`crates/spur-license/src/licenseseat.rs:347`) currently maps all unrecognized kinds to `LicenseEventKind::Validated`, which may produce spurious events for `LicenseLoaded` and `NetworkOnline/Offline`. Task 7's implementer should decide whether to filter these before forwarding.
+
 Implication for Phase 2 Task 7 (C9 dedup): **EXECUTE**
 
 ---
@@ -130,7 +164,7 @@ Evidence — the README documents heartbeats as the mechanism for releasing `flo
   heartbeat_interval: Duration::from_secs(300),      // 5 minutes
   ```
 
-Evidence — README `Heartbeat & Seat Tracking` section (line 300):
+Evidence — README `Heartbeat & Seat Tracking` section (`README.md:300`):
 ```
 If heartbeats stop (app crash, network loss, user closes app), the seat is released after the grace period configured in your LicenseSeat dashboard.
 ```
@@ -142,6 +176,16 @@ The README frames heartbeat as a universal seat-tracking mechanism, not one cond
 Implication for Phase 2 Task 8 (D1 gating): **SKIP**
 
 The upstream model does not differentiate heartbeat requirements by mode. All activated subjects run heartbeats at the configured interval. Task 8's per-mode gate would be a SPUR-layer policy, not an enforcement of any upstream invariant.
+
+**Interaction with SPUR's existing `should_heartbeat` gate:** SPUR already has a coarser SPUR-layer gate at `crates/spur-core/src/license_runtime.rs:79-81`:
+
+```rust
+fn should_heartbeat(state: &LicenseState) -> bool {
+    state.is_active() && !matches!(state.binding_mode, BindingMode::Unknown)
+}
+```
+
+This guard suppresses heartbeats when `BindingMode` is `Unknown` (i.e., before SPUR has resolved the mode from the SDK response). It is **intentionally retained as-is**: its purpose is to prevent heartbeat calls before a license is fully bound, not to restrict heartbeat to any specific mode. Task 8 is SKIP because no upstream invariant motivates tightening this gate further — for example, restricting it to `FloatingCi`-only — since the upstream SDK runs heartbeats for all modes equally. If SPUR policy later decides that `NodeLocked` or `Organization` seats should not heartbeat, that change would need to be implemented explicitly in this guard; the audit found no upstream contract that mandates it.
 
 ---
 
