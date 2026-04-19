@@ -148,6 +148,7 @@ fn kiro_available_notification_populates_registry() {
         "brain".to_string(),
         std::path::PathBuf::from("."),
         kiro_cfg,
+        Vec::new(),
     );
 
     let params = serde_json::json!({
@@ -221,6 +222,7 @@ fn kiro_execute_response_renders_as_system_note() {
         "brain".to_string(),
         std::path::PathBuf::from("."),
         kiro_cfg,
+        Vec::new(),
     );
 
     let ev = SpurEvent::now(SpurEventBody::AgentExtNotification {

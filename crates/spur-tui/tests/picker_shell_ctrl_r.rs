@@ -23,6 +23,7 @@ fn mk_view() -> SessionDetailView {
         "brain".into(),
         tmp.path().to_path_buf(),
         spur_tui::test_support::default_agent_config("claude"),
+        Vec::new(),
     )
 }
 
