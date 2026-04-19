@@ -1,5 +1,8 @@
 pub mod continuation_bridge;
-pub use continuation_bridge::{new_overflow_buf, OverflowBuf};
+pub use continuation_bridge::{
+    new_overflow_buf, report_detached_completion,
+    ContinuationEventSink, OverflowBuf,
+};
 
 pub mod scheduler;
 pub use scheduler::{BrainScheduler, ScheduledAction};

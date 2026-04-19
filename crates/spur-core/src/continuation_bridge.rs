@@ -43,12 +43,20 @@ pub async fn report_detached_completion(
         status: cont.payload.status.clone(),
     });
     // 2) Model-visible continuation SECOND (try_send + overflow fallback).
-    let input = InteractiveInput::SystemContinuation {
+    match continuation_tx.try_send(InteractiveInput::SystemContinuation {
         session: session.clone(),
         continuation: cont.clone(),
-    };
-    if let Err(TrySendError::Full(_)) = continuation_tx.try_send(input) {
-        overflow.lock().await.push_back((session, cont));
+    }) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            overflow.lock().await.push_back((session, cont));
+        }
+        Err(TrySendError::Closed(_)) => {
+            tracing::warn!(
+                delegation_id = %cont.delegation_id,
+                "continuation channel disconnected — continuation lost (orchestrator shut down)"
+            );
+        }
     }
 }
 
@@ -83,7 +91,6 @@ mod tests {
     async fn overflow_buf_stores_on_try_send_full() {
         let buf = new_overflow_buf();
         let (_tx, _rx) = mpsc::channel::<InteractiveInput>(1);   // tiny cap
-        let _tx_clone = _tx.clone();
         // Fill the channel.
         _tx.try_send(InteractiveInput::Message { blocks: vec![], interrupt: false }).unwrap();
 
