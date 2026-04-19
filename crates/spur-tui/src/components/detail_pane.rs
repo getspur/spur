@@ -74,21 +74,57 @@ impl DetailPane {
         self.is_following = true;
     }
 
-    pub fn scroll_up(&mut self) {
+    pub fn scroll_up(
+        &mut self,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_up();
+                return;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
         self.is_following = false;
     }
 
-    pub fn scroll_down(&mut self) {
+    pub fn scroll_down(
+        &mut self,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_down();
+                return;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_add(1);
     }
 
-    pub fn scroll_to_top(&mut self) {
+    pub fn scroll_to_top(
+        &mut self,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_to_top();
+                return;
+            }
+        }
         self.scroll_offset = 0;
         self.is_following = false;
     }
 
-    pub fn scroll_to_bottom(&mut self) {
+    pub fn scroll_to_bottom(
+        &mut self,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        if matches!(self.current_tab, DetailTab::Stream) {
+            if let Some(trace) = stream_trace {
+                trace.scroll_to_bottom();
+                return;
+            }
+        }
         self.is_following = true;
     }
 
@@ -98,6 +134,7 @@ impl DetailPane {
         area: Rect,
         node: &ExecutorNode,
         issue_badge: Option<&str>,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
     ) {
         let following_indicator = if self.is_following {
             " ▼ following "
@@ -147,6 +184,20 @@ impl DetailPane {
         // Body
         let body_area = chunks[1];
         let visible_h = body_area.height as usize;
+
+        // For the Stream tab, delegate to ReactTrace when available.
+        if self.current_tab == DetailTab::Stream {
+            if let Some(trace) = stream_trace {
+                // Delegate to the compact ReactTrace body renderer.
+                // `render_compact` paints ONLY the body — DetailPane
+                // owns the outer block. Using `ReactTrace::render`
+                // here would double-draw borders.
+                trace.render_compact(frame, body_area);
+                // Scroll state lives on trace.anchor, not DetailPane's
+                // scroll_offset. Other tabs still use scroll_offset.
+                return;
+            }
+        }
 
         let body_lines = match self.current_tab {
             DetailTab::Stream => self.render_stream(node, body_area.width),
