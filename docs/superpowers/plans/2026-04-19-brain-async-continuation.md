@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Revision:** rev 2 (2026-04-19) — L9 simulation pass applied. API drift vs installed `agent-client-protocol-schema-0.11.4` corrected; cross-task funnel plumbing reconciled; Task-8 restructured into three dispatch helpers.
+
 **Goal:** Give detached worker completion a principled path back to the brain as a system-owned continuation (new ACP prompt turn), without pretending to be user input, via a pure-sync `BrainScheduler` policy owned by `run_interactive`.
 
 **Architecture:** Three-lane ingress (User / Tool / Continuation) collapsed onto one `mpsc::Receiver<InteractiveInput>` but split internally by `BrainScheduler` into two deques (`pending_user`, `pending_continuations`). MCP result collector publishes detached completions via a single `report_detached_completion` helper that emits the funnel event first (for UI) then `try_send`s a `SystemContinuation` variant (for the model), with an overflow deque for backpressure. Autonomous continuation turns fire only when idle; they coalesce and merge into user turns when one is queued, under a per-turn byte budget, with self-describing `[SPUR:background]` marker blocks so the brain can distinguish user-authored from SPUR-injected content on the ACP wire.
@@ -10,10 +12,14 @@
 
 **Spec:** `docs/superpowers/specs/2026-04-19-brain-async-continuation-design.md` (rev 2).
 
-**Prerequisites / dependency notes:**
-- `DelegationStatus::Cancelled { reason }` already exists in `crates/spur-acp/src/domain/delegation.rs` (so INV-6 Cancelled variant is usable today).
-- `BrainSessionId` / `DelegationId` typed newtypes from sibling INV-1 / INV-2 fixes are NOT yet landed; this plan uses the existing `SessionId` (from `spur-acp`) and `String` for `delegation_id`. When INV-1/2 land, a single rename pass migrates the fields. The scheduler API shape is chosen to minimize that diff.
-- `InV-7` `PlanCompleted` / `PlanReadyToMerge` events are NOT yet defined; this plan scopes `ContinuationSource` to `AsyncRequested | BlockTimeout | Cancelled` for v1, leaving the Plan-terminal variants as a trivial additive extension when INV-7 lands.
+**Prerequisites / dependency notes (rev 2):**
+- `DelegationStatus::Cancelled { reason }` already exists in `crates/spur-acp/src/domain/delegation.rs:48` (INV-6 Cancelled variant is usable today).
+- `BrainSessionId` newtype **already exists** in `spur-acp` and is the parameter type of `McpCallbackServer::new`. This plan uses `SessionId` inside `InteractiveInput::SystemContinuation` and `BrainContinuation` to match the existing scheduler/orchestrator idiom; a one-line rename is possible when the remaining INV-2 migration work lands. `DelegationId` typed newtype is NOT yet landed — `String` is used, will rename when INV-1 lands.
+- `SpurEventBody::PlanCompleted` / `SpurEventBody::PlanReadyToMerge` **already exist** (verified at `spur-mcp/tests/plan_cancelled_task_semantics.rs:267,276` and `submit_plan_persist.rs:208,215`). Therefore `ContinuationSource` includes `PlanCompleted` and `PlanReadyToMerge` variants from day 1 (Task 1).
+- `SpurEventBody` is currently **not** `#[non_exhaustive]` (verified `events.rs:233`). Task 5 adds `#[non_exhaustive]` in the same commit as the new `ContinuationDropped` variant — future-proofing for all additive variants.
+- `InteractiveInput` is currently **not** `#[non_exhaustive]` (verified `orchestrator.rs:135`). Task 2 adds `#[non_exhaustive]` in the same commit as `SystemContinuation` for symmetry.
+- ACP crate version: `agent-client-protocol = 0.10` → resolves to `agent-client-protocol-schema-0.11.4`. Prompt builders in Task 7 use `EmbeddedResourceResource` (not `ResourceContents` — that name does not exist).
+- `PromptRequest::new` signature: `new(session_id: impl Into<SessionId>, prompt: Vec<ContentBlock>) -> Self` (verified `content.rs` + live use at `orchestrator.rs:1150`). Task 9 uses `PromptRequest::new(b.acp_session_id.clone(), blocks)`.
 
 ---
 
@@ -75,8 +81,10 @@ mod tests {
             ContinuationSource::AsyncRequested,
             ContinuationSource::BlockTimeout,
             ContinuationSource::Cancelled,
+            ContinuationSource::PlanCompleted,
+            ContinuationSource::PlanReadyToMerge,
         ];
-        assert_eq!(vs.len(), 3);
+        assert_eq!(vs.len(), 5);
     }
 
     #[test]
@@ -123,8 +131,12 @@ pub enum ContinuationSource {
     /// `delegate_to_worker` exceeded the MCP block window; returned
     /// `delegation_id` for polling; worker later finished.
     BlockTimeout,
-    /// Post-INV-6: worker reached `DelegationStatus::Cancelled`.
+    /// Worker reached `DelegationStatus::Cancelled` (INV-6).
     Cancelled,
+    /// `SpurEventBody::PlanCompleted` fired for a plan the brain dispatched.
+    PlanCompleted,
+    /// `SpurEventBody::PlanReadyToMerge` fired for a plan the brain dispatched.
+    PlanReadyToMerge,
 }
 
 /// Narrow projection of a worker outcome for scheduler consumption.
@@ -225,9 +237,9 @@ mod interactive_input_tests {
 Run: `cargo test -p spur-core --lib orchestrator::interactive_input_tests::system_continuation_variant_constructs`
 Expected: compile error — variant does not exist.
 
-- [ ] **Step 3: Add the variant**
+- [ ] **Step 3: Mark `InteractiveInput` `#[non_exhaustive]` + add the variant**
 
-Edit `crates/spur-core/src/orchestrator.rs` — inside the `InteractiveInput` enum (near line 192, just before closing `}`), add:
+Edit `crates/spur-core/src/orchestrator.rs` — add `#[non_exhaustive]` on the `InteractiveInput` enum (above line 135), then inside the enum (near line 192, just before closing `}`), add:
 
 ```rust
     /// Detached delegation completion returned to the orchestrator for
@@ -239,32 +251,85 @@ Edit `crates/spur-core/src/orchestrator.rs` — inside the `InteractiveInput` en
     },
 ```
 
-- [ ] **Step 4: Handle the new variant in the main match arms**
+- [ ] **Step 4: Add a shared DRY helper for "ignore at unexpected site"**
 
-Find every `match` / `if let` over `InteractiveInput` in `orchestrator.rs` (use `grep -n "InteractiveInput::" crates/spur-core/src/orchestrator.rs`). For each site that does NOT handle `SystemContinuation`, add a branch:
+In `orchestrator.rs`, near the `InteractiveInput` enum definition, add a module-private helper:
 
 ```rust
-InteractiveInput::SystemContinuation { .. } => {
-    // Routed via BrainScheduler in run_interactive; unreachable here.
-    tracing::debug!("SystemContinuation at unexpected match site — dropped");
+#[inline]
+fn ignore_system_continuation_unexpected_site(site: &'static str) {
+    tracing::debug!(
+        site = %site,
+        "SystemContinuation reached unexpected match arm — routed via BrainScheduler in run_interactive only"
+    );
 }
 ```
 
-Do NOT wire scheduling logic yet — Task 5 does that.
+- [ ] **Step 5: Add the variant arm at every exhaustive `InteractiveInput` match site**
 
-- [ ] **Step 5: Run tests**
+The following sites match on `InteractiveInput` and are NOT behind a `_ => ...` catch-all. Each requires an explicit arm:
+
+**In `crates/spur-core/src/orchestrator.rs`:**
+- Line 795 (outer loop dispatch)
+- Line 850
+- Line 935
+- Line 1002
+- Line 1025 (`CancelStream` outside-stream-drop branch)
+- Line 1033
+- Line 1045
+- Line 1070
+- Line 1097
+- Line 1258 (inner streaming `select!` — see Step 6)
+- Line 1273
+- Line 1281 (inner `select!` `other =>` catch-all — special, see Step 6)
+- Line 1311
+- Line 1330
+- Line 4349 (test module)
+- Line 4416 (test module)
+
+**In `crates/spur-core/tests/review_gate_integration.rs`:**
+- Line 315
+- Line 339
+- Line 347
+
+For sites that treat the input as a no-op at this layer (most of them), insert:
+
+```rust
+InteractiveInput::SystemContinuation { .. } => {
+    ignore_system_continuation_unexpected_site(concat!(file!(), ":", line!()));
+}
+```
+
+Use `rustc` as the ground truth: `cargo check -p spur-core` will enumerate every non-exhaustive match error. Work through them one by one.
+
+- [ ] **Step 6: Handle the inner `select!` catch-all at line 1281 specially**
+
+The inner streaming `select!` currently has `other => { pending_messages.push_back(other) }`. Task 8 replaces `pending_messages` with `BrainScheduler`; for now, to keep Task 2 self-contained, match `SystemContinuation` explicitly at line 1281 and drop it with the helper (Task 8 rewires it into `scheduler.push_continuation(continuation)`):
+
+```rust
+other @ InteractiveInput::SystemContinuation { .. } => {
+    ignore_system_continuation_unexpected_site("inner_select_catchall_line_1281");
+    // Task 8 replaces this with scheduler.push_continuation(cont).
+    drop(other);
+}
+```
+
+- [ ] **Step 7: Run tests**
 
 Run: `cargo test -p spur-core --lib orchestrator::interactive_input_tests`
 Expected: 1 test PASS.
 
+Run: `cargo test -p spur-core --test review_gate_integration`
+Expected: PASS (test file now handles the variant).
+
 Run: `cargo build -p spur-core`
 Expected: clean build (no non-exhaustive match warnings).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/spur-core/src/orchestrator.rs
-git commit -m "feat(spur-core): add InteractiveInput::SystemContinuation variant"
+git add crates/spur-core/src/orchestrator.rs crates/spur-core/tests/review_gate_integration.rs
+git commit -m "feat(spur-core): add InteractiveInput::SystemContinuation variant (#[non_exhaustive])"
 ```
 
 ---
@@ -647,17 +712,25 @@ git commit -m "feat(spur-core): implement BrainScheduler::next with user-priorit
 Run: `grep -n "pub enum SpurEventBody" crates/spur-acp/src/domain/events.rs`
 Note the line number of the enum; you'll insert a variant near the end.
 
-- [ ] **Step 3: Add `ContinuationDropped` variant**
+- [ ] **Step 3: Mark `SpurEventBody` `#[non_exhaustive]` + add `ContinuationDropped`**
 
-Edit `crates/spur-acp/src/domain/events.rs` — inside `pub enum SpurEventBody`, add:
+`SpurEventBody` is currently not `#[non_exhaustive]`. Adding the new variant without this attribute breaks every exhaustive match on the enum across lineage/projection, lineage/adapter, TUI app/dashboard/session_detail, and tests (~20 sites). The hygiene fix is a one-line addition in the SAME commit.
+
+Edit `crates/spur-acp/src/domain/events.rs` at line ~233:
 
 ```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]                         // ← ADD THIS
+pub enum SpurEventBody {
+    // ... existing variants ...
+
     /// A pending system continuation was evicted without being delivered
     /// to the brain. See async-continuation design spec §Failure Cases.
     ContinuationDropped {
         delegation_id: String,
         reason: ContinuationDropReason,
     },
+}
 ```
 
 Just above `SpurEventBody`, add:
@@ -673,6 +746,8 @@ pub enum ContinuationDropReason {
 ```
 
 Wire it through any `#[serde]` tags already on `SpurEventBody`.
+
+**Note on compilation impact:** because we mark `#[non_exhaustive]` in the same commit, any existing exhaustive `match` on `SpurEventBody` that lacks a `_ => ...` arm will now need one. Run `cargo check --workspace` and add `_ => {}` (or a debug log) at any flagged site. Most TUI sites already have catch-alls; the lineage adapter / projection may need the arm.
 
 - [ ] **Step 4: Implement `note_session_swap` in scheduler**
 
@@ -800,18 +875,26 @@ pub use continuation_bridge::{new_overflow_buf, OverflowBuf};
 Run: `cargo test -p spur-core --lib continuation_bridge::tests::overflow_buf_stores_on_try_send_full`
 Expected: PASS.
 
-- [ ] **Step 3: Implement `report_detached_completion` with failing test**
+- [ ] **Step 3: Implement `report_detached_completion`**
 
 Add to `continuation_bridge.rs`:
 
 ```rust
-use crate::event_funnel::FunnelHandle;
-use spur_acp::domain::events::{DelegationStatus as EvtStatus, SpurEventBody};
+use spur_acp::domain::events::SpurEventBody;
+use spur_acp::domain::delegation::DelegationStatus;
+
+/// Abstract sink — decouples the helper from both `FunnelHandle` (spur-core)
+/// and `McpEventSink` (spur-mcp). Both types implement this by simple
+/// delegation; callers in orchestrator use a closure over `FunnelHandle::emit`
+/// and callers in MCP use the existing `event_sink` via a small adapter.
+pub trait ContinuationEventSink: Send + Sync {
+    fn emit(&self, body: SpurEventBody);
+}
 
 /// Exactly-once bridge from MCP result collector → orchestrator ingress.
-/// Emits the funnel event BEFORE sending `SystemContinuation` (INV-C3).
+/// Emits the UI event BEFORE sending `SystemContinuation` (INV-C3).
 pub async fn report_detached_completion(
-    funnel: &FunnelHandle,
+    sink: &dyn ContinuationEventSink,
     continuation_tx: &mpsc::Sender<InteractiveInput>,
     overflow: &OverflowBuf,
     session: SessionId,
@@ -819,9 +902,9 @@ pub async fn report_detached_completion(
     cont: BrainContinuation,
 ) {
     // 1) UI-visible event FIRST.
-    funnel.emit(SpurEventBody::DelegationCompleted {
+    sink.emit(SpurEventBody::DelegationCompleted {
         worker_session,
-        status: cont.payload.status.clone().into(),
+        status: cont.payload.status.clone(),
     });
     // 2) Model-visible continuation SECOND (try_send + overflow fallback).
     let input = InteractiveInput::SystemContinuation {
@@ -834,37 +917,32 @@ pub async fn report_detached_completion(
 }
 ```
 
-Note: `cont.payload.status.clone().into()` — confirm the `From<DelegationStatus>` conversion exists for `events::DelegationStatus` (or whatever the event enum uses). If not, inline the conversion inline using a `match`.
+Verify `SpurEventBody::DelegationCompleted { worker_session, status }` matches the current shape at `spur-acp/src/domain/events.rs:315` — CONFIRMED. `status` is `DelegationStatus` directly; no `.into()` conversion needed.
 
-Run `grep -n "DelegationCompleted" crates/spur-acp/src/domain/events.rs` to see the exact variant shape; match it.
+- [ ] **Step 4: Adapter impls for `FunnelHandle` and `McpEventSink`**
 
-Add test:
+Add below in the same file:
 
 ```rust
-    #[tokio::test]
-    async fn report_detached_completion_emits_funnel_before_send() {
-        // Build a stub funnel that records emit order.
-        // Spec this test against whatever test helpers event_funnel exposes.
-        // If none: capture events via a broadcast::Receiver test double
-        // and assert DelegationCompleted is the first message observed.
-        //
-        // (Concrete code: copy the pattern from
-        // crates/spur-core/tests or event_funnel.rs itself.)
-    }
+impl ContinuationEventSink for crate::event_funnel::FunnelHandle {
+    fn emit(&self, body: SpurEventBody) { self.emit(body) }
+}
 ```
 
-If a lightweight `FunnelHandle::for_test()` or `tests::make_test_funnel()` already exists in `event_funnel.rs`, use it. Otherwise, skip ordering assertion here and rely on the integration test in Task 11.
+And, in `crates/spur-mcp/src/events.rs` (or wherever `McpEventSink` lives), add a blanket impl OR a small wrapper inside Task 10's wiring — concrete code provided in Task 10 Step 4.
 
-- [ ] **Step 4: Run tests**
+No unit test for ordering here — `FunnelHandle` has no `for_test()` helper. Ordering is covered in Task 13's integration test via a real `broadcast::Receiver`.
+
+- [ ] **Step 5: Run tests**
 
 Run: `cargo test -p spur-core --lib continuation_bridge`
-Expected: tests PASS (may be just the overflow test if ordering test is deferred).
+Expected: overflow-buf test PASSES; no ordering test at this layer.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/spur-core/src/continuation_bridge.rs crates/spur-core/src/lib.rs
-git commit -m "feat(spur-core): add report_detached_completion bridge with overflow deque"
+git commit -m "feat(spur-core): report_detached_completion bridge with ContinuationEventSink trait + overflow deque"
 ```
 
 ---
@@ -966,7 +1044,10 @@ Expected: compile errors — functions don't exist.
 Append to `continuation_bridge.rs`:
 
 ```rust
-use agent_client_protocol::{ContentBlock, ResourceContents, EmbeddedResource, TextContent};
+use agent_client_protocol::{
+    ContentBlock, EmbeddedResource, EmbeddedResourceResource,
+    TextContent, TextResourceContents,
+};
 
 pub const MERGE_BUDGET_DEFAULT_BYTES: usize = 4096;
 
@@ -994,8 +1075,8 @@ fn continuation_resource_block(c: &BrainContinuation) -> ContentBlock {
     ContentBlock::Resource(EmbeddedResource {
         annotations: None,
         meta: None,
-        resource: ResourceContents::TextResourceContents(
-            agent_client_protocol::TextResourceContents {
+        resource: EmbeddedResourceResource::TextResourceContents(
+            TextResourceContents {
                 uri: continuation_uri(&c.delegation_id),
                 mime_type: Some("application/json".into()),
                 text: json,
@@ -1084,8 +1165,8 @@ fn block_byte_cost(b: &ContentBlock) -> usize {
         ContentBlock::Text(t) => t.text.len(),
         ContentBlock::Resource(r) => {
             match &r.resource {
-                ResourceContents::TextResourceContents(t) => t.text.len() + t.uri.len(),
-                _ => 256,  // best-effort default for non-text resources
+                EmbeddedResourceResource::TextResourceContents(t) => t.text.len() + t.uri.len(),
+                EmbeddedResourceResource::BlobResourceContents(_) => 256,  // best-effort
             }
         }
         _ => 128,
@@ -1138,82 +1219,112 @@ At `orchestrator.rs:748`:
 let mut scheduler = crate::scheduler::BrainScheduler::new(None);
 ```
 
-- [ ] **Step 3: Replace the drain-then-recv block with scheduler-driven pop**
+- [ ] **Step 3: Introduce three dispatch helpers + replace drain-then-recv block**
 
-At `orchestrator.rs:784-791`, replace the `pending_messages.pop_front().or_else(...)` pattern with:
+The outer loop at `orchestrator.rs:784-791` is replaced with a **three-dispatch** pattern. Continuation turns do NOT route through an `InteractiveInput` — they go directly to a dispatcher. This avoids the "synthesize a fake SystemContinuation" footgun (C8.1).
+
+Declare above the outer loop (after the `scheduler` construction):
 
 ```rust
-let next_input = loop {
-    match scheduler.next(std::time::Instant::now()) {
-        crate::scheduler::ScheduledAction::UserPrompt(input) => break Some(input),
+// Extracted later in Task 9 into standalone fns; for now, closures inline.
+```
+
+Replace the pop-then-await block with:
+
+```rust
+loop {
+    // (a) Drain overflow at TOP of iteration so next() sees fresh state (C8.2).
+    {
+        let mut over = overflow_continuations.lock().await;
+        while let Some((_sid, c)) = over.pop_front() {
+            scheduler.push_continuation(c);
+        }
+    }
+
+    // (b) Ask scheduler what to do now.
+    let action = scheduler.next(std::time::Instant::now());
+
+    match action {
+        crate::scheduler::ScheduledAction::UserPrompt(user_input) => {
+            dispatch_user_turn(user_input, &[], /* &mut brain, &funnel, ... */).await?;
+        }
         crate::scheduler::ScheduledAction::MergedPrompt { user, continuations } => {
-            // Stash continuations for prompt assembly at the prompt() call site.
-            pending_merge_continuations = continuations;
-            break Some(user);
+            dispatch_user_turn(user, &continuations, /* ... */).await?;
         }
         crate::scheduler::ScheduledAction::ContinuationPrompt(continuations) => {
-            // Synthesize a system-only turn input wrapping the coalesced continuations.
-            pending_merge_continuations = continuations.clone();
-            break Some(crate::orchestrator::InteractiveInput::SystemContinuation {
-                session: active_brain_session_id.clone()
-                    .unwrap_or_else(|| spur_acp::types::SessionId::new()),
-                continuation: continuations.into_iter().next().unwrap(),
-                // Note: the full batch lives in pending_merge_continuations; this
-                // variant carries just one for ingress-type symmetry. The prompt
-                // builder reads from pending_merge_continuations.
-            });
+            dispatch_autonomous_turn(&continuations, /* ... */).await?;
         }
         crate::scheduler::ScheduledAction::Idle => {
-            // Drain overflow deque before awaiting new input.
-            {
-                let mut over = overflow_continuations.lock().await;
-                while let Some((_sid, c)) = over.pop_front() {
-                    scheduler.push_continuation(c);
-                }
-            }
-            // Await new input.
             match user_input_rx.recv().await {
-                Some(input) => match input {
-                    crate::orchestrator::InteractiveInput::SystemContinuation { continuation, .. } => {
-                        scheduler.push_continuation(continuation);
-                        continue;
-                    }
-                    other => {
-                        scheduler.push_user(other);
-                        continue;
-                    }
-                }
-                None => break None,  // channel closed
+                Some(crate::orchestrator::InteractiveInput::SystemContinuation {
+                    continuation, ..
+                }) => scheduler.push_continuation(continuation),
+                Some(other) => scheduler.push_user(other),
+                None => break,   // channel closed — shutdown
             }
         }
     }
-};
+}
 ```
 
-Declare `let mut pending_merge_continuations: Vec<BrainContinuation> = Vec::new();` above the loop. Declare `overflow_continuations: OverflowBuf` as a function parameter of `run_interactive` (see Task 10 for wire-up).
+The three dispatch helpers are defined as inline closures OR pulled out as `async fn` helpers at module scope (recommended — easier to read and test). Each encapsulates: (1) the prompt-block construction via Task 7 builders, (2) the `PromptRequest::new(session_id, blocks)` call (Task 9), (3) `scheduler.note_turn_started()`/`note_turn_finished()` bracketing.
 
-- [ ] **Step 4: Wire `note_turn_started` / `note_turn_finished`**
+Declare `overflow_continuations: OverflowBuf` as a new parameter on `run_interactive` (Task 10 threads it from `spur-cli/main.rs`).
 
-At `orchestrator.rs:1156` (just before `b.connection.prompt(prompt_request).await`), call:
+- [ ] **Step 4: Wire `note_turn_started` / `note_turn_finished` via RAII guard**
+
+The streaming loop has multiple exit paths (normal `:1253`, cancel force-break `:1294`, any `?` error bail-outs). A bare "call finished at line 1253" is insufficient — an error-path exit would leave `turn_in_flight == true` forever. Use an RAII guard to guarantee invocation.
+
+Add to `crates/spur-core/src/scheduler.rs`:
 
 ```rust
-scheduler.note_turn_started();
+/// RAII: sets `turn_in_flight = true` on construction, clears on Drop.
+/// Binds a &mut BrainScheduler for the duration of a turn.
+pub struct TurnGuard<'a> {
+    sched: &'a mut BrainScheduler,
+}
+
+impl<'a> TurnGuard<'a> {
+    pub fn arm(sched: &'a mut BrainScheduler) -> Self {
+        sched.note_turn_started();
+        Self { sched }
+    }
+}
+
+impl Drop for TurnGuard<'_> {
+    fn drop(&mut self) {
+        self.sched.note_turn_finished();
+    }
+}
 ```
 
-At `orchestrator.rs:1253` (after the streaming `loop` exits normally), call:
+In each dispatch helper, bracket the `connection.prompt(...).await` loop with:
 
 ```rust
-scheduler.note_turn_finished();
+let _guard = crate::scheduler::TurnGuard::arm(&mut scheduler);
+// ... the entire streaming select! loop ...
+// _guard drops here → note_turn_finished() regardless of exit path.
 ```
-
-Also call `note_turn_finished()` on any early-exit path out of the streaming loop (cancel force-break at `:1293-1295`).
 
 - [ ] **Step 5: Wire `note_cancel_resolved`**
 
-At the site where the cancel drain completes (after `cancel_deadline` fires or the stream ends during cancel, roughly around the force-break at `orchestrator.rs:1293-1295`), call:
+At the cancel-drain resolution site (`orchestrator.rs:1294`, just before the `break` in the `cancel_deadline` arm), call:
 
 ```rust
 scheduler.note_cancel_resolved(std::time::Instant::now());
+```
+
+Also call it on the normal-path post-cancel completion: if the stream drains during cancel (rather than force-break firing), the `select!` exits at `:1253`; the dispatch helper must check whether a cancel was in progress and call `note_cancel_resolved` if so. Concrete shape:
+
+```rust
+// Inside dispatch_user_turn / dispatch_autonomous_turn:
+let mut saw_cancel = false;
+// inside the select! cancel arm:
+saw_cancel = true;
+// after the select! exits (any path):
+if saw_cancel {
+    scheduler.note_cancel_resolved(std::time::Instant::now());
+}
 ```
 
 - [ ] **Step 6: Build — expect prompt-assembly errors**
@@ -1242,48 +1353,73 @@ If not, continue to Task 9 and commit jointly at its end.
 
 Find where `PromptRequest::new(...)` (or equivalent) is built from the flattened `InteractiveInput::Message` blocks, near line 1156. Record the exact path.
 
-- [ ] **Step 2: Branch on input variant to build blocks**
+- [ ] **Step 2: Extract each dispatch helper, each with its own block-construction**
 
-Replace the single construction with a match on the input that fed this turn:
+Replace Task 8's inline closures with three module-local async fns in `orchestrator.rs`:
 
 ```rust
 use crate::continuation_bridge::{
     render_autonomous_continuation_turn, render_merged_turn_with_spill,
     MERGE_BUDGET_DEFAULT_BYTES,
 };
+use agent_client_protocol::PromptRequest;
 
-let blocks = match &next_input_for_turn {
-    InteractiveInput::Message { blocks, .. } => {
-        if pending_merge_continuations.is_empty() {
-            blocks.clone()
-        } else {
-            let (merged, spilled) = render_merged_turn_with_spill(
-                blocks,
-                &pending_merge_continuations,
-                MERGE_BUDGET_DEFAULT_BYTES,
-            );
-            // Re-queue spilled continuations for the next turn.
-            for c in spilled {
-                scheduler.push_continuation(c);
-            }
-            merged
+/// Fire a user-originated turn (with optional background continuations).
+async fn dispatch_user_turn(
+    user_input: InteractiveInput,
+    continuations: &[spur_acp::domain::BrainContinuation],
+    brain: &mut BrainSession,
+    scheduler: &mut crate::scheduler::BrainScheduler,
+    funnel: &crate::event_funnel::FunnelHandle,
+    // ... other run_interactive state passed through
+) -> Result<Vec<spur_acp::domain::BrainContinuation> /* spilled */> {
+    let user_blocks = match user_input {
+        InteractiveInput::Message { blocks, .. } => blocks,
+        InteractiveInput::NewSessionWithMessage { blocks, .. } => blocks,
+        // Other variants should not reach this path; handle inline or route earlier.
+        other => {
+            tracing::warn!(?other, "unexpected non-Message variant in dispatch_user_turn");
+            return Ok(vec![]);
         }
-    }
-    InteractiveInput::SystemContinuation { .. } => {
-        render_autonomous_continuation_turn(&pending_merge_continuations)
-    }
-    _ => {
-        // Other variants should not reach this path.
-        tracing::warn!("unexpected InteractiveInput variant at prompt construction");
-        vec![]
-    }
-};
-pending_merge_continuations.clear();
+    };
 
-let prompt_request = PromptRequest::new(blocks);
+    let (blocks, spilled) = if continuations.is_empty() {
+        (user_blocks, vec![])
+    } else {
+        render_merged_turn_with_spill(&user_blocks, continuations, MERGE_BUDGET_DEFAULT_BYTES)
+    };
+
+    let prompt_request = PromptRequest::new(brain.acp_session_id.clone(), blocks);
+    let _guard = crate::scheduler::TurnGuard::arm(scheduler);
+    run_brain_prompt_stream(brain, prompt_request, funnel).await?;
+    Ok(spilled)
+}
+
+/// Fire an autonomous continuation-only turn.
+async fn dispatch_autonomous_turn(
+    continuations: &[spur_acp::domain::BrainContinuation],
+    brain: &mut BrainSession,
+    scheduler: &mut crate::scheduler::BrainScheduler,
+    funnel: &crate::event_funnel::FunnelHandle,
+    // ... other state
+) -> Result<()> {
+    let blocks = render_autonomous_continuation_turn(continuations);
+    let prompt_request = PromptRequest::new(brain.acp_session_id.clone(), blocks);
+    let _guard = crate::scheduler::TurnGuard::arm(scheduler);
+    run_brain_prompt_stream(brain, prompt_request, funnel).await?;
+    Ok(())
+}
 ```
 
-Rename `next_input` → `next_input_for_turn` for the variable you bound in Task 8 step 3 so the match in step 2 here is unambiguous.
+`run_brain_prompt_stream` is the existing streaming-loop body extracted from `orchestrator.rs:1156-1300`. Extract it to a helper `async fn` that owns only the streaming `select!` + event emission, not the outer event-loop control flow. The extraction is the biggest structural edit in the plan — do it in small steps and compile after each.
+
+After each dispatch returns, re-queue spilled continuations:
+
+```rust
+for c in spilled { scheduler.push_continuation(c); }
+```
+
+**Important:** `PromptRequest::new` signature is `new(session_id: impl Into<SessionId>, prompt: Vec<ContentBlock>)` (verified at `orchestrator.rs:1150`). The second argument is `prompt`, not `blocks`.
 
 - [ ] **Step 3: Build + sanity test**
 
@@ -1320,45 +1456,96 @@ overflow_continuations: crate::continuation_bridge::OverflowBuf,
 
 Feed them through the same argument list used by every caller (likely `spur-cli/src/main.rs` and any tests).
 
-- [ ] **Step 2: Extend `McpCallbackServer::new` (or equivalent) with the same two inputs**
+- [ ] **Step 2: Extend `McpCallbackServer` with continuation context**
 
-Grep `crates/spur-mcp/src/server.rs` for the constructor. Add fields:
+`McpCallbackServer::new` currently takes `session_id: &spur_acp::BrainSessionId, pm_service, event_sink: Option<Arc<dyn McpEventSink>>` (verified at `server.rs:485`). Do NOT add a new `brain_funnel` field — reuse the existing `event_sink`.
+
+Add a single `DetachedContinuationCtx` bundle to the struct:
 
 ```rust
-continuation_tx: tokio::sync::mpsc::Sender<spur_core::orchestrator::InteractiveInput>,
-overflow_continuations: spur_core::continuation_bridge::OverflowBuf,
-brain_funnel: spur_core::event_funnel::FunnelHandle,
+// In spur-mcp/src/server.rs, near McpCallbackServer struct:
+pub struct DetachedContinuationCtx {
+    pub continuation_tx: tokio::sync::mpsc::Sender<spur_core::orchestrator::InteractiveInput>,
+    pub overflow: spur_core::continuation_bridge::OverflowBuf,
+    pub brain_session_id: spur_acp::types::SessionId,
+}
 ```
 
-(`brain_funnel` is the same funnel handle the orchestrator holds; MCP needs it to emit `DelegationCompleted` first, per INV-C3.)
-
-- [ ] **Step 3: Call `report_detached_completion` from the result-collector detached branch**
-
-Locate `spawn_result_collector` (around `server.rs:519-548`). The current code inserts into `completed_delegations`. Modify the insert point to ALSO invoke the bridge helper when the completion is "detached" (i.e., the originating call was `delegate_async`, OR `delegate_to_worker` that previously timed out and returned `delegation_id`).
-
-Existing code shape (paraphrased from grounding):
+Extend `McpCallbackServer::new`:
 
 ```rust
-let result = oneshot_rx.await?;
-active_delegations.lock().await.remove(&delegation_id);
-completed_delegations.lock().await.insert(delegation_id.clone(), (result.clone(), Instant::now()));
+pub fn new(
+    session_id: &spur_acp::BrainSessionId,
+    pm_service: Option<Arc<PmService>>,
+    event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+    continuation_ctx: DetachedContinuationCtx,     // NEW
+) -> (Self, DelegationChannel) {
 ```
 
-Add, after the insert:
+Store `continuation_ctx: Arc<DetachedContinuationCtx>` on the struct.
+
+- [ ] **Step 3: Adapter from `McpEventSink` to `ContinuationEventSink`**
+
+Add in `crates/spur-mcp/src/events.rs` (or wherever `McpEventSink` trait lives):
 
 ```rust
-// Detached-completion continuation hand-off.
-if is_detached {   // set by the caller — delegate_async OR block-timeout on delegate_to_worker
+/// Thin adapter so Task 6's helper can accept an McpEventSink.
+pub struct SinkAsContinuationEventSink(pub Arc<dyn McpEventSink>);
+
+impl spur_core::continuation_bridge::ContinuationEventSink for SinkAsContinuationEventSink {
+    fn emit(&self, body: spur_acp::domain::events::SpurEventBody) {
+        // McpEventSink typically has a send method that wraps body into SpurEvent
+        // and forwards to the funnel. Inline the exact call here.
+        self.0.send_event(body);   // or self.0.emit(body) — match actual trait
+    }
+}
+```
+
+Confirm the actual `McpEventSink` method name by reading `crates/spur-mcp/src/events.rs`. Adjust the `emit` body to use the real method.
+
+- [ ] **Step 4: Call `report_detached_completion` from the result-collector detached branch**
+
+Modify `spawn_result_collector` to take a single bundled arg:
+
+```rust
+// Old 5-arg signature → new 6-arg signature with one bundle.
+fn spawn_result_collector(
+    tracker: &TaskTracker,
+    delegation_id: String,
+    rx: oneshot::Receiver<DelegationResult>,
+    active: Arc<Mutex<HashMap<String, ...>>>,
+    completed: Arc<Mutex<HashMap<String, (DelegationResult, Instant)>>>,
+    detached: Option<DetachedCompletionHandle>,   // NEW — None for blocking path
+)
+```
+
+Where:
+
+```rust
+pub struct DetachedCompletionHandle {
+    pub ctx: Arc<DetachedContinuationCtx>,
+    pub sink: Arc<dyn ContinuationEventSink>,
+    pub source_kind: DetachedSourceKind,   // AsyncRequested | BlockTimeout
+    pub worker_session: SessionId,
+}
+
+pub enum DetachedSourceKind { AsyncRequested, BlockTimeout }
+```
+
+Inside `spawn_result_collector`, after the `completed_delegations` insert, add:
+
+```rust
+if let Some(h) = detached {
     use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
-    let source = if was_block_timeout {
-        ContinuationSource::BlockTimeout
-    } else {
-        ContinuationSource::AsyncRequested
-    };
-    // Cancelled status overrides regardless of source.
+
     let source = if matches!(result.status, spur_acp::domain::delegation::DelegationStatus::Cancelled { .. }) {
         ContinuationSource::Cancelled
-    } else { source };
+    } else {
+        match h.source_kind {
+            DetachedSourceKind::AsyncRequested => ContinuationSource::AsyncRequested,
+            DetachedSourceKind::BlockTimeout   => ContinuationSource::BlockTimeout,
+        }
+    };
 
     let cont = BrainContinuation {
         delegation_id: delegation_id.clone(),
@@ -1367,35 +1554,47 @@ if is_detached {   // set by the caller — delegate_async OR block-timeout on d
             status: result.status.clone(),
             summary: result.summary.clone(),
             diff_summary: result.diff_summary.clone(),
-            worker_branch: None,  // populate when orchestrator begins emitting it
+            worker_branch: result.worker_branch.clone(),   // DelegationResult does have this field
         },
         created_at: std::time::Instant::now(),
     };
     spur_core::continuation_bridge::report_detached_completion(
-        &brain_funnel,
-        &continuation_tx,
-        &overflow_continuations,
-        brain_session_id.clone(),
-        worker_session.clone(),
+        h.sink.as_ref(),
+        &h.ctx.continuation_tx,
+        &h.ctx.overflow,
+        h.ctx.brain_session_id.clone(),
+        h.worker_session.clone(),
         cont,
     ).await;
 }
 ```
 
-Thread `is_detached` / `was_block_timeout` bool into `spawn_result_collector`'s signature — `handle_delegate_async` passes `true` + `false`; `handle_delegate_to_worker` passes `true` + `true` only on its timeout return path; inline successful `delegate_to_worker` returns pass `false` + `_`.
+Update the three call sites:
+- `server.rs:740` (`handle_delegate_to_worker` inline success) → `detached = None`
+- `server.rs:834` (`handle_delegate_to_worker` block-timeout branch) → `detached = Some(handle with BlockTimeout)`
+- `server.rs:2025` (`handle_delegate_async`) → `detached = Some(handle with AsyncRequested)`
 
-- [ ] **Step 4: Wire in `spur-cli/src/main.rs`**
+(Line numbers verified against the current checkout at grounding time.)
+
+- [ ] **Step 5: Wire in `spur-cli/src/main.rs`**
 
 Near line 466 where `user_tx, user_rx = mpsc::channel(32)` is created:
 
 ```rust
 let overflow_continuations = spur_core::continuation_bridge::new_overflow_buf();
 let continuation_tx = user_tx.clone();   // MCP reuses the same ingress.
+let continuation_ctx = spur_mcp::server::DetachedContinuationCtx {
+    continuation_tx: continuation_tx.clone(),
+    overflow: overflow_continuations.clone(),
+    brain_session_id: brain_session_id.clone(),   // already constructed nearby
+};
 ```
 
-Pass both into both `McpCallbackServer::new(...)` and `run_interactive(...)`.
+Pass `continuation_ctx` into `McpCallbackServer::new(...)`. Pass `overflow_continuations.clone()` as the new `run_interactive` parameter.
 
-- [ ] **Step 5: Build + lightweight run**
+Update any test callers of `run_interactive` in `crates/spur-core/tests/review_gate_integration.rs:315,339,347` — pass a test overflow buf constructed with `new_overflow_buf()`.
+
+- [ ] **Step 6: Build + lightweight run**
 
 Run: `cargo build --workspace`
 Expected: clean build.
@@ -1403,11 +1602,11 @@ Expected: clean build.
 Run: `cargo test --workspace -- --skip expensive`
 Expected: no new failures.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add crates/spur-mcp/src/server.rs crates/spur-core/src/orchestrator.rs crates/spur-cli/src/main.rs
-git commit -m "feat: wire MCP result collector through report_detached_completion"
+git add crates/spur-mcp/src/server.rs crates/spur-mcp/src/events.rs crates/spur-core/src/orchestrator.rs crates/spur-cli/src/main.rs crates/spur-core/tests/review_gate_integration.rs
+git commit -m "feat: wire MCP result collector through report_detached_completion (sink-reuse)"
 ```
 
 ---
@@ -1425,10 +1624,11 @@ Also: any `ResumeSession` handler (grep `InteractiveInput::ResumeSession`).
 
 - [ ] **Step 2: Call `note_session_swap` at each swap**
 
-After the new brain session is established and `active_brain_session_id` is updated:
+There is no `active_brain_session_id` variable. The active brain is `brain: Option<BrainSession>` at `orchestrator.rs:747`, and the session id is `brain.as_ref().unwrap().acp_session_id`. After the new brain session is constructed and assigned:
 
 ```rust
-let evicted = scheduler.note_session_swap(active_brain_session_id.clone());
+let new_sid = brain.as_ref().map(|b| b.acp_session_id.clone());
+let evicted = scheduler.note_session_swap(new_sid);
 for c in evicted {
     funnel.emit(spur_acp::domain::events::SpurEventBody::ContinuationDropped {
         delegation_id: c.delegation_id,
@@ -1437,7 +1637,12 @@ for c in evicted {
 }
 ```
 
-Do this at every place `active_brain_session_id` is mutated after initial startup. Do NOT emit on first-ever brain startup (swap-from-None is not an eviction event).
+Call sites:
+1. **`NewSessionWithMessage`** handler (`orchestrator.rs:1305-1321`) — teardown brain, spawn new brain, push Message.
+2. **`ResumeSession`** handler (grep `InteractiveInput::ResumeSession` for line number).
+3. **Do NOT call on initial brain startup** — first None→Some transition has `pending_continuations` empty by invariant, so the eviction is a no-op, but it's clearer to skip the call entirely at startup.
+
+`funnel` is already in scope in `run_interactive` (built at `orchestrator.rs:454` and threaded throughout).
 
 - [ ] **Step 3: Build**
 
@@ -1640,6 +1845,7 @@ use spur_acp::domain::delegation::DelegationStatus;
 use spur_acp::types::SessionId;
 use std::time::Instant;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 fn mk_cont(id: &str) -> BrainContinuation {
     BrainContinuation {
@@ -1673,7 +1879,7 @@ async fn backpressure_overflow_on_full_channel() {
             session: SessionId::new(),
             continuation: mk_cont(&format!("id-{i}")),
         };
-        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(input) {
+        if let Err(TrySendError::Full(_)) = tx.try_send(input) {
             overflow.lock().await.push_back((SessionId::new(), mk_cont(&format!("id-{i}"))));
         }
     }
@@ -1851,18 +2057,33 @@ echo "INV-C2: OK"
 
 Make executable.
 
-- [ ] **Step 3: Add to CI (or pre-commit)**
+- [ ] **Step 3: Create new CI workflow for invariant lints**
 
-Pattern A — existing GitHub Actions: append a step to the existing lint/test workflow:
+`.github/workflows/` currently contains `release-python.yml`, `release.yml`, `vendor-leak-check.yml` — no general CI / test workflow. Create a NEW file `.github/workflows/lint-invariants.yml`:
 
 ```yaml
-  - name: INV-C1/C2 continuation-scheduler lints
-    run: |
-      ./scripts/lint_prompt_call_sites.sh
-      ./scripts/lint_message_construction_sites.sh
+name: Lint invariants
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # git grep needs the full tree
+
+      - name: INV-C1 — only run_interactive calls brain.prompt()
+        run: ./scripts/lint_prompt_call_sites.sh
+
+      - name: INV-C2 — only TUI translation constructs InteractiveInput::Message
+        run: ./scripts/lint_message_construction_sites.sh
 ```
 
-Pattern B — no CI found: add to `.husky/pre-commit` or a README instruction. Grep: `find .github -name '*.yml'` to confirm.
+Note: `git grep` only sees committed files; this lint is a CI check, not a pre-commit hook. If a pre-commit hook is desired later, switch the scripts to `grep -rn` locally.
 
 - [ ] **Step 4: Run the scripts locally**
 
@@ -1875,9 +2096,34 @@ Expected: `INV-C2: OK`
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/lint_prompt_call_sites.sh scripts/lint_message_construction_sites.sh .github/workflows
+git add scripts/lint_prompt_call_sites.sh scripts/lint_message_construction_sites.sh .github/workflows/lint-invariants.yml
 git commit -m "chore(ci): grep-lints for INV-C1 / INV-C2 (prompt call + Message construction)"
 ```
+
+---
+
+## Rev 2 Corrections Applied
+
+Applied from the L9 simulation pass (see the review transcript for full rationale):
+
+| Correction | Task | Summary |
+|---|---|---|
+| C1.1 | 1 | Added `PlanCompleted` / `PlanReadyToMerge` to `ContinuationSource` (variants exist in SpurEventBody already) |
+| C1.2 | 1 | Prereq note updated: `BrainSessionId` already exists; `DelegationId` not yet landed |
+| C2.1 | 2 | Enumerated 19 match sites + added DRY `ignore_system_continuation_unexpected_site` helper + marked enum `#[non_exhaustive]` |
+| C5.1 | 5 | Marked `SpurEventBody` `#[non_exhaustive]` in same commit as `ContinuationDropped` variant |
+| C6.1 | 6 | Introduced `ContinuationEventSink` trait to decouple from `FunnelHandle` / `McpEventSink` |
+| C6.2 | 6 | Dropped unit ordering test (no `FunnelHandle::for_test()` helper exists); ordering covered in Task 13 |
+| C7.1 | 7 | Renamed `ResourceContents` → `EmbeddedResourceResource` (ACP schema 0.11.4 API) |
+| C8.1 | 8 | Replaced fake-SystemContinuation synthesis with three-dispatch helpers (`dispatch_user_turn`, `dispatch_autonomous_turn`, plus merged path) |
+| C8.2 | 8 | Moved overflow drain to top of loop iteration (before `next()`) |
+| C8.3 | 8 | Added `TurnGuard` RAII to guarantee `note_turn_finished` on every exit path |
+| C9.1 | 9 | `PromptRequest::new(session_id, blocks)` — corrected signature |
+| C10.1 | 10 | Removed `brain_funnel` parameter; reuses existing `event_sink` via `SinkAsContinuationEventSink` adapter |
+| C10.2 | 10 | Bundled continuation context into `DetachedContinuationCtx` + `DetachedCompletionHandle` structs |
+| C11.1 | 11 | Replaced `active_brain_session_id` with `brain.as_ref().map(|b| b.acp_session_id.clone())` |
+| C13.1 | 13 | Added `use tokio::sync::mpsc::error::TrySendError;` import |
+| C14.1 | 14 | Create NEW `.github/workflows/lint-invariants.yml` (no existing workflow to append to) |
 
 ---
 
