@@ -154,6 +154,9 @@ pub struct App {
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
     /// Event-sourced projection of brain → executor lineage.
     lineage: ExecutorLineage,
+    /// Per-executor `ReactTrace` instances rendered by the Stream tab.
+    /// Populated on every `SpurEventBody::WorkerNotification`.
+    pub(crate) worker_streams: crate::worker_streams::WorkerStreams,
     license_state: LicenseStateEvent,
     license_badge: Option<LicenseBadge>,
     #[cfg(feature = "markdown")]
@@ -258,6 +261,7 @@ impl App {
             brain_name: None,
             pending_permission: None,
             lineage: ExecutorLineage::new(),
+            worker_streams: crate::worker_streams::WorkerStreams::new(),
             #[cfg(feature = "markdown")]
             mermaid_picker,
             #[cfg(feature = "markdown")]
@@ -602,6 +606,38 @@ impl App {
         // Always fold into the lineage projection first. The projection is a
         // pure function of the event stream — view code reads from it later.
         self.lineage.apply(&event);
+
+        // Route worker stream updates into per-executor ReactTraces.
+        // Orphan drop: skip events whose executor the lineage doesn't
+        // know yet, to avoid materializing a trace with AgentKind::Generic
+        // that would never be corrected. Matches the brain view's fidelity
+        // ceiling (events before SessionDetailView construction are lost).
+        if let spur_acp::domain::events::SpurEventBody::WorkerNotification {
+            executor_id,
+            notification,
+            ..
+        } = &event.body
+        {
+            let exec_id = spur_core::lineage::types::ExecutorId::new(executor_id);
+            if let Some(node) = self.lineage.node(&exec_id) {
+                let agent_name = node.agent.clone();
+                self.worker_streams.route(executor_id, &agent_name, &notification.update);
+            } else {
+                tracing::trace!(
+                    executor_id = %executor_id,
+                    "dropping WorkerNotification for unknown executor (orphan)"
+                );
+            }
+        }
+
+        // Reset per-executor trace on retry. Mirrors the lineage
+        // projection's `node.stream_buffer.clear()` on the same event.
+        if let spur_acp::domain::events::SpurEventBody::ExecutorRetryStarted {
+            id, ..
+        } = &event.body
+        {
+            self.worker_streams.reset(id);
+        }
 
         self.dirty = true;
 
@@ -1597,6 +1633,16 @@ impl App {
         }
     }
 
+    /// Read-only access to per-executor `ReactTrace` instances.
+    pub fn worker_streams(&self) -> &crate::worker_streams::WorkerStreams {
+        &self.worker_streams
+    }
+
+    /// Mutable access to per-executor `ReactTrace` instances.
+    pub fn worker_streams_mut(&mut self) -> &mut crate::worker_streams::WorkerStreams {
+        &mut self.worker_streams
+    }
+
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
         #[cfg(feature = "markdown")]
@@ -2039,5 +2085,103 @@ fn humanize_since(iso: Option<&str>) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86400)
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Minimal `App` for unit tests. Avoids disk I/O from
+    /// `SessionMetadataStore::load`.
+    pub fn new_for_tests() -> Self {
+        App::new(None, false)
+    }
+}
+
+#[cfg(test)]
+mod worker_stream_routing_tests {
+    use super::*;
+    use spur_acp::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent};
+    use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+    use spur_acp::SessionId;
+
+    fn msg_update(text: &str) -> SessionUpdate {
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            text,
+        ))))
+    }
+
+    fn test_app() -> App {
+        App::new_for_tests()
+    }
+
+    fn wrap_event(body: SpurEventBody) -> SpurEvent {
+        SpurEvent::now(body)
+    }
+
+    #[test]
+    fn worker_notification_populates_per_executor_trace() {
+        let mut app = test_app();
+        // Seed lineage with the executor first — routing drops orphan events.
+        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+            id: "exec-42".into(),
+            parent_id: None,
+            session_id: SessionId("abc".into()),
+            agent: "claude".into(),
+            role: spur_acp::Role::Executor,
+            task_spec: String::new(),
+        }));
+        let notif = Box::new(SessionNotification::new("abc", msg_update("hello from worker")));
+        app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
+            brain_session_id: SessionId("brain-1".into()),
+            executor_id: "exec-42".into(),
+            notification: notif,
+        }));
+        let trace = app.worker_streams().get("exec-42").expect("trace for spawned executor");
+        assert_eq!(trace.entry_count(), 1);
+    }
+
+    #[test]
+    fn orphan_worker_notification_is_dropped() {
+        let mut app = test_app();
+        let notif = Box::new(SessionNotification::new("abc", msg_update("orphan")));
+        app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
+            brain_session_id: SessionId("brain-1".into()),
+            executor_id: "orphan-exec".into(),
+            notification: notif,
+        }));
+        assert!(
+            app.worker_streams().get("orphan-exec").is_none(),
+            "orphan events must not materialize a trace"
+        );
+    }
+
+    #[test]
+    fn executor_retry_started_resets_trace() {
+        let mut app = test_app();
+        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+            id: "exec-r".into(),
+            parent_id: None,
+            session_id: SessionId("abc".into()),
+            agent: "claude".into(),
+            role: spur_acp::Role::Executor,
+            task_spec: String::new(),
+        }));
+        app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
+            brain_session_id: SessionId("brain-1".into()),
+            executor_id: "exec-r".into(),
+            notification: Box::new(SessionNotification::new("abc", msg_update("pre-retry"))),
+        }));
+        assert_eq!(app.worker_streams().get("exec-r").unwrap().entry_count(), 1);
+        app.handle_spur_event(wrap_event(SpurEventBody::ExecutorRetryStarted {
+            id: "exec-r".into(),
+            attempt_n: 2,
+            reason: "test retry".into(),
+            new_session_id: SessionId("new-sess".into()),
+        }));
+        assert_eq!(
+            app.worker_streams().get("exec-r").unwrap().entry_count(),
+            0,
+            "retry clears the per-executor trace"
+        );
     }
 }
