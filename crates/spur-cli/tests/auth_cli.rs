@@ -46,3 +46,18 @@ fn auth_login_requires_provider_configuration() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not configured") || stderr.contains("license provider"));
 }
+
+#[test]
+fn auth_status_json_emits_parseable_object() {
+    let _guard = LOCK.lock().unwrap();
+    let output = spur()
+        .args(["auth", "status", "--format", "json"])
+        .output()
+        .expect("spawn spur auth status --format json");
+    assert!(output.status.success(), "exit status: {:?}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .expect("valid JSON on stdout");
+    assert!(value.get("status").is_some(), "missing status field: {stdout}");
+    assert!(value.get("plan").is_some(), "missing plan field: {stdout}");
+}
