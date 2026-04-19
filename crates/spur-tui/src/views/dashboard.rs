@@ -134,6 +134,12 @@ fn format_issue_badge(issue_id: &str, issues: &[spur_pm::IssueSummary]) -> Strin
     }
 }
 
+impl Default for DashboardView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DashboardView {
     pub fn new() -> Self {
         let mut activity_log = ActivityLog::new("Activity");
@@ -192,7 +198,7 @@ impl DashboardView {
         } else if text.contains('@')
             && !text
                 .split('@')
-                .last()
+                .next_back()
                 .unwrap_or("")
                 .contains(char::is_whitespace)
         {
@@ -794,27 +800,24 @@ impl DashboardView {
                 && self.detail_pane.current_tab == DetailTab::Review
             {
                 let ch = self.input_bar.text().chars().next().unwrap();
-                match ch {
-                    ch @ ('a' | 'd' | 'm' | 'R') => {
-                        self.input_bar.clear();
-                        if let Some(decision) =
-                            crate::components::review_card::decision_for_key(ch, None)
-                        {
-                            if let Some(id) = self.focused_node.clone() {
-                                let attempt_n = lineage
-                                    .and_then(|l| l.node(&id))
-                                    .and_then(|n| n.pending_review.as_ref().map(|r| r.attempt_n))
-                                    .unwrap_or(1);
-                                return Some(Action::SubmitReview {
-                                    executor_id: id.0,
-                                    attempt_n,
-                                    decision,
-                                });
-                            }
+                if let ch @ ('a' | 'd' | 'm' | 'R') = ch {
+                    self.input_bar.clear();
+                    if let Some(decision) =
+                        crate::components::review_card::decision_for_key(ch, None)
+                    {
+                        if let Some(id) = self.focused_node.clone() {
+                            let attempt_n = lineage
+                                .and_then(|l| l.node(&id))
+                                .and_then(|n| n.pending_review.as_ref().map(|r| r.attempt_n))
+                                .unwrap_or(1);
+                            return Some(Action::SubmitReview {
+                                executor_id: id.0,
+                                attempt_n,
+                                decision,
+                            });
                         }
-                        return None;
                     }
-                    _ => {}
+                    return None;
                 }
             }
 

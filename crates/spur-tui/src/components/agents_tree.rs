@@ -22,6 +22,12 @@ pub struct AgentsTree {
     selected: Option<ExecutorId>,
 }
 
+impl Default for AgentsTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentsTree {
     pub fn new() -> Self {
         Self {

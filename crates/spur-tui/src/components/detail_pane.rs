@@ -46,6 +46,12 @@ pub struct DetailPane {
     is_following: bool,
 }
 
+impl Default for DetailPane {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DetailPane {
     pub fn new() -> Self {
         Self {

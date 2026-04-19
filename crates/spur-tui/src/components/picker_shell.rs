@@ -349,7 +349,7 @@ impl PickerShell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::query_source::{HistoryQuerySource, QuerySource, RetrievalAccept};
+    use crate::components::query_source::{HistoryQuerySource, RetrievalAccept};
     use crate::input_history::{InputHistoryEntry, InputStateSnapshot};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

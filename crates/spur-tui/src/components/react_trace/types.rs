@@ -124,7 +124,9 @@ pub(crate) enum Segment {
 /// resize clamps to the entry's last row (Phase 3 trade-off; v1 byte
 /// anchor was entry-coarse and snapped to entry start anyway).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ScrollAnchor {
+    #[default]
     Following,
     Row {
         entry_idx: usize,
@@ -132,8 +134,3 @@ pub enum ScrollAnchor {
     },
 }
 
-impl Default for ScrollAnchor {
-    fn default() -> Self {
-        ScrollAnchor::Following
-    }
-}

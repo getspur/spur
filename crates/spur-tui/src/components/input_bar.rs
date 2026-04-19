@@ -1431,7 +1431,7 @@ impl InputBar {
         let layout = crate::components::input_bar_wrap::wrap(&lines, inner.width);
         let visible = inner.height as usize;
         let total = layout.visual_height() as usize;
-        let view_top = if total <= visible { 0 } else { total - visible };
+        let view_top = total.saturating_sub(visible);
         let last_vr = (view_top + visible).min(total);
         let mut out_lines: Vec<ratatui::text::Line<'static>> =
             Vec::with_capacity(last_vr.saturating_sub(view_top));
@@ -1489,6 +1489,24 @@ impl InputBar {
         self.goal_vcol = Some(goal);
         let (target_row, target_byte) = layout.visual_to_logical(target_vr, target_vc);
         self.move_cursor_to_byte(target_byte_abs(&lines, target_row, target_byte));
+    }
+}
+
+/// Convert per-line byte offset to absolute byte offset across all lines.
+fn target_byte_abs(lines: &[String], row: usize, byte_col: usize) -> usize {
+    let mut acc = 0usize;
+    for (i, l) in lines.iter().enumerate() {
+        if i == row {
+            return acc + byte_col;
+        }
+        acc += l.len() + 1; // +1 for '\n'
+    }
+    acc
+}
+
+impl Default for InputBar {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1605,23 +1623,5 @@ mod required_height_tests {
             .draw(|f| bar.render(f, Rect::new(0, 0, 20, 3)))
             .unwrap();
         assert_eq!(bar.last_inner_width_for_test(), 18);
-    }
-}
-
-/// Convert per-line byte offset to absolute byte offset across all lines.
-fn target_byte_abs(lines: &[String], row: usize, byte_col: usize) -> usize {
-    let mut acc = 0usize;
-    for (i, l) in lines.iter().enumerate() {
-        if i == row {
-            return acc + byte_col;
-        }
-        acc += l.len() + 1; // +1 for '\n'
-    }
-    acc
-}
-
-impl Default for InputBar {
-    fn default() -> Self {
-        Self::new()
     }
 }

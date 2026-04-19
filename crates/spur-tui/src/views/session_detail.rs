@@ -1818,7 +1818,7 @@ mod invalidate_protocols_tests {
 
     fn test_ctx() -> crate::views::ViewContext<'static> {
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
-            std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+            std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         crate::views::ViewContext {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,
@@ -1975,7 +1975,7 @@ mod cancel_state_tests {
 
     fn test_ctx() -> crate::views::ViewContext<'static> {
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
-            std::sync::LazyLock::new(|| spur_core::lineage::projection::ExecutorLineage::new());
+            std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         crate::views::ViewContext {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,

@@ -434,8 +434,8 @@ async fn main() -> Result<()> {
             // Create PmService (optional — returns None if no backend available)
             let pm_service = spur_pm::PmService::try_new(
                 config.pm.github.as_ref().and_then(|g| g.repo.clone()),
-                config.pm.beads.as_ref().map_or(true, |b| b.enabled),
-                config.pm.github.as_ref().map_or(true, |g| g.enabled),
+                config.pm.beads.as_ref().is_none_or(|b| b.enabled),
+                config.pm.github.as_ref().is_none_or(|g| g.enabled),
                 &repo_root,
                 None,
             )
@@ -654,8 +654,8 @@ async fn cmd_agents(repo_root: PathBuf, command: Option<AgentsCommands>) -> Resu
                 println!("No agents registered. Run `spur init` first.");
             } else {
                 println!(
-                    "{:<15} {:<10} {:<8} {:<8} {}",
-                    "Name", "Transport", "Role", "Cost", "Health"
+                    "{:<15} {:<10} {:<8} {:<8} Health",
+                    "Name", "Transport", "Role", "Cost"
                 );
                 println!("{}", "-".repeat(55));
                 for agent in agents {

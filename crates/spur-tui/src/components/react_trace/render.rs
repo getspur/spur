@@ -415,11 +415,11 @@ impl ReactTrace {
             let width_ok = self
                 .line_cache
                 .as_ref()
-                .map_or(false, |c| c.width == effective_width);
+                .is_some_and(|c| c.width == effective_width);
             let fence_ok = self
                 .line_cache
                 .as_ref()
-                .map_or(false, |c| c.fence_gen == fence_gen);
+                .is_some_and(|c| c.fence_gen == fence_gen);
 
             if width_ok && fence_ok {
                 match dirty {

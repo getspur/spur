@@ -30,7 +30,7 @@ fn seed_state() -> PaletteState {
 fn char_key_appends_to_query() {
     let mut s = seed_state();
     let i = s.handle_key(key(KeyCode::Char('r')));
-    assert!(matches!(i, None));
+    assert!(i.is_none());
     assert_eq!(s.query(), "r");
 }
 
@@ -39,7 +39,7 @@ fn backspace_pops_char() {
     let mut s = seed_state();
     s.set_query("refa");
     let i = s.handle_key(key(KeyCode::Backspace));
-    assert!(matches!(i, None));
+    assert!(i.is_none());
     assert_eq!(s.query(), "ref");
 }
 
@@ -47,7 +47,7 @@ fn backspace_pops_char() {
 fn down_moves_cursor_and_emits_no_intent() {
     let mut s = seed_state();
     let i = s.handle_key(key(KeyCode::Down));
-    assert!(matches!(i, None));
+    assert!(i.is_none());
     assert_eq!(s.cursor(), 1);
 }
 
@@ -67,7 +67,7 @@ fn enter_emits_accept_intent_with_selected_payload() {
 fn enter_with_empty_ranked_emits_no_intent() {
     let mut s = PaletteState::new();
     let i = s.handle_key(key(KeyCode::Enter));
-    assert!(matches!(i, None));
+    assert!(i.is_none());
 }
 
 #[test]

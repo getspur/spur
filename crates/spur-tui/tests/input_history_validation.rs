@@ -2,7 +2,6 @@
 //! must not produce InputStateSnapshots with invalid ProtectedRanges.
 //! Invalid ranges are dropped on load; the text payload is preserved.
 
-use spur_tui::components::input_bar::ProtectedRange;
 use spur_tui::input_history::InputStateSnapshot;
 
 fn snapshot_json(text: &str, ranges_json: &str) -> String {

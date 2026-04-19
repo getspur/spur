@@ -1251,7 +1251,7 @@ fn sim_mermaid_state_mismatch_in_shift() {
 /// consecutive page_ups produce the same anchor.
 #[test]
 fn sim_page_up_walks_within_long_message() {
-    use crate::components::react_trace::types::ScrollAnchor;
+    
     let mut trace = ReactTrace::new_for_tests();
 
     let mut payload = String::new();
@@ -1294,7 +1294,7 @@ fn sim_page_up_walks_within_long_message() {
 /// entry 3's content after the new chunks land.
 #[test]
 fn sim_anchor_preserved_across_appends_to_later_entries() {
-    use crate::components::react_trace::types::ScrollAnchor;
+    
     let mut trace = ReactTrace::new_for_tests();
 
     // Five entries from different agents (so each pushes a new entry).
