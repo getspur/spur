@@ -78,6 +78,10 @@ role = "both"
 capabilities = []
 cost_tier = "medium"
 
+[agents.entries.permissions]
+skip = true
+session_mode = "bypassPermissions"
+
 # Codex via zed-industries/codex-acp — ACP adapter for OpenAI Codex.
 # Install binary from https://github.com/zed-industries/codex-acp/releases
 # or use the codex-acp npx entry below instead.
