@@ -49,6 +49,29 @@ impl PickerShell {
         }
     }
 
+    /// Open a shell with an initial query (e.g. from an active trigger
+    /// prefix). For `ReadFromInputBar` sources, installs `query` into the
+    /// shell's internal `MiniInput` via `set_query_from_input_bar`. For
+    /// `OwnedByShell` sources, uses `query` as the initial MiniInput text.
+    pub fn open_with_query(source: Box<dyn QuerySource>, query: &str) -> Self {
+        let mut shell = Self::open(source);
+        if !query.is_empty() {
+            // Use the existing set_query_from_input_bar path for trigger
+            // sources; for OwnedByShell sources, fall back to pasting into
+            // the MiniInput directly.
+            if shell.source.query_mode() == QueryMode::ReadFromInputBar {
+                shell.set_query_from_input_bar(query);
+            } else {
+                shell.query.paste(query);
+                shell.rows = shell.source.refresh(shell.query.text());
+                if !shell.rows.is_empty() {
+                    shell.list_state.select(Some(0));
+                }
+            }
+        }
+        shell
+    }
+
     // ── Test accessors ─────────────────────────────────────────────────
     #[cfg(test)]
     pub fn row_count(&self) -> usize {
@@ -177,9 +200,9 @@ impl PickerShell {
         });
     }
 
-    /// For mention/slash (`QueryMode::ReadFromInputBar`). Not used by Phase 1
-    /// but needed by the trait so Phase 3 can compile against this signature.
-    #[allow(dead_code)]
+    /// For mention/slash (`QueryMode::ReadFromInputBar`). Called by the
+    /// view on every InputBar text change so the shell's query mirrors
+    /// the trigger prefix.
     pub fn set_query_from_input_bar(&mut self, q: &str) {
         debug_assert_eq!(self.source.query_mode(), QueryMode::ReadFromInputBar);
         // Directly install the prefix text; no edit history to preserve.
