@@ -9,19 +9,59 @@ use crate::components::input_bar::ProtectedRange;
 pub const HISTORY_CAP: usize = 100;
 
 /// Exact restorable input state for the composer.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct InputStateSnapshot {
-    #[serde(default)]
     pub text: String,
-    #[serde(default)]
     pub protected_ranges: Vec<ProtectedRange>,
+}
+
+#[derive(Deserialize)]
+struct RawInputStateSnapshot {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    protected_ranges: Vec<ProtectedRange>,
+}
+
+impl<'de> Deserialize<'de> for InputStateSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawInputStateSnapshot::deserialize(deserializer)?;
+        Ok(Self::sanitized(raw.text, raw.protected_ranges))
+    }
 }
 
 impl InputStateSnapshot {
     pub fn new(text: String, protected_ranges: Vec<ProtectedRange>) -> Self {
+        Self::sanitized(text, protected_ranges)
+    }
+
+    /// Build a snapshot, dropping any `ProtectedRange` that is out of
+    /// bounds, off a UTF-8 char boundary, has `start > end`, or overlaps
+    /// an earlier kept range. Keeps the text intact. Defense-in-depth for
+    /// hand-edited or corrupted persisted history.
+    fn sanitized(text: String, ranges: Vec<ProtectedRange>) -> Self {
+        let mut sorted = ranges;
+        sorted.sort_by_key(|r| r.start);
+
+        let mut kept: Vec<ProtectedRange> = Vec::with_capacity(sorted.len());
+        let mut last_end: usize = 0;
+        for r in sorted {
+            let in_bounds = r.start <= r.end && r.end <= text.len();
+            let on_boundaries =
+                text.is_char_boundary(r.start) && text.is_char_boundary(r.end);
+            let non_overlapping = r.start >= last_end;
+            if in_bounds && on_boundaries && non_overlapping {
+                last_end = r.end;
+                kept.push(r);
+            }
+        }
+
         Self {
             text,
-            protected_ranges,
+            protected_ranges: kept,
         }
     }
 
