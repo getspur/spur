@@ -20,7 +20,7 @@ fn mk(kind: PaletteKind, label: &str) -> PaletteResult {
 fn empty_state_has_empty_query_and_no_cursor_movement() {
     let state = PaletteState::new();
     assert_eq!(state.query(), "");
-    assert_eq!(state.ranked().len(), 0);
+    assert_eq!(state.ranked_len(), 0);
     assert_eq!(state.cursor(), 0);
 }
 
@@ -37,8 +37,8 @@ fn push_raw_accumulates_without_ranking() {
     ]);
     // With empty query, raw results pass through as ranked (input order preserved,
     // matching `commands::fuzzy::rank` semantics).
-    assert_eq!(state.ranked().len(), 1);
-    assert_eq!(state.ranked()[0].label, "/plan");
+    assert_eq!(state.ranked_len(), 1);
+    assert_eq!(state.nth_ranked(0).unwrap().label, "/plan");
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn set_query_reranks_by_fuzzy_score_and_drops_unmatched() {
         mk(PaletteKind::Worker, "refactor-auth-async"),
     ]);
     s.set_query("refac");
-    let labels: Vec<&str> = s.ranked().iter().map(|r| r.label.as_str()).collect();
+    let labels: Vec<&str> = s.iter_ranked().map(|r| r.label.as_str()).collect();
     assert!(labels.contains(&"refactor-auth"));
     assert!(labels.contains(&"refactor-auth-async"));
     assert!(!labels.contains(&"debug-ci-flake"));
@@ -96,6 +96,6 @@ fn reset_clears_query_and_raw_but_not_state_struct() {
     s.set_query("x");
     s.reset();
     assert_eq!(s.query(), "");
-    assert_eq!(s.ranked().len(), 0);
+    assert_eq!(s.ranked_len(), 0);
     assert_eq!(s.cursor(), 0);
 }

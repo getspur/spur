@@ -76,7 +76,7 @@ impl<'a> Widget for PaletteOverlay<'a> {
         Paragraph::new(query_line).render(query_area, buf);
 
         // Results or empty-state placeholder.
-        if self.state.ranked().is_empty() {
+        if self.state.ranked_len() == 0 {
             let msg = if self.state.query().is_empty() {
                 "type to filter"
             } else {
@@ -90,8 +90,7 @@ impl<'a> Widget for PaletteOverlay<'a> {
         } else {
             let items: Vec<ListItem> = self
                 .state
-                .ranked()
-                .iter()
+                .iter_ranked()
                 .enumerate()
                 .map(|(i, r)| {
                     let selected = i == self.state.cursor();
