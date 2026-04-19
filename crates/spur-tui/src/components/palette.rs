@@ -1,0 +1,188 @@
+//! Universal command palette — Ctrl+K.
+//!
+//! A modal overlay that fuzzy-searches across sessions, workers-in-lineage,
+//! commands, and the current-session trace. Dispatches an `Action` on Enter.
+
+use crate::components::palette_sources::PaletteSource;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteKind {
+    Command,
+    Session,
+    Worker,
+    Trace,
+}
+
+#[derive(Debug, Clone)]
+pub enum PalettePayload {
+    Command { name: String },
+    Session { session_id: String },
+    Worker { session_id: spur_acp::SessionId },
+    Trace { entry_idx: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct PaletteResult {
+    pub kind: PaletteKind,
+    pub label: String,
+    pub subtitle: String,
+    pub payload: PalettePayload,
+}
+
+pub struct PaletteState {
+    query: String,
+    raw: Vec<PaletteResult>,
+    ranked: Vec<PaletteResult>,
+    cursor: usize,
+}
+
+impl PaletteState {
+    pub fn new() -> Self {
+        Self { query: String::new(), raw: Vec::new(), ranked: Vec::new(), cursor: 0 }
+    }
+
+    pub fn query(&self) -> &str { &self.query }
+    pub fn ranked(&self) -> &[PaletteResult] { &self.ranked }
+    pub fn cursor(&self) -> usize { self.cursor }
+
+    /// Populate from a source batch. Call once per source at open time.
+    pub fn push_raw(&mut self, mut results: Vec<PaletteResult>) {
+        self.raw.append(&mut results);
+        self.rerank();
+    }
+
+    /// Append multiple source batches and rerank exactly once at the end.
+    /// Use this in preference to repeated `push_raw` when loading all sources at open.
+    pub fn extend_raw(&mut self, batches: impl IntoIterator<Item = Vec<PaletteResult>>) {
+        for mut batch in batches {
+            self.raw.append(&mut batch);
+        }
+        self.rerank();
+    }
+
+    /// Pull results from every registered source. Convenience for tests and
+    /// for the App-level open path.
+    pub fn load_from_sources(&mut self, sources: &[Box<dyn PaletteSource>]) {
+        self.raw.clear();
+        for src in sources {
+            self.raw.extend(src.collect());
+        }
+        self.rerank();
+    }
+
+    fn rerank(&mut self) {
+        // Empty query: preserve input order (same semantics as commands::fuzzy::rank).
+        if self.query.is_empty() {
+            self.ranked = self.raw.clone();
+        } else {
+            self.ranked = rank_results(&self.raw, &self.query);
+        }
+        self.cursor = self.cursor.min(self.ranked.len().saturating_sub(1));
+    }
+
+    pub fn set_query(&mut self, q: impl Into<String>) {
+        self.query = q.into();
+        self.rerank();
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.query.push(c);
+        self.rerank();
+    }
+
+    pub fn pop_char(&mut self) {
+        self.query.pop();
+        self.rerank();
+    }
+
+    pub fn cursor_down(&mut self) {
+        if self.ranked.is_empty() { return; }
+        self.cursor = (self.cursor + 1).min(self.ranked.len() - 1);
+    }
+
+    pub fn cursor_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn selected(&self) -> Option<&PaletteResult> {
+        self.ranked.get(self.cursor)
+    }
+
+    pub fn reset(&mut self) {
+        self.query.clear();
+        self.raw.clear();
+        self.ranked.clear();
+        self.cursor = 0;
+    }
+}
+
+impl Default for PaletteState {
+    fn default() -> Self { Self::new() }
+}
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+#[derive(Debug)]
+pub enum PaletteIntent {
+    Accept(PaletteResult),
+    Dismiss,
+}
+
+impl PaletteState {
+    /// Dispatch one key. Returns `Some(intent)` when the overlay should take
+    /// a higher-level action (accept or dismiss); `None` means state was
+    /// mutated but the overlay stays open.
+    pub fn handle_key(&mut self, ev: KeyEvent) -> Option<PaletteIntent> {
+        // Ctrl+C always dismisses.
+        if ev.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(ev.code, KeyCode::Char('c'))
+        {
+            return Some(PaletteIntent::Dismiss);
+        }
+
+        match ev.code {
+            KeyCode::Esc => Some(PaletteIntent::Dismiss),
+            KeyCode::Enter | KeyCode::Tab => {
+                self.selected().cloned().map(PaletteIntent::Accept)
+            }
+            KeyCode::Up => {
+                self.cursor_up();
+                None
+            }
+            KeyCode::Down => {
+                self.cursor_down();
+                None
+            }
+            KeyCode::Backspace => {
+                self.pop_char();
+                None
+            }
+            KeyCode::Char(c) if !ev.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.push_char(c);
+                None
+            }
+            _ => None, // swallow other keys silently
+        }
+    }
+}
+
+/// Nucleo-fuzzy rank across all sources by matching `query` against `label`.
+/// Unmatched results are dropped. Ties broken by insertion order.
+fn rank_results(entries: &[PaletteResult], query: &str) -> Vec<PaletteResult> {
+    use nucleo_matcher::{pattern::{CaseMatching, Normalization, Pattern}, Matcher};
+
+    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut scored: Vec<(u32, PaletteResult)> = entries
+        .iter()
+        .filter_map(|e| {
+            let score = pattern.score(
+                nucleo_matcher::Utf32Str::new(&e.label, &mut Vec::new()),
+                &mut matcher,
+            )?;
+            Some((score, e.clone()))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().map(|(_, e)| e).collect()
+}

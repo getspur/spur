@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::Frame;
 use tokio::sync::{broadcast, mpsc};
@@ -17,6 +17,8 @@ use ratatui_image::picker::Picker;
 
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
+use crate::components::palette::PaletteIntent;
+use crate::components::palette_sources::{CommandSource, PaletteSource, SessionSource, TraceSource, WorkerSource};
 use crate::components::input_bar::EditMode;
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
@@ -169,6 +171,11 @@ pub struct App {
     /// at session-creation time (see `resolve_agent_config`). Defaults to
     /// `SpurConfig::default()` when no config is supplied.
     config: std::sync::Arc<spur_acp::SpurConfig>,
+    palette_visible: bool,
+    palette_state: crate::components::palette::PaletteState,
+    /// Last dispatched Action, for integration tests only.
+    #[cfg(any(test, debug_assertions))]
+    last_action: Option<crate::action::Action>,
 }
 
 impl App {
@@ -264,6 +271,10 @@ impl App {
             metadata_store,
             edit_mode: EditMode::default(),
             config,
+            palette_visible: false,
+            palette_state: crate::components::palette::PaletteState::new(),
+            #[cfg(any(test, debug_assertions))]
+            last_action: None,
         };
 
         app.license_badge = license_badge_from_state(&app.license_state);
@@ -325,6 +336,61 @@ impl App {
         self.dirty = true;
     }
 
+    fn open_palette(&mut self) {
+        if self.help_visible || self.quit_confirm_visible {
+            return; // palette won't open while a higher-priority overlay is up
+        }
+        self.palette_state.reset();
+
+        // Load sources: Commands, Sessions, Workers, Trace.
+        let cmd_registry = crate::commands::registry::CommandRegistry::new();
+        let cmd_src = CommandSource::new(&cmd_registry);
+        let sess_src = SessionSource::from_metadata(self.metadata_store.metadata());
+        let worker_src = WorkerSource::from_lineage(&self.lineage);
+
+        let mut batches = vec![
+            cmd_src.collect(),
+            sess_src.collect(),
+            worker_src.collect(),
+        ];
+        if let Some(view) = self.session_detail.as_ref() {
+            let trace_src = TraceSource::from_trace(view.react_trace());
+            batches.push(trace_src.collect());
+        }
+        self.palette_state.extend_raw(batches);
+
+        self.palette_visible = true;
+        self.dirty = true;
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn is_palette_visible(&self) -> bool {
+        self.palette_visible
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn try_open_palette_for_test(&mut self) {
+        self.open_palette();
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn seed_palette_with_session_for_test(&mut self, session_id: &str, label: &str) {
+        use crate::components::palette::{PaletteKind, PalettePayload, PaletteResult};
+        // Reset first so the injected result is the only one in the list.
+        self.palette_state.reset();
+        self.palette_state.push_raw(vec![PaletteResult {
+            kind: PaletteKind::Session,
+            label: label.to_string(),
+            subtitle: format!("session · {}", session_id),
+            payload: PalettePayload::Session { session_id: session_id.to_string() },
+        }]);
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn last_action_for_test(&self) -> Option<crate::action::Action> {
+        self.last_action.clone()
+    }
+
     /// Look up the `AgentConfig` for an agent by name (`AgentConfig::name`)
     /// in the loaded `SpurConfig`. Falls back to a minimal synthesized
     /// config when the agent isn't declared — this preserves startup
@@ -383,6 +449,38 @@ impl App {
                         }
                         _ => return, // swallow all keys while help is visible
                     }
+                }
+
+                // Priority 2.5 — palette overlay.
+                if self.palette_visible {
+                    match self.palette_state.handle_key(key) {
+                        Some(PaletteIntent::Dismiss) => {
+                            self.palette_visible = false;
+                            self.palette_state.reset();
+                            self.dirty = true;
+                        }
+                        Some(PaletteIntent::Accept(result)) => {
+                            self.palette_visible = false;
+                            self.palette_state.reset();
+                            if let Some(action) = result_to_action(result) {
+                                self.process_action(action);
+                            }
+                            self.dirty = true;
+                        }
+                        None => {
+                            self.dirty = true;
+                        }
+                    }
+                    return;
+                }
+
+                // Global Ctrl+K opens palette (checked only when no higher-priority
+                // overlay is up — QuitConfirm and HelpOverlay already returned above).
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('k'))
+                {
+                    self.open_palette();
+                    return;
                 }
 
                 let ctx = crate::views::ViewContext {
@@ -752,6 +850,10 @@ impl App {
 
     /// Process a single Action returned by a view.
     fn process_action(&mut self, action: Action) {
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.last_action = Some(action.clone());
+        }
         match action {
             Action::Quit => {
                 // If a brain is attached, show the confirmation dialog so
@@ -1639,6 +1741,13 @@ impl App {
             let brain = self.brain_name.as_deref().unwrap_or("(unknown)");
             QuitConfirmDialog::render(frame, area, brain);
         }
+
+        if self.palette_visible {
+            let overlay = crate::components::palette_overlay::PaletteOverlay::new(
+                &self.palette_state,
+            );
+            frame.render_widget(overlay, frame.area());
+        }
     }
 }
 
@@ -1890,6 +1999,31 @@ fn render_mermaid_overlay(
         ))),
         chunks[2],
     );
+}
+
+fn result_to_action(
+    result: crate::components::palette::PaletteResult,
+) -> Option<crate::action::Action> {
+    use crate::action::{Action, ViewId};
+    use crate::components::palette::PalettePayload;
+    match result.payload {
+        PalettePayload::Session { session_id } => {
+            Some(Action::ResumeSession { session_id })
+        }
+        PalettePayload::Worker { session_id } => {
+            Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))
+        }
+        PalettePayload::Command { name: _ } => {
+            // Commands dispatched via existing slash-command path. Phase F1.5
+            // will wire a direct dispatch; for MVP accept is a no-op here.
+            None
+        }
+        PalettePayload::Trace { entry_idx: _ } => {
+            // Phase F1.5: add `Action::ScrollToTraceEntry(usize)`. For MVP accept
+            // is a no-op (palette closes, trace stays at anchor).
+            None
+        }
+    }
 }
 
 /// Human-friendly relative time for the resume banner ("5m ago", "2h ago").
