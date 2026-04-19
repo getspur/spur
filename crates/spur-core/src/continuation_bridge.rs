@@ -27,22 +27,26 @@ pub trait ContinuationEventSink: Send + Sync {
     fn emit(&self, body: SpurEventBody);
 }
 
-/// Exactly-once bridge from MCP result collector → orchestrator ingress.
-/// Emits the UI event BEFORE sending `SystemContinuation` (INV-C3).
+/// Route a detached completion's continuation into the orchestrator ingress.
+///
+/// **INV-C3** is preserved structurally: the orchestrator's `execute_delegation`
+/// emits `SpurEventBody::DelegationCompleted` before sending the result onto
+/// the oneshot; MCP's result collector awaits that oneshot before invoking
+/// this helper, so the UI event is always published before the
+/// `SystemContinuation` reaches the orchestrator ingress.
+///
+/// Callers do NOT need to emit `DelegationCompleted` separately — doing so
+/// causes duplicate dashboard log entries.
 pub async fn report_detached_completion(
-    sink: &dyn ContinuationEventSink,
     continuation_tx: &mpsc::Sender<InteractiveInput>,
     overflow: &OverflowBuf,
     session: SessionId,
-    worker_session: SessionId,
+    _worker_session: SessionId, // kept for future use (correlation logs etc.)
     cont: BrainContinuation,
 ) {
-    // 1) UI-visible event FIRST.
-    sink.emit(SpurEventBody::DelegationCompleted {
-        worker_session,
-        status: cont.payload.status.clone(),
-    });
-    // 2) Model-visible continuation SECOND (try_send + overflow fallback).
+    // Route the model-visible continuation (try_send + overflow fallback).
+    // DelegationCompleted is emitted by execute_delegation before the oneshot
+    // fires — do NOT emit it here to avoid duplicate dashboard entries.
     match continuation_tx.try_send(InteractiveInput::SystemContinuation {
         session: session.clone(),
         continuation: cont.clone(),

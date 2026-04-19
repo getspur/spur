@@ -508,9 +508,9 @@ impl Orchestrator {
 
     /// Build a `DetachedContinuationCtx` for `McpCallbackServer::new`.
     ///
-    /// Wires the `on_complete` async callback to `report_detached_completion`,
-    /// capturing the funnel handle (for UI event emission) and the
-    /// orchestrator ingress sender + overflow (for model-visible continuation).
+    /// Wires the `on_complete` async callback to `report_detached_completion`.
+    /// `DelegationCompleted` is emitted by `execute_delegation` before the
+    /// oneshot fires, so INV-C3 is preserved without emitting here.
     ///
     /// If no `continuation_tx` has been wired (e.g. `run_adhoc`), the
     /// callback is a no-op — continuations are silently dropped, which is
@@ -519,7 +519,6 @@ impl Orchestrator {
         &self,
         brain_session_id: spur_acp::types::SessionId,
     ) -> spur_mcp::server::DetachedContinuationCtx {
-        let funnel = self.funnel.clone();
         match (self.continuation_tx.clone(), self.continuation_overflow.clone()) {
             (Some(tx), Some(overflow)) => {
                 let session = brain_session_id.clone();
@@ -528,15 +527,10 @@ impl Orchestrator {
                         let tx = tx.clone();
                         let overflow = overflow.clone();
                         let session = session.clone();
-                        let funnel = funnel.clone();
                         let worker_session =
                             spur_acp::types::SessionId(worker_session_str);
                         Box::pin(async move {
-                            // INV-C3: UI event BEFORE model-visible ingress.
-                            // FunnelHandle already implements ContinuationEventSink
-                            // (see continuation_bridge.rs).
                             crate::continuation_bridge::report_detached_completion(
-                                &funnel,
                                 &tx,
                                 &overflow,
                                 session,
