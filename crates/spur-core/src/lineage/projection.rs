@@ -320,7 +320,76 @@ impl ExecutorLineage {
                 }
             }
 
+            SpurEventBody::BrainRetired { session, .. } => {
+                let eid = ExecutorId::new(session.0.clone());
+                if !self.nodes.contains_key(&eid) {
+                    // Brain spawn not yet projected — buffer so it replays on
+                    // arrival. Preserves replay-purity under out-of-order logs.
+                    self.buffer_orphan(eid, event.clone());
+                    return;
+                }
+                self.cascade_retire(&eid, event.occurred_at);
+            }
+
             _ => {}
+        }
+    }
+
+    /// Cascade terminal close-out from a retired brain to every non-terminal
+    /// descendant. Iterative DFS over `child_ids: Vec` — deterministic order
+    /// under replay (projection.rs doc rule #2). All timestamps come from the
+    /// triggering event's `occurred_at`; never from `SystemTime::now()`.
+    ///
+    /// Idempotent: if the root is already terminal, returns without touching
+    /// descendants (they were closed on the first apply).
+    fn cascade_retire(&mut self, root: &ExecutorId, occurred_at: std::time::SystemTime) {
+        // Short-circuit if root is already terminal (idempotency).
+        if let Some(n) = self.nodes.get(root) {
+            if matches!(
+                n.phase,
+                LifecycleState::Succeeded
+                    | LifecycleState::Failed
+                    | LifecycleState::Cancelled
+            ) {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        let mut stack: Vec<ExecutorId> = vec![root.clone()];
+        while let Some(id) = stack.pop() {
+            // Enqueue children FIRST so we don't hold a borrow across the
+            // mutation below.
+            if let Some(n) = self.nodes.get(&id) {
+                for c in &n.child_ids {
+                    stack.push(c.clone());
+                }
+            }
+            if let Some(n) = self.nodes.get_mut(&id) {
+                // Only touch non-terminal nodes. A descendant that already
+                // succeeded/failed/cancelled keeps its terminal status.
+                if matches!(
+                    n.phase,
+                    LifecycleState::Succeeded
+                        | LifecycleState::Failed
+                        | LifecycleState::Cancelled
+                ) {
+                    continue;
+                }
+                n.phase = LifecycleState::Cancelled;
+                n.last_event_at = Some(occurred_at);
+                if let Some(a) = n.current_attempt_mut() {
+                    if a.ended_at.is_none() {
+                        a.ended_at = Some(occurred_at);
+                    }
+                    a.status = AttemptStatus::Cancelled;
+                }
+                // A cascaded node can no longer hold a pending review.
+                n.pending_review = None;
+            }
+            // Drain from the pending-review queue (deterministic Vec op).
+            self.pending_review_order.retain(|x| x != &id);
         }
     }
 
@@ -386,6 +455,19 @@ impl ExecutorLineage {
             p.child_ids.push(node.id.clone());
         }
         self.nodes.insert(node.id.clone(), node);
+    }
+
+    /// Drain and replay any child-orphan events buffered for `id`. Used by
+    /// the legacy adapter after inserting a new root/child node so events
+    /// that arrived before the spawn (e.g. out-of-order `BrainRetired`)
+    /// land on the fresh node. Parent-orphan buffer is not drained here —
+    /// it is keyed on a parent id that the legacy flow never names.
+    pub(crate) fn drain_child_orphans_for(&mut self, id: &ExecutorId) {
+        if let Some(queue) = self.orphan_buffer.remove(id) {
+            for ev in queue {
+                self.apply_inner(&ev);
+            }
+        }
     }
 
     pub(crate) fn node_mut_public(&mut self, id: &ExecutorId) -> Option<&mut ExecutorNode> {

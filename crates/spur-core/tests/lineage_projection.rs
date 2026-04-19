@@ -457,3 +457,249 @@ fn orphan_replay_does_not_retrigger_legacy_adapter() {
     assert_eq!(n.attempts.len(), 1);
     assert_eq!(n.phase, LifecycleState::Running);
 }
+
+// ─── BrainRetired fold ────────────────────────────────────────────────
+//
+// Corresponds to `retire_active_brain` in the orchestrator: the retired
+// brain and all non-terminal descendants move to `Cancelled`, attempts
+// close with `ended_at = event.occurred_at`, and pending-review queue
+// is drained for cascaded ids.
+
+use spur_acp::domain::events::BrainRetireReason;
+
+#[test]
+fn brain_retired_cascades_descendants_to_cancelled() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    }));
+
+    l.apply(&SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("b1".into()),
+        reason: BrainRetireReason::UserClear,
+    }));
+
+    let brain = l.node(&ExecutorId::new("b1")).unwrap();
+    assert_eq!(
+        brain.phase,
+        LifecycleState::Cancelled,
+        "brain must move to Cancelled"
+    );
+    assert!(
+        brain.current_attempt().unwrap().ended_at.is_some(),
+        "brain attempt must close"
+    );
+
+    let worker = l.node(&ExecutorId::new("w1")).unwrap();
+    assert_eq!(
+        worker.phase,
+        LifecycleState::Cancelled,
+        "descendant must cascade to Cancelled"
+    );
+    assert!(
+        worker.current_attempt().unwrap().ended_at.is_some(),
+        "descendant attempt must close"
+    );
+}
+
+#[test]
+fn brain_retired_preserves_terminal_descendants() {
+    // A child that already succeeded must not be downgraded to Cancelled.
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationCompleted {
+        worker_session: SessionId("w1".into()),
+        status: DelegationStatus::Success,
+    }));
+
+    l.apply(&SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("b1".into()),
+        reason: BrainRetireReason::UserClear,
+    }));
+
+    let worker = l.node(&ExecutorId::new("w1")).unwrap();
+    assert_eq!(
+        worker.phase,
+        LifecycleState::Succeeded,
+        "already-terminal descendant must not be overwritten"
+    );
+}
+
+#[test]
+fn brain_retired_drains_pending_review_for_cascaded_ids() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+        id: "w1".into(),
+        attempt_n: 1,
+        kind: ReviewKind::Completion,
+        payload: ReviewPayload {
+            summary: "done".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
+        },
+    }));
+    assert_eq!(l.pending_reviews().len(), 1);
+
+    l.apply(&SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("b1".into()),
+        reason: BrainRetireReason::UserClear,
+    }));
+
+    assert!(
+        l.pending_reviews().is_empty(),
+        "cascaded descendants must be drained from pending_review_order"
+    );
+    let worker = l.node(&ExecutorId::new("w1")).unwrap();
+    assert!(worker.pending_review.is_none());
+}
+
+#[test]
+fn brain_retired_is_idempotent() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    let ev = SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("b1".into()),
+        reason: BrainRetireReason::UserClear,
+    });
+    l.apply(&ev);
+    let after_first = l.node(&ExecutorId::new("b1")).unwrap().clone();
+
+    // Apply same event again — must be a no-op.
+    l.apply(&ev);
+    let after_second = l.node(&ExecutorId::new("b1")).unwrap().clone();
+
+    assert_eq!(after_first.phase, after_second.phase);
+    assert_eq!(
+        after_first.current_attempt().unwrap().ended_at,
+        after_second.current_attempt().unwrap().ended_at,
+        "ended_at must not drift on repeated apply"
+    );
+}
+
+#[test]
+fn two_clear_cycles_leave_one_running_root() {
+    // Regression: before BrainRetired, each /clear left a zombie root in
+    // Running. With the fold arm, only the latest brain is non-terminal.
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("b1".into()),
+        reason: BrainRetireReason::UserClear,
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b2".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("b2".into()),
+        reason: BrainRetireReason::UserClear,
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b3".into()),
+    }));
+
+    assert_eq!(l.root_ids().len(), 3, "all three roots retained");
+    let running: Vec<_> = l
+        .root_ids()
+        .iter()
+        .filter(|id| {
+            l.node(id).map(|n| n.phase).unwrap_or(LifecycleState::Spawning)
+                != LifecycleState::Cancelled
+        })
+        .collect();
+    assert_eq!(running.len(), 1, "only the latest brain stays non-terminal");
+    assert_eq!(running[0], &ExecutorId::new("b3"));
+}
+
+#[test]
+fn worker_spawn_after_retire_attaches_under_live_brain_not_zombie() {
+    // Adapter parent-inference must skip terminal Brain roots.
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("b1".into()),
+        reason: BrainRetireReason::UserClear,
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b2".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w-late".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    }));
+
+    let w = l.node(&ExecutorId::new("w-late")).unwrap();
+    assert_eq!(
+        w.parent_id.as_ref().unwrap(),
+        &ExecutorId::new("b2"),
+        "worker must attach under the live brain, not the retired one"
+    );
+    let zombie = l.node(&ExecutorId::new("b1")).unwrap();
+    assert!(
+        zombie.child_ids.is_empty(),
+        "retired brain must not receive new children"
+    );
+}
+
+#[test]
+fn brain_retired_before_spawn_is_buffered_as_orphan() {
+    // If BrainRetired arrives before BrainSpawned (pathological ordering,
+    // e.g. replay from a partial log), it must be buffered and replayed.
+    // This guarantees we never silently drop a close-out event.
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainRetired {
+        session: SessionId("b1".into()),
+        reason: BrainRetireReason::UserClear,
+    }));
+    // No node exists yet — nothing to assert beyond "no panic".
+    assert!(l.node(&ExecutorId::new("b1")).is_none());
+
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    let n = l.node(&ExecutorId::new("b1")).unwrap();
+    assert_eq!(
+        n.phase,
+        LifecycleState::Cancelled,
+        "orphan-buffered BrainRetired must replay after spawn"
+    );
+}

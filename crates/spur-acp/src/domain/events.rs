@@ -238,6 +238,19 @@ pub enum ContinuationDropReason {
     Shutdown,
 }
 
+/// Why a brain session was retired. Companion to [`SpurEventBody::BrainRetired`].
+/// See docs/superpowers/specs/2026-04-19-clear-command-session-reset-design.md.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BrainRetireReason {
+    /// User invoked `/clear`. Spur-local meta-command.
+    UserClear,
+    /// Session swap via `ResumeSession` (user selected a different session).
+    ResumeSwitch,
+    /// Orchestrator shutting down.
+    Shutdown,
+}
+
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -611,6 +624,23 @@ pub enum SpurEventBody {
         session: SessionId,
         turn_kind: String,
         continuations_count: usize,
+    },
+
+    /// Emitted by the orchestrator when a brain session is retired via
+    /// `retire_active_brain` (e.g. `/clear`, `ResumeSession`, shutdown).
+    ///
+    /// The lineage projection folds this event by cascading the named
+    /// brain and all non-terminal descendants to
+    /// [`LifecycleState::Cancelled`], stamping
+    /// `ended_at = event.occurred_at` on each current attempt and
+    /// draining the cascaded ids from the pending-review queue.
+    ///
+    /// The orchestrator emits this **before** aborting the brain's
+    /// background tasks so trailing notifications landing afterward
+    /// project against the already-closed state deterministically.
+    BrainRetired {
+        session: SessionId,
+        reason: BrainRetireReason,
     },
 }
 

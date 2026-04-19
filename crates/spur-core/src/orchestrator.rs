@@ -128,6 +128,10 @@ pub struct BrainSession {
     /// reused connection keeps emitting events tagged with this
     /// (now-stale) `spur_session_id`.
     pub notification_pump_handle: Option<JoinHandle<()>>,
+    /// Wall-clock instant this session was created. Used by
+    /// `retire_active_brain` to record session duration in the cost
+    /// ledger on close-out.
+    pub started_at: std::time::Instant,
 }
 
 /// A user input message from the TUI.
@@ -893,7 +897,12 @@ impl Orchestrator {
                     }
                     // NewSessionWithMessage — retire brain, then push Message to scheduler.
                     InteractiveInput::NewSessionWithMessage { blocks, interrupt } => {
-                        Self::retire_active_brain(&mut brain, &mut agent_connection);
+                        self.retire_active_brain(
+                            &mut brain,
+                            &mut agent_connection,
+                            spur_acp::domain::events::BrainRetireReason::UserClear,
+                        )
+                        .await;
                         let evicted = scheduler.note_session_swap(None);
                         for c in evicted {
                             self.funnel.emit(SpurEventBody::ContinuationDropped {
@@ -959,7 +968,12 @@ impl Orchestrator {
 
                     // ── ResumeSession ─────────────────────────────────────
                     InteractiveInput::ResumeSession { session_id } => {
-                        Self::retire_active_brain(&mut brain, &mut agent_connection);
+                        self.retire_active_brain(
+                            &mut brain,
+                            &mut agent_connection,
+                            spur_acp::domain::events::BrainRetireReason::ResumeSwitch,
+                        )
+                        .await;
                         // Evict stale continuations targeting the prior brain session.
                         let evicted = scheduler.note_session_swap(None);
                         for c in evicted {
@@ -1679,21 +1693,62 @@ impl Orchestrator {
     /// session switch — for claude-code-acp that's ~1-3s of node startup
     /// per switch.
     ///
+    /// Emits `BrainRetired` *before* aborting background tasks so the
+    /// lineage projection observes the close-out ahead of any trailing
+    /// notifications. Closes the cost ledger for the retired session.
+    /// Drains the notification pump with a bounded grace (100 ms) before
+    /// aborting, so late notifications still reach the projection.
+    ///
     /// The old ACP session id on the agent side is abandoned silently;
-    /// the ACP protocol has no `close_session` and most agents treat
-    /// unreferenced sessions as inert.
-    fn retire_active_brain(
+    /// the ACP protocol has no `close_session`. Followup issue tracks a
+    /// best-effort `session/cancel` dispatch per transport.
+    async fn retire_active_brain(
+        &mut self,
         brain: &mut Option<BrainSession>,
         agent_connection: &mut Option<(Box<dyn spur_acp::AgentConnection>, String)>,
+        reason: spur_acp::domain::events::BrainRetireReason,
     ) {
-        if let Some(b) = brain.take() {
-            b.delegation_handle.abort();
-            if let Some(h) = b.notification_pump_handle {
-                h.abort();
+        let Some(b) = brain.take() else { return };
+
+        // 1. Emit BrainRetired BEFORE aborting handles. Broadcast emit is
+        //    synchronous into the channel, so any post-abort stragglers
+        //    that slip through land on an already-closed projection state.
+        self.emit(SpurEvent::now(SpurEventBody::BrainRetired {
+            session: b.spur_session_id.clone(),
+            reason,
+        }));
+
+        // 2. Close the cost ledger. Best-effort: `end_session` is fallible
+        //    when the sqlite row is missing (e.g. cost tracking disabled
+        //    or start_session was skipped). If the brain name has left
+        //    the registry, we cannot recover its `cost_tier` — in that
+        //    case the ledger stays open (better than inventing a tier).
+        if let Some(ref ct) = self.cost_tracker {
+            if let Some(cfg) = self.registry.get(&b.brain_name) {
+                let duration = b.started_at.elapsed();
+                let _ = ct.end_session(&b.spur_session_id, "retired", duration, cfg.cost_tier);
             }
-            b.mcp_handle.abort();
-            *agent_connection = Some((b.connection, b.brain_name));
         }
+
+        // 3. Drain the notification pump with a bounded grace so the
+        //    last batch of notifications reaches the projection. On
+        //    timeout, abort explicitly — dropping a `JoinHandle` does NOT
+        //    cancel the task. `abort_handle` gives us a side-channel that
+        //    survives moving the handle into `timeout`.
+        if let Some(h) = b.notification_pump_handle {
+            let abort = h.abort_handle();
+            if tokio::time::timeout(std::time::Duration::from_millis(100), h)
+                .await
+                .is_err()
+            {
+                abort.abort();
+            }
+        }
+
+        // 4. Abort remaining handles and stash connection for reuse.
+        b.delegation_handle.abort();
+        b.mcp_handle.abort();
+        *agent_connection = Some((b.connection, b.brain_name));
     }
 
     /// Resolve and initialize a brain agent connection without starting a full session.
@@ -1872,6 +1927,7 @@ impl Orchestrator {
             delegation_handle,
             notification_pump_handle,
             mcp_handle,
+            started_at: std::time::Instant::now(),
         })
     }
 
@@ -2083,6 +2139,7 @@ impl Orchestrator {
             delegation_handle,
             notification_pump_handle,
             mcp_handle,
+            started_at: std::time::Instant::now(),
         };
 
         // Return an empty stream if we fell back to new_session.

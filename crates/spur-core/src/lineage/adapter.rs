@@ -39,6 +39,10 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 stream_buffer: std::collections::VecDeque::new(),
                 issue_id: None,
             });
+            // Replay any events (e.g. an early `BrainRetired`) that arrived
+            // before this spawn was projected. Symmetric with the
+            // `ExecutorSpawned` arm in `apply_inner`.
+            lineage.drain_child_orphans_for(&id);
         }
 
         SpurEventBody::WorkerSpawned {
@@ -57,7 +61,18 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 .find(|rid| {
                     lineage
                         .node(rid)
-                        .map(|n| n.role == Role::Brain)
+                        .map(|n| {
+                            // Prefer the most recent *non-terminal* Brain
+                            // root. A retired brain must not adopt new
+                            // children after `BrainRetired` has cascaded it.
+                            n.role == Role::Brain
+                                && !matches!(
+                                    n.phase,
+                                    LifecycleState::Succeeded
+                                        | LifecycleState::Failed
+                                        | LifecycleState::Cancelled
+                                )
+                        })
                         .unwrap_or(false)
                 })
                 .cloned();
