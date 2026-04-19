@@ -60,6 +60,7 @@ fn direct_session_excludes_workers() {
 
 #[test]
 fn empty_query_pins_workers_first() {
+    use std::io::Write;
     let workers: Vec<WorkerMentionDescriptor> = (0..6)
         .map(|i| WorkerMentionDescriptor {
             name: format!("worker-{}", i),
@@ -70,8 +71,14 @@ fn empty_query_pins_workers_first() {
     let mut reg = MentionRegistry::for_brain_session(workers);
     let sid = SessionId::new();
     let tmp = tempfile::tempdir().unwrap();
+    // Seed competing files. Their display strings are short ("a.rs", "b.rs",
+    // ...) so under the OLD length-sorted ranking they'd push workers
+    // (display "worker:worker-N") off the top of the result.
+    for ch in ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] {
+        let mut f = std::fs::File::create(tmp.path().join(format!("{}.rs", ch))).unwrap();
+        writeln!(f, "// stub").unwrap();
+    }
     let hits = reg.query(&sid, tmp.path(), "", 20);
-    // First 6 must all be Worker kind.
     let worker_count = hits
         .iter()
         .take(6)
@@ -86,7 +93,8 @@ fn empty_query_pins_workers_first() {
 
 #[test]
 fn empty_query_caps_workers_at_pin_cap() {
-    // Provide 10 workers — only 6 (WORKER_PIN_CAP) should appear at the top.
+    use std::io::Write;
+    // 10 workers in snapshot; only 6 (WORKER_PIN_CAP) should appear.
     let workers: Vec<WorkerMentionDescriptor> = (0..10)
         .map(|i| WorkerMentionDescriptor {
             name: format!("w{:02}", i),
@@ -97,13 +105,31 @@ fn empty_query_caps_workers_at_pin_cap() {
     let mut reg = MentionRegistry::for_brain_session(workers);
     let sid = SessionId::new();
     let tmp = tempfile::tempdir().unwrap();
+    // Need enough competing files to fill the remaining 14 slots in
+    // a limit=20 query — and to make the cap visible.
+    for i in 0..20 {
+        let mut f = std::fs::File::create(tmp.path().join(format!("file_{:02}.rs", i))).unwrap();
+        writeln!(f, "// stub").unwrap();
+    }
     let hits = reg.query(&sid, tmp.path(), "", 20);
     let head_workers = hits
         .iter()
         .take(6)
         .filter(|h| h.kind == MentionKind::Worker)
         .count();
-    assert_eq!(head_workers, 6);
+    assert_eq!(head_workers, 6, "first 6 rows should be workers");
+    // Rows 7-20 should not be workers (the cap capped at 6).
+    let tail_workers = hits
+        .iter()
+        .skip(6)
+        .filter(|h| h.kind == MentionKind::Worker)
+        .count();
+    assert_eq!(tail_workers, 0, "no workers should appear after the cap");
+    // And there should be at least one file present in the tail.
+    assert!(
+        hits.iter().skip(6).any(|h| h.kind != MentionKind::Worker),
+        "expected files after the worker pin"
+    );
 }
 
 #[test]
