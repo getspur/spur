@@ -16,8 +16,8 @@ use spur_acp::connection::{
 use spur_acp::registry::AgentRegistry;
 use spur_acp::types::*;
 use spur_acp::{
-    DelegationResult, DelegationStatus, LifecycleState, ReviewKind, ReviewPayload, SpurEvent,
-    SpurEventBody, TimeoutFallback,
+    CancellationControl, DelegationResult, DelegationStatus, LifecycleState, ReviewKind,
+    ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
 };
 use spur_pm::Issue;
 
@@ -377,6 +377,8 @@ pub struct Orchestrator {
     pub review_sink: ReviewSink, // Clone type, shares inner Arc<Mutex>
     repo_root: PathBuf,
     pub pm_service: Option<Arc<PmService>>,
+    /// INV-6: per-delegation cancellation token registry.
+    cancellation_control: CancellationControl,
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -465,6 +467,7 @@ impl Orchestrator {
             review_sink,
             repo_root,
             pm_service: None,
+            cancellation_control: CancellationControl::new(),
         })
     }
 
@@ -477,6 +480,13 @@ impl Orchestrator {
     /// Subscribe to orchestrator events (for TUI, logging, etc.).
     pub fn subscribe(&self) -> broadcast::Receiver<SpurEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// INV-6: Return a clonable handle to the cancellation token registry.
+    /// Pass a clone to `McpCallbackServer` so `handle_cancel_delegation` can
+    /// signal running delegations without routing through the delegation channel.
+    pub fn cancellation_control(&self) -> CancellationControl {
+        self.cancellation_control.clone()
     }
 
     /// Spawn the licensing runtime helper against this orchestrator's event funnel.
@@ -571,8 +581,9 @@ impl Orchestrator {
         // 4. Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
+        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;
 
         // Populate available workers.
@@ -580,9 +591,11 @@ impl Orchestrator {
             .registry
             .worker_capable()
             .into_iter()
-            .map(|c| build_worker_info(c))
+            .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
+        // INV-6: wire the cancellation side-channel.
+        mcp_server.set_cancellation_control(self.cancellation_control.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -651,6 +664,7 @@ impl Orchestrator {
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
+            self.cancellation_control.clone(),
         ));
 
         // Stream brain output. For native (ACP-transport) agents prompt()
@@ -1551,17 +1565,20 @@ impl Orchestrator {
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
+        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
             .registry
             .worker_capable()
             .into_iter()
-            .map(|c| build_worker_info(c))
+            .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
+        // INV-6: wire the cancellation side-channel.
+        mcp_server.set_cancellation_control(self.cancellation_control.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1619,6 +1636,7 @@ impl Orchestrator {
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
+            self.cancellation_control.clone(),
         ));
 
         // Spawn the vendor-extension notification pump (if the transport
@@ -1704,17 +1722,20 @@ impl Orchestrator {
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
+        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&session_id, self.pm_service.clone(), sink);
+            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink);
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
             .registry
             .worker_capable()
             .into_iter()
-            .map(|c| build_worker_info(c))
+            .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
+        // INV-6: wire the cancellation side-channel.
+        mcp_server.set_cancellation_control(self.cancellation_control.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1827,6 +1848,7 @@ impl Orchestrator {
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
+            self.cancellation_control.clone(),
         ));
 
         // Pump vendor-extension notifications onto the event stream.
@@ -1954,6 +1976,7 @@ impl Orchestrator {
     /// reconnect succeeded; `None` if the breaker is open or reconnect
     /// failed (in which case `BrainReconnectFailed` was already
     /// emitted).
+    #[allow(clippy::too_many_arguments)]
     async fn reconnect_with_events(
         &mut self,
         dead_brain: BrainSession,
@@ -2386,6 +2409,7 @@ impl Orchestrator {
     /// Spawns each delegation as a separate tokio task, allowing multiple
     /// workers to run concurrently. A semaphore limits the number of
     /// simultaneous workers to `max_concurrent`.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_delegations(
         mut channel: DelegationChannel,
         repo_root: PathBuf,
@@ -2394,6 +2418,7 @@ impl Orchestrator {
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
         pm_service: Option<Arc<PmService>>,
+        cancellation_control: CancellationControl,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
         // Debounce: skip post-delegation refresh if another completed <3s ago.
@@ -2429,6 +2454,14 @@ impl Orchestrator {
             let pm_service = pm_service.clone();
             let last_refresh_at = Arc::clone(&last_refresh_at);
 
+            // INV-6: register a cancellation token BEFORE spawning so
+            // cancel() arriving between dispatch and spawn still works.
+            let cancel_token = {
+                let cc = cancellation_control.clone();
+                cc.register(request_id.clone()).await
+            };
+            let cancellation_control_for_task = cancellation_control.clone();
+
             tokio::spawn(async move {
                 let mut guard = DelegationGuard {
                     funnel: funnel.clone(),
@@ -2442,6 +2475,8 @@ impl Orchestrator {
                     Ok(permit) => permit,
                     Err(_) => {
                         error!("Semaphore closed — aborting delegation");
+                        // Clean up the token if we abort early.
+                        cancellation_control_for_task.remove(&request_id).await;
                         return; // guard fires DelegationCompleted(Failed)
                     }
                 };
@@ -2484,20 +2519,52 @@ impl Orchestrator {
                 // `DelegationCompleted` was never emitted for the right
                 // session. v1 accepts that worker-hang detection is not
                 // automatic — separate concern, separate fix.
-                let (result, executor_id_opt) = Self::execute_delegation(
-                    agent,
-                    task,
-                    context_files,
-                    request_id.clone(),
-                    brain_session_id,
-                    delegation_plan,
-                    issue_id.clone(),
-                    repo_root,
-                    agent_configs,
-                    funnel.clone(),
-                    review_sink.clone(),
-                )
-                .await;
+                //
+                // INV-6: race execute_delegation against the per-delegation
+                // cancellation token. If cancel() arrives first, we return
+                // DelegationStatus::Cancelled without waiting for the worker.
+                let (result, executor_id_opt) = tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        let status = DelegationStatus::Cancelled {
+                            reason: "brain requested cancel".into(),
+                        };
+                        // Emit DelegationCompleted so TUI, lineage, and
+                        // other funnel subscribers don't see a stale
+                        // "active" entry for this delegation.
+                        funnel.emit(SpurEventBody::DelegationCompleted {
+                            worker_session: spur_acp::types::SessionId(request_id.clone()),
+                            status: status.clone(),
+                        });
+                        (
+                            DelegationResult {
+                                status,
+                                diff: None,
+                                diff_summary: None,
+                                summary: None,
+                                estimated_cost_usd: 0.0,
+                                worker_branch: None,
+                            },
+                            None,
+                        )
+                    }
+                    r = Self::execute_delegation(
+                        agent,
+                        task,
+                        context_files,
+                        request_id.clone(),
+                        brain_session_id,
+                        delegation_plan,
+                        issue_id.clone(),
+                        repo_root,
+                        agent_configs,
+                        funnel.clone(),
+                        review_sink.clone(),
+                    ) => r,
+                };
+                // Always clean up the token entry (avoids stale entries
+                // when the delegation completes normally before cancel fires).
+                cancellation_control_for_task.remove(&request_id).await;
 
                 // Comment on / revert issue on completion (10g).
                 if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
@@ -2601,7 +2668,7 @@ impl Orchestrator {
         original_task: String,
         context_files: Vec<String>,
         request_id: String,
-        brain_session_id: SessionId,
+        brain_session_id: spur_acp::BrainSessionId,
         delegation_plan: Option<spur_acp::domain::DelegationPlan>,
         issue_id: Option<String>,
         repo_root: PathBuf,
@@ -2613,20 +2680,16 @@ impl Orchestrator {
         // so retry loops at orchestrator.rs:3013 reuse the formatted
         // base. No-op when context_files is empty.
         let original_task = format_worker_task(&original_task, &context_files);
-        // Internal operation: __cancel_delegation. Still stubbed until a
-        // real orchestrator-side cancellation handler lands. Any other
-        // `__`-prefixed agent name is an error (no longer reachable from
-        // the MCP server — report_progress and get_session_cost were
-        // removed in T1).
+        // `__`-prefixed agent names are reserved for internal operations.
+        // __cancel_delegation no longer routes through this path (INV-6 —
+        // cancellation now goes through CancellationControl). Any other
+        // `__`-prefixed name is an unsupported internal operation.
         if agent.starts_with("__") {
-            let error = if agent == "__cancel_delegation" {
-                "Internal operation not yet wired: __cancel_delegation".to_string()
-            } else {
-                format!("Unsupported internal operation: {agent}")
-            };
             return (
                 DelegationResult {
-                    status: DelegationStatus::Failed { error },
+                    status: DelegationStatus::Failed {
+                        error: format!("Unsupported internal operation: {agent}"),
+                    },
                     diff: None,
                     diff_summary: None,
                     summary: None,
@@ -2762,11 +2825,12 @@ impl Orchestrator {
                 );
             }
 
-            // Review gate: register FIRST, then emit events.
-            // `ReviewSink` requires register-before-emit so a TUI
-            // cannot race a `SubmitReview` past an unregistered sink.
-            let rx = match register_gate(eid.clone(), attempt_n, &review_sink).await {
-                Ok(rx) => rx,
+            // INV-4: obtain a ReviewHandle first — it is the ONLY way to
+            // emit `ExecutorReviewRequested` for this slot, enforced at
+            // the type level. `register_handle` wraps `ReviewSink::register`
+            // so the ordering invariant (register-before-emit) is preserved.
+            let handle = match review_sink.register_handle(eid.clone(), attempt_n).await {
+                Ok(h) => h,
                 Err(e) => {
                     tracing::error!(
                         executor_id = %eid.0,
@@ -2835,12 +2899,11 @@ impl Orchestrator {
                 delegation_plan: delegation_plan.clone(),
                 chosen_matches_dispatched,
             };
-            funnel.emit(SpurEventBody::ExecutorReviewRequested {
-                id: eid.0.clone(),
-                attempt_n,
-                kind: ReviewKind::Completion,
-                payload: review_payload,
-            });
+            // Emit via the handle — type-enforced: no handle → no emit.
+            handle.emit_requested(&funnel, ReviewKind::Completion, review_payload);
+
+            // Consume the handle to get the receiver for the decision loop.
+            let rx = handle.into_rx();
 
             // Inline decision-loop (so we can intercept Retry before
             // apply_decision_to_candidate maps it to Failed).
@@ -3184,6 +3247,9 @@ pub fn should_preserve_worktree(status: &DelegationStatus) -> bool {
                 fallback: TimeoutFallback::Reject { .. } | TimeoutFallback::Abandon,
                 ..
             }
+            // INV-6: preserve partial work for cancelled delegations so
+            // the brain/user can inspect what was done before cancellation.
+            | DelegationStatus::Cancelled { .. }
     )
 }
 
@@ -3300,6 +3366,7 @@ impl Drop for DelegationGuard {
 /// constructs the `DelegationResult`. Centralizing this makes the
 /// "every terminal emits DelegationCompleted" invariant locally
 /// verifiable (one call site per terminal arm in `execute_delegation`).
+#[allow(clippy::too_many_arguments)]
 fn finalize(
     funnel: &crate::event_funnel::FunnelHandle,
     worker_session: SessionId,
@@ -3571,7 +3638,7 @@ fn maybe_synthesize_file_touch(
 ///
 /// Read-only context shared across worker attempt retries.
 struct WorkerAttemptCtx<'a> {
-    brain_session_id: &'a SessionId,
+    brain_session_id: &'a spur_acp::BrainSessionId,
     agent: &'a str,
     task: &'a str,
     request_id: &'a str,
@@ -3603,7 +3670,7 @@ async fn run_one_worker_attempt(
     // stable executor_id" limitation documented for follow-up work.
     // The projection path (apply_inner) sees each event correctly.
     funnel.emit(SpurEventBody::DelegationRequested {
-        from: ctx.brain_session_id.clone(),
+        from: ctx.brain_session_id.as_session_id().clone(),
         to_agent: ctx.agent.to_string(),
         task: ctx.task.to_string(),
         request_id: ctx.request_id.to_string(),
@@ -3639,7 +3706,7 @@ async fn run_one_worker_attempt(
     if let Some(mut ext_rx) = connection.take_ext_notification_rx() {
         let funnel_for_ext = funnel.clone();
         let executor_id_for_ext = worker_session.0.clone();
-        let brain_session_for_ext = ctx.brain_session_id.clone();
+        let brain_session_for_ext = ctx.brain_session_id.as_session_id().clone();
         tokio::spawn(async move {
             while let Some(payload) = ext_rx.recv().await {
                 crate::spur_ext_interp::interpret(
@@ -3667,7 +3734,7 @@ async fn run_one_worker_attempt(
     // Correlate this executor with the brain's delegate_to_worker call
     // so the brain-side session_detail view can render an inline card.
     funnel.emit(SpurEventBody::DelegationDispatched {
-        from: ctx.brain_session_id.clone(),
+        from: ctx.brain_session_id.as_session_id().clone(),
         request_id: ctx.request_id.to_string(),
         executor_id: worker_session.0.clone(),
     });
@@ -3719,14 +3786,14 @@ async fn run_one_worker_attempt(
             // before any other notification handling.
             maybe_synthesize_file_touch(
                 &notification,
-                ctx.brain_session_id,
+                ctx.brain_session_id.as_session_id(),
                 &worker_session.0,
                 &file_touch_dedup,
                 funnel,
             );
             // Phase 1 — stream worker notifications to TUI via event bus.
             funnel.emit(SpurEventBody::WorkerNotification {
-                brain_session_id: ctx.brain_session_id.clone(),
+                brain_session_id: ctx.brain_session_id.as_session_id().clone(),
                 executor_id: worker_session.0.clone(),
                 notification: Box::new(notification.clone()),
             });
@@ -4094,6 +4161,169 @@ pub mod test_support {
             .collect();
         super::render_retry_context(&internal, original_task, current_feedback)
     }
+
+    // ─── Review gate helpers ──────────────────────────────────────────
+    // Test-only. Production code uses ReviewSink::register_handle (INV-4).
+
+    use super::{
+        apply_decision_to_candidate, DelegationStatus, ExecutorId, ReviewSink, ReviewSinkError,
+        TimeoutFallback,
+    };
+
+    /// Register a pending review on the sink. Returns the receiver the
+    /// caller awaits.
+    ///
+    /// **Test-only** — production code uses `ReviewSink::register_handle` (INV-4).
+    pub async fn register_gate(
+        executor_id: ExecutorId,
+        attempt_n: u32,
+        review_sink: &ReviewSink,
+    ) -> Result<tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>, ReviewSinkError> {
+        review_sink.register(executor_id, attempt_n).await
+    }
+
+    /// Wait for a review decision (or timeout) and shape the final
+    /// `DelegationStatus`.
+    ///
+    /// **Does NOT handle `Retry`** — returns `Failed` if Retry arrives.
+    ///
+    /// **Test-only** — production code uses `ReviewHandle::into_rx` (INV-4).
+    pub async fn wait_gate(
+        rx: tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>,
+        executor_id: ExecutorId,
+        candidate_status: DelegationStatus,
+        review_timeout: std::time::Duration,
+        timeout_fallback: TimeoutFallback,
+        review_sink: ReviewSink,
+    ) -> DelegationStatus {
+        tokio::select! {
+            recv_result = rx => {
+                match recv_result {
+                    Ok(decision) => apply_decision_to_candidate(decision, candidate_status),
+                    Err(_) => {
+                        review_sink.remove(&executor_id).await;
+                        DelegationStatus::TimedOut {
+                            waited_for: review_timeout,
+                            fallback: timeout_fallback,
+                        }
+                    }
+                }
+            }
+            _ = tokio::time::sleep(review_timeout) => {
+                review_sink.remove(&executor_id).await;
+                DelegationStatus::TimedOut {
+                    waited_for: review_timeout,
+                    fallback: timeout_fallback,
+                }
+            }
+        }
+    }
+
+    /// Register + wait composition.
+    ///
+    /// **Test-only** — production code uses `ReviewSink::register_handle` (INV-4).
+    pub async fn run_gate_for_candidate(
+        executor_id: ExecutorId,
+        attempt_n: u32,
+        candidate_status: DelegationStatus,
+        review_timeout: std::time::Duration,
+        timeout_fallback: TimeoutFallback,
+        review_sink: ReviewSink,
+    ) -> DelegationStatus {
+        let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::error!(
+                    executor_id = %executor_id.0,
+                    error = %e,
+                    "review_sink registration failed"
+                );
+                return DelegationStatus::Failed {
+                    error: format!("review registration failed: {e}"),
+                };
+            }
+        };
+        wait_gate(
+            rx,
+            executor_id,
+            candidate_status,
+            review_timeout,
+            timeout_fallback,
+            review_sink,
+        )
+        .await
+    }
+
+    /// Wraps `register_gate` + `wait_gate` in a retry loop.
+    ///
+    /// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
+    /// `max_review_retries`.
+    ///
+    /// NOTE: mirrors execute_delegation's production retry loop — drift
+    /// hazard. Changes to retry semantics should touch both.
+    ///
+    /// **Test-only** — production code uses `ReviewSink::register_handle` (INV-4).
+    pub async fn run_gate_with_retries(
+        executor_id: ExecutorId,
+        candidate_status: DelegationStatus,
+        review_timeout: std::time::Duration,
+        timeout_fallback: TimeoutFallback,
+        max_review_retries: u32,
+        review_sink: ReviewSink,
+    ) -> DelegationStatus {
+        let mut attempt_n: u32 = 1;
+        loop {
+            let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    return DelegationStatus::Failed {
+                        error: format!("review registration failed: {e}"),
+                    };
+                }
+            };
+
+            use spur_acp::ReviewDecision;
+            let decision_result = tokio::select! {
+                r = rx => r.ok(),
+                _ = tokio::time::sleep(review_timeout) => {
+                    review_sink.remove(&executor_id).await;
+                    return DelegationStatus::TimedOut {
+                        waited_for: review_timeout,
+                        fallback: timeout_fallback,
+                    };
+                }
+            };
+
+            match decision_result {
+                Some(ReviewDecision::Approve) => return candidate_status,
+                Some(ReviewDecision::Reject { reason }) => {
+                    return DelegationStatus::Rejected { reason }
+                }
+                Some(ReviewDecision::Modify { note }) => {
+                    return DelegationStatus::Modified {
+                        reviewer_note: note,
+                    }
+                }
+                Some(ReviewDecision::Retry { .. }) => {
+                    // `>` (not `>=`): see execute_delegation for rationale.
+                    if attempt_n > max_review_retries {
+                        return DelegationStatus::Failed {
+                            error: format!("retry limit exceeded after {} attempts", attempt_n),
+                        };
+                    }
+                    attempt_n += 1;
+                    continue;
+                }
+                None => {
+                    review_sink.remove(&executor_id).await;
+                    return DelegationStatus::TimedOut {
+                        waited_for: review_timeout,
+                        fallback: timeout_fallback,
+                    };
+                }
+            }
+        }
+    }
 }
 
 /// Strip a leading `!` from the first text block in `blocks`, if any.
@@ -4132,195 +4362,6 @@ pub async fn review_dispatcher_loop(mut rx: mpsc::Receiver<InteractiveInput>, si
                 .await;
         }
         // All other variants: noop in this loop.
-    }
-}
-
-// ─── Review gate helper ───────────────────────────────────────────────
-
-/// Register a pending review on the sink. Returns the receiver the
-/// caller awaits.
-///
-/// MUST be called BEFORE emitting `ExecutorReviewRequested` so the TUI
-/// cannot race a `SubmitReview` past an unregistered sink — see
-/// `ReviewSink` docs for the invariant.
-pub async fn register_gate(
-    executor_id: ExecutorId,
-    attempt_n: u32,
-    review_sink: &ReviewSink,
-) -> Result<tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>, ReviewSinkError> {
-    review_sink.register(executor_id, attempt_n).await
-}
-
-/// Wait for a review decision (or timeout) and shape the final
-/// `DelegationStatus`. The caller MUST have already called
-/// `register_gate` and MUST pass the receiver returned from that call.
-///
-/// **Does NOT handle `Retry`** — if a `ReviewDecision::Retry` arrives,
-/// this function returns a `DelegationStatus::Failed` with an
-/// explanatory message. Task 10 wraps this helper in a retry loop that
-/// intercepts `Retry` decisions before they reach this function, so in
-/// practice this arm is unreachable once Task 10 is integrated; the
-/// explicit arm exists for safety if someone calls this helper
-/// directly without a wrapper.
-///
-/// On timeout or sender-drop: explicitly removes the sink entry (to
-/// prevent stale entries per the spec's error-handling
-/// "explicit-remove" contract) and returns
-/// `TimedOut { waited_for, fallback }`.
-pub async fn wait_gate(
-    rx: tokio::sync::oneshot::Receiver<spur_acp::ReviewDecision>,
-    executor_id: ExecutorId,
-    candidate_status: DelegationStatus,
-    review_timeout: std::time::Duration,
-    timeout_fallback: TimeoutFallback,
-    review_sink: ReviewSink,
-) -> DelegationStatus {
-    tokio::select! {
-        recv_result = rx => {
-            match recv_result {
-                Ok(decision) => apply_decision_to_candidate(decision, candidate_status),
-                Err(_) => {
-                    // Sender dropped before sending — treat as timeout.
-                    review_sink.remove(&executor_id).await;
-                    DelegationStatus::TimedOut {
-                        waited_for: review_timeout,
-                        fallback: timeout_fallback,
-                    }
-                }
-            }
-        }
-        _ = tokio::time::sleep(review_timeout) => {
-            // Explicit-remove contract (spec error-handling section).
-            review_sink.remove(&executor_id).await;
-            DelegationStatus::TimedOut {
-                waited_for: review_timeout,
-                fallback: timeout_fallback,
-            }
-        }
-    }
-}
-
-/// Register + wait composition. Exists primarily for unit tests that
-/// want to exercise the full gate shape in one call; production code
-/// in `execute_delegation` calls `register_gate` and `wait_gate`
-/// separately so event emission can be sequenced between them (the
-/// register-before-emit ordering the `ReviewSink` invariant requires).
-///
-/// On register failure (already-registered double-register): returns
-/// `Failed` with an explanatory error.
-pub async fn run_gate_for_candidate(
-    executor_id: ExecutorId,
-    attempt_n: u32,
-    candidate_status: DelegationStatus,
-    review_timeout: std::time::Duration,
-    timeout_fallback: TimeoutFallback,
-    review_sink: ReviewSink,
-) -> DelegationStatus {
-    let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(
-                executor_id = %executor_id.0,
-                error = %e,
-                "review_sink registration failed"
-            );
-            return DelegationStatus::Failed {
-                error: format!("review registration failed: {e}"),
-            };
-        }
-    };
-    wait_gate(
-        rx,
-        executor_id,
-        candidate_status,
-        review_timeout,
-        timeout_fallback,
-        review_sink,
-    )
-    .await
-}
-
-/// Test helper: wraps `register_gate` + `wait_gate` in a retry loop,
-/// re-using the same `candidate_status` for each attempt (since this
-/// helper doesn't spawn workers — production code in `execute_delegation`
-/// respawns the worker and produces a fresh candidate each iteration).
-///
-/// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
-/// `max_review_retries`. On exceed, returns
-/// `Failed { error: "retry limit exceeded after N attempts" }`.
-///
-/// NOTE: this mirrors execute_delegation's production retry loop. See
-/// the cross-reference comment at the Retry match arm there for
-/// invariants. Drift hazard: tests passing here do not guarantee the
-/// production loop behaves the same. Changes to retry semantics
-/// should touch both.
-pub async fn run_gate_with_retries(
-    executor_id: ExecutorId,
-    candidate_status: DelegationStatus,
-    review_timeout: std::time::Duration,
-    timeout_fallback: TimeoutFallback,
-    max_review_retries: u32,
-    review_sink: ReviewSink,
-) -> DelegationStatus {
-    let mut attempt_n: u32 = 1;
-    loop {
-        let rx = match register_gate(executor_id.clone(), attempt_n, &review_sink).await {
-            Ok(rx) => rx,
-            Err(e) => {
-                return DelegationStatus::Failed {
-                    error: format!("review registration failed: {e}"),
-                };
-            }
-        };
-
-        // One iteration of the gate. We inline the select! here (rather than
-        // calling wait_gate) so we can intercept Retry BEFORE it gets mapped
-        // to Failed by apply_decision_to_candidate.
-        use spur_acp::ReviewDecision;
-        let decision_result = tokio::select! {
-            r = rx => r.ok(),
-            _ = tokio::time::sleep(review_timeout) => {
-                review_sink.remove(&executor_id).await;
-                return DelegationStatus::TimedOut {
-                    waited_for: review_timeout,
-                    fallback: timeout_fallback,
-                };
-            }
-        };
-
-        match decision_result {
-            Some(ReviewDecision::Approve) => return candidate_status,
-            Some(ReviewDecision::Reject { reason }) => {
-                return DelegationStatus::Rejected { reason }
-            }
-            Some(ReviewDecision::Modify { note }) => {
-                return DelegationStatus::Modified {
-                    reviewer_note: note,
-                }
-            }
-            Some(ReviewDecision::Retry { .. }) => {
-                // `>` (not `>=`): see execute_delegation for rationale.
-                // Error message reports `attempt_n` (the actual attempt
-                // count that ran), NOT `max_review_retries`. See the
-                // execute_delegation cross-reference for the worked
-                // example.
-                if attempt_n > max_review_retries {
-                    return DelegationStatus::Failed {
-                        error: format!("retry limit exceeded after {} attempts", attempt_n),
-                    };
-                }
-                attempt_n += 1;
-                continue;
-            }
-            None => {
-                // Sender dropped — treat as timeout.
-                review_sink.remove(&executor_id).await;
-                return DelegationStatus::TimedOut {
-                    waited_for: review_timeout,
-                    fallback: timeout_fallback,
-                };
-            }
-        }
     }
 }
 
@@ -4743,18 +4784,18 @@ mod normalize_tests {
         let dispatched = "kiro";
         let chosen = "claude";
         let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
-        assert_eq!(matched, false);
+        assert!(!matched);
 
         let dispatched = "claude-code-acp";
         let chosen = "claude";
         let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
         // claude-code-acp normalizes to "claude-code", so "claude" != "claude-code"
-        assert_eq!(matched, false);
+        assert!(!matched);
 
         let dispatched = "claude-code-acp";
         let chosen = "claude-code-acp";
         let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
-        assert_eq!(matched, true);
+        assert!(matched);
     }
 }
 

@@ -1,7 +1,11 @@
 use crate::DiffSummary;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 /// Result status of a delegation to a worker.
 ///
@@ -40,6 +44,11 @@ pub enum DelegationStatus {
         #[serde(with = "duration_serde")]
         waited_for: Duration,
         fallback: TimeoutFallback,
+    },
+    /// INV-6: cancellation requested via `CancellationControl::cancel(id)`.
+    /// `reason` describes who/why cancellation fired.
+    Cancelled {
+        reason: String,
     },
 }
 
@@ -118,6 +127,62 @@ mod duration_serde {
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         u64::deserialize(d).map(Duration::from_secs)
+    }
+}
+
+// ─── INV-6: Cancellation primitives ──────────────────────────────────────────
+
+/// Outcome returned by `CancellationControl::cancel`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// Token found and cancellation signaled. The delegation's
+    /// `tokio::select!` will resolve to `DelegationStatus::Cancelled`.
+    Cancelled,
+    /// No token with this `request_id` — delegation already completed or
+    /// was never dispatched.
+    NotFound,
+}
+
+/// Clonable handle to the per-delegation cancellation token registry.
+///
+/// Obtained from `Orchestrator::cancellation_control()`. Pass a clone to
+/// `McpCallbackServer` so `handle_cancel_delegation` can reach it without
+/// routing through the normal `DelegationRequest` channel.
+#[derive(Clone, Default)]
+pub struct CancellationControl {
+    tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
+}
+
+impl CancellationControl {
+    /// Create a new, empty control handle. The orchestrator creates one and
+    /// hands out clones.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a fresh token for `request_id`. Called by
+    /// `handle_delegations` before spawning the delegation task.
+    pub async fn register(&self, request_id: String) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.tokens.lock().await.insert(request_id, token.clone());
+        token
+    }
+
+    /// Remove and cancel the token for `request_id`.
+    /// Returns `Cancelled` if the token was found, `NotFound` otherwise.
+    pub async fn cancel(&self, request_id: &str) -> CancelOutcome {
+        if let Some(token) = self.tokens.lock().await.remove(request_id) {
+            token.cancel();
+            CancelOutcome::Cancelled
+        } else {
+            CancelOutcome::NotFound
+        }
+    }
+
+    /// Remove the token entry without cancelling (called after normal
+    /// completion so stale entries don't accumulate).
+    pub async fn remove(&self, request_id: &str) {
+        self.tokens.lock().await.remove(request_id);
     }
 }
 

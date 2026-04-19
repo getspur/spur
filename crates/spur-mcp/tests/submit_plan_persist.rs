@@ -149,3 +149,166 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
         .collect();
     assert!(required.contains(&"tasks"));
 }
+
+/// INV-7: verify that `run_plan` emits `PlanCompleted` and `PlanReadyToMerge`
+/// when all tasks are already in a terminal Approved state on entry (so the
+/// executor loop exits immediately without dispatching).
+#[tokio::test]
+async fn run_plan_emits_plan_completed_on_terminal_state() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+    use spur_mcp::plan::{run_plan, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+    use spur_mcp::McpEventSink;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    let state = PlanState {
+        plan_id: "p1".into(),
+        tasks: vec![PlanTaskEntry {
+            spec: PlanTask {
+                task_id: "t1".into(),
+                agent: "a".into(),
+                task: "T".into(),
+                depends_on: vec![],
+                issue_id: None,
+                context_files: vec![],
+            },
+            status: PlanTaskStatus::Approved { summary: None },
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+        }],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
+        epic_id: None,
+    };
+
+    /// A test sink that captures emitted event bodies synchronously.
+    struct CaptureSink {
+        events: std::sync::Mutex<Vec<SpurEvent>>,
+    }
+    impl McpEventSink for CaptureSink {
+        fn emit(&self, body: SpurEventBody) {
+            self.events.lock().unwrap().push(SpurEvent::now(body));
+        }
+    }
+
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
+
+    let (dtx, _drx) = mpsc::channel(8);
+
+    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref)).await;
+
+    let events = sink.events.lock().unwrap();
+    let saw_completed = events.iter().any(|e| {
+        matches!(
+            &e.body,
+            SpurEventBody::PlanCompleted { plan_id, approved, .. }
+                if plan_id == "p1" && *approved == 1
+        )
+    });
+    let saw_ready = events.iter().any(|e| {
+        matches!(
+            &e.body,
+            SpurEventBody::PlanReadyToMerge { plan_id } if plan_id == "p1"
+        )
+    });
+    assert!(
+        saw_completed,
+        "PlanCompleted must be emitted; got: {:?}",
+        events.iter().map(|e| &e.body).collect::<Vec<_>>()
+    );
+    assert!(
+        saw_ready,
+        "PlanReadyToMerge must be emitted (all Approved); got: {:?}",
+        events.iter().map(|e| &e.body).collect::<Vec<_>>()
+    );
+}
+
+/// INV-5: verify that `handle_review_task` releases the plan-state lock BEFORE
+/// it calls `pm.update_issue`, so concurrent readers are not blocked by network
+/// latency.
+///
+/// Mechanism: `SleepyPm` fires a oneshot signal the instant `update_issue` is
+/// entered (before the virtual sleep).  The test awaits that signal, which
+/// proves the approve task has genuinely reached the beads-I/O await point —
+/// ruling out a false-pass from an early-error exit that never held the lock in
+/// the first place.  Only then does it call `try_lock`.
+///
+/// With the fix the lock is dropped before `update_issue` is called, so
+/// `try_lock` succeeds.  Without the fix the lock is still held at that point,
+/// so `try_lock` would return `Err`.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn review_approve_releases_plan_lock_before_beads_io() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    let state = spur_mcp::plan::PlanState {
+        plan_id: "p1".into(),
+        tasks: vec![spur_mcp::plan::PlanTaskEntry {
+            spec: spur_mcp::plan::PlanTask {
+                task_id: "t1".into(),
+                agent: "a".into(),
+                task: "T".into(),
+                depends_on: vec![],
+                issue_id: Some("bd-1".into()),
+                context_files: vec![],
+            },
+            status: spur_mcp::plan::PlanTaskStatus::AwaitingReview { summary: None },
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+        }],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
+        epic_id: None,
+    };
+    let plan_arc: Arc<Mutex<spur_mcp::plan::PlanState>> = Arc::new(Mutex::new(state));
+
+    // SleepyPm sleeps 1 s (virtual) inside update_issue and fires `entered_rx`
+    // the moment update_issue is entered — before the sleep.
+    let (sleepy_pm, entered_rx) =
+        spur_mcp::test_support::make_sleepy_pm_with_signal(Duration::from_secs(1));
+
+    // Start approve in the background.
+    let plan_ref = Arc::clone(&plan_arc);
+    let approve = tokio::spawn(async move {
+        spur_mcp::plan::handle_review_task(
+            plan_ref,
+            "p1",
+            "t1",
+            "approve",
+            Some("ok"),
+            Some(sleepy_pm.as_ref()),
+            None,
+            None,
+            None,
+        )
+        .await
+    });
+
+    // Wait until approve has provably entered update_issue's await point.
+    // This guarantees we are NOT racing against an early-error path and that
+    // the plan lock has been held and (with the fix) released.
+    entered_rx
+        .await
+        .expect("approve must reach update_issue before the test can proceed");
+
+    // The lock must be available: approve dropped it before calling update_issue.
+    // Without the fix it would still be held here, and try_lock would fail.
+    let guard = plan_arc.try_lock();
+    assert!(
+        guard.is_ok(),
+        "plan lock must be released before pm.update_issue — INV-5 violated"
+    );
+    drop(guard);
+
+    // Let the approve finish (auto-advances virtual time past the 1 s sleep).
+    approve
+        .await
+        .expect("approve task panicked")
+        .expect("approve returned Err");
+}

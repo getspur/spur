@@ -560,6 +560,23 @@ pub enum SpurEventBody {
         max_attempts: u32,
         delegation_id: String,
     },
+
+    // ── Plan lifecycle events (INV-7) ─────────────────────────────────────────
+    /// Emitted once when a submitted plan reaches a terminal state (no tasks
+    /// left to dispatch). Counts reflect the final status of all tasks.
+    /// Brain awaits this instead of polling get_plan_status.
+    PlanCompleted {
+        plan_id: String,
+        approved: u32,
+        rejected: u32,
+        failed: u32,
+    },
+    /// Emitted when all tasks in a plan are Approved. Distinct from
+    /// PlanCompleted (which fires on any terminal state). Brain treats this
+    /// as the merge-authorization signal.
+    PlanReadyToMerge {
+        plan_id: String,
+    },
 }
 
 /// A single entry in a replayed conversation history.

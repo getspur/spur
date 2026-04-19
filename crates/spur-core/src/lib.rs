@@ -5,7 +5,7 @@ pub mod lineage;
 pub(crate) mod notification_drain;
 pub mod notification_pump;
 pub mod orchestrator;
-mod review_sink;
+pub mod review_sink;
 pub mod skills;
 pub mod skip_perm;
 pub mod spur_ext_interp;
