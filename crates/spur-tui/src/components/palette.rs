@@ -3,8 +3,6 @@
 //! A modal overlay that fuzzy-searches across sessions, workers-in-lineage,
 //! commands, and the current-session trace. Dispatches an `Action` on Enter.
 
-use crate::components::palette_sources::PaletteSource;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteKind {
     Command,
@@ -29,21 +27,65 @@ pub struct PaletteResult {
     pub payload: PalettePayload,
 }
 
+/// State owned by the Ctrl+K palette overlay.
+///
+/// # Performance Invariant
+///
+/// `rerank()` (called on every keystroke, every query mutation, and every
+/// palette open) guarantees:
+///   - **O(N) time** where N = `raw.len()`.
+///   - **O(M · 4 bytes)** new memory per rerank, where M = matched entries.
+///   - **Exactly 2 allocations** on the non-empty-query path: one `Pattern`
+///     parse and one scratch `Vec<(u32, u32)>` for scoring.
+///   - **Zero clones** of `PaletteResult` fields (label/subtitle are not
+///     copied during rerank; we rank by index into `raw`).
+///
+/// Enforced by `tests/palette_rerank_bench_smoke.rs`. If that test fails
+/// after a refactor, you have reintroduced unbounded allocation — fix it
+/// rather than loosening the threshold.
+///
+/// The invariant assumes N < 10,000. Phase F2 cross-session trace indexing
+/// will push N higher; at that point add query debouncing or an
+/// approximate top-K.
 pub struct PaletteState {
     query: String,
     raw: Vec<PaletteResult>,
-    ranked: Vec<PaletteResult>,
+    /// Indices into `raw` in rank order. Replaces a previous owned
+    /// `ranked: Vec<PaletteResult>` field to avoid per-rerank cloning.
+    order: Vec<u32>,
     cursor: usize,
+    /// Reused across keystrokes to avoid per-rerank heap allocation.
+    matcher: nucleo_matcher::Matcher,
+    /// Scratch buffer reused by `Utf32Str::new` inside rerank's inner loop.
+    /// Grows on demand to fit the longest label seen; never shrunk.
+    scratch: Vec<char>,
 }
 
 impl PaletteState {
     pub fn new() -> Self {
-        Self { query: String::new(), raw: Vec::new(), ranked: Vec::new(), cursor: 0 }
+        Self {
+            query: String::new(),
+            raw: Vec::new(),
+            order: Vec::new(),
+            cursor: 0,
+            matcher: nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT),
+            scratch: Vec::new(),
+        }
     }
 
     pub fn query(&self) -> &str { &self.query }
-    pub fn ranked(&self) -> &[PaletteResult] { &self.ranked }
     pub fn cursor(&self) -> usize { self.cursor }
+    pub fn ranked_len(&self) -> usize { self.order.len() }
+
+    /// Borrow the `i`th ranked result, if any.
+    pub fn nth_ranked(&self, i: usize) -> Option<&PaletteResult> {
+        self.order.get(i).and_then(|&idx| self.raw.get(idx as usize))
+    }
+
+    /// Iterate ranked results in rank order. Zero-copy.
+    pub fn iter_ranked(&self) -> impl Iterator<Item = &PaletteResult> + '_ {
+        self.order.iter().filter_map(move |&i| self.raw.get(i as usize))
+    }
 
     /// Populate from a source batch. Call once per source at open time.
     pub fn push_raw(&mut self, mut results: Vec<PaletteResult>) {
@@ -52,7 +94,7 @@ impl PaletteState {
     }
 
     /// Append multiple source batches and rerank exactly once at the end.
-    /// Use this in preference to repeated `push_raw` when loading all sources at open.
+    /// Prefer this over repeated `push_raw` when loading all sources at open.
     pub fn extend_raw(&mut self, batches: impl IntoIterator<Item = Vec<PaletteResult>>) {
         for mut batch in batches {
             self.raw.append(&mut batch);
@@ -60,24 +102,29 @@ impl PaletteState {
         self.rerank();
     }
 
-    /// Pull results from every registered source. Convenience for tests and
-    /// for the App-level open path.
-    pub fn load_from_sources(&mut self, sources: &[Box<dyn PaletteSource>]) {
-        self.raw.clear();
-        for src in sources {
-            self.raw.extend(src.collect());
-        }
-        self.rerank();
-    }
-
     fn rerank(&mut self) {
-        // Empty query: preserve input order (same semantics as commands::fuzzy::rank).
+        use nucleo_matcher::{pattern::{CaseMatching, Normalization, Pattern}, Utf32Str};
+
+        self.order.clear();
         if self.query.is_empty() {
-            self.ranked = self.raw.clone();
+            // Empty-query path: identity order, no scoring, no cloning.
+            self.order.extend(0..self.raw.len() as u32);
         } else {
-            self.ranked = rank_results(&self.raw, &self.query);
+            let pattern = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
+            let mut tmp: Vec<(u32, u32)> = Vec::with_capacity(self.raw.len());
+            for (i, entry) in self.raw.iter().enumerate() {
+                self.scratch.clear();
+                let utf = Utf32Str::new(&entry.label, &mut self.scratch);
+                if let Some(score) = pattern.score(utf, &mut self.matcher) {
+                    tmp.push((score, i as u32));
+                }
+            }
+            // Stable sort by descending score; ties preserve insertion order.
+            tmp.sort_by(|a, b| b.0.cmp(&a.0));
+            self.order.extend(tmp.into_iter().map(|(_, i)| i));
         }
-        self.cursor = self.cursor.min(self.ranked.len().saturating_sub(1));
+        // Clamp cursor to new ranked length.
+        self.cursor = self.cursor.min(self.order.len().saturating_sub(1));
     }
 
     pub fn set_query(&mut self, q: impl Into<String>) {
@@ -95,24 +142,39 @@ impl PaletteState {
         self.rerank();
     }
 
-    pub fn cursor_down(&mut self) {
-        if self.ranked.is_empty() { return; }
-        self.cursor = (self.cursor + 1).min(self.ranked.len() - 1);
+    /// Move the cursor by `delta`. Positive is down, negative is up.
+    /// Clamped to `[0, order.len()-1]`. No-op when ranked is empty.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let n = self.order.len() as isize;
+        if n == 0 { return; }
+        let new_cursor = (self.cursor as isize + delta).clamp(0, n - 1);
+        self.cursor = new_cursor as usize;
     }
 
-    pub fn cursor_up(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+    pub fn cursor_up(&mut self)   { self.move_cursor(-1); }
+    pub fn cursor_down(&mut self) { self.move_cursor(1); }
+
+    /// Move the cursor up by `n` rows (for PageUp). Clamped at 0.
+    pub fn page_up(&mut self, n: usize)   { self.move_cursor(-(n as isize)); }
+    /// Move the cursor down by `n` rows (for PageDown). Clamped at end.
+    pub fn page_down(&mut self, n: usize) { self.move_cursor(n as isize); }
+
+    pub fn cursor_home(&mut self) { self.cursor = 0; }
+    pub fn cursor_end(&mut self) {
+        self.cursor = self.order.len().saturating_sub(1);
     }
 
     pub fn selected(&self) -> Option<&PaletteResult> {
-        self.ranked.get(self.cursor)
+        self.nth_ranked(self.cursor)
     }
 
     pub fn reset(&mut self) {
         self.query.clear();
         self.raw.clear();
-        self.ranked.clear();
+        self.order.clear();
         self.cursor = 0;
+        // `matcher` and `scratch` retain their capacity — intentional:
+        // reuse eliminates per-rerank heap allocation across opens.
     }
 }
 
@@ -164,25 +226,4 @@ impl PaletteState {
             _ => None, // swallow other keys silently
         }
     }
-}
-
-/// Nucleo-fuzzy rank across all sources by matching `query` against `label`.
-/// Unmatched results are dropped. Ties broken by insertion order.
-fn rank_results(entries: &[PaletteResult], query: &str) -> Vec<PaletteResult> {
-    use nucleo_matcher::{pattern::{CaseMatching, Normalization, Pattern}, Matcher};
-
-    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-    let mut scored: Vec<(u32, PaletteResult)> = entries
-        .iter()
-        .filter_map(|e| {
-            let score = pattern.score(
-                nucleo_matcher::Utf32Str::new(&e.label, &mut Vec::new()),
-                &mut matcher,
-            )?;
-            Some((score, e.clone()))
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.into_iter().map(|(_, e)| e).collect()
 }
