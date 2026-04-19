@@ -636,7 +636,6 @@ async fn main() -> Result<()> {
     }
 }
 
-
 async fn cmd_agents(repo_root: PathBuf, command: Option<AgentsCommands>) -> Result<()> {
     let config = load_config()?;
     let mut orch = Orchestrator::new(repo_root, config)?;
