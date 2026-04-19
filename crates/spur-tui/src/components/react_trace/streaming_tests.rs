@@ -537,6 +537,18 @@ fn sim_fix_content_anchor_eliminates_ghost_text() {
     );
 }
 
+#[test]
+fn with_kind_compact_sets_compact_flag() {
+    use crate::components::react_trace::ReactTrace;
+    use spur_acp::AgentKind;
+
+    let t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    assert!(t.is_compact(), "with_kind_compact should set compact = true");
+
+    let full = ReactTrace::with_kind(AgentKind::Generic);
+    assert!(!full.is_compact(), "with_kind should leave compact = false");
+}
+
 /// SIM-4 — Stress test the fix across multiple sequential flushes.
 ///
 /// Real streams emit many chunks; each may trigger a flush. The anchor
