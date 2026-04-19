@@ -132,6 +132,7 @@ pub struct BrainSession {
 }
 
 /// A user input message from the TUI.
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum InteractiveInput {
     Message {

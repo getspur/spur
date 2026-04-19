@@ -6,9 +6,26 @@
 use spur_acp::domain::BrainContinuation;
 use spur_acp::types::SessionId;
 use std::collections::{HashSet, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::orchestrator::InteractiveInput;
+
+pub const CANCEL_GRACE_DEFAULT: Duration = Duration::from_millis(750);
+
+#[derive(Debug)]
+pub enum ScheduledAction {
+    /// Fire a user turn. Caller flattens into `PromptRequest`.
+    UserPrompt(InteractiveInput),
+    /// Fire an autonomous continuation turn with these coalesced continuations.
+    ContinuationPrompt(Vec<BrainContinuation>),
+    /// Fire a merged turn: user input foreground, continuations as background blocks.
+    MergedPrompt {
+        user: InteractiveInput,
+        continuations: Vec<BrainContinuation>,
+    },
+    /// Nothing to do.
+    Idle,
+}
 
 /// Owns the split-lane queues and scheduling policy for brain turns.
 pub struct BrainScheduler {
@@ -67,10 +84,108 @@ impl BrainScheduler {
         self.pending_continuations.push_back(c);
     }
 
+    pub fn note_turn_started(&mut self) {
+        self.turn_in_flight = true;
+    }
+
+    pub fn note_turn_finished(&mut self) {
+        self.turn_in_flight = false;
+    }
+
+    /// Call AFTER cancel has fully resolved (stream drained / force-timeout fired).
+    pub fn note_cancel_resolved(&mut self, now: Instant) {
+        self.cancel_grace_until = Some(now + CANCEL_GRACE_DEFAULT);
+    }
+
+    /// Arriving user prompt during grace clears the grace window.
+    fn clear_grace_if_user_arrived(&mut self) {
+        if !self.pending_user.is_empty() {
+            self.cancel_grace_until = None;
+        }
+    }
+
+    fn in_cancel_grace(&self, now: Instant) -> bool {
+        match self.cancel_grace_until {
+            Some(t) => now < t,
+            None => false,
+        }
+    }
+
+    /// Pure sync: given the current clock, return the next action.
+    /// Mutates internal queues for any action that delivers continuations.
+    ///
+    /// **At-most-once delivery:** a continuation popped into any prompt
+    /// variant is recorded in `delivered_ids` immediately. If the caller
+    /// fails to actually deliver the prompt to the brain, those
+    /// continuations are lost. This is consistent with the spec's INV-C5
+    /// idempotency rule and the scheduler's "report and decide" role —
+    /// failure recovery is the dispatcher's responsibility, not the
+    /// scheduler's.
+    pub fn next(&mut self, now: Instant) -> ScheduledAction {
+        self.clear_grace_if_user_arrived();
+
+        if self.turn_in_flight {
+            return ScheduledAction::Idle;
+        }
+
+        // User priority.
+        if let Some(user) = self.pending_user.pop_front() {
+            let continuations = if self.pending_continuations.is_empty() {
+                Vec::new()
+            } else {
+                self.drain_continuations_for_delivery()
+            };
+            if continuations.is_empty() {
+                return ScheduledAction::UserPrompt(user);
+            }
+            return ScheduledAction::MergedPrompt { user, continuations };
+        }
+
+        // No user queued: can we fire an autonomous continuation?
+        if self.pending_continuations.is_empty() {
+            return ScheduledAction::Idle;
+        }
+        if self.in_cancel_grace(now) {
+            return ScheduledAction::Idle;
+        }
+        ScheduledAction::ContinuationPrompt(self.drain_continuations_for_delivery())
+    }
+
+    /// Drains ALL pending continuations. Merge-byte-budget enforcement
+    /// lives at the prompt-builder layer (Task 7), not here — the
+    /// scheduler hands over the full batch and the builder spills.
+    fn drain_continuations_for_delivery(&mut self) -> Vec<BrainContinuation> {
+        let batch: Vec<_> = self.pending_continuations.drain(..).collect();
+        for c in &batch {
+            self.delivered_ids.insert(c.delegation_id.clone());
+        }
+        batch
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_user_len(&self) -> usize { self.pending_user.len() }
     #[cfg(test)]
     pub(crate) fn pending_continuation_len(&self) -> usize { self.pending_continuations.len() }
+}
+
+/// RAII guard: sets `turn_in_flight = true` on `arm`, clears on `Drop`.
+/// Task 8 uses this to guarantee `note_turn_finished()` is called on
+/// every exit path from the streaming loop (normal, cancel, error).
+pub struct TurnGuard<'a> {
+    sched: &'a mut BrainScheduler,
+}
+
+impl<'a> TurnGuard<'a> {
+    pub fn arm(sched: &'a mut BrainScheduler) -> Self {
+        sched.note_turn_started();
+        Self { sched }
+    }
+}
+
+impl Drop for TurnGuard<'_> {
+    fn drop(&mut self) {
+        self.sched.note_turn_finished();
+    }
 }
 
 #[cfg(test)]
@@ -108,5 +223,80 @@ mod tests {
         assert_eq!(s.pending_continuation_len(), 1);
         s.push_continuation(mk_cont("id-2"));
         assert_eq!(s.pending_continuation_len(), 2);
+    }
+
+    #[test]
+    fn next_is_idle_when_everything_empty() {
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+        assert!(matches!(s.next(Instant::now()), ScheduledAction::Idle));
+    }
+
+    #[test]
+    fn next_returns_user_prompt_when_user_queued_and_idle() {
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+        s.push_user(InteractiveInput::Message { blocks: vec![], interrupt: false });
+        assert!(matches!(s.next(Instant::now()), ScheduledAction::UserPrompt(_)));
+    }
+
+    #[test]
+    fn next_returns_idle_while_turn_in_flight_even_if_user_queued() {
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+        s.push_user(InteractiveInput::Message { blocks: vec![], interrupt: false });
+        s.note_turn_started();
+        assert!(matches!(s.next(Instant::now()), ScheduledAction::Idle));
+    }
+
+    #[test]
+    fn next_fires_continuation_only_when_idle_and_no_user_pending() {
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+        s.push_continuation(mk_cont("id-1"));
+        match s.next(Instant::now()) {
+            ScheduledAction::ContinuationPrompt(cs) => assert_eq!(cs.len(), 1),
+            other => panic!("expected ContinuationPrompt, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn next_user_beats_continuation_when_both_queued() {
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+        s.push_continuation(mk_cont("id-1"));
+        s.push_user(InteractiveInput::Message { blocks: vec![], interrupt: false });
+        match s.next(Instant::now()) {
+            ScheduledAction::MergedPrompt { continuations, .. } => {
+                assert_eq!(continuations.len(), 1);
+            }
+            other => panic!("expected MergedPrompt, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn next_suppresses_continuation_during_cancel_grace() {
+        let now = Instant::now();
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+        s.push_continuation(mk_cont("id-1"));
+        s.note_cancel_resolved(now);
+        // Inside the grace window: Idle.
+        assert!(matches!(s.next(now + std::time::Duration::from_millis(100)), ScheduledAction::Idle));
+        // After grace: fires.
+        assert!(matches!(
+            s.next(now + std::time::Duration::from_millis(2000)),
+            ScheduledAction::ContinuationPrompt(_)
+        ));
+    }
+
+    #[test]
+    fn next_coalesces_multiple_continuations_fifo() {
+        let mut s = BrainScheduler::new(Some(SessionId::new()));
+        s.push_continuation(mk_cont("id-1"));
+        s.push_continuation(mk_cont("id-2"));
+        s.push_continuation(mk_cont("id-3"));
+        match s.next(Instant::now()) {
+            ScheduledAction::ContinuationPrompt(cs) => {
+                assert_eq!(cs.len(), 3);
+                assert_eq!(cs[0].delegation_id, "id-1");
+                assert_eq!(cs[2].delegation_id, "id-3");
+            }
+            _ => panic!("expected ContinuationPrompt"),
+        }
     }
 }
