@@ -214,6 +214,10 @@ impl SpurLicense {
         self.provider.refresh_policy()
     }
 
+    pub fn requires_heartbeat(&self) -> bool {
+        self.provider.requires_heartbeat()
+    }
+
     pub fn has_entitlement(&self, feature: &str) -> bool {
         self.provider.has_entitlement(feature)
     }

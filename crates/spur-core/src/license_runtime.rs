@@ -52,7 +52,7 @@ pub fn spawn_license_runtime(license: SpurLicense, funnel: FunnelHandle) -> Join
                     let jittered_delay = current_validate_delay.mul_f64(1.0 + jitter_ms);
                     validate_sleep.as_mut().reset(tokio::time::Instant::now() + jittered_delay);
                 }
-                _ = &mut heartbeat_sleep, if should_heartbeat(&license.current_state()) => {
+                _ = &mut heartbeat_sleep, if should_heartbeat(&license) => {
                     match license.heartbeat().await {
                         Ok(_) => {
                             current_heartbeat_delay = policy.heartbeat_interval;
@@ -83,8 +83,11 @@ pub fn spawn_license_runtime(license: SpurLicense, funnel: FunnelHandle) -> Join
     })
 }
 
-fn should_heartbeat(state: &LicenseState) -> bool {
-    state.is_active() && !matches!(state.binding_mode, BindingMode::Unknown)
+fn should_heartbeat(license: &SpurLicense) -> bool {
+    let state = license.current_state();
+    state.is_active()
+        && !matches!(state.binding_mode, BindingMode::Unknown)
+        && license.requires_heartbeat()
 }
 
 fn degraded_from(mut state: LicenseState, message: String) -> LicenseState {

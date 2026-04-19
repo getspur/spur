@@ -169,6 +169,14 @@ impl LicenseProvider for LicenseSeatProvider {
         self.refresh_policy
     }
 
+    fn requires_heartbeat(&self) -> bool {
+        // Upstream licenseseat 0.5.3 has no per-mode heartbeat policy;
+        // the SPUR-layer coarse gate (state.is_active() &&
+        // binding_mode != Unknown) drives suppression. See
+        // docs/rca/2026-04-19-licenseseat-emission-audit.md Gate 2.
+        true
+    }
+
     fn has_entitlement(&self, feature: &str) -> bool {
         self.sdk.has_entitlement(feature)
     }
@@ -346,14 +354,17 @@ impl LicenseProvider for DisabledProvider {
 fn is_handler_originated(kind: &EventKind) -> bool {
     matches!(
         kind,
-        EventKind::ActivationSuccess
+        EventKind::ActivationStart
+            | EventKind::ActivationSuccess
             | EventKind::ActivationError
+            | EventKind::ValidationStart
             | EventKind::ValidationSuccess
             | EventKind::ValidationFailed
             | EventKind::ValidationError
             | EventKind::ValidationAuthFailed
             | EventKind::HeartbeatSuccess
             | EventKind::HeartbeatError
+            | EventKind::DeactivationStart
             | EventKind::DeactivationSuccess
             | EventKind::DeactivationError
     )
@@ -422,5 +433,54 @@ fn hydrate_from_cached(cached: &licenseseat::License) -> LicenseState {
         binding_mode: BindingMode::NodeLocked,
         offline_ok: true,
         status_text: "Cached license available".into(),
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::is_handler_originated;
+    use licenseseat::EventKind;
+
+    #[test]
+    fn handler_originated_covers_all_explicit_kinds() {
+        for kind in [
+            EventKind::ActivationStart,
+            EventKind::ActivationSuccess,
+            EventKind::ActivationError,
+            EventKind::ValidationStart,
+            EventKind::ValidationSuccess,
+            EventKind::ValidationFailed,
+            EventKind::ValidationError,
+            EventKind::ValidationAuthFailed,
+            EventKind::HeartbeatSuccess,
+            EventKind::HeartbeatError,
+            EventKind::DeactivationStart,
+            EventKind::DeactivationSuccess,
+            EventKind::DeactivationError,
+        ] {
+            assert!(
+                is_handler_originated(&kind),
+                "expected {:?} to be classified as handler-originated",
+                kind,
+            );
+        }
+    }
+
+    #[test]
+    fn handler_originated_excludes_autonomous_kinds() {
+        // Autonomous/server-push kinds must NOT be dropped by the bridge.
+        // If this test fails, the bridge will silence revocations and
+        // offline-validation failures — a severe regression.
+        for kind in [
+            EventKind::LicenseRevoked,
+            EventKind::LicenseLoaded,
+            EventKind::ValidationAutoFailed,
+        ] {
+            assert!(
+                !is_handler_originated(&kind),
+                "autonomous kind {:?} must NOT be classified as handler-originated",
+                kind,
+            );
+        }
     }
 }

@@ -186,6 +186,67 @@ async fn degraded_from_preserves_invalid_status_text() {
     );
 }
 
+#[tokio::test]
+async fn runtime_skips_heartbeat_when_provider_declines() {
+    // Seed an Active NodeLocked state — the SPUR-layer coarse gate would
+    // allow heartbeat — but FakeProvider.requires_heartbeat=false should
+    // suppress it.
+    let seed = LicenseState::active_validated(Plan::Pro, Default::default());
+    let fake = Arc::new(
+        FakeProvider::new(seed)
+            .with_refresh_policy(spur_license::provider::RefreshPolicy {
+                validate_interval: Duration::from_secs(3600),
+                heartbeat_interval: Duration::from_millis(30),
+            })
+            .with_requires_heartbeat(false),
+    );
+    let probe = fake.clone();
+    let license = SpurLicense::from_provider(fake);
+
+    let (bcast_tx, _bcast_rx) = broadcast::channel::<SpurEvent>(64);
+    let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
+    let handle = spawn_license_runtime(license, funnel);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    handle.abort();
+
+    assert_eq!(
+        probe.heartbeat_call_count(),
+        0,
+        "runtime must respect provider.requires_heartbeat=false"
+    );
+}
+
+#[tokio::test]
+async fn runtime_heartbeats_when_provider_requires_it() {
+    // Symmetric positive case: requires_heartbeat=true AND state bound.
+    let seed = LicenseState::active_validated(Plan::Pro, Default::default());
+    let fake = Arc::new(
+        FakeProvider::new(seed)
+            .with_refresh_policy(spur_license::provider::RefreshPolicy {
+                validate_interval: Duration::from_secs(3600),
+                heartbeat_interval: Duration::from_millis(30),
+            })
+            .with_requires_heartbeat(true),
+    );
+    let probe = fake.clone();
+    let license = SpurLicense::from_provider(fake);
+
+    let (bcast_tx, _bcast_rx) = broadcast::channel::<SpurEvent>(64);
+    let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
+    let handle = spawn_license_runtime(license, funnel);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    handle.abort();
+
+    assert!(
+        probe.heartbeat_call_count() >= 1,
+        "runtime must heartbeat when provider.requires_heartbeat=true; \
+         got {}",
+        probe.heartbeat_call_count(),
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn runtime_validates_within_first_minute_after_boot() {
     let seed = LicenseState::active_validated(Plan::Pro, Default::default());
