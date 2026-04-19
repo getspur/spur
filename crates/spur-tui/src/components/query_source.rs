@@ -304,6 +304,7 @@ impl QuerySource for MentionQuerySource {
                 let icon = match m.kind {
                     MentionKind::Directory => "\u{1F4C1}",
                     MentionKind::File => "\u{1F4C4}",
+                    MentionKind::Worker => "\u{1F916}",
                 };
                 RetrievalRow {
                     primary: format!("{} @{}", icon, m.display),
