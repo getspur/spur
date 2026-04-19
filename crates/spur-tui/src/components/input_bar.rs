@@ -1001,6 +1001,7 @@ impl InputBar {
         let last_w = self.last_inner_width.get();
         let lines: Vec<String> = snapshot.text.split('\n').map(|s| s.to_string()).collect();
         self.textarea = TextArea::new(lines);
+        self.textarea.set_max_histories(0);
         self.textarea.set_cursor_line_style(Style::default());
         self.rebuild_line_cache();
         self.move_cursor_to_byte(cursor.min(snapshot.text.len()));
@@ -1110,6 +1111,7 @@ impl InputBar {
         let mode = self.mode;
         let last_w = self.last_inner_width.get();
         self.textarea = TextArea::default();
+        self.textarea.set_max_histories(0);
         self.textarea.set_cursor_line_style(Style::default());
         self.line_cache = vec![0];
         self.protected_ranges.clear();
@@ -1147,6 +1149,13 @@ impl InputBar {
     #[doc(hidden)]
     pub fn last_inner_width_for_test(&self) -> u16 {
         self.last_inner_width.get()
+    }
+
+    /// Test-only: read the textarea's currently-configured max history.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn max_histories_for_test(&self) -> usize {
+        self.textarea.max_histories()
     }
 
     /// Set the status label.

@@ -240,3 +240,28 @@ fn history_cap_is_single_sourced() {
     // not a private duplicate inside InputBar.
     assert_eq!(spur_tui::input_history::HISTORY_CAP, 100);
 }
+
+#[test]
+fn restore_snapshot_keeps_undo_disabled() {
+    let mut b = InputBar::new();
+    // InputBar::new() disables undo history by calling set_max_histories(0).
+    assert_eq!(b.max_histories_for_test(), 0);
+
+    type_str(&mut b, "first prompt");
+    submit(&mut b);
+    type_str(&mut b, "second prompt");
+    submit(&mut b);
+
+    // Browse history backward — this triggers restore_snapshot, which
+    // rebuilds the TextArea. Without the fix, the rebuilt TextArea has
+    // undo history silently re-enabled (default max_histories), which
+    // drifts protected ranges on Ctrl+Z.
+    b.history_prev();
+    assert_eq!(b.text(), "second prompt");
+    assert_eq!(
+        b.max_histories_for_test(),
+        0,
+        "undo must remain disabled across restore_snapshot to keep \
+         protected ranges in sync"
+    );
+}
