@@ -250,3 +250,12 @@ fn overlay_grouped_view_caps_rows_per_kind() {
     );
     assert!(shown >= 2, "expected at least 2 sessions rendered; got {shown}");
 }
+
+#[test]
+fn overlay_hints_row_has_select_accept_dismiss() {
+    let state = PaletteState::new();
+    let rendered = render_to_string_with_session_flag(&state, 80, 12, true);
+    assert!(rendered.contains("select"), "hints missing 'select': {rendered}");
+    assert!(rendered.contains("accept"), "hints missing 'accept': {rendered}");
+    assert!(rendered.contains("dismiss"), "hints missing 'dismiss': {rendered}");
+}

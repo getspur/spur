@@ -249,7 +249,7 @@ impl<'a> Widget for PaletteOverlay<'a> {
 
         // Hint line.
         let hint = Line::from(Span::styled(
-            "↑↓ select · ↵ go · esc close · type to filter",
+            "↑↓ select   ⏎ accept   esc dismiss",
             Style::default().fg(Color::DarkGray),
         ));
         Paragraph::new(hint).render(hints_area, buf);
