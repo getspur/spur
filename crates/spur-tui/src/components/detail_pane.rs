@@ -41,7 +41,7 @@ impl DetailTab {
 }
 
 pub struct DetailPane {
-    pub current_tab: DetailTab,
+    pub(crate) current_tab: DetailTab,
     scroll_offset: usize,
     is_following: bool,
 }
@@ -113,6 +113,13 @@ impl DetailPane {
             scroll_offset: 0,
             is_following: true,
         }
+    }
+
+    /// Read-only accessor for the current tab. External callers cannot
+    /// write `current_tab` directly; use [`DetailPane::jump_to_tab`] or
+    /// [`DetailPane::cycle_tab`] to change it.
+    pub fn current_tab(&self) -> DetailTab {
+        self.current_tab
     }
 
     /// Private shared helper. Encodes the per-tab reset invariants so
