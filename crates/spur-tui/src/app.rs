@@ -2595,7 +2595,7 @@ mod brain_retired_tests {
         }));
 
         let sid_before = app.session_detail.as_ref().unwrap().session_id().clone();
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
 
         let detail = app.session_detail.as_ref().expect("view must still exist");
         assert!(detail.is_cleared());
@@ -2617,7 +2617,7 @@ mod brain_retired_tests {
             .input_bar_mut_for_test()
             .set_text("typed before clear".into(), 18);
 
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
 
         assert_eq!(
             app.session_detail.as_ref().unwrap().input_bar_text(),
@@ -2634,7 +2634,7 @@ mod brain_retired_tests {
         }));
         app.session_detail.as_mut().unwrap().stream_in_flight = true;
 
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
 
         let detail = app.session_detail.as_ref().unwrap();
         assert!(!detail.stream_in_flight);
@@ -2692,13 +2692,13 @@ mod brain_retired_tests {
             .unwrap()
             .input_bar_mut_for_test()
             .set_text("draft-A".into(), 7);
-        let _ = app.process_action(Action::SaveDraft {
+        app.process_action(Action::SaveDraft {
             session_id: "carryover-a".into(),
             draft: "draft-A".into(),
         });
 
         // User submits /clear.
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
 
         // User types a new prompt into the preserved InputBar.
         app.session_detail.as_mut().unwrap().input_bar_mut_for_test().set_text(
@@ -2735,7 +2735,7 @@ mod brain_retired_tests {
             agent: "kiro".into(),
             session: SessionId("empty-carryover-a".into()),
         }));
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
         app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
             agent: "kiro".into(),
             session: SessionId("empty-carryover-b".into()),
@@ -2755,7 +2755,7 @@ mod brain_retired_tests {
             agent: "kiro".into(),
             session: SessionId("banner-a".into()),
         }));
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
         assert!(app.session_detail.as_ref().unwrap().ready_banner_text().is_some());
 
         app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
@@ -2782,7 +2782,7 @@ mod brain_retired_tests {
             .input_bar_mut_for_test()
             .set_text("mid-thought".into(), 11);
 
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
         {
             let d = app.session_detail.as_ref().unwrap();
             assert!(d.is_cleared());
@@ -2824,8 +2824,8 @@ mod brain_retired_tests {
             agent: "kiro".into(),
             session: SessionId("double-a".into()),
         }));
-        let _ = app.process_action(Action::ClearSession);
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
         let d = app.session_detail.as_ref().unwrap();
         assert!(d.is_cleared());
         assert!(d.ready_banner_text().is_some());
@@ -2843,7 +2843,7 @@ mod brain_retired_tests {
             .unwrap()
             .show_resume_banner("t".into(), "1s ago".into());
 
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
 
         let d = app.session_detail.as_ref().unwrap();
         // reset_for_clear wipes resume_banner; ready_banner is now the only one.
@@ -2867,7 +2867,7 @@ mod brain_retired_tests {
             detail.tool_depth_for_test_mut().insert("t2".into(), 2);
         }
 
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
 
         assert!(app
             .session_detail
@@ -2885,12 +2885,12 @@ mod brain_retired_tests {
             session: SessionId("debounce-a".into()),
         }));
         // User had a draft 'draft-A' saved.
-        let _ = app.process_action(Action::SaveDraft {
+        app.process_action(Action::SaveDraft {
             session_id: "debounce-a".into(),
             draft: "draft-A".into(),
         });
         // /clear + new typing.
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
         app.session_detail
             .as_mut()
             .unwrap()
@@ -2945,7 +2945,7 @@ mod brain_retired_tests {
         // assert it is NOT forced to Idle by the ghost-clear path.
         app.brain_status = BrainStatus::Thinking;
 
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
 
         let detail = app.session_detail.as_ref().expect("view must still exist");
         assert!(
@@ -2978,7 +2978,7 @@ mod brain_retired_tests {
         }));
         app.brain_status = BrainStatus::Thinking;
 
-        let _ = app.process_action(Action::ClearSession);
+        app.process_action(Action::ClearSession);
 
         let detail = app.session_detail.as_ref().expect("view must still exist");
         assert!(
