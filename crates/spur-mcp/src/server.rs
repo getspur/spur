@@ -412,6 +412,7 @@ pub async fn emit_plan_submit_audit(
     if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
         tracing::warn!(
             epic_id = %sg.epic_id,
+            plan_id = %plan_id,
             "PlanSubmit audit comment emission failed (graph is persisted; audit missing): {e}"
         );
     }
