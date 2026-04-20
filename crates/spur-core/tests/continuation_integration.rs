@@ -250,3 +250,119 @@ async fn test_no_double_delivery_on_block_timeout() {
          Phase 1c (skip map write when detached) closes.",
     );
 }
+
+/// INV-ASYNC-1 companion: fast-path (worker completes *within* the inline
+/// window). The brain must receive the `DelegationResult` via the inline MCP
+/// response ONLY — no detached callback, no map write.
+///
+/// Response-shape contract (spec §8.3, post-review revision): `content[0].text`
+/// is PURE JSON — no human-readable shadow prefix. Parsing the text with
+/// `serde_json::from_str` must succeed and yield the fields documented below.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_no_double_delivery_on_fast_path() {
+    use serde_json::Value;
+    use spur_acp::domain::delegation::DelegationStatus;
+    use spur_acp::{BrainSessionId, DelegationResult};
+    use spur_mcp::server::DetachedContinuationCtx;
+    use spur_mcp::{McpCallbackServer, WorkerInfo};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::time::Duration;
+
+    // Inline window 5s; worker responds at t=1s — strictly within the window.
+    const INLINE_WAIT_MS: u64 = 5_000;
+    const WORKER_DELAY_SECS: u64 = 1;
+
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let cb = Arc::clone(&callback_count);
+    let ctx = DetachedContinuationCtx {
+        on_complete: Arc::new(move |_cont, _worker| {
+            let cb = Arc::clone(&cb);
+            Box::pin(async move {
+                cb.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    };
+
+    let brain_sid = BrainSessionId::new(SessionId::new());
+    let (mut server, mut channel) = McpCallbackServer::new(&brain_sid, None, None, ctx);
+    server.set_workers(vec![WorkerInfo {
+        name: "worker-fast".into(),
+        tier: Some("generalist".into()),
+        ..Default::default()
+    }]);
+    server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
+    let server = Arc::new(server);
+
+    let worker_handle = tokio::spawn(async move {
+        let req = channel.request_rx.recv().await.expect("delegation request");
+        let delegation_id = req.id.clone();
+        tokio::time::sleep(Duration::from_secs(WORKER_DELAY_SECS)).await;
+        let _ = req.respond_to.send(DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("worker done".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        });
+        delegation_id
+    });
+
+    let server_ref = Arc::clone(&server);
+    let mcp_resp_handle = tokio::spawn(async move {
+        server_ref
+            .__test_call_delegate_to_worker("worker-fast", "fast task")
+            .await
+    });
+
+    let mcp_resp = mcp_resp_handle.await.expect("mcp task join");
+    let delegation_id = worker_handle.await.expect("worker task join");
+
+    server.shutdown().await;
+
+    // content[0].text MUST be pure JSON — parse it strictly.
+    let text = mcp_resp
+        .pointer("/result/content/0/text")
+        .and_then(|t| t.as_str())
+        .expect("mcp response must carry content[0].text");
+    let payload: Value = serde_json::from_str(text).expect(
+        "Phase 1c response-shape contract: content[0].text must be pure JSON, \
+         no shadow prefix. If this fails, the handler is still prepending a \
+         human-readable sentence — brains doing json.loads(text) will break.",
+    );
+
+    assert_eq!(
+        payload["status"].as_str(),
+        Some("completed"),
+        "fast path must report status=completed",
+    );
+    assert_eq!(
+        payload["continuation_will_fire"].as_bool(),
+        Some(false),
+        "fast path must declare no continuation will fire",
+    );
+    assert!(
+        payload.get("result").is_some(),
+        "fast path must embed the DelegationResult under `result`",
+    );
+    assert_eq!(
+        payload["result"]["status"].as_str(),
+        Some("Success"),
+        "embedded DelegationResult must reflect worker success",
+    );
+
+    // INV-ASYNC-1 'never both' specialized for fast path:
+    // (a) no detached continuation callback fired,
+    // (b) completed_delegations map is empty (fast arm never writes it).
+    assert_eq!(
+        callback_count.load(Ordering::SeqCst),
+        0,
+        "fast path must NOT fire a detached continuation callback",
+    );
+    assert!(
+        !server.__test_completed_has(&delegation_id).await,
+        "fast path must NOT leave a `completed_delegations` entry behind",
+    );
+}
