@@ -18,7 +18,7 @@ use ratatui_image::picker::Picker;
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
 use crate::components::palette::PaletteIntent;
-use crate::components::palette_sources::{CommandSource, PaletteSource, SessionSource, TraceSource, WorkerSource};
+use crate::components::palette_sources::{CommandSource, PaletteSource, SessionSource, WorkerSource};
 use crate::components::input_bar::EditMode;
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
@@ -344,23 +344,53 @@ impl App {
         if self.help_visible || self.quit_confirm_visible {
             return; // palette won't open while a higher-priority overlay is up
         }
+        tracing::debug!(target: "palette", "open_palette: start");
         self.palette_state.reset();
 
-        // Load sources: Commands, Sessions, Workers, Trace.
-        let cmd_registry = crate::commands::registry::CommandRegistry::new();
-        let cmd_src = CommandSource::new(&cmd_registry);
+        // Load sources: Commands, Sessions, Workers. (Trace deferred — see U3c.)
+        // CommandRegistry is not Clone; borrow from the active session_detail
+        // or fall back to a fresh empty one (SpurLocal commands are still
+        // included unconditionally via registry's ensure_cache).
+        //
+        // IMPORTANT — DO NOT "SIMPLIFY":
+        // `owned_fallback` is declared on its own line BEFORE the match so its
+        // storage outlives the `&owned_fallback` reference produced inside the
+        // `None` arm. Rewriting this as `match ... { None => &CommandRegistry::new() }`
+        // will NOT compile: the temporary returned by `CommandRegistry::new()`
+        // would be dropped at the end of the arm, leaving a dangling reference.
+        // This idiom intentionally trades two extra lines for a stable borrow.
+        let owned_fallback;
+        let cmd_registry: &crate::commands::registry::CommandRegistry =
+            match self.session_detail.as_ref() {
+                Some(view) => &view.command_registry,
+                None => {
+                    owned_fallback = crate::commands::registry::CommandRegistry::new();
+                    &owned_fallback
+                }
+            };
+        let cmd_src = CommandSource::new(cmd_registry);
         let sess_src = SessionSource::from_metadata(self.metadata_store.metadata());
         let worker_src = WorkerSource::from_lineage(&self.lineage);
 
-        let mut batches = vec![
-            cmd_src.collect(),
-            sess_src.collect(),
-            worker_src.collect(),
-        ];
-        if let Some(view) = self.session_detail.as_ref() {
-            let trace_src = TraceSource::from_trace(view.react_trace());
-            batches.push(trace_src.collect());
-        }
+        let cmd_batch = cmd_src.collect();
+        let sess_batch = sess_src.collect();
+        let worker_batch = worker_src.collect();
+        // Trace source is unconditionally omitted (U3c) — log the deferral
+        // state, not session presence, so telemetry stays honest.
+        let trace_dispatch_deferred = true;
+        tracing::debug!(
+            target: "palette",
+            commands = cmd_batch.len(),
+            sessions = sess_batch.len(),
+            workers = worker_batch.len(),
+            trace_dispatch_deferred,
+            "open_palette: sources collected"
+        );
+        let batches = vec![cmd_batch, sess_batch, worker_batch];
+        // Trace source is intentionally skipped until trace-dispatch lands;
+        // see docs/superpowers/specs/2026-04-20-palette-end-to-end-integration-design.md (U3c).
+        // TODO(palette-trace-dispatch): re-add a TraceSource batch here when
+        // Action::ScrollToTraceEntry lands with a stable-id design for TraceEntry.
         self.palette_state.extend_raw(batches);
 
         self.palette_visible = true;
@@ -393,6 +423,128 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn last_action_for_test(&self) -> Option<crate::action::Action> {
         self.last_action.clone()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn palette_state_for_test(&self) -> &crate::components::palette::PaletteState {
+        &self.palette_state
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn palette_state_for_test_mut(&mut self) -> &mut crate::components::palette::PaletteState {
+        &mut self.palette_state
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn handle_crossterm_event_for_test(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) {
+        use crossterm::event::Event;
+        self.handle_crossterm_event(Event::Key(key));
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_for_palette_test() -> Self {
+        // Minimal App for palette-integration tests. Uses the same path as
+        // test_support::new_app — no user_input channel, no session picker —
+        // so open_palette() can run safely.
+        Self::new(None, false)
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn seed_session_detail_with_dynamic_command_for_test(
+        &mut self,
+        handle: &str,
+        name: &str,
+        description: &str,
+    ) {
+        use crate::commands::registry::CommandRegistry;
+        use spur_acp::{AvailableCommand, CommandsConfig};
+        let cfg = CommandsConfig::default();
+        let entry = crate::agents::build_entry(
+            handle,
+            &cfg,
+            &AvailableCommand::new(name, description),
+        );
+        let mut registry = CommandRegistry::new();
+        registry.set_agent_commands(handle, vec![entry]);
+        self.session_detail = Some(
+            crate::views::session_detail::SessionDetailView::new_for_palette_test(registry),
+        );
+    }
+
+    /// Current ACP session id, if a `session_detail` is active.
+    /// Used by the palette's `Command` accept path to construct
+    /// `Action::SendMessage` / `Action::VendorExec` without a round-trip
+    /// through the session-detail view.
+    fn current_acp_session_id(&self) -> Option<spur_acp::SessionId> {
+        self.session_detail
+            .as_ref()
+            .map(|v| v.session_id().clone())
+    }
+
+    fn result_to_action(
+        &self,
+        result: crate::components::palette::PaletteResult,
+    ) -> Option<crate::action::Action> {
+        use crate::action::{Action, ViewId};
+        use crate::commands::registry::CommandRegistry;
+        use crate::commands::submit_router::{route, SubmitDecision};
+        use crate::components::palette::PalettePayload;
+        match result.payload {
+            PalettePayload::Session { session_id } => {
+                Some(Action::ResumeSession { session_id })
+            }
+            PalettePayload::Worker { session_id } => {
+                Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))
+            }
+            PalettePayload::Command { name } => {
+                // IMPORTANT — DO NOT "SIMPLIFY":
+                // `owned_fallback` is declared on its own line BEFORE the match so its
+                // storage outlives the `&owned_fallback` reference returned from the
+                // `None` arm. Rewriting this as `match ... { None => &CommandRegistry::new() }`
+                // will NOT compile: the temporary returned by `CommandRegistry::new()`
+                // would be dropped at the end of the arm, leaving a dangling reference.
+                // This idiom is intentionally identical to the one in `open_palette`
+                // (CommandRegistry is not Clone, so we can't sidestep with .clone()).
+                let owned_fallback;
+                let registry: &CommandRegistry = match self.session_detail.as_ref() {
+                    Some(view) => &view.command_registry,
+                    None => {
+                        owned_fallback = CommandRegistry::new();
+                        &owned_fallback
+                    }
+                };
+                match route(&format!("/{name}"), &[], registry, false) {
+                    SubmitDecision::Local { action } => Some(action),
+                    SubmitDecision::Send { blocks, interrupt } => {
+                        let session = self.current_acp_session_id()?;
+                        Some(Action::SendMessage {
+                            session,
+                            blocks,
+                            interrupt,
+                        })
+                    }
+                    SubmitDecision::VendorExec { method, params } => {
+                        let session = self.current_acp_session_id()?;
+                        Some(Action::VendorExec {
+                            session,
+                            method,
+                            params,
+                        })
+                    }
+                    SubmitDecision::Empty => None,
+                }
+            }
+            PalettePayload::Trace { entry_idx: _ } => {
+                // TODO(palette-trace-dispatch): wire when stable-id design lands.
+                // Unreachable in practice because TraceSource is omitted from
+                // extend_raw (see open_palette). Kept as a type-exhaustiveness
+                // anchor and a forward-compat hook.
+                None
+            }
+        }
     }
 
     /// Look up the `AgentConfig` for an agent by name (`AgentConfig::name`)
@@ -488,7 +640,7 @@ impl App {
                         Some(PaletteIntent::Accept(result)) => {
                             self.palette_visible = false;
                             self.palette_state.reset();
-                            if let Some(action) = result_to_action(result) {
+                            if let Some(action) = self.result_to_action(result) {
                                 self.process_action(action);
                             }
                             self.dirty = true;
@@ -1885,7 +2037,8 @@ impl App {
         if self.palette_visible {
             let overlay = crate::components::palette_overlay::PaletteOverlay::new(
                 &self.palette_state,
-            );
+            )
+            .with_session_active(self.session_detail.is_some());
             frame.render_widget(overlay, frame.area());
         }
     }
@@ -2134,31 +2287,6 @@ fn render_mermaid_overlay(
         ))),
         chunks[2],
     );
-}
-
-fn result_to_action(
-    result: crate::components::palette::PaletteResult,
-) -> Option<crate::action::Action> {
-    use crate::action::{Action, ViewId};
-    use crate::components::palette::PalettePayload;
-    match result.payload {
-        PalettePayload::Session { session_id } => {
-            Some(Action::ResumeSession { session_id })
-        }
-        PalettePayload::Worker { session_id } => {
-            Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))
-        }
-        PalettePayload::Command { name: _ } => {
-            // Commands dispatched via existing slash-command path. Phase F1.5
-            // will wire a direct dispatch; for MVP accept is a no-op here.
-            None
-        }
-        PalettePayload::Trace { entry_idx: _ } => {
-            // Phase F1.5: add `Action::ScrollToTraceEntry(usize)`. For MVP accept
-            // is a no-op (palette closes, trace stays at anchor).
-            None
-        }
-    }
 }
 
 /// Human-friendly relative time for the resume banner ("5m ago", "2h ago").
