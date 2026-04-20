@@ -46,8 +46,7 @@ impl WorkerSignal {
 /// Encode a `WorkerSignal` as a full sentinel comment body ready for
 /// `br comments add`.
 pub fn encode_comment(signal: &WorkerSignal) -> String {
-    let json =
-        serde_json::to_string(signal).expect("WorkerSignal always serializes");
+    let json = serde_json::to_string(signal).expect("WorkerSignal always serializes");
     format!("{SENTINEL_PREFIX}\n{json}")
 }
 

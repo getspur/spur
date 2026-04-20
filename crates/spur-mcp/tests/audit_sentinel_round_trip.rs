@@ -8,25 +8,37 @@ use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use tempfile::TempDir;
 
 fn br_available() -> bool {
-    Command::new("br").arg("--help").output()
-        .map(|o| o.status.success()).unwrap_or(false)
+    Command::new("br")
+        .arg("--help")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("br")
-        .args(args).arg("--json")
-        .current_dir(repo).env("RUST_LOG", "error")
-        .output().expect("br invocation");
+        .args(args)
+        .arg("--json")
+        .current_dir(repo)
+        .env("RUST_LOG", "error")
+        .output()
+        .expect("br invocation");
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
-        Err(format!("br {args:?} failed: {}", String::from_utf8_lossy(&out.stderr)))
+        Err(format!(
+            "br {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))
     }
 }
 
 fn extract_id(json: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(json).unwrap();
-    v.get("id").and_then(|x| x.as_str()).expect("id").to_string()
+    v.get("id")
+        .and_then(|x| x.as_str())
+        .expect("id")
+        .to_string()
 }
 
 #[test]
@@ -55,7 +67,9 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             worker_branch: Some("feat/x".into()),
             diff_summary: Some("3 files changed".into()),
         },
-        AuditSentinelKind::Approval { delegation_id: "del-1".into() },
+        AuditSentinelKind::Approval {
+            delegation_id: "del-1".into(),
+        },
         AuditSentinelKind::Rejection {
             delegation_id: "del-1".into(),
             feedback: "needs more tests".into(),
@@ -69,7 +83,10 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
 
     let list_out = run_br(dir.path(), &["comments", "list", &id]).unwrap();
     let items: serde_json::Value = serde_json::from_str(&list_out).unwrap();
-    let texts: Vec<String> = items.as_array().unwrap().iter()
+    let texts: Vec<String> = items
+        .as_array()
+        .unwrap()
+        .iter()
         .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from))
         .collect();
 
@@ -79,6 +96,9 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
                 .and_then(|r| r.ok())
                 .is_some_and(|k| k == *v)
         });
-        assert!(found, "variant {v:?} did not round-trip through br comments: {texts:?}");
+        assert!(
+            found,
+            "variant {v:?} did not round-trip through br comments: {texts:?}"
+        );
     }
 }

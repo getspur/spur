@@ -47,7 +47,8 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
     const INLINE_WAIT_MS: u64 = 100;
 
     let brain_sid = BrainSessionId::new(SessionId::new());
-    let (mut server, mut channel) = McpCallbackServer::new(&brain_sid, None, None, empty_continuation_ctx());
+    let (mut server, mut channel) =
+        McpCallbackServer::new(&brain_sid, None, None, empty_continuation_ctx());
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {
         name: "fake-worker".into(),
@@ -177,7 +178,8 @@ async fn test_parallel_preserves_input_order() {
     const INLINE_WAIT_MS: u64 = 100;
 
     let brain_sid = BrainSessionId::new(SessionId::new());
-    let (mut server, mut channel) = McpCallbackServer::new(&brain_sid, None, None, empty_continuation_ctx());
+    let (mut server, mut channel) =
+        McpCallbackServer::new(&brain_sid, None, None, empty_continuation_ctx());
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {
         name: "fake-worker".into(),
@@ -268,7 +270,8 @@ async fn test_parallel_no_serial_dispatch_regression() {
     const INLINE_WAIT_MS: u64 = 2000;
 
     let brain_sid = BrainSessionId::new(SessionId::new());
-    let (mut server, mut channel) = McpCallbackServer::new(&brain_sid, None, None, empty_continuation_ctx());
+    let (mut server, mut channel) =
+        McpCallbackServer::new(&brain_sid, None, None, empty_continuation_ctx());
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {
         name: "fake-worker".into(),
@@ -312,12 +315,7 @@ async fn test_parallel_no_serial_dispatch_regression() {
     let text = extract_response_text(&mcp_resp);
     let results = parse_results(&text);
 
-    assert_eq!(
-        results.len(),
-        N,
-        "must return N={} results",
-        N
-    );
+    assert_eq!(results.len(), N, "must return N={} results", N);
 
     for (i, entry) in results.iter().enumerate() {
         assert_eq!(

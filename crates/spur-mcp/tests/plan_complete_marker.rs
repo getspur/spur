@@ -95,11 +95,7 @@ async fn build_epic_subgraph_emits_plan_complete_on_epic() {
     let epic_id = &subgraph.epic_id;
 
     // Ask beads for the epic issue and check its labels contain spur:plan-complete.
-    let list_out = run_br(
-        dir.path(),
-        &["show", epic_id],
-    )
-    .expect("br show <epic_id> failed");
+    let list_out = run_br(dir.path(), &["show", epic_id]).expect("br show <epic_id> failed");
 
     // `br show` returns a JSON array; grab the first (and only) element.
     let items: serde_json::Value =

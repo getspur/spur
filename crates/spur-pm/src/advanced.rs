@@ -61,11 +61,7 @@ pub trait BeadsAdvanced: Send + Sync {
 
     async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<CommentId>;
 
-    async fn remove_dependency(
-        &self,
-        issue_id: &str,
-        depends_on_id: &str,
-    ) -> anyhow::Result<()>;
+    async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()>;
 
     async fn dep_cycles(&self) -> anyhow::Result<Vec<DependencyCycle>>;
 }

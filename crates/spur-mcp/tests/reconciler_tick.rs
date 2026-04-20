@@ -108,19 +108,43 @@ async fn observe_ready_returns_unblocked_task_only() {
     // --- Create epic + 2 tasks ---
     let epic_json = run_br_json(
         dir.path(),
-        &["create", "--type", "epic", "--title", "Plan P1 Epic", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan P1 Epic",
+            "--priority",
+            "2",
+        ],
     );
     let epic_id = parse_id_from_create(&epic_json);
 
     let task_a_json = run_br_json(
         dir.path(),
-        &["create", "--type", "task", "--title", "Task A (unblocked)", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A (unblocked)",
+            "--priority",
+            "2",
+        ],
     );
     let task_a_id = parse_id_from_create(&task_a_json);
 
     let task_b_json = run_br_json(
         dir.path(),
-        &["create", "--type", "task", "--title", "Task B (blocked by A)", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task B (blocked by A)",
+            "--priority",
+            "2",
+        ],
     );
     let task_b_id = parse_id_from_create(&task_b_json);
 
@@ -138,11 +162,11 @@ async fn observe_ready_returns_unblocked_task_only() {
 
     // --- Construct PmService ---
     let pm = spur_pm::PmService::try_new(
-        None,       // no github_repo
-        true,       // beads_enabled
-        false,      // github_enabled
+        None,  // no github_repo
+        true,  // beads_enabled
+        false, // github_enabled
         dir.path(),
-        None,       // closed_status default
+        None, // closed_status default
     )
     .await
     .expect("PmService::try_new failed")
@@ -194,19 +218,43 @@ async fn observe_ready_via_br_returns_ready_tasks() {
     // --- Create epic + 2 tasks ---
     let epic_json = run_br_json(
         dir.path(),
-        &["create", "--type", "epic", "--title", "Plan P1 Epic (br fallback)", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan P1 Epic (br fallback)",
+            "--priority",
+            "2",
+        ],
     );
     let epic_id = parse_id_from_create(&epic_json);
 
     let task_a_json = run_br_json(
         dir.path(),
-        &["create", "--type", "task", "--title", "Task A (unblocked, br path)", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A (unblocked, br path)",
+            "--priority",
+            "2",
+        ],
     );
     let task_a_id = parse_id_from_create(&task_a_json);
 
     let task_b_json = run_br_json(
         dir.path(),
-        &["create", "--type", "task", "--title", "Task B (blocked by A, br path)", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task B (blocked by A, br path)",
+            "--priority",
+            "2",
+        ],
     );
     let task_b_id = parse_id_from_create(&task_b_json);
 
@@ -224,11 +272,11 @@ async fn observe_ready_via_br_returns_ready_tasks() {
 
     // --- Construct PmService ---
     let pm = spur_pm::PmService::try_new(
-        None,   // no github_repo
-        true,   // beads_enabled
-        false,  // github_enabled
+        None,  // no github_repo
+        true,  // beads_enabled
+        false, // github_enabled
         dir.path(),
-        None,   // closed_status default
+        None, // closed_status default
     )
     .await
     .expect("PmService::try_new failed")

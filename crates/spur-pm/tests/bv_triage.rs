@@ -77,10 +77,7 @@ async fn triage_with_label_filter_surfaces_matching_issue() {
     run_br(dir.path(), &["init"]);
 
     // Create one issue under "spur:plan-id:P1" plus one unrelated issue.
-    let plan_task = extract_id(&run_br(
-        dir.path(),
-        &["create", "plan-task", "-t", "task"],
-    ));
+    let plan_task = extract_id(&run_br(dir.path(), &["create", "plan-task", "-t", "task"]));
     run_br(
         dir.path(),
         &["label", "add", &plan_task, "-l", "spur:plan-id:P1"],
@@ -88,10 +85,7 @@ async fn triage_with_label_filter_surfaces_matching_issue() {
     let _other = extract_id(&run_br(dir.path(), &["create", "other", "-t", "task"]));
 
     let bv = BvAdapter::connect(dir.path()).await.expect("bv connect");
-    let report = bv
-        .triage(Some("spur:plan-id:P1"))
-        .await
-        .expect("triage");
+    let report = bv.triage(Some("spur:plan-id:P1")).await.expect("triage");
 
     // Label-scoped query should surface the plan_task but not "other".
     let ids: Vec<&str> = report

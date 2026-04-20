@@ -2228,10 +2228,19 @@ pub async fn handle_review_task(
         // 2b) Flush audit sentinel emissions — advisory, outside the lock.
         for emit in outcome.audit_emits {
             match emit {
-                PendingAuditEmit::Approval { issue_id, plan_id, delegation_id } => {
+                PendingAuditEmit::Approval {
+                    issue_id,
+                    plan_id,
+                    delegation_id,
+                } => {
                     emit_approval_audit(Some(pm), &issue_id, &plan_id, &delegation_id).await;
                 }
-                PendingAuditEmit::Rejection { issue_id, plan_id, delegation_id, feedback } => {
+                PendingAuditEmit::Rejection {
+                    issue_id,
+                    plan_id,
+                    delegation_id,
+                    feedback,
+                } => {
                     emit_rejection_audit(Some(pm), &issue_id, &plan_id, &delegation_id, &feedback)
                         .await;
                 }
@@ -2782,10 +2791,7 @@ mod tests {
             "spur:plan-id:custom".to_string(),
         ];
         assert_eq!(super::label_value(&labels, "spur:agent:"), Some("codex"));
-        assert_eq!(
-            super::label_value(&labels, "spur:plan-id:"),
-            Some("custom")
-        );
+        assert_eq!(super::label_value(&labels, "spur:plan-id:"), Some("custom"));
         assert_eq!(super::label_value(&labels, "missing="), None);
     }
 
@@ -3529,13 +3535,7 @@ mod tests {
             "epic body",
             vec![],
         );
-        let child_with_body = make_issue(
-            "bd-251",
-            Some("task"),
-            vec![],
-            "do the work",
-            vec![],
-        );
+        let child_with_body = make_issue("bd-251", Some("task"), vec![], "do the work", vec![]);
         let derived = super::derive_epic_plan_from_issues(
             &epic,
             &[child_with_body],
@@ -3547,13 +3547,7 @@ mod tests {
         assert_eq!(derived.plan_tasks[0].task, "do the work");
 
         // When child.body is empty, task_text is empty — no fallback.
-        let child_empty_body = make_issue(
-            "bd-252",
-            Some("task"),
-            vec![],
-            "",
-            vec![],
-        );
+        let child_empty_body = make_issue("bd-252", Some("task"), vec![], "", vec![]);
         let derived2 = super::derive_epic_plan_from_issues(
             &epic,
             &[child_empty_body],
