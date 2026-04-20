@@ -429,6 +429,43 @@ pub fn plan_epic_issue_creates(
     Ok((epic_create, child_specs))
 }
 
+/// Build `PlanTaskEntry` values from a list of `PlanTask`s, optionally
+/// backfilling `spec.issue_id` from a `task_map` produced by
+/// `build_epic_subgraph`.
+///
+/// Backfill rule: a task's `issue_id` is set to the task_map value ONLY when
+/// the field is currently `None`. Pre-existing values are NOT overwritten —
+/// they represent a `spur:source-issue:` reference pointing to a pre-existing
+/// issue and must be preserved so downstream audit logic can distinguish the
+/// source issue from the newly-created beads child.
+///
+/// Ephemeral plans pass `task_map = None`; every entry keeps `issue_id: None`.
+pub fn build_entries_with_task_map(
+    tasks: Vec<crate::plan::PlanTask>,
+    task_map: Option<&std::collections::HashMap<String, String>>,
+) -> Vec<crate::plan::PlanTaskEntry> {
+    tasks
+        .into_iter()
+        .map(|mut spec| {
+            if spec.issue_id.is_none() {
+                if let Some(map) = task_map {
+                    if let Some(beads_id) = map.get(&spec.task_id) {
+                        spec.issue_id = Some(beads_id.clone());
+                    }
+                }
+            }
+            crate::plan::PlanTaskEntry {
+                spec,
+                status: crate::plan::PlanTaskStatus::Pending,
+                result: None,
+                worker_branch: None,
+                attempt: 1,
+                history: Vec::new(),
+            }
+        })
+        .collect()
+}
+
 /// Truncate a task description to a reasonable issue-title length.
 /// Beads has no hard limit but overly long titles are unwieldy in UIs.
 fn truncate_for_title(s: &str) -> String {
@@ -1823,17 +1860,10 @@ impl McpCallbackServer {
             None
         };
 
-        let entries: Vec<crate::plan::PlanTaskEntry> = tasks
-            .into_iter()
-            .map(|spec| crate::plan::PlanTaskEntry {
-                spec,
-                status: crate::plan::PlanTaskStatus::Pending,
-                result: None,
-                worker_branch: None,
-                attempt: 1,
-                history: Vec::new(),
-            })
-            .collect();
+        let entries: Vec<crate::plan::PlanTaskEntry> = build_entries_with_task_map(
+            tasks,
+            epic_subgraph.as_ref().map(|sg| &sg.task_map),
+        );
 
         let task_count = entries.len();
         let state = crate::plan::PlanState {
