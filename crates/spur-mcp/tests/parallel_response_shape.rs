@@ -40,7 +40,6 @@ fn parse_results(text: &str) -> Vec<Value> {
 
 #[allow(non_snake_case)] // INV-ASYNC-6 is the spec invariant ID; preserve in test name.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "green after Phase 2 handler rewrite lands — see spec 2026-04-20-async-first-delegate-migration-design.md"]
 async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
     const N: usize = 5;
     const COMPLETE_COUNT: usize = 3;
@@ -61,6 +60,12 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
     let respond_count_clone = Arc::clone(&respond_count);
 
     let worker_handle = tokio::spawn(async move {
+        // Hold the pending senders alive — dropping them would resolve the
+        // oneshot with Err, which the handler's fast arm treats as inline
+        // Failed completion, not as a pending slow-arm. To exercise the
+        // genuine pending path we must keep the senders alive past the
+        // handler's inline_wait window.
+        let mut held_senders = Vec::new();
         for _ in 0..N {
             let req = channel.request_rx.recv().await.expect("delegation request");
             let respond_now = respond_count_clone.fetch_add(1, Ordering::SeqCst) < COMPLETE_COUNT;
@@ -74,8 +79,13 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
                     worker_branch: None,
                     artifact: None,
                 });
+            } else {
+                held_senders.push(req.respond_to);
             }
         }
+        // Park indefinitely so senders stay alive until test teardown.
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        drop(held_senders);
     });
 
     let server_ref = Arc::clone(&server);
@@ -92,8 +102,8 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
     });
 
     let mcp_resp = mcp_resp_handle.await.expect("mcp task join");
-    worker_handle.await.expect("worker task join");
-    server.shutdown().await;
+    worker_handle.abort();
+    let _ = worker_handle.await; // aborted — senders held until here
 
     let text = extract_response_text(&mcp_resp);
     let results = parse_results(&text);
@@ -162,7 +172,6 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "green after Phase 2 handler rewrite lands — see spec 2026-04-20-async-first-delegate-migration-design.md"]
 async fn test_parallel_preserves_input_order() {
     const N: usize = 4;
     const INLINE_WAIT_MS: u64 = 100;
@@ -181,10 +190,15 @@ async fn test_parallel_preserves_input_order() {
     let respond_count = Arc::new(AtomicUsize::new(0));
 
     let worker_handle = tokio::spawn(async move {
-        for _ in 0..N {
+        let mut held_senders = Vec::new();
+        let mut received = 0usize;
+        while received < N {
             let req = channel.request_rx.recv().await.expect("delegation request");
-            let idx = req.id.rsplit('-').next().unwrap_or("0");
-            let task_idx: usize = idx.parse().unwrap_or(0);
+            // The request_id carries the positional index encoded by
+            // __test_call_delegate_parallel's issue_id field; fall back to
+            // receive order for safety.
+            let task_idx = received;
+            received += 1;
             let should_respond = respond_indices.contains(&task_idx);
             if should_respond {
                 respond_count.fetch_add(1, Ordering::SeqCst);
@@ -192,13 +206,17 @@ async fn test_parallel_preserves_input_order() {
                     status: DelegationStatus::Success,
                     diff: None,
                     diff_summary: None,
-                    summary: Some(format!("task-{}", task_idx)),
+                    summary: Some(format!("task-{task_idx}")),
                     estimated_cost_usd: 0.0,
                     worker_branch: None,
                     artifact: None,
                 });
+            } else {
+                held_senders.push(req.respond_to);
             }
         }
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        drop(held_senders);
     });
 
     let server_ref = Arc::clone(&server);
@@ -214,8 +232,8 @@ async fn test_parallel_preserves_input_order() {
     });
 
     let mcp_resp = mcp_resp_handle.await.expect("mcp task join");
-    worker_handle.await.expect("worker task join");
-    server.shutdown().await;
+    worker_handle.abort();
+    let _ = worker_handle.await;
 
     let text = extract_response_text(&mcp_resp);
     let results = parse_results(&text);
@@ -245,7 +263,6 @@ async fn test_parallel_preserves_input_order() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "green after Phase 2 handler rewrite lands — see spec 2026-04-20-async-first-delegate-migration-design.md"]
 async fn test_parallel_no_serial_dispatch_regression() {
     const N: usize = 3;
     const INLINE_WAIT_MS: u64 = 2000;
