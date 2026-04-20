@@ -240,7 +240,7 @@ async fn test_cancel_during_inline_window_fast_arm_wins() {
     let cc_worker = cc.clone();
     let worker_handle = tokio::spawn(async move {
         let req = channel.request_rx.recv().await.expect("delegation request");
-        let delegation_id = req.id.clone();
+        let delegation_id: String = req.id.clone().into();
         let token = cc_worker.register(delegation_id.clone()).await;
         let _ = id_tx.send(delegation_id.clone());
         let status = tokio::select! {
@@ -379,7 +379,7 @@ async fn test_cancel_during_detached_path_continuation_delivers_cancelled() {
     let cc_worker = cc.clone();
     let worker_handle = tokio::spawn(async move {
         let req = channel.request_rx.recv().await.expect("delegation request");
-        let delegation_id = req.id.clone();
+        let delegation_id: String = req.id.clone().into();
         let token = cc_worker.register(delegation_id.clone()).await;
         let _ = id_tx.send(delegation_id.clone());
         let status = tokio::select! {

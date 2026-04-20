@@ -3,7 +3,7 @@
 //!
 //! Pure-sync policy. No tokio primitives; unit-testable without a runtime.
 
-use spur_acp::domain::BrainContinuation;
+use spur_acp::domain::{BrainContinuation, DelegationId};
 use spur_acp::types::SessionId;
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -40,8 +40,8 @@ pub struct BrainScheduler {
     /// Grows without a cap in v1 — long-lived sessions with many async
     /// delegations will accumulate entries. Bound is a future concern
     /// (e.g. LRU cap at 2048) if observed; N for a typical session is
-    /// small. Migrates to `HashSet<DelegationId>` when INV-1 lands.
-    delivered_ids:         HashSet<String>,
+    /// small.
+    delivered_ids:         HashSet<DelegationId>,
     /// Active brain session guard for G2 session-swap eviction. `None`
     /// before the first brain spawns. Uses `SessionId` to match the
     /// orchestrator's `brain.acp_session_id` idiom; will migrate to

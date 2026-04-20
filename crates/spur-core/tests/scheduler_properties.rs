@@ -45,7 +45,7 @@ proptest! {
     fn no_continuation_is_ever_scheduled_twice(events in prop::collection::vec(event_strategy(), 0..100)) {
         let mut s = BrainScheduler::new(Some(SessionId::new()));
         let mut now = Instant::now();
-        let mut seen_scheduled_ids: std::collections::HashSet<String> = Default::default();
+        let mut seen_scheduled_ids: std::collections::HashSet<spur_acp::domain::DelegationId> = Default::default();
 
         for e in events {
             match e {

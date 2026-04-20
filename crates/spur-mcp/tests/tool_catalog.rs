@@ -10,8 +10,6 @@ use spur_mcp::tools_list;
 const EXPECTED: &[&str] = &[
     "delegate_to_worker",
     "delegate_parallel",
-    "delegate_async",
-    "wait_delegation",
     "check_delegation_status",
     "cancel_delegation",
     "list_available_workers",

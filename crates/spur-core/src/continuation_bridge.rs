@@ -132,7 +132,7 @@ fn continuation_resource_block(c: &BrainContinuation) -> ContentBlock {
 
     ContentBlock::Resource(EmbeddedResource::new(
         EmbeddedResourceResource::TextResourceContents(
-            TextResourceContents::new(json, continuation_uri(&c.delegation_id))
+            TextResourceContents::new(json, continuation_uri(c.delegation_id.as_str()))
                 .mime_type(Some("application/json".into())),
         ),
     ))

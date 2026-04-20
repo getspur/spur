@@ -7,8 +7,8 @@ pub use artifact::{ArtifactKind, WorkerArtifact};
 pub use continuation::{BrainContinuation, ContinuationPayload, ContinuationSource};
 
 pub use delegation::{
-    CancelOutcome, CancellationControl, DelegationPlan, DelegationResult, DelegationStatus,
-    PlanCandidate, PlanSubtask, TimeoutFallback,
+    CancelOutcome, CancellationControl, DelegationId, DelegationPlan, DelegationResult,
+    DelegationStatus, PlanCandidate, PlanSubtask, TimeoutFallback,
 };
 pub use events::{
     HistoryEntry, IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan,

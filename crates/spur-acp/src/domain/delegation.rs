@@ -7,6 +7,80 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+/// Typed identifier for a delegation request.
+///
+/// Wraps the UUID-v4 string that used to flow as a bare `String` through
+/// `DelegationRequest.id`, `BrainContinuation.delegation_id`, and the
+/// MCP-side `active_delegations` / `completed_delegations` maps. The
+/// `serde(transparent)` attribute keeps the JSON wire format identical
+/// to the pre-newtype representation (plain string) so no brain-side
+/// migration is required. `From<String>` / `From<&str>` exist to ease
+/// the gradual migration of call sites that still produce bare strings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DelegationId(pub String);
+
+impl DelegationId {
+    /// Mint a fresh UUID-v4-backed id.
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for DelegationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for DelegationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for DelegationId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for DelegationId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<DelegationId> for String {
+    fn from(id: DelegationId) -> Self {
+        id.0
+    }
+}
+
+/// Ergonomic comparisons against bare string literals so assertions and
+/// log-field checks keep working after the newtype migration.
+impl PartialEq<str> for DelegationId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for DelegationId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for DelegationId {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
 /// Result status of a delegation to a worker.
 ///
 /// `Rejected` is reserved for human-issued rejections arriving via the

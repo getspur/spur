@@ -583,7 +583,7 @@ pub async fn run_plan(
             let (tx, rx) = oneshot::channel::<DelegationResult>();
 
             let request = DelegationRequest {
-                id: delegation_id,
+                id: delegation_id.into(),
                 agent: task_spec.agent.clone(),
                 task: task_spec.task.clone(),
                 context_files: task_spec.context_files.clone(),
@@ -1389,7 +1389,7 @@ pub async fn review_task(
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<DelegationResult>();
 
             let req = crate::tools::DelegationRequest {
-                id: delegation_id.clone(),
+                id: delegation_id.clone().into(),
                 agent: entry.spec.agent.clone(),
                 task: enriched,
                 delegation_plan: None,
@@ -1818,7 +1818,7 @@ fn apply_decision_and_extract(
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<DelegationResult>();
 
             let req = crate::tools::DelegationRequest {
-                id: delegation_id.clone(),
+                id: delegation_id.clone().into(),
                 agent: entry.spec.agent.clone(),
                 task: enriched,
                 delegation_plan: None,
@@ -2132,7 +2132,7 @@ fn dispatch_newly_ready(
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<DelegationResult>();
 
         let req = crate::tools::DelegationRequest {
-            id: delegation_id.clone(),
+            id: delegation_id.clone().into(),
             agent,
             task,
             delegation_plan: None,
