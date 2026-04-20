@@ -1,7 +1,9 @@
+pub mod artifact;
 pub mod continuation;
 pub mod delegation;
 pub mod events;
 
+pub use artifact::{ArtifactKind, WorkerArtifact};
 pub use continuation::{BrainContinuation, ContinuationPayload, ContinuationSource};
 
 pub use delegation::{
