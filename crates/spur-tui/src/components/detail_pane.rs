@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Paragraph, Tabs},
     Frame,
 };
 use spur_core::{Artifact, ExecutorNode};
@@ -251,7 +251,18 @@ impl DetailPane {
             DetailTab::Review => self.render_review(node),
         };
 
-        let total = body_lines.len();
+        // Pre-wrap at the body width so `max_offset` reflects the actual
+        // number of rendered rows. Previously `Paragraph::wrap` wrapped at
+        // render time while the ceiling was computed from unwrapped
+        // `body_lines.len()`, which clipped scroll above the true bottom
+        // on long single-line content (e.g., a 500-char task spec).
+        let wrapped: Vec<Line<'static>> = body_lines
+            .iter()
+            .flat_map(|l| {
+                crate::components::line_wrap::wrap_line_to_width(l, body_area.width)
+            })
+            .collect();
+        let total = wrapped.len();
         let max_offset = total.saturating_sub(visible_h);
         if self.is_following {
             self.scroll_offset = max_offset;
@@ -263,9 +274,8 @@ impl DetailPane {
             }
         }
 
-        let p = Paragraph::new(body_lines)
-            .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset as u16, 0));
+        // Input is already wrapped; don't re-wrap inside Paragraph.
+        let p = Paragraph::new(wrapped).scroll((self.scroll_offset as u16, 0));
         frame.render_widget(p, body_area);
     }
 
