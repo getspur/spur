@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod advanced;
 pub mod beads;
 pub mod bv;
 pub mod github;
@@ -7,6 +8,10 @@ pub mod service;
 pub mod types;
 
 pub use adapter::{IssueTracker, PrService};
+pub use advanced::{
+    AuditEntry, AuditEntryType, AuditId, AuditRecordInput, BeadsAdvanced, Comment, CommentId,
+    DependencyCycle, ReadyFilter,
+};
 pub use beads::BeadsAdapter;
 pub use bv::BvAdapter;
 pub use github::GitHubAdapter;
