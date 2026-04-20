@@ -707,6 +707,31 @@ impl McpCallbackServer {
         serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
     }
 
+    /// Test-only: invoke the `delegate_parallel` JSON-RPC handler directly.
+    ///
+    /// Exposed for `crates/spur-mcp/tests/parallel_response_shape.rs` to exercise
+    /// per-task parallelization without standing up the full HTTP stack.
+    /// Returns the raw JSON-RPC response as a `serde_json::Value`.
+    #[doc(hidden)]
+    pub async fn __test_call_delegate_parallel(&self, tasks: Vec<(&str, &str)>) -> Value {
+        let task_array: Value = Value::Array(
+            tasks
+                .iter()
+                .enumerate()
+                .map(|(idx, (agent, task))| {
+                    json!({
+                        "agent": agent,
+                        "task": task,
+                        "issue_id": format!("test-issue-{}", idx),
+                    })
+                })
+                .collect(),
+        );
+        let args = json!({ "tasks": task_array });
+        let resp = self.handle_delegate_parallel(Value::from(1), args).await;
+        serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
     /// Test-only: peek whether a result is sitting in `completed_delegations`
     /// awaiting a `check_delegation_status` poll. Used to detect the
     /// double-delivery failure mode (map write AND continuation callback both
