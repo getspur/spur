@@ -1606,8 +1606,9 @@ impl App {
                         .agents_tree_mut()
                         .set_selected(Some(id.clone()));
                     self.dashboard.set_focused_node(Some(id));
-                    self.dashboard.detail_pane_mut().current_tab =
-                        crate::components::detail_pane::DetailTab::Review;
+                    self.dashboard
+                        .detail_pane_mut()
+                        .jump_to_tab(crate::components::detail_pane::DetailTab::Review, None);
                 }
             }
             Action::ToggleCollapse => {
