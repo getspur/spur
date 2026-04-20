@@ -164,6 +164,55 @@ impl SessionDetailView {
         }
     }
 
+    /// Minimal `SessionDetailView` for palette-integration tests. Only
+    /// `command_registry` is meaningfully populated. Not suitable for tests
+    /// that exercise render, input bar, or trace paths.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_for_palette_test(
+        command_registry: crate::commands::registry::CommandRegistry,
+    ) -> Self {
+        let mention_registry = crate::mentions::MentionRegistry::for_direct_session();
+        Self {
+            session_id: spur_acp::SessionId("palette-test".into()),
+            agent_name: "palette-test-agent".to_string(),
+            role: "brain".to_string(),
+            agent_cfg: std::sync::Arc::new(spur_acp::AgentConfig::with_defaults(
+                "palette-test-agent",
+            )),
+            react_trace: crate::components::react_trace::ReactTrace::with_kind(
+                spur_acp::AgentKind::Generic,
+            ),
+            input_bar: crate::components::input_bar::InputBar::new(),
+            cost: 0.0,
+            started_at: std::time::Instant::now(),
+            current_mode: None,
+            command_registry,
+            context_used: None,
+            context_size: None,
+            auth_error: None,
+            trigger_detector:
+                crate::components::completion_trigger::TriggerDetector::new(),
+            mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
+            cwd: std::path::PathBuf::from("."),
+            #[cfg(feature = "markdown")]
+            mermaid_registry: std::collections::HashMap::new(),
+            #[cfg(feature = "markdown")]
+            pending_fence_actions: std::collections::VecDeque::new(),
+            #[cfg(feature = "markdown")]
+            render_picker: None,
+            last_draft_change_at: None,
+            last_persisted_draft: String::new(),
+            resume_banner: None,
+            stream_in_flight: false,
+            cancelling_in_flight: false,
+            cancel_mode: None,
+            picker_shell: None,
+            workers_panel_collapsed: false,
+            tool_depth: std::collections::HashMap::new(),
+            known_worker_names: std::collections::HashSet::new(),
+        }
+    }
+
     /// Show the resume banner for an auto-resumed session. Called by App on
     /// startup after reading session metadata.
     pub fn show_resume_banner(&mut self, title: String, quit_ago: String) {

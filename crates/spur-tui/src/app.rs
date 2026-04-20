@@ -348,8 +348,19 @@ impl App {
         self.palette_state.reset();
 
         // Load sources: Commands, Sessions, Workers, Trace.
-        let cmd_registry = crate::commands::registry::CommandRegistry::new();
-        let cmd_src = CommandSource::new(&cmd_registry);
+        // CommandRegistry is not Clone; borrow from the active session_detail
+        // or fall back to a fresh empty one (SpurLocal commands are still
+        // included unconditionally via registry's ensure_cache).
+        let owned_fallback;
+        let cmd_registry: &crate::commands::registry::CommandRegistry =
+            match self.session_detail.as_ref() {
+                Some(view) => &view.command_registry,
+                None => {
+                    owned_fallback = crate::commands::registry::CommandRegistry::new();
+                    &owned_fallback
+                }
+            };
+        let cmd_src = CommandSource::new(cmd_registry);
         let sess_src = SessionSource::from_metadata(self.metadata_store.metadata());
         let worker_src = WorkerSource::from_lineage(&self.lineage);
 
@@ -402,6 +413,41 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn last_action_for_test(&self) -> Option<crate::action::Action> {
         self.last_action.clone()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn palette_state_for_test(&self) -> &crate::components::palette::PaletteState {
+        &self.palette_state
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_for_palette_test() -> Self {
+        // Minimal App for palette-integration tests. Uses the same path as
+        // test_support::new_app — no user_input channel, no session picker —
+        // so open_palette() can run safely.
+        Self::new(None, false)
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn seed_session_detail_with_dynamic_command_for_test(
+        &mut self,
+        handle: &str,
+        name: &str,
+        description: &str,
+    ) {
+        use crate::commands::registry::CommandRegistry;
+        use spur_acp::{AvailableCommand, CommandsConfig};
+        let cfg = CommandsConfig::default();
+        let entry = crate::agents::build_entry(
+            handle,
+            &cfg,
+            &AvailableCommand::new(name, description),
+        );
+        let mut registry = CommandRegistry::new();
+        registry.set_agent_commands(handle, vec![entry]);
+        self.session_detail = Some(
+            crate::views::session_detail::SessionDetailView::new_for_palette_test(registry),
+        );
     }
 
     /// Look up the `AgentConfig` for an agent by name (`AgentConfig::name`)
