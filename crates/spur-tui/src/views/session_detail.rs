@@ -164,9 +164,17 @@ impl SessionDetailView {
         }
     }
 
-    /// Minimal `SessionDetailView` for palette-integration tests. Only
+    /// Minimal `SessionDetailView` for palette-integration tests — only
     /// `command_registry` is meaningfully populated. Not suitable for tests
     /// that exercise render, input bar, or trace paths.
+    ///
+    /// MAINTENANCE: This is a manual struct literal because `SessionDetailView`
+    /// holds types without a meaningful `Default` (`Instant::now()`,
+    /// `Rc<RefCell<MentionRegistry>>`, `Arc<AgentConfig>`, `PathBuf`).
+    /// **Every new field added to `SessionDetailView` must also be added
+    /// here, otherwise palette tests will fail to compile.** Keep the field
+    /// initializers in the same order as the struct definition for easy
+    /// audit.
     #[cfg(any(test, debug_assertions))]
     pub fn new_for_palette_test(
         command_registry: crate::commands::registry::CommandRegistry,

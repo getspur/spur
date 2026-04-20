@@ -1,3 +1,6 @@
+// rustc resolves submodules of integration-test files relative to
+// `tests/` (not the test file's directory), so #[path] is required to
+// keep the helper co-located under tests/palette_integration/.
 #[path = "palette_integration/util.rs"]
 mod util;
 
