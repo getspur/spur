@@ -587,12 +587,65 @@ impl BeadsAdvanced for BeadsAdapter {
         Ok(items.into_iter().map(IssueSummary::from).collect())
     }
 
-    async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<Comment>> {
-        anyhow::bail!("list_comments: not yet implemented")
+    async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<Comment>> {
+        #[derive(serde::Deserialize)]
+        struct BrComment {
+            // br returns id as integer
+            id: serde_json::Value,
+            // br uses "text" for comment body
+            #[serde(alias = "body")]
+            text: String,
+            // br uses "author" for the commenter
+            #[serde(alias = "actor", default)]
+            author: Option<String>,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+        let output = self
+            .run_br(vec!["comments".into(), "list".into(), issue_id.into()])
+            .await?;
+        let items: Vec<BrComment> = serde_json::from_str(&output)
+            .map_err(|e| anyhow::anyhow!("parse `br comments list`: {e}\nraw: {output}"))?;
+        Ok(items
+            .into_iter()
+            .map(|c| {
+                let id_str = match &c.id {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    other => other.to_string(),
+                };
+                Comment {
+                    id: id_str,
+                    body: c.text,
+                    actor: c.author.unwrap_or_default(),
+                    created_at: c.created_at,
+                }
+            })
+            .collect())
     }
 
-    async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<CommentId> {
-        anyhow::bail!("add_comment: not yet implemented")
+    async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<CommentId> {
+        #[derive(serde::Deserialize)]
+        struct BrCommentAdd {
+            // br returns id as integer; accept both via serde_json::Value then convert.
+            id: serde_json::Value,
+        }
+        let output = self
+            .run_br(vec![
+                "comments".into(),
+                "add".into(),
+                issue_id.into(),
+                body.into(),
+            ])
+            .await?;
+        // `br comments add --json` returns `{"id": <int|str>}` on success.
+        let added: BrCommentAdd = serde_json::from_str(&output)
+            .map_err(|e| anyhow::anyhow!("parse `br comments add`: {e}\nraw: {output}"))?;
+        let id_str = match &added.id {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            other => anyhow::bail!("unexpected id type from br comments add: {other}"),
+        };
+        Ok(id_str)
     }
 
     async fn audit_record(
