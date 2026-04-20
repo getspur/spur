@@ -169,6 +169,15 @@ impl BeadsAdapter {
             cursor_path,
         };
 
+        // Hydrate last_poll from disk if cursor_path is set and file exists.
+        if let Some(cursor) = adapter.load_cursor() {
+            let mut guard = adapter
+                .last_poll
+                .lock()
+                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
+            *guard = Some(cursor);
+        }
+
         // Verify binary is installed by running `br version --json`
         let version_output = adapter
             .run_br(vec!["version".into()])
@@ -297,6 +306,25 @@ impl BeadsAdapter {
     /// Run `br` with the default actor (if any) attached.
     async fn run_br(&self, args: Vec<String>) -> anyhow::Result<String> {
         self.run_br_as(args, None).await
+    }
+
+    /// Load the poll cursor from disk (if `cursor_path` is set and file exists).
+    fn load_cursor(&self) -> Option<DateTime<Utc>> {
+        let path = self.cursor_path.as_ref()?;
+        let contents = std::fs::read_to_string(path).ok()?;
+        let parsed: DateTime<Utc> = contents.trim().parse().ok()?;
+        Some(parsed)
+    }
+
+    /// Persist the poll cursor to disk (if `cursor_path` is set).
+    fn save_cursor(&self, cursor: DateTime<Utc>) {
+        if let Some(path) = self.cursor_path.as_ref() {
+            // RFC3339 format is round-trippable via FromStr<DateTime<Utc>>.
+            let s = cursor.to_rfc3339();
+            if let Err(e) = std::fs::write(path, s) {
+                tracing::warn!(?path, "failed to write cursor file: {e}");
+            }
+        }
     }
 }
 
@@ -543,6 +571,7 @@ impl IssueTracker for BeadsAdapter {
                 .lock()
                 .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
             *guard = Some(now);
+            self.save_cursor(now);
         }
 
         Ok(events)
