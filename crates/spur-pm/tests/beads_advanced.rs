@@ -173,3 +173,61 @@ async fn audit_record_carries_actor_when_set() {
         .expect("expected PlanSubmit entry");
     assert_eq!(entry.actor, "brain:test-session");
 }
+
+/// B1+B2 regression: `ReadyFilter.priorities` is a set-membership filter
+/// matching br's actual `-p` semantics. Empirically: `br ready -p 0 -p 2`
+/// returns P0 ∪ P2, not a range.
+#[tokio::test]
+async fn list_ready_priorities_is_set_membership() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let (dir, adapter) = setup_workspace().await;
+
+    // Create issues at priorities 0, 2, 4. Use `-p` on create to set initial priority.
+    run_br(dir.path(), &["create", "P0", "--silent", "-t", "task", "-p", "0"]);
+    run_br(dir.path(), &["create", "P2", "--silent", "-t", "task", "-p", "2"]);
+    run_br(dir.path(), &["create", "P4", "--silent", "-t", "task", "-p", "4"]);
+
+    // Filter to {0, 2}. Expect exactly two issues, priorities 0 and 2.
+    let ready = adapter
+        .list_ready(ReadyFilter {
+            priorities: vec![0, 2],
+            limit: Some(50),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let priorities: Vec<i32> = ready
+        .iter()
+        .map(|i| i.priority.expect("br ready row must carry priority"))
+        .collect();
+
+    assert_eq!(priorities.len(), 2, "expected 2 items, got {priorities:?}");
+    assert!(priorities.contains(&0), "missing priority 0: {priorities:?}");
+    assert!(priorities.contains(&2), "missing priority 2: {priorities:?}");
+    assert!(!priorities.contains(&4), "priority 4 should be filtered out: {priorities:?}");
+}
+
+/// Empty `priorities` means no priority filter — returns all ready items.
+#[tokio::test]
+async fn list_ready_empty_priorities_means_no_filter() {
+    if !br_available() {
+        return;
+    }
+    let (dir, adapter) = setup_workspace().await;
+    run_br(dir.path(), &["create", "A", "--silent", "-t", "task", "-p", "0"]);
+    run_br(dir.path(), &["create", "B", "--silent", "-t", "task", "-p", "4"]);
+
+    let ready = adapter
+        .list_ready(ReadyFilter {
+            priorities: vec![],
+            limit: Some(50),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(ready.len(), 2, "expected both issues with no filter");
+}
