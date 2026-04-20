@@ -77,11 +77,24 @@ impl Reconciler {
                 }
                 _ = tokio::time::sleep(interval) => {}
             }
-            let did_work = match self.tick_once().await {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::warn!("reconciler tick failed: {e}");
-                    false
+            // Race tick_once against cancel so shutdown cannot hang behind
+            // stuck PM I/O (bv.triage / br ready). Aborting a tick's partial
+            // I/O is acceptable: the reconciler is observation-only in v0a.2
+            // and performs no state mutation to roll back.
+            let did_work = tokio::select! {
+                biased;
+                _ = &mut cancel => {
+                    tracing::info!("reconciler received cancel during tick");
+                    break;
+                }
+                result = self.tick_once() => {
+                    match result {
+                        Ok(w) => w,
+                        Err(e) => {
+                            tracing::warn!("reconciler tick failed: {e}");
+                            false
+                        }
+                    }
                 }
             };
             if did_work {
@@ -175,6 +188,40 @@ impl Reconciler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D1 fix coverage: verify that the biased select! pattern used inside
+    /// `Reconciler::run` to race `tick_once` against `cancel` actually
+    /// preempts an in-flight future when cancel fires. Uses a pending future
+    /// as a stand-in for a stuck `bv.triage`/`br ready` call; without the
+    /// biased cancel race, the task would hang indefinitely.
+    #[tokio::test]
+    async fn biased_select_cancel_preempts_pending_tick() {
+        use std::future::pending;
+        use tokio::sync::oneshot;
+
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        tokio::pin!(cancel_rx);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let _ = cancel_tx.send(());
+        });
+
+        let blocking = pending::<anyhow::Result<bool>>();
+        tokio::pin!(blocking);
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), async move {
+            tokio::select! {
+                biased;
+                _ = &mut cancel_rx => "cancelled",
+                _ = &mut blocking => "tick_completed",
+            }
+        })
+        .await
+        .expect("select must not hang when cancel is live");
+
+        assert_eq!(outcome, "cancelled");
+    }
 
     #[test]
     fn cadence_backoff_formula() {

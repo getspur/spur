@@ -309,3 +309,67 @@ async fn observe_ready_via_br_returns_ready_tasks() {
         "task B ({task_b_id}) is blocked and must not be in br fallback ready list; got: {ready_ids:?}"
     );
 }
+
+/// D1 regression: `Reconciler::run` must honor cancel even while a tick is
+/// mid-flight. Prior to the biased cancel-race select, cancel could only win
+/// between ticks; a stuck `bv.triage`/`br ready` would hang shutdown.
+///
+/// Strategy: spin the reconciler at a very fast cadence so ticks are nearly
+/// always in flight, let it run for a brief warm-up, then fire cancel. With
+/// the fix in place the spawned task must complete within the 1-second
+/// timeout budget.
+#[tokio::test]
+async fn reconciler_cancels_during_tick() {
+    use std::time::Duration;
+
+    if !br_available() {
+        eprintln!("skipping reconciler_cancels_during_tick: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    // Seed a few issues so tick_once has non-trivial work to process.
+    for idx in 0..5 {
+        run_br_json(
+            dir.path(),
+            &[
+                "create",
+                "--type",
+                "task",
+                "--title",
+                &format!("Warm-up task {idx}"),
+                "--priority",
+                "2",
+            ],
+        );
+    }
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService) — beads dir must exist after br init");
+    let pm = Arc::new(pm);
+
+    // Very fast cadence → high probability that cancel lands mid-tick.
+    let cfg = ReconcilerConfig {
+        base_interval: Duration::from_millis(5),
+        idle_ceiling: Duration::from_millis(50),
+        backoff_factor: 2,
+    };
+    let reconciler = Reconciler::new(cfg, pm, Arc::new(Notify::new()), None);
+
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(async move { reconciler.run(cancel_rx).await });
+
+    // Let the run loop fire several ticks.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    cancel_tx.send(()).expect("cancel receiver alive");
+
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("reconciler must shut down within 1s of cancel")
+        .expect("reconciler task must not panic");
+}
