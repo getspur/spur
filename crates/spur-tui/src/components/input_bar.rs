@@ -9,6 +9,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
+use crate::components::completion_trigger::IntentEvent;
 use crate::input_history::{HISTORY_CAP, InputHistoryEntry, InputStateSnapshot};
 
 /// A protected byte range inside the text representing an atomic token
@@ -39,6 +40,18 @@ pub enum VimMode {
     Insert,
     Visual,
     Operator(char),
+}
+
+/// The result of `InputBar::handle_key`. The `Submit` variant preserves
+/// today's submit tuple; the `Key` variant carries the classified
+/// `IntentEvent` for the TriggerDetector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HandleOutcome {
+    /// Buffer submitted. `String` is the submitted text, `bool` is the
+    /// interrupt flag. The view also emits `IntentEvent::Submitted`.
+    Submit(String, bool),
+    /// Ordinary key processed; carries the classified intent.
+    Key(IntentEvent),
 }
 
 /// A text input widget for chatting with the brain agent, built on tui-textarea.
