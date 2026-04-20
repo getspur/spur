@@ -63,6 +63,9 @@ impl MentionRegistry {
     /// Drop all cached per-session indexes. Call after the agent
     /// registry reloads so the next `query()` rebuilds with the
     /// fresh worker snapshot.
+    ///
+    /// Currently has no caller — wired up when live config-reload
+    /// support is added (out of scope for v1).
     pub fn clear_cache(&mut self) {
         self.cache.clear();
     }
@@ -99,6 +102,9 @@ impl MentionRegistry {
         if query.is_empty() {
             // Empty-query branch: pin up to WORKER_PIN_CAP workers, then
             // fill remaining slots with files sorted by display length.
+            // perf: two alloc+sort passes over cached entries on every
+            // empty-query call. Acceptable at expected index scale (≤10k);
+            // revisit if profiling shows picker latency.
             let mut workers: Vec<MentionEntry> = entries
                 .iter()
                 .filter(|e| e.kind == MentionKind::Worker)
