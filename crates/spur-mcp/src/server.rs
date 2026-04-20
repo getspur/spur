@@ -571,7 +571,11 @@ impl McpCallbackServer {
     /// When `detached` is `Some`, the task additionally calls
     /// `report_detached_completion` to route the result back into the
     /// orchestrator ingress (INV-C3 ordering: UI event BEFORE ingress).
-    fn spawn_result_collector(
+    ///
+    /// Exposed for integration tests in sibling crates. Not part of the
+    /// stable public API — `#[doc(hidden)]` keeps it out of rustdoc.
+    #[doc(hidden)]
+    pub fn spawn_result_collector(
         tracker: &TaskTracker,
         delegation_id: String,
         rx: tokio::sync::oneshot::Receiver<DelegationResult>,
@@ -647,6 +651,32 @@ impl McpCallbackServer {
     pub async fn shutdown(&self) {
         self.task_tracker.close();
         self.task_tracker.wait().await;
+    }
+
+    /// Test-only: invoke the `delegate_to_worker` JSON-RPC handler directly.
+    ///
+    /// Exposed solely so integration tests in sibling crates (e.g.
+    /// `spur-core/tests/continuation_integration.rs`) can exercise the
+    /// block-timeout / detached-completion paths without standing up the full
+    /// HTTP stack. Returns the raw JSON-RPC response as a `serde_json::Value`.
+    #[doc(hidden)]
+    pub async fn __test_call_delegate_to_worker(&self, agent: &str, task: &str) -> Value {
+        let resp = self
+            .handle_delegate_to_worker(Value::from(1), json!({ "agent": agent, "task": task }))
+            .await;
+        serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
+    /// Test-only: peek whether a result is sitting in `completed_delegations`
+    /// awaiting a `check_delegation_status` poll. Used to detect the
+    /// double-delivery failure mode (map write AND continuation callback both
+    /// firing for the same delegation).
+    #[doc(hidden)]
+    pub async fn __test_completed_has(&self, delegation_id: &str) -> bool {
+        self.completed_delegations
+            .lock()
+            .await
+            .contains_key(delegation_id)
     }
 
     /// Remove completed delegation results older than `COMPLETED_TTL`.
@@ -827,13 +857,22 @@ impl McpCallbackServer {
             .lock()
             .await
             .insert(request_id.clone());
+        // Phase 1a (INV-ASYNC-1, additive): pass a BlockTimeout continuation
+        // handle so that if the worker outlives DELEGATION_BLOCK_TIMEOUT,
+        // completion is routed through the continuation bridge instead of
+        // leaving the result to be polled out of `completed_delegations`.
+        // Map write still happens at :600 until Phase 1c refactors the
+        // collector to skip it when detached is Some.
         Self::spawn_result_collector(
             &self.task_tracker,
             request_id.clone(),
             rx,
             Arc::clone(&self.active_delegations),
             Arc::clone(&self.completed_delegations),
-            None, // inline-wait path; brain gets result in MCP response
+            Some(DetachedCompletionHandle {
+                ctx: Arc::clone(&self.continuation_ctx),
+                source_kind: DetachedSourceKind::BlockTimeout,
+            }),
         );
 
         let deadline = tokio::time::Instant::now() + DELEGATION_BLOCK_TIMEOUT;
@@ -928,7 +967,14 @@ impl McpCallbackServer {
                 rx,
                 Arc::clone(&self.active_delegations),
                 Arc::clone(&self.completed_delegations),
-                None, // parallel path; brain waits inline for all results
+                // Phase 1a (INV-ASYNC-1, additive): per-task BlockTimeout
+                // continuation for the parallel path. Phase 2 owns the
+                // per-task inline window; this handle already matches that
+                // future shape.
+                Some(DetachedCompletionHandle {
+                    ctx: Arc::clone(&self.continuation_ctx),
+                    source_kind: DetachedSourceKind::BlockTimeout,
+                }),
             );
             receivers.push((request_id, agent));
         }
