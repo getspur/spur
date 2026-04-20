@@ -178,6 +178,49 @@ fn cycle_tab_opens_task_at_top() {
     );
 }
 
+/// T-D2a: A non-Stream tab whose content contains a line longer than
+/// the pane width must let the user scroll down to the wrapped tail of
+/// that line. Today `max_offset` is computed from unwrapped
+/// `body_lines.len()`, so very long single-line content is unscrollable
+/// past its first visible wrap.
+#[test]
+fn non_stream_scroll_reaches_wrapped_bottom() {
+    let mut pane = DetailPane::new();
+    // Task spec: a very long single line, so `lines().count() == 1` but
+    // `wrap_line_to_width(_, ~38) ` produces many rows. The "ZZZZEND"
+    // marker lives at the tail of the wrapped content.
+    let task_spec = format!("{}ZZZZEND", "x".repeat(500));
+    let n = node(&task_spec);
+
+    // Cycle Stream → Artifacts → Attempts → Task.
+    for _ in 0..3 {
+        pane.cycle_tab(true, None);
+    }
+    assert_eq!(pane.current_tab, DetailTab::Task);
+
+    // Terminal 40 × 10: body is ~38 × 7 after borders/tab bar.
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| pane.render(f, Rect::new(0, 0, 40, 10), &n, None, None))
+        .unwrap();
+
+    // Scroll down repeatedly — must reach the wrapped tail. Render between
+    // each scroll so the pane's max_offset is re-clamped using whatever
+    // total-row count the render path sees.
+    for _ in 0..50 {
+        pane.scroll_down(None);
+        term.draw(|f| pane.render(f, Rect::new(0, 0, 40, 10), &n, None, None))
+            .unwrap();
+    }
+
+    let buf = term.backend().buffer().clone();
+    assert!(
+        buffer_contains(&buf, "ZZZZEND"),
+        "after 50× scroll_down on a Task tab with a long wrapped line, the \
+         tail marker `ZZZZEND` must be visible; buffer:\n{:#?}",
+        buf
+    );
+}
+
 /// T-D4b: Cycling back into the Stream tab from elsewhere must snap the
 /// trace back to Following so the user sees the latest output — otherwise
 /// returning to Stream may leave the viewport pinned mid-history.
