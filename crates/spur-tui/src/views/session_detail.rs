@@ -576,9 +576,7 @@ impl SessionDetailView {
     /// fast-path: on `Idle` state and a non-opening event, return in O(1)
     /// without fetching text/cursor/ranges from `input_bar`.
     fn dispatch_intent(&mut self, event: crate::components::completion_trigger::IntentEvent) {
-        use crate::components::completion_trigger::{
-            IntentEvent, TriggerKind, TriggerTransition,
-        };
+        use crate::components::completion_trigger::{IntentEvent, TriggerKind, TriggerTransition};
         use crate::components::picker_shell::PickerShell;
         use crate::components::query_source::{
             MentionQuerySource, QueryMode, SlashQuerySource, SlashRow,
@@ -610,9 +608,7 @@ impl SessionDetailView {
         // borrows from input_bar — two simultaneous fields of self.
         let ranges = self.input_bar.protected_ranges().to_vec();
 
-        let transition = self
-            .trigger_detector
-            .step(event, &text, cursor, &ranges);
+        let transition = self.trigger_detector.step(event, &text, cursor, &ranges);
 
         match transition {
             TriggerTransition::None => {}
@@ -882,14 +878,18 @@ impl SessionDetailView {
                     PickerAction::None => {}
                     PickerAction::Cancel => {
                         self.picker_shell = None;
-                        self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Dismissed);
+                        self.dispatch_intent(
+                            crate::components::completion_trigger::IntentEvent::Dismissed,
+                        );
                     }
                     PickerAction::Accept(accept) => {
                         match accept {
                             RetrievalAccept::ReplaceState(snap) => {
                                 let len = snap.text.len();
                                 self.input_bar.set_state(snap, len);
-                                self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Accepted);
+                                self.dispatch_intent(
+                                    crate::components::completion_trigger::IntentEvent::Accepted,
+                                );
                             }
                             RetrievalAccept::InsertAtom {
                                 text,
@@ -901,14 +901,18 @@ impl SessionDetailView {
                                     self.replace_trigger_token(prefix_start, "");
                                 }
                                 self.input_bar.insert_atom(text, uri, name);
-                                self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Accepted);
+                                self.dispatch_intent(
+                                    crate::components::completion_trigger::IntentEvent::Accepted,
+                                );
                             }
                             RetrievalAccept::ReplaceTriggerToken {
                                 prefix_start,
                                 replacement,
                             } => {
                                 self.replace_trigger_token(prefix_start, &replacement);
-                                self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Accepted);
+                                self.dispatch_intent(
+                                    crate::components::completion_trigger::IntentEvent::Accepted,
+                                );
                             }
                         }
                         self.picker_shell = None;
@@ -962,7 +966,10 @@ impl SessionDetailView {
                         let dec = route(&text, &ranges, &self.command_registry, interrupt);
                         return match dec {
                             SubmitDecision::Empty => None,
-                            SubmitDecision::Send { mut blocks, interrupt } => {
+                            SubmitDecision::Send {
+                                mut blocks,
+                                interrupt,
+                            } => {
                                 if self.role == "brain" {
                                     let _ = crate::mentions::hint::prepend_worker_hint(
                                         &mut blocks,
@@ -977,11 +984,13 @@ impl SessionDetailView {
                                 })
                             }
                             SubmitDecision::Local { action } => Some(action),
-                            SubmitDecision::VendorExec { method, params } => Some(Action::VendorExec {
-                                session: self.session_id.clone(),
-                                method,
-                                params,
-                            }),
+                            SubmitDecision::VendorExec { method, params } => {
+                                Some(Action::VendorExec {
+                                    session: self.session_id.clone(),
+                                    method,
+                                    params,
+                                })
+                            }
                         };
                     }
                     return None;
@@ -1688,7 +1697,6 @@ fn format_diff_truncated(path: &str, old: Option<&str>, new_: &str) -> String {
     }
     out
 }
-
 
 #[cfg(all(test, feature = "markdown"))]
 mod invalidate_protocols_tests {

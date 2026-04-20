@@ -20,45 +20,72 @@ fn press_ctrl(bar: &mut InputBar, c: char) -> IntentEvent {
 fn arrow_keys_classify_as_moved_cursor() {
     let mut bar = InputBar::new();
     bar.set_text("abcdef".into(), 3);
-    assert!(matches!(press(&mut bar, KeyCode::Left), IntentEvent::MovedCursor));
-    assert!(matches!(press(&mut bar, KeyCode::Right), IntentEvent::MovedCursor));
-    assert!(matches!(press(&mut bar, KeyCode::Up), IntentEvent::MovedCursor));
-    assert!(matches!(press(&mut bar, KeyCode::Down), IntentEvent::MovedCursor));
+    assert!(matches!(
+        press(&mut bar, KeyCode::Left),
+        IntentEvent::MovedCursor
+    ));
+    assert!(matches!(
+        press(&mut bar, KeyCode::Right),
+        IntentEvent::MovedCursor
+    ));
+    assert!(matches!(
+        press(&mut bar, KeyCode::Up),
+        IntentEvent::MovedCursor
+    ));
+    assert!(matches!(
+        press(&mut bar, KeyCode::Down),
+        IntentEvent::MovedCursor
+    ));
 }
 
 #[test]
 fn backspace_classifies_as_deleted_char() {
     let mut bar = InputBar::new();
     bar.set_text("abc".into(), 3);
-    assert!(matches!(press(&mut bar, KeyCode::Backspace), IntentEvent::DeletedChar));
+    assert!(matches!(
+        press(&mut bar, KeyCode::Backspace),
+        IntentEvent::DeletedChar
+    ));
 }
 
 #[test]
 fn delete_classifies_as_deleted_char() {
     let mut bar = InputBar::new();
     bar.set_text("abc".into(), 0);
-    assert!(matches!(press(&mut bar, KeyCode::Delete), IntentEvent::DeletedChar));
+    assert!(matches!(
+        press(&mut bar, KeyCode::Delete),
+        IntentEvent::DeletedChar
+    ));
 }
 
 #[test]
 fn ctrl_k_classifies_as_deleted_char() {
     let mut bar = InputBar::new();
     bar.set_text("hello world".into(), 5);
-    assert!(matches!(press_ctrl(&mut bar, 'k'), IntentEvent::DeletedChar));
+    assert!(matches!(
+        press_ctrl(&mut bar, 'k'),
+        IntentEvent::DeletedChar
+    ));
 }
 
 #[test]
 fn ctrl_u_classifies_as_deleted_char() {
     let mut bar = InputBar::new();
     bar.set_text("hello world".into(), 5);
-    assert!(matches!(press_ctrl(&mut bar, 'u'), IntentEvent::DeletedChar));
+    assert!(matches!(
+        press_ctrl(&mut bar, 'u'),
+        IntentEvent::DeletedChar
+    ));
 }
 
 #[test]
 fn ctrl_w_classifies_as_deleted_char() {
     let mut bar = InputBar::new();
     bar.set_text("hello world".into(), 11);
-    assert!(matches!(press_ctrl(&mut bar, 'w'), IntentEvent::DeletedChar));
+    assert!(matches!(
+        press_ctrl(&mut bar, 'w'),
+        IntentEvent::DeletedChar
+    ));
 }
 
 #[test]
@@ -105,6 +132,12 @@ fn enter_on_empty_returns_noop() {
 fn home_end_classify_as_moved_cursor() {
     let mut bar = InputBar::new();
     bar.set_text("abc".into(), 3);
-    assert!(matches!(press(&mut bar, KeyCode::Home), IntentEvent::MovedCursor));
-    assert!(matches!(press(&mut bar, KeyCode::End), IntentEvent::MovedCursor));
+    assert!(matches!(
+        press(&mut bar, KeyCode::Home),
+        IntentEvent::MovedCursor
+    ));
+    assert!(matches!(
+        press(&mut bar, KeyCode::End),
+        IntentEvent::MovedCursor
+    ));
 }

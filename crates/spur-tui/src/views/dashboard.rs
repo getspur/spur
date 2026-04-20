@@ -495,8 +495,13 @@ impl DashboardView {
                             .as_ref()
                             .map(|iid| format_issue_badge(iid, &self.tracked_issues));
                         let trace = worker_streams.get_mut(&id.0);
-                        self.detail_pane
-                            .render(frame, chunks[log_chunk], node, badge.as_deref(), trace);
+                        self.detail_pane.render(
+                            frame,
+                            chunks[log_chunk],
+                            node,
+                            badge.as_deref(),
+                            trace,
+                        );
                     } else {
                         self.activity_log.render(frame, chunks[log_chunk]);
                     }
