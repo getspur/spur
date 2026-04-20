@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub const SENTINEL_PREFIX: &str = "[[spur-audit v1]]";
 
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum AuditSentinelKind {
     PlanSubmit {
@@ -40,6 +40,33 @@ pub enum AuditSentinelKind {
         delegation_id: String,
         feedback: String,
     },
+    Signal {
+        signal_id: String,
+        #[serde(rename = "signal_kind")]
+        kind: String,
+        severity: f32,
+        reason: String,
+    },
+    MutationPlan {
+        mutation_id: String,
+        op: String,
+        #[serde(default)]
+        trigger_signal_id: Option<String>,
+        trigger_task_id: String,
+    },
+    MutationCommit {
+        mutation_id: String,
+        children_created: Vec<String>,
+    },
+    MutationInvariantViolation {
+        mutation_id: String,
+        violation: String,
+        rollback_status: String,
+    },
+    LateSignal {
+        signal_id: String,
+        terminal_status: String,
+    },
     /// Forward-compat fallback. When a future SPUR release adds a new audit
     /// sentinel variant and emits it into a beads comment, older clients
     /// parsing that comment will deserialize it into `Unknown` instead of
@@ -58,6 +85,11 @@ impl AuditSentinelKind {
             Self::Completion { .. } => "completion",
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
+            Self::Signal { .. } => "signal",
+            Self::MutationPlan { .. } => "mutation-plan",
+            Self::MutationCommit { .. } => "mutation-commit",
+            Self::MutationInvariantViolation { .. } => "mutation-invariant-violation",
+            Self::LateSignal { .. } => "late-signal",
             Self::Unknown => "unknown",
         }
     }
@@ -134,6 +166,31 @@ mod tests {
                 delegation_id: "del-A".into(),
                 feedback: "try again".into(),
             },
+            AuditSentinelKind::Signal {
+                signal_id: "sig-1".into(),
+                kind: "scope-drift".into(),
+                severity: 0.82,
+                reason: "auth spans 4 subsystems".into(),
+            },
+            AuditSentinelKind::MutationPlan {
+                mutation_id: "mut-V".into(),
+                op: "split".into(),
+                trigger_signal_id: Some("sig-1".into()),
+                trigger_task_id: "bd-102".into(),
+            },
+            AuditSentinelKind::MutationCommit {
+                mutation_id: "mut-V".into(),
+                children_created: vec!["bd-201".into(), "bd-202".into()],
+            },
+            AuditSentinelKind::MutationInvariantViolation {
+                mutation_id: "mut-V".into(),
+                violation: "cycle".into(),
+                rollback_status: "completed".into(),
+            },
+            AuditSentinelKind::LateSignal {
+                signal_id: "sig-2".into(),
+                terminal_status: "approved".into(),
+            },
         ];
         for k in cases {
             let body = encode_comment(&k);
@@ -201,6 +258,31 @@ mod tests {
                 delegation_id: "x".into(),
                 feedback: "f".into(),
             },
+            AuditSentinelKind::Signal {
+                signal_id: "sig-1".into(),
+                kind: "scope-drift".into(),
+                severity: 0.82,
+                reason: "auth spans 4 subsystems".into(),
+            },
+            AuditSentinelKind::MutationPlan {
+                mutation_id: "mut-V".into(),
+                op: "split".into(),
+                trigger_signal_id: Some("sig-1".into()),
+                trigger_task_id: "bd-102".into(),
+            },
+            AuditSentinelKind::MutationCommit {
+                mutation_id: "mut-V".into(),
+                children_created: vec!["bd-201".into(), "bd-202".into()],
+            },
+            AuditSentinelKind::MutationInvariantViolation {
+                mutation_id: "mut-V".into(),
+                violation: "cycle".into(),
+                rollback_status: "completed".into(),
+            },
+            AuditSentinelKind::LateSignal {
+                signal_id: "sig-2".into(),
+                terminal_status: "approved".into(),
+            },
             AuditSentinelKind::Unknown,
         ] {
             let json = serde_json::to_value(&k).unwrap();
@@ -255,5 +337,59 @@ mod tests {
         // Locks in the logging bucket name used by the tracing::debug! call
         // in parse_comment. If this changes, update the observability story.
         assert_eq!(AuditSentinelKind::Unknown.kind_str(), "unknown");
+    }
+
+    #[test]
+    fn signal_variant_round_trips() {
+        let kind = AuditSentinelKind::Signal {
+            signal_id: "sig-1".into(),
+            kind: "scope-drift".into(),
+            severity: 0.82,
+            reason: "auth spans 4 subsystems".into(),
+        };
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "signal");
+    }
+
+    #[test]
+    fn mutation_plan_and_commit_round_trip() {
+        let plan = AuditSentinelKind::MutationPlan {
+            mutation_id: "mut-V".into(),
+            op: "split".into(),
+            trigger_signal_id: Some("sig-1".into()),
+            trigger_task_id: "bd-102".into(),
+        };
+        let parsed = parse_comment(&encode_comment(&plan)).unwrap().unwrap();
+        assert_eq!(parsed, plan);
+
+        let commit = AuditSentinelKind::MutationCommit {
+            mutation_id: "mut-V".into(),
+            children_created: vec!["bd-201".into(), "bd-202".into()],
+        };
+        let parsed_c = parse_comment(&encode_comment(&commit)).unwrap().unwrap();
+        assert_eq!(parsed_c, commit);
+    }
+
+    #[test]
+    fn late_signal_round_trips() {
+        let kind = AuditSentinelKind::LateSignal {
+            signal_id: "sig-2".into(),
+            terminal_status: "approved".into(),
+        };
+        let parsed = parse_comment(&encode_comment(&kind)).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+    }
+
+    #[test]
+    fn invariant_violation_round_trips() {
+        let kind = AuditSentinelKind::MutationInvariantViolation {
+            mutation_id: "mut-V".into(),
+            violation: "cycle".into(),
+            rollback_status: "completed".into(),
+        };
+        let parsed = parse_comment(&encode_comment(&kind)).unwrap().unwrap();
+        assert_eq!(parsed, kind);
     }
 }
