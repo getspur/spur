@@ -392,6 +392,31 @@ pub async fn build_epic_subgraph(
     Ok(EpicSubgraph { epic_id, task_map })
 }
 
+/// Emit a `[[spur-audit v1]]` `PlanSubmit` sentinel comment on the epic issue.
+///
+/// Advisory: failure is logged via `tracing::warn!` and swallowed. Does not
+/// abort the caller. See docs/superpowers/plans/2026-04-20-adaptive-plan-
+/// repair-v0a.md "Review addendum II" for why comments are the audit
+/// transport.
+pub async fn emit_plan_submit_audit(
+    advanced: &dyn spur_pm::BeadsAdvanced,
+    plan_id: &str,
+    sg: &EpicSubgraph,
+) {
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+        plan_id: plan_id.to_string(),
+        epic_issue_id: sg.epic_id.clone(),
+        task_ids: sg.task_map.values().cloned().collect(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
+        tracing::warn!(
+            epic_id = %sg.epic_id,
+            "PlanSubmit audit comment emission failed (graph is persisted; audit missing): {e}"
+        );
+    }
+}
+
 /// Pure helper: compute the IssueCreate values that build_epic_subgraph
 /// would dispatch to PmService. Returns the epic's IssueCreate plus a
 /// Vec of (task_id, IssueCreate) for each child in topological order.
@@ -1875,6 +1900,16 @@ impl McpCallbackServer {
         } else {
             None
         };
+
+        // v0a.2: Emit PlanSubmit audit sentinel comment on the epic. Advisory —
+        // failure is warned and swallowed. See docs/superpowers/plans/
+        // 2026-04-20-adaptive-plan-repair-v0a.md "Review addendum II" for why
+        // comments (not br audit record) are the audit transport.
+        if let Some(sg) = &epic_subgraph {
+            if let Some(adv) = self.pm_service.as_deref().and_then(|pm| pm.advanced()) {
+                emit_plan_submit_audit(adv, &plan_id, sg).await;
+            }
+        }
 
         let entries: Vec<crate::plan::PlanTaskEntry> = build_entries_with_task_map(
             tasks,
