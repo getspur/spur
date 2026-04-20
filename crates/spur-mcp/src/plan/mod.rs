@@ -130,13 +130,14 @@ fn label_value<'a>(labels: &'a [String], prefix: &str) -> Option<&'a str> {
         .next()
 }
 
-/// Return a copy of `labels` with all entries that start with `"spur."` removed.
+/// Return a copy of `labels` with all entries that start with `"spur:"` removed
+/// (the SPUR machine-label prefix).
 // Task 2 MCP handler will consume this; tested via strip_spur_labels_drops_machine_prefix.
 #[allow(dead_code)]
 fn strip_spur_labels(labels: &[String]) -> Vec<String> {
     labels
         .iter()
-        .filter(|l| !l.starts_with("spur."))
+        .filter(|l| !l.starts_with("spur:"))
         .cloned()
         .collect()
 }
@@ -196,20 +197,20 @@ pub fn derive_epic_plan_from_issues(
         }
 
         // 4b. Resolve agent.
-        let agent = if let Some(name) = label_value(&child.labels, "spur.agent=") {
+        let agent = if let Some(name) = label_value(&child.labels, labels::AGENT_PREFIX) {
             name.to_string()
-        } else if let Some(name) = label_value(&epic.labels, "spur.agent=") {
+        } else if let Some(name) = label_value(&epic.labels, labels::AGENT_PREFIX) {
             name.to_string()
         } else if let Some(name) = default_agent {
             warnings.push(format!(
-                "'{}' has no spur.agent label — used default_agent",
+                "'{}' has no spur:agent:<name> label — used default_agent",
                 child.id
             ));
             name.to_string()
         } else {
             let known = known_agents.join(", ");
             return Err(format!(
-                "no agent for task '{}'; set `spur.agent=<name>` label or pass default_agent. Known agents: [{}]",
+                "no agent for task '{}'; set `spur:agent:<name>` label or pass default_agent. Known agents: [{}]",
                 child.id, known
             ));
         };
@@ -224,7 +225,15 @@ pub fn derive_epic_plan_from_issues(
         }
 
         // 4d. Resolve task text.
-        let task_text = if let Some(text) = label_value(&child.labels, "spur.task_text=") {
+        //
+        // NOTE: `spur:task-text:<text>` as a LABEL is structurally broken against
+        // br 0.1.14's label grammar `[A-Za-z0-9_:-]+`. Any realistic task text
+        // will contain forbidden chars (`.`, `=`, space, etc) and be rejected by
+        // `br label add`. This label convention should migrate off labels to the
+        // issue `description` field (tracked as v0a.2 follow-up). Kept here for
+        // backward compatibility with pre-v0a callers that never actually wrote
+        // these labels through `br`.
+        let task_text = if let Some(text) = label_value(&child.labels, "spur:task-text:") {
             text.to_string()
         } else {
             child.body.clone()
@@ -2500,13 +2509,13 @@ mod tests {
     #[test]
     fn label_value_finds_prefix() {
         let labels = vec![
-            "spur.agent=codex".to_string(),
+            "spur:agent:codex".to_string(),
             "priority=high".to_string(),
-            "spur.task_text=custom".to_string(),
+            "spur:task-text:custom".to_string(),
         ];
-        assert_eq!(super::label_value(&labels, "spur.agent="), Some("codex"));
+        assert_eq!(super::label_value(&labels, "spur:agent:"), Some("codex"));
         assert_eq!(
-            super::label_value(&labels, "spur.task_text="),
+            super::label_value(&labels, "spur:task-text:"),
             Some("custom")
         );
         assert_eq!(super::label_value(&labels, "missing="), None);
@@ -2515,9 +2524,9 @@ mod tests {
     #[test]
     fn strip_spur_labels_drops_machine_prefix() {
         let labels = vec![
-            "spur.agent=codex".to_string(),
+            "spur:agent:codex".to_string(),
             "area:auth".to_string(),
-            "spur.task_text=x".to_string(),
+            "spur:task-text:x".to_string(),
             "bug".to_string(),
         ];
         let kept = super::strip_spur_labels(&labels);
@@ -2572,7 +2581,7 @@ mod tests {
         let epic = make_issue(
             "bd-100",
             Some("epic"),
-            vec!["spur.agent=codex".to_string()],
+            vec!["spur:agent:codex".to_string()],
             "Epic body",
             vec![],
         );
@@ -2647,7 +2656,7 @@ mod tests {
         let child = make_issue(
             "bd-203",
             Some("epic"),
-            vec!["spur.agent=codex".to_string()],
+            vec!["spur:agent:codex".to_string()],
             "sub-epic",
             vec![],
         );
@@ -2667,7 +2676,7 @@ mod tests {
         let epic = make_issue(
             "bd-204",
             Some("epic"),
-            vec!["spur.agent=codex".to_string()],
+            vec!["spur:agent:codex".to_string()],
             "body",
             vec![],
         );
@@ -2691,7 +2700,7 @@ mod tests {
         let epic = make_issue(
             "bd-206",
             Some("epic"),
-            vec!["spur.agent=codex".to_string()],
+            vec!["spur:agent:codex".to_string()],
             "body",
             vec![],
         );
@@ -2724,7 +2733,7 @@ mod tests {
         let epic = make_issue(
             "bd-ep1",
             Some("epic"),
-            vec!["spur.agent=codex".to_string()],
+            vec!["spur:agent:codex".to_string()],
             "body",
             vec![],
         );
@@ -2780,11 +2789,11 @@ mod tests {
         let epic = make_issue(
             "bd-208",
             Some("epic"),
-            vec!["spur.agent=claude-code".to_string()],
+            vec!["spur:agent:claude-code".to_string()],
             "body",
             vec![],
         );
-        // child has NO spur.agent label
+        // child has NO spur:agent:<name> label
         let child = make_issue("bd-209", Some("task"), vec![], "task body", vec![]);
         let derived = super::derive_epic_plan_from_issues(
             &epic,
@@ -2842,7 +2851,7 @@ mod tests {
         let child = make_issue(
             "bd-215",
             Some("task"),
-            vec!["spur.agent=kiro".to_string()],
+            vec!["spur:agent:kiro".to_string()],
             "task body",
             vec![],
         );
@@ -2863,14 +2872,14 @@ mod tests {
         let epic = make_issue(
             "bd-216",
             Some("epic"),
-            vec!["spur.agent=codex".to_string()],
+            vec!["spur:agent:codex".to_string()],
             "body",
             vec![],
         );
         let child = make_issue(
             "bd-217",
             Some("task"),
-            vec!["spur.task_text=custom task text".to_string()],
+            vec!["spur:task-text:custom task text".to_string()],
             "issue body (should be ignored)",
             vec![],
         );
@@ -2887,13 +2896,13 @@ mod tests {
 
     #[test]
     fn derive_rejects_empty_agent_label() {
-        // A `spur.agent=` label with empty value resolves to ""; must fail
+        // A `spur:agent:` label with empty value resolves to ""; must fail
         // the known_agents check with an actionable error.
         let epic = make_issue("bd-230", Some("epic"), vec![], "body", vec![]);
         let child = make_issue(
             "bd-231",
             Some("task"),
-            vec!["spur.agent=".to_string()],
+            vec!["spur:agent:".to_string()],
             "task body",
             vec![],
         );
@@ -2910,20 +2919,20 @@ mod tests {
 
     #[test]
     fn derive_accepts_empty_spur_task_text_override() {
-        // Document the current behavior: `spur.task_text=` (empty value)
+        // Document the current behavior: `spur:task-text:` (empty value)
         // yields an empty PlanTask.task (override beats body). This is the
         // intended contract — an empty value is still an explicit override.
         let epic = make_issue(
             "bd-232",
             Some("epic"),
-            vec!["spur.agent=codex".to_string()],
+            vec!["spur:agent:codex".to_string()],
             "body",
             vec![],
         );
         let child = make_issue(
             "bd-233",
             Some("task"),
-            vec!["spur.task_text=".to_string()],
+            vec!["spur:task-text:".to_string()],
             "issue body (should be ignored)",
             vec![],
         );
@@ -2946,7 +2955,7 @@ mod tests {
         let epic = make_issue(
             "bd-218",
             Some("epic"),
-            vec!["spur.agent=codex".to_string()],
+            vec!["spur:agent:codex".to_string()],
             "body",
             vec![],
         );

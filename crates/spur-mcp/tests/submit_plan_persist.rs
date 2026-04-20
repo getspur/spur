@@ -50,8 +50,8 @@ fn epic_create_carries_plan_id_label_and_epic_type() {
     assert_eq!(epic.issue_type.as_deref(), Some("epic"));
     assert_eq!(epic.description.as_deref(), Some("Body"));
     assert!(
-        epic.labels.iter().any(|l| l == "spur.plan_id=plan-xyz"),
-        "epic must carry spur.plan_id label; got {:?}",
+        epic.labels.iter().any(|l| l == "spur:plan-id:plan-xyz"),
+        "epic must carry spur:plan-id label; got {:?}",
         epic.labels,
     );
 }
@@ -79,12 +79,12 @@ fn children_carry_spur_plan_id_plan_task_id_and_agent_labels() {
         .find(|(k, _)| k == "b")
         .expect("child b present");
     let labels: &Vec<String> = &child_b.labels;
-    assert!(labels.iter().any(|l| l == "spur.plan_id=plan-xyz"));
-    assert!(labels.iter().any(|l| l == "spur.plan_task_id=b"));
-    assert!(labels.iter().any(|l| l == "spur.agent=claude-code-acp"));
+    assert!(labels.iter().any(|l| l == "spur:plan-id:plan-xyz"));
+    assert!(labels.iter().any(|l| l == "spur:plan-task-id:b"));
+    assert!(labels.iter().any(|l| l == "spur:agent:claude-code-acp"));
     assert!(
-        labels.iter().any(|l| l == "spur.source_issue=bd-42"),
-        "child b sourced from bd-42 must carry spur.source_issue label"
+        labels.iter().any(|l| l == "spur:source-issue:bd-42"),
+        "child b sourced from bd-42 must carry spur:source-issue label"
     );
 }
 

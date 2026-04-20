@@ -4,15 +4,32 @@
 //! in this module. String-typing labels at the call site is a bug waiting to
 //! happen — use these constructors instead.
 //!
+//! # Grammar constraint
+//!
+//! `br 0.1.14` enforces label grammar `[A-Za-z0-9_:-]+` (empirically verified
+//! via `br label add` — `VALIDATION_FAILED` error surface). Labels containing
+//! `.`, `=`, `/`, or whitespace are rejected. All constructors in this module
+//! produce br-legal labels. Callers supplying raw components (plan IDs, task
+//! IDs, agent names) are responsible for ensuring those components use only
+//! `[A-Za-z0-9_:-]` characters.
+//!
 //! See `docs/superpowers/specs/2026-04-20-adaptive-plan-repair-design.md`
 //! §Information Flow → Label vocabulary for the authoritative list.
 
 pub fn plan_id(plan_id: &str) -> String {
-    format!("spur.plan_id={plan_id}")
+    format!("spur:plan-id:{plan_id}")
 }
 
 pub fn plan_task_id(task_id: &str) -> String {
-    format!("spur.plan_task_id={task_id}")
+    format!("spur:plan-task-id:{task_id}")
+}
+
+pub fn agent(agent_name: &str) -> String {
+    format!("spur:agent:{agent_name}")
+}
+
+pub fn source_issue(issue_id: &str) -> String {
+    format!("spur:source-issue:{issue_id}")
 }
 
 pub fn delegation_id(delegation_id: &str) -> String {
@@ -34,29 +51,37 @@ pub fn mutation_id(mutation_id: &uuid::Uuid) -> String {
     format!("mutation-id:{mutation_id}")
 }
 
-pub fn superseded_by(child_ids: &[String]) -> String {
-    format!("superseded-by:{}", child_ids.join(","))
-}
+/// Prefix strings for parsing. Use these with `label_value()` or `strip_prefix()`.
+pub const PLAN_ID_PREFIX: &str = "spur:plan-id:";
+pub const PLAN_TASK_ID_PREFIX: &str = "spur:plan-task-id:";
+pub const AGENT_PREFIX: &str = "spur:agent:";
+pub const SOURCE_ISSUE_PREFIX: &str = "spur:source-issue:";
 
-/// Returns `Some(task_id)` if the given label is a `spur.plan_task_id=<id>` label.
+/// Returns `Some(task_id)` if the given label is a `spur:plan-task-id:<id>` label.
 pub fn parse_plan_task_id(label: &str) -> Option<&str> {
-    label.strip_prefix("spur.plan_task_id=")
+    label.strip_prefix(PLAN_TASK_ID_PREFIX)
 }
 
-/// Returns `Some(plan_id)` if the given label is a `spur.plan_id=<id>` label.
+/// Returns `Some(plan_id)` if the given label is a `spur:plan-id:<id>` label.
 pub fn parse_plan_id(label: &str) -> Option<&str> {
-    label.strip_prefix("spur.plan_id=")
+    label.strip_prefix(PLAN_ID_PREFIX)
+}
+
+/// Returns `Some(agent_name)` if the given label is a `spur:agent:<name>` label.
+pub fn parse_agent(label: &str) -> Option<&str> {
+    label.strip_prefix(AGENT_PREFIX)
+}
+
+/// Returns `Some(issue_id)` if the given label is a `spur:source-issue:<id>` label.
+pub fn parse_source_issue(label: &str) -> Option<&str> {
+    label.strip_prefix(SOURCE_ISSUE_PREFIX)
 }
 
 /// Returns `Some(kind)` if the given label is a `signal:<kind>` label
 /// (not a bucketed variant `signal:<kind>:<bucket>`).
 pub fn parse_signal_kind(label: &str) -> Option<&str> {
     let rest = label.strip_prefix("signal:")?;
-    if rest.contains(':') {
-        None
-    } else {
-        Some(rest)
-    }
+    if rest.contains(':') { None } else { Some(rest) }
 }
 
 #[cfg(test)]
@@ -65,8 +90,10 @@ mod tests {
 
     #[test]
     fn constructors_produce_expected_strings() {
-        assert_eq!(plan_id("P1"), "spur.plan_id=P1");
-        assert_eq!(plan_task_id("T1"), "spur.plan_task_id=T1");
+        assert_eq!(plan_id("P1"), "spur:plan-id:P1");
+        assert_eq!(plan_task_id("T1"), "spur:plan-task-id:T1");
+        assert_eq!(agent("codex"), "spur:agent:codex");
+        assert_eq!(source_issue("bd-42"), "spur:source-issue:bd-42");
         assert_eq!(delegation_id("del-A"), "delegation-id:del-A");
         assert_eq!(signal_kind("scope-drift"), "signal:scope-drift");
         assert_eq!(
@@ -78,20 +105,56 @@ mod tests {
 
     #[test]
     fn parsers_invert_constructors() {
-        let p = plan_task_id("T1");
-        assert_eq!(parse_plan_task_id(&p), Some("T1"));
+        assert_eq!(parse_plan_task_id(&plan_task_id("T1")), Some("T1"));
         assert_eq!(parse_plan_task_id("unrelated"), None);
-        let plan = plan_id("P1");
-        assert_eq!(parse_plan_id(&plan), Some("P1"));
+        assert_eq!(parse_plan_id(&plan_id("P1")), Some("P1"));
+        assert_eq!(parse_agent(&agent("codex")), Some("codex"));
+        assert_eq!(parse_source_issue(&source_issue("bd-42")), Some("bd-42"));
         assert_eq!(parse_signal_kind("signal:scope-drift"), Some("scope-drift"));
         assert_eq!(parse_signal_kind("signal:scope-drift:high"), None);
     }
 
+    /// `br 0.1.14` label grammar, verified empirically via
+    /// `br label add` `VALIDATION_FAILED` error:
+    /// `^[A-Za-z0-9_:-]+$` — alphanumeric, dash, underscore, colon only.
+    fn is_br_legal(label: &str) -> bool {
+        !label.is_empty()
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
+    }
+
     #[test]
-    fn superseded_by_joins_ids_with_comma() {
-        assert_eq!(
-            superseded_by(&["bd-1".into(), "bd-2".into(), "bd-3".into()]),
-            "superseded-by:bd-1,bd-2,bd-3"
-        );
+    fn constructors_emit_br_legal_labels() {
+        for s in [
+            plan_id("P1"),
+            plan_task_id("T1"),
+            agent("claude-code-acp"),
+            source_issue("bd-42"),
+            delegation_id("del-A"),
+            signal_kind("scope-drift"),
+            signal_kind_bucket("scope-drift", "high"),
+            mutation_id(&uuid::Uuid::nil()),
+        ] {
+            assert!(is_br_legal(&s), "constructor emitted br-illegal label: {s}");
+        }
+    }
+
+    #[test]
+    fn is_br_legal_matches_empirical_grammar() {
+        // Positive cases (verified against real `br label add`):
+        assert!(is_br_legal("alpha1"));
+        assert!(is_br_legal("with-dash"));
+        assert!(is_br_legal("with_under"));
+        assert!(is_br_legal("with:colon"));
+        assert!(is_br_legal("mix-ed:under_score1"));
+        assert!(is_br_legal("UPPER"));
+        assert!(is_br_legal("123-4"));
+        // Negative cases (verified rejected by real `br label add`):
+        assert!(!is_br_legal("with.dot"));
+        assert!(!is_br_legal("with=eq"));
+        assert!(!is_br_legal("with/slash"));
+        assert!(!is_br_legal("with space"));
+        assert!(!is_br_legal(""));
     }
 }
