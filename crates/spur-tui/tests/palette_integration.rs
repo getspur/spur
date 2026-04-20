@@ -81,6 +81,11 @@ fn open_palette_surfaces_session_command_registry_entries() {
 
 #[test]
 fn accept_spur_local_command_emits_concrete_action() {
+    // Why seed a dynamic /anything command? It exercises the Some(view)
+    // arm of result_to_action's borrow-shim. We then query /help to
+    // confirm spur-local resolution still works through the borrowed
+    // (rather than fallback) registry. The third test in this file covers
+    // the None arm explicitly.
     // /help is a spur-local command → SubmitDecision::Local { Action::ShowHelp }.
     // Palette should emit Action::ShowHelp on Accept.
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -104,7 +109,7 @@ fn accept_spur_local_command_emits_concrete_action() {
 }
 
 #[test]
-fn accept_agent_dynamic_command_emits_send_or_vendor_exec() {
+fn accept_agent_dynamic_command_emits_send_message() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use spur_tui::action::Action;
     let mut app = util::app_with_seeded_session_and_dynamic_command(
@@ -118,13 +123,15 @@ fn accept_agent_dynamic_command_emits_send_or_vendor_exec() {
         KeyCode::Enter,
         KeyModifiers::NONE,
     ));
+    // CommandsConfig::default() sets dispatch = DispatchKind::PromptText,
+    // so build_entry produces a Dispatch::PromptText entry and routing
+    // always lands on SubmitDecision::Send → Action::SendMessage. A
+    // VendorExec test would need to seed a CommandsConfig with
+    // DispatchKind::VendorExec and a non-empty exec_method.
     let action = app.last_action_for_test();
     assert!(
-        matches!(
-            action,
-            Some(Action::SendMessage { .. }) | Some(Action::VendorExec { .. })
-        ),
-        "expected SendMessage or VendorExec; got {:?}",
+        matches!(action, Some(Action::SendMessage { .. })),
+        "expected Action::SendMessage; got {:?}",
         action
     );
 }
