@@ -42,6 +42,15 @@ use crate::session_metadata::SessionMetadata;
 pub struct SessionSource {
     /// Snapshot taken at palette-open time, pre-sorted by recency
     /// (`last_opened_at` descending). Owned to avoid lifetime gymnastics.
+    ///
+    /// Entries with an empty `last_opened_at` (the `SessionEntry::default()`
+    /// value, e.g. sessions persisted before the field was introduced) sort
+    /// to the END of the list — empty string lex-sorts before any ISO-8601
+    /// timestamp, so under descending sort they end up last.
+    ///
+    /// Tie-break for entries with identical timestamps is `BTreeMap` key
+    /// order (lexicographic on `session_id`), inherited from
+    /// `SessionMetadata::sessions` iteration order plus stable sort.
     entries: Vec<(String, String)>, // (session_id, display_label)
 }
 
