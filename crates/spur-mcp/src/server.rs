@@ -719,6 +719,21 @@ impl McpCallbackServer {
             .contains_key(delegation_id)
     }
 
+    /// Test-only: invoke the `cancel_delegation` JSON-RPC handler directly.
+    ///
+    /// Mirrors `__test_call_delegate_to_worker`: exposed solely so integration
+    /// tests in sibling crates (e.g. `spur-core/tests/cancellation.rs`) can
+    /// drive the INV-ASYNC-3 cancel path deterministically without standing
+    /// up the full HTTP stack. Returns the raw JSON-RPC response as a
+    /// `serde_json::Value`.
+    #[doc(hidden)]
+    pub async fn __test_call_cancel_delegation(&self, delegation_id: &str) -> Value {
+        let resp = self
+            .handle_cancel_delegation(Value::from(2), json!({ "delegation_id": delegation_id }))
+            .await;
+        serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
     /// Remove completed delegation results older than `COMPLETED_TTL`.
     /// Called lazily from polling handlers to bound memory growth.
     async fn evict_stale_completions(&self) {
