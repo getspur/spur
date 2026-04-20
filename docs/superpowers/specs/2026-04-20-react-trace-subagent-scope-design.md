@@ -1,8 +1,11 @@
 # React-trace sub-agent scope rendering — design
 
 *Date: 2026-04-20*
-*Status: approved (brainstorm gate), ready for plan*
+*Status: approved (brainstorm gate); revised after codex-acp + opencode-acp review; awaiting user re-approval before writing-plans handoff*
 *Surface: `crates/spur-tui/src/components/react_trace/`*
+*Review rounds applied:*
+- *codex-acp (Rust/systems): `dirty_from` framing corrected (§3.2); `TraceKind::ScopeTerminal` non-Act variant introduced (§3.1, §3.2); late-child and late-ToolCallUpdate semantics specified (§3.2, §5.10, §5.11); `orphan_warned` dedup state owned by `ReactTrace` (§3.3.1); glyph near-miss `◈`/`◆` documented (§7, §3.6); depth-clamp warn added (§3.6, §5.4); test scaffolding gap flagged (§7).*
+- *opencode-acp (UX): orphan wording `(detached child)` → `(orphan)` (§3.4); warning `Style` in `trace_format.rs` (§3.4); `NO_COLOR` explicit handling (§3.5, §5.12); bracketed badge retained at 72–79 cols (§3.5); sticky-header and tree-summary-pane added to deferred (§6).*
 
 ## 1. Problem
 
@@ -252,21 +255,24 @@ Render inline during streaming (like 3.4), then collapse children into a folded 
 
 ## 7. Risks
 
-- **Glyph overlap with existing `trace_format.rs` palette.** Must be audited pre-implementation; a collision would silently confuse readers.
-- **Color allocator exhaustion at >8 concurrent Tasks.** Palette recycles after 8; distinct color no longer guaranteed. Acceptable for Phase 1 — Claude rarely runs more than 2–3 parallel Tasks — but document the cap.
-- **Terminal child-count accuracy.** Counting forward from Header scans entries; cost is O(Task-span). For a long-running Task with many children, that is still bounded and only runs once at terminal emission.
-- **Narrow-terminal color-only identity.** At <60-col widths, users without color capability (or with color disabled) lose scope identity. Acceptable fallback: depth indent remains, matching today's behavior.
+- **Glyph near-miss: `◈` (thinking, `trace_format.rs:28`) vs `◆` (Terminal).** Visually distinct in most fonts but can blur in dim terminals or certain CJK-oriented fallback fonts. Mitigation: snapshot-test both glyphs at render time; if the test fails on the project's reference terminal, swap Terminal glyph to `▣` or `■` before merge. Exact collisions already confirmed absent against `trace_format.rs:20-51` (`⚙ ✎ ✗ → 🔎 $ ◈ ↯ ⇄ ▸ ⧉ 🔧` / `✓ ✗ ?`).
+- **Color allocator exhaustion at >8 concurrent Tasks.** Palette recycles after 8; distinct color no longer guaranteed. Acceptable for Phase 1 — Claude rarely runs more than 2–3 parallel Tasks — but documented; the bracketed badge `[Tn]` still gives unique identity through at least 99 concurrent scopes.
+- **Terminal child-count accuracy.** Counting forward from Header scans entries; cost is O(Task-span). For a long-running Task with many children, that is still bounded and only runs once at terminal emission. Late children after Terminal intentionally do NOT update the count (see §3.2) — the `(late)` suffix on their rows communicates the discrepancy.
+- **`ScopeColorAllocator` borrow shape.** The allocator lives on `ReactTrace` behind `&mut`. Dispatch (write) and render (read-only after initial assignment) must not interleave mid-operation. Safe under the current UI-thread serialization guarantees; confirm no future async render path introduces a conflicting borrow.
+- **Near-zero existing test coverage for `ToolCall → Terminal → late` sequences.** `streaming_tests.rs:1811-1868,2062-2107` covers message/thought chunks and single-Act status mutation but not the synthesized-Terminal sequences §5 criteria 10–11 depend on. Test scaffolding must be added as part of this work.
+- **Color-free identity still relies on an 8-value palette.** At very high concurrency (10+ Tasks), two badges reuse the same color. Numeric suffix continues to distinguish them at <80 cols; at ≥80 cols the bracketed badge is always present. Risk only manifests if both badges scroll off at once — low likelihood.
 
 ## 8. Files touched
 
-- `crates/spur-tui/src/components/react_trace/types.rs` — add `ScopeId`, `ScopeRole`, `Scope`, extend `TraceEntry`.
-- `crates/spur-tui/src/components/react_trace/dispatch.rs:69-80` — replace depth-bare block with scope classification.
-- `crates/spur-tui/src/components/react_trace/scope_colors.rs` — new module.
-- `crates/spur-tui/src/components/react_trace/mod.rs` — own `ScopeColorAllocator` on `ReactTrace`.
-- `crates/spur-tui/src/components/react_trace/render.rs` — gutter + badge + header/terminal row treatment.
+- `crates/spur-tui/src/components/react_trace/types.rs` — add `ScopeId`, `ScopeRole`, `Scope`, extend `TraceEntry`, add `TraceKind::ScopeTerminal`.
+- `crates/spur-tui/src/components/react_trace/dispatch.rs:69-80` — replace depth-bare block with scope classification; hook Terminal synthesis into `SessionUpdate::ToolCallUpdate` terminal-status path.
+- `crates/spur-tui/src/components/react_trace/scope_colors.rs` — new module with `ScopeColorAllocator`.
+- `crates/spur-tui/src/components/react_trace/mod.rs` — add `ScopeColorAllocator` and `orphan_warned: HashSet<ScopeId>` fields on `ReactTrace`; clear both in every session-reset code path.
+- `crates/spur-tui/src/components/react_trace/render.rs` — gutter + badge + Header/Terminal row treatment; `find_act_by_id_mut` already skips non-Act kinds (§3.2 Terminal-row lookup isolation), verify unchanged.
 - `crates/spur-tui/src/components/react_trace/compact_render.rs` — same, with width-tier degradation.
-- `crates/spur-tui/src/components/react_trace/streaming_tests.rs` — golden-output tests for §5 criteria.
-- (Fixtures) `crates/spur-acp/tests/fixtures/notifications/claude-code-acp/tool_call_subagent_task.json` — already covers Claude case; may add an orphan fixture.
+- `crates/spur-tui/src/components/trace_format.rs` — add `warning` `Style` (Yellow/Amber) for orphan rendering; keep existing family/outcome glyph tables unchanged.
+- `crates/spur-tui/src/components/react_trace/streaming_tests.rs` — golden-output tests for §5 criteria, including new sequences for criteria 10–12.
+- (Fixtures) `crates/spur-acp/tests/fixtures/notifications/claude-code-acp/tool_call_subagent_task.json` — already covers Claude case; add a new orphan fixture `tool_call_orphan_child.json`.
 
 ## 9. Out of scope
 
