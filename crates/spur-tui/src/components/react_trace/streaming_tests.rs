@@ -2070,3 +2070,207 @@ fn dispatch_thought_chunk_appends_think_entry() {
     assert_eq!(trace.entry_count(), 1);
     assert!(matches!(&trace.entries()[0].kind, TraceKind::Think));
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Compact-path scroll correctness tests.
+//
+// These pin the behavior that `scroll_up`/`scroll_down`/`page_up`/`page_down`
+// on a trace constructed via `with_kind_compact` (used by dashboard worker
+// streams via `DetailPane::render`'s Stream tab) actually move the anchor
+// off `Following`. Today's `shift_anchor_by` early-returns when `line_cache`
+// is `None`, and the compact path only populates `compact_cache`, so j/k
+// are silently no-ops on the dashboard Stream tab — a critical regression
+// these tests lock down.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// T-D1a: `scroll_up` on a compact trace with enough entries to overflow
+/// the viewport must move the anchor off `Following`.
+#[test]
+fn scroll_up_on_compact_moves_anchor_off_following() {
+    use crate::components::react_trace::types::ScrollAnchor;
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    // Alternate think / agent message to avoid coalescing; 20 distinct entries.
+    for i in 0..10 {
+        t.append_think(&format!("th-{}", i), "12:00".into());
+        t.append_message(&format!("msg-{}", i), "bot", "12:00".into());
+    }
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10)))
+        .unwrap();
+
+    assert!(t.last_total_lines >= 20, "seed should overflow viewport");
+    // Start at the tail; this is the default anchor.
+    assert!(t.is_following(), "expected to start in Following");
+
+    t.scroll_up();
+
+    assert!(
+        !t.is_following(),
+        "scroll_up on compact must leave Following; anchor={:?}",
+        t.anchor_for_tests()
+    );
+    assert!(
+        matches!(t.anchor_for_tests(), ScrollAnchor::Row { .. }),
+        "scroll_up should produce a Row anchor; got {:?}",
+        t.anchor_for_tests()
+    );
+}
+
+/// T-D1b: scrolling up across entries with kind transitions must account
+/// for separator rows. With 10 alternating-kind entries, compact layout
+/// produces 10 content rows plus 9 separator rows = 19 rows. Walking
+/// `scroll_up` 5 times from `Following` (which resolves to row 14 at
+/// height 5, since `max_offset = total - visible = 19 - 5 = 14`) must
+/// land on row 9, which corresponds to an entry boundary, not a
+/// separator-offset miscount.
+#[test]
+fn scroll_up_on_compact_accounts_for_separators() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    // Alternate think/user to force a separator between every pair.
+    for i in 0..5 {
+        t.append_think(&format!("th-{}", i), "12:00".into());
+        t.append_user_message(&format!("us-{}", i), "12:00".into());
+    }
+    assert_eq!(t.entry_count(), 10);
+
+    let mut term = Terminal::new(TestBackend::new(40, 5)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 5)))
+        .unwrap();
+
+    // 10 entries + 9 transitions = 19 rendered rows.
+    assert_eq!(
+        t.last_total_lines, 19,
+        "expected 19 rendered rows (10 entries + 9 separators), got {}",
+        t.last_total_lines
+    );
+
+    // Walk scroll_up 5 times. On a 5-row viewport with 19 total rows,
+    // the starting resolved row is `max_offset = 19 - 5 = 14`; after 5
+    // scroll_ups it must be `9`, not `4` or similar miscounts.
+    for _ in 0..5 {
+        t.scroll_up();
+    }
+
+    let starts = t
+        .compact_entry_row_starts_for_tests()
+        .expect("compact cache should be populated after render_compact");
+    let anchor = t.anchor_for_tests();
+    use crate::components::react_trace::types::ScrollAnchor;
+    let resolved_row = match anchor {
+        ScrollAnchor::Row {
+            entry_idx,
+            row_within_entry,
+        } => starts[entry_idx] + row_within_entry,
+        ScrollAnchor::Following => t.last_total_lines - t.last_visible_height,
+    };
+    assert_eq!(
+        resolved_row, 9,
+        "5× scroll_up from Following on 19-row compact trace at height 5 \
+         must resolve to row 9; got row {} (anchor={:?}, starts={:?})",
+        resolved_row, anchor, starts,
+    );
+}
+
+/// T-D1c: `entry_row_starts` on the compact cache must be strictly
+/// non-decreasing and `starts[0] == 0`. Pins the cache invariant.
+#[test]
+fn compact_entry_row_starts_are_monotonic_and_start_at_zero() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
+    // Alternate think / message to force 6 distinct entries (consecutive
+    // same-kind appends coalesce into the tail).
+    for i in 0..3 {
+        t.append_think(&format!("th-{}", i), "12:00".into());
+        t.append_message(&format!("msg-{}", i), "bot", "12:00".into());
+    }
+    assert_eq!(t.entry_count(), 6);
+
+    let mut term = Terminal::new(TestBackend::new(40, 5)).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 5)))
+        .unwrap();
+
+    let starts = t
+        .compact_entry_row_starts_for_tests()
+        .expect("compact cache should be populated");
+    assert_eq!(starts.len(), 6, "starts should have one entry per trace entry");
+    assert_eq!(starts[0], 0, "first entry must start at row 0");
+    for pair in starts.windows(2) {
+        assert!(
+            pair[1] > pair[0],
+            "entry_row_starts must be strictly increasing: {:?}",
+            starts
+        );
+    }
+}
+
+/// T-D1d: Incremental rebuild (adding an entry after an initial render)
+/// must leave `entry_row_starts` equal to what a from-scratch rebuild
+/// would produce. Pins the paired-truncate-and-extend invariant.
+#[test]
+fn compact_incremental_rebuild_preserves_entry_row_starts() {
+    use crate::components::react_trace::ReactTrace;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    // Shared seeder: 5 alternating entries so no coalescing occurs.
+    fn seed_five(t: &mut crate::components::react_trace::ReactTrace) {
+        t.append_think("t-0", "12:00".into());
+        t.append_message("m-0", "bot", "12:00".into());
+        t.append_think("t-1", "12:00".into());
+        t.append_message("m-1", "bot", "12:00".into());
+        t.append_think("t-2", "12:00".into());
+    }
+
+    // Pass A: build 5 entries, render once (populates cache), then add
+    // a 6th entry and re-render (incremental rebuild path).
+    let mut ta = ReactTrace::with_kind_compact(AgentKind::Generic);
+    seed_five(&mut ta);
+    let mut term_a = Terminal::new(TestBackend::new(40, 5)).unwrap();
+    term_a
+        .draw(|f| ta.render_compact(f, Rect::new(0, 0, 40, 5)))
+        .unwrap();
+    ta.append_message("m-2", "bot", "12:00".into());
+    term_a
+        .draw(|f| ta.render_compact(f, Rect::new(0, 0, 40, 5)))
+        .unwrap();
+    let incremental_starts = ta
+        .compact_entry_row_starts_for_tests()
+        .expect("compact cache should be populated after incremental rebuild");
+
+    // Pass B: build the same 6 entries in one go, render once (cold build).
+    let mut tb = ReactTrace::with_kind_compact(AgentKind::Generic);
+    seed_five(&mut tb);
+    tb.append_message("m-2", "bot", "12:00".into());
+    let mut term_b = Terminal::new(TestBackend::new(40, 5)).unwrap();
+    term_b
+        .draw(|f| tb.render_compact(f, Rect::new(0, 0, 40, 5)))
+        .unwrap();
+    let fresh_starts = tb
+        .compact_entry_row_starts_for_tests()
+        .expect("compact cache should be populated after cold build");
+
+    // Pins that starts is actually populated — if the cache doesn't track
+    // per-entry row starts, both vectors would be empty and the test would
+    // trivially pass.
+    assert_eq!(
+        incremental_starts.len(),
+        6,
+        "incremental rebuild should produce 6 entry row starts, got {:?}",
+        incremental_starts
+    );
+    assert_eq!(
+        incremental_starts, fresh_starts,
+        "incremental rebuild must produce same entry_row_starts as cold build"
+    );
+}
