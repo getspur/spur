@@ -94,6 +94,7 @@ pub enum IntentEvent {
 }
 
 /// Internal state of the trigger detector.
+#[allow(dead_code)] // Wired into TriggerDetector in Task 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TriggerState {
     Idle,
