@@ -45,6 +45,7 @@ pub enum VimMode {
 /// The result of `InputBar::handle_key`. The `Submit` variant preserves
 /// today's submit tuple; the `Key` variant carries the classified
 /// `IntentEvent` for the TriggerDetector.
+#[must_use = "the IntentEvent must be dispatched to the TriggerDetector"]
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandleOutcome {
     /// Buffer submitted. `String` is the submitted text, `bool` is the
@@ -331,8 +332,13 @@ impl InputBar {
             match pending.key {
                 Key::Char('g') if matches!(input.key, Key::Char('g')) => {
                     self.textarea.move_cursor(CursorMove::Top);
-                    self.vim_complete_operator(mode);
-                    return HandleOutcome::Key(IntentEvent::MovedCursor);
+                    let _ = self.vim_complete_operator(mode);
+                    let intent = match mode {
+                        VimMode::Operator('y') => IntentEvent::NoOp,
+                        VimMode::Operator('d') | VimMode::Operator('c') => IntentEvent::DeletedChar,
+                        _ => IntentEvent::MovedCursor,
+                    };
+                    return HandleOutcome::Key(intent);
                 }
                 Key::Char(op) if matches!(mode, VimMode::Operator(c) if c == op) => {
                     if let Key::Char(c) = input.key {
@@ -560,9 +566,15 @@ impl InputBar {
             _ => return HandleOutcome::Key(IntentEvent::NoOp),
         }
 
-        // After movement, complete pending operator and return MovedCursor.
+        // After movement, complete pending operator. Intent depends on whether
+        // the operator deleted/changed, copied, or was absent (plain movement).
         let _ = self.vim_complete_operator(mode);
-        HandleOutcome::Key(IntentEvent::MovedCursor)
+        let intent = match mode {
+            VimMode::Operator('y') => IntentEvent::NoOp,
+            VimMode::Operator('d') | VimMode::Operator('c') => IntentEvent::DeletedChar,
+            _ => IntentEvent::MovedCursor,
+        };
+        HandleOutcome::Key(intent)
     }
 
     /// Complete a pending operator (d/c/y) after a movement.
@@ -1480,7 +1492,7 @@ mod required_height_tests {
             crossterm::event::KeyCode::Down,
             crossterm::event::KeyModifiers::NONE,
         );
-        bar.handle_key(key);
+        let _ = bar.handle_key(key);
         // At default width 80 the line fits on one vrow, so Down is a noop.
         // The assertion proves the key was HANDLED (didn't panic, didn't
         // mutate unexpectedly) rather than falling through the match-all.
