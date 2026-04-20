@@ -523,7 +523,10 @@ impl Orchestrator {
         &self,
         brain_session_id: spur_acp::types::SessionId,
     ) -> spur_mcp::server::DetachedContinuationCtx {
-        match (self.continuation_tx.clone(), self.continuation_overflow.clone()) {
+        match (
+            self.continuation_tx.clone(),
+            self.continuation_overflow.clone(),
+        ) {
             (Some(tx), Some(overflow)) => {
                 let session = brain_session_id.clone();
                 spur_mcp::server::DetachedContinuationCtx {
@@ -531,8 +534,7 @@ impl Orchestrator {
                         let tx = tx.clone();
                         let overflow = overflow.clone();
                         let session = session.clone();
-                        let worker_session =
-                            spur_acp::types::SessionId(worker_session_str);
+                        let worker_session = spur_acp::types::SessionId(worker_session_str);
                         Box::pin(async move {
                             crate::continuation_bridge::report_detached_completion(
                                 &tx,
@@ -550,9 +552,7 @@ impl Orchestrator {
                 // No ingress channel wired — produce a no-op ctx so the
                 // constructor signature is satisfied (run_adhoc path).
                 spur_mcp::server::DetachedContinuationCtx {
-                    on_complete: std::sync::Arc::new(|_cont, _worker| {
-                        Box::pin(async {})
-                    }),
+                    on_complete: std::sync::Arc::new(|_cont, _worker| Box::pin(async {})),
                 }
             }
         }
@@ -907,7 +907,8 @@ impl Orchestrator {
                         for c in evicted {
                             self.funnel.emit(SpurEventBody::ContinuationDropped {
                                 delegation_id: c.delegation_id,
-                                reason: spur_acp::domain::events::ContinuationDropReason::SessionSwap,
+                                reason:
+                                    spur_acp::domain::events::ContinuationDropReason::SessionSwap,
                             });
                         }
                         if blocks.is_empty() {
@@ -930,9 +931,11 @@ impl Orchestrator {
                                     Ok(pair) => pair,
                                     Err(e) => {
                                         error!(error = %e, "Failed to connect brain for list_sessions");
-                                        self.emit(SpurEvent::now(SpurEventBody::SessionsListError {
-                                            message: e.to_string(),
-                                        }));
+                                        self.emit(SpurEvent::now(
+                                            SpurEventBody::SessionsListError {
+                                                message: e.to_string(),
+                                            },
+                                        ));
                                         continue;
                                     }
                                 }
@@ -979,7 +982,8 @@ impl Orchestrator {
                         for c in evicted {
                             self.funnel.emit(SpurEventBody::ContinuationDropped {
                                 delegation_id: c.delegation_id,
-                                reason: spur_acp::domain::events::ContinuationDropReason::SessionSwap,
+                                reason:
+                                    spur_acp::domain::events::ContinuationDropReason::SessionSwap,
                             });
                         }
 
@@ -1047,7 +1051,9 @@ impl Orchestrator {
                                 // No eviction emission here — the note_session_swap(None)
                                 // above already drained any stale continuations.
                                 if let Some(ref b) = brain {
-                                    scheduler.note_session_swap(Some(SessionId(b.acp_session_id.clone())));
+                                    scheduler.note_session_swap(Some(SessionId(
+                                        b.acp_session_id.clone(),
+                                    )));
                                 }
                                 self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
                                     session: spur_id,
@@ -1082,11 +1088,13 @@ impl Orchestrator {
                             let call_result = b.connection.call_ext(&method, params).await;
                             match call_result {
                                 Ok(resp) => {
-                                    self.emit(SpurEvent::now(SpurEventBody::AgentExtNotification {
-                                        session: session.clone(),
-                                        method: format!("{}/response", method),
-                                        params: resp,
-                                    }));
+                                    self.emit(SpurEvent::now(
+                                        SpurEventBody::AgentExtNotification {
+                                            session: session.clone(),
+                                            method: format!("{}/response", method),
+                                            params: resp,
+                                        },
+                                    ));
                                 }
                                 Err(e) => {
                                     warn!(
@@ -1241,11 +1249,15 @@ impl Orchestrator {
             // ── (d) Scheduler returned a prompt action — fire the brain turn ──
             //
             // Decompose the ScheduledAction into (user_input_opt, continuations).
-            let (user_input_opt, continuations): (Option<InteractiveInput>, Vec<spur_acp::domain::BrainContinuation>) = match action {
+            let (user_input_opt, continuations): (
+                Option<InteractiveInput>,
+                Vec<spur_acp::domain::BrainContinuation>,
+            ) = match action {
                 crate::scheduler::ScheduledAction::UserPrompt(u) => (Some(u), vec![]),
-                crate::scheduler::ScheduledAction::MergedPrompt { user, continuations } => {
-                    (Some(user), continuations)
-                }
+                crate::scheduler::ScheduledAction::MergedPrompt {
+                    user,
+                    continuations,
+                } => (Some(user), continuations),
                 crate::scheduler::ScheduledAction::ContinuationPrompt(cs) => (None, cs),
                 crate::scheduler::ScheduledAction::Idle => unreachable!("handled above"),
             };
@@ -1280,7 +1292,10 @@ impl Orchestrator {
                 Some(other) => {
                     // Defensive: unexpected variant in scheduler (e.g. a non-Message
                     // that somehow got pushed). Log and skip.
-                    tracing::warn!(?other, "unexpected non-Message variant dequeued from scheduler; skipping turn");
+                    tracing::warn!(
+                        ?other,
+                        "unexpected non-Message variant dequeued from scheduler; skipping turn"
+                    );
                     continue;
                 }
             };
@@ -1306,7 +1321,8 @@ impl Orchestrator {
                         for c in evicted {
                             self.funnel.emit(SpurEventBody::ContinuationDropped {
                                 delegation_id: c.delegation_id,
-                                reason: spur_acp::domain::events::ContinuationDropReason::SessionSwap,
+                                reason:
+                                    spur_acp::domain::events::ContinuationDropReason::SessionSwap,
                             });
                         }
                         brain = Some(b);
@@ -1335,10 +1351,10 @@ impl Orchestrator {
             let spur_sid_for_log = b.spur_session_id.clone();
 
             let turn_kind = match (&user_input_opt, continuations.is_empty()) {
-                (Some(_), true)  => "user_only",
+                (Some(_), true) => "user_only",
                 (Some(_), false) => "merged",
-                (None, false)    => "continuation_only",
-                (None, true)     => "empty_defensive",
+                (None, false) => "continuation_only",
+                (None, true) => "empty_defensive",
             };
             tracing::debug!(
                 continuation_probe = true,
@@ -4208,12 +4224,18 @@ fn truncate_summary(text: &str, cap: usize) -> String {
     )
 }
 
-fn truncate_summary_env_default(text: &str) -> String {
-    let cap: usize = std::env::var("SPUR_SUMMARY_MAX_BYTES")
+/// The effective summary cap in bytes, read from `SPUR_SUMMARY_MAX_BYTES`
+/// (default 4000). Single source of truth for both `truncate_summary`
+/// and artifact-persistence predicates.
+fn summary_cap_bytes() -> usize {
+    std::env::var("SPUR_SUMMARY_MAX_BYTES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(4000);
-    truncate_summary(text, cap)
+        .unwrap_or(4000)
+}
+
+fn truncate_summary_env_default(text: &str) -> String {
+    truncate_summary(text, summary_cap_bytes())
 }
 
 /// Compute a `DiffSummary` for a worktree via `git diff --numstat <basis>`.
@@ -4716,6 +4738,11 @@ mod cancel_deadline_arm_tests {
 mod truncate_summary_tests {
     use super::truncate_summary;
 
+    // Serializes all env-mutating tests in this module. `SPUR_SUMMARY_MAX_BYTES`
+    // is process-global; without this lock the tests race under the default
+    // parallel harness.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn under_cap_returns_unchanged() {
         let input = "short text";
@@ -4759,7 +4786,33 @@ mod truncate_summary_tests {
     }
 
     #[test]
+    fn summary_cap_bytes_respects_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("SPUR_SUMMARY_MAX_BYTES").ok();
+        unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", "1234") };
+        let got = super::summary_cap_bytes();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", v) },
+            None => unsafe { std::env::remove_var("SPUR_SUMMARY_MAX_BYTES") },
+        }
+        assert_eq!(got, 1234);
+    }
+
+    #[test]
+    fn summary_cap_bytes_defaults_to_4000_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("SPUR_SUMMARY_MAX_BYTES").ok();
+        unsafe { std::env::remove_var("SPUR_SUMMARY_MAX_BYTES") };
+        let got = super::summary_cap_bytes();
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", v) };
+        }
+        assert_eq!(got, 4000);
+    }
+
+    #[test]
     fn env_var_overrides_default_cap() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // This test mutates process-global env state. It is safe only
         // because no other test in this binary reads SPUR_SUMMARY_MAX_BYTES
         // concurrently. If that changes (future Task 6 integration test,
@@ -5276,8 +5329,8 @@ mod context_files_wiring_tests {
 #[cfg(test)]
 mod interactive_input_tests {
     use super::InteractiveInput;
-    use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
     use spur_acp::domain::delegation::DelegationStatus;
+    use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
     use spur_acp::types::SessionId;
     use std::time::Instant;
 
@@ -5288,7 +5341,9 @@ mod interactive_input_tests {
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
                 status: DelegationStatus::Success,
-                summary: None, diff_summary: None, worker_branch: None,
+                summary: None,
+                diff_summary: None,
+                worker_branch: None,
                 artifact: None,
             },
             created_at: Instant::now(),
