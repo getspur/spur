@@ -5,6 +5,7 @@
 //! deps run in parallel, blocked tasks wait. Individual delegations flow
 //! through the existing `DelegationRequest` → orchestrator pipeline.
 
+pub mod audit_sentinel;
 pub mod labels;
 pub mod signals;
 
