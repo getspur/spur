@@ -373,15 +373,21 @@ pub async fn build_epic_subgraph(
         task_map.insert(task_id, child_id);
     }
 
-    pm.update_issue(
-        &epic_id,
-        spur_pm::types::IssueUpdate {
-            add_labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
-            ..Default::default()
-        },
-    )
-    .await
-    .map_err(|e| format!("failed to mark epic spur:plan-complete: {e}"))?;
+    if let Err(e) = pm
+        .update_issue(
+            &epic_id,
+            spur_pm::types::IssueUpdate {
+                add_labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            %epic_id,
+            "failed to emit spur:plan-complete marker on epic (graph is complete, marker missing — reconciler will skip): {e}"
+        );
+    }
 
     Ok(EpicSubgraph { epic_id, task_map })
 }

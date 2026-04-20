@@ -46,7 +46,6 @@ pub fn signal_kind_bucket(kind: &str, bucket: &str) -> String {
 
 pub const SIGNAL_LATE_ARRIVAL: &str = "signal:late-arrival";
 pub const READY_FOR_REVIEW: &str = "ready-for-review";
-
 /// Marker applied to an epic after `build_epic_subgraph` successfully creates
 /// ALL children + dependency edges. The v0a.2 reconciler filters on this label
 /// to avoid observing partially-persisted plan graphs as ready work.

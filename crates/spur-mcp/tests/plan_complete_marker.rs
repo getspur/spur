@@ -121,4 +121,5 @@ async fn build_epic_subgraph_emits_plan_complete_on_epic() {
         "epic {epic_id} must carry '{}' after successful build_epic_subgraph; got labels: {label_values:?}",
         labels::PLAN_COMPLETE
     );
+    // TODO(v0b): assert marker is ABSENT when mid-loop child-create fails
 }
