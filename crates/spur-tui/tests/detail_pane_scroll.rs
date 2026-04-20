@@ -84,13 +84,19 @@ fn seeded_compact_trace() -> ReactTrace {
 #[test]
 fn stream_footer_badge_reflects_trace_anchor() {
     let mut pane = DetailPane::new();
-    assert_eq!(pane.current_tab, DetailTab::Stream);
+    assert_eq!(pane.current_tab(), DetailTab::Stream);
     let mut trace = seeded_compact_trace();
 
     // Render once while following: badge should appear.
     let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
     term.draw(|f| {
-        pane.render(f, Rect::new(0, 0, 80, 12), &node(""), None, Some(&mut trace));
+        pane.render(
+            f,
+            Rect::new(0, 0, 80, 12),
+            &node(""),
+            None,
+            Some(&mut trace),
+        );
     })
     .unwrap();
     let frame_following = term.backend().buffer().clone();
@@ -109,7 +115,13 @@ fn stream_footer_badge_reflects_trace_anchor() {
 
     // Re-render: badge must NOT appear.
     term.draw(|f| {
-        pane.render(f, Rect::new(0, 0, 80, 12), &node(""), None, Some(&mut trace));
+        pane.render(
+            f,
+            Rect::new(0, 0, 80, 12),
+            &node(""),
+            None,
+            Some(&mut trace),
+        );
     })
     .unwrap();
     let frame_scrolled = term.backend().buffer().clone();
@@ -157,7 +169,7 @@ fn cycle_tab_opens_task_at_top() {
     for _ in 0..3 {
         pane.cycle_tab(true, None);
     }
-    assert_eq!(pane.current_tab, DetailTab::Task);
+    assert_eq!(pane.current_tab(), DetailTab::Task);
 
     // Render at height 8; visible content should include the FIRST task line.
     let mut term = Terminal::new(TestBackend::new(40, 8)).unwrap();
@@ -196,7 +208,7 @@ fn non_stream_scroll_reaches_wrapped_bottom() {
     for _ in 0..3 {
         pane.cycle_tab(true, None);
     }
-    assert_eq!(pane.current_tab, DetailTab::Task);
+    assert_eq!(pane.current_tab(), DetailTab::Task);
 
     // Terminal 40 × 10: body is ~38 × 7 after borders/tab bar.
     let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
@@ -231,14 +243,14 @@ fn cycle_tab_into_stream_snaps_trace_to_bottom() {
 
     // Walk away from Stream (Artifacts).
     pane.cycle_tab(true, Some(&mut trace));
-    assert_ne!(pane.current_tab, DetailTab::Stream);
+    assert_ne!(pane.current_tab(), DetailTab::Stream);
 
     // Drag the anchor off Following so the "snap back" is observable.
     trace.scroll_up();
     assert!(!trace.is_following());
 
     // Cycle back around to Stream — must re-engage Following.
-    while pane.current_tab != DetailTab::Stream {
+    while pane.current_tab() != DetailTab::Stream {
         pane.cycle_tab(true, Some(&mut trace));
     }
     assert!(
