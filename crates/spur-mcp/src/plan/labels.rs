@@ -93,6 +93,26 @@ pub fn parse_signal_kind(label: &str) -> Option<&str> {
     }
 }
 
+/// Label marker set on beads issues created as part of a mutation batch.
+/// Example: `spur:mutation-id:f30c1a2e-...`
+pub fn mutation_id_label(mutation_id: &uuid::Uuid) -> String {
+    format!("spur:mutation-id:{mutation_id}")
+}
+
+/// Label attached to the SUPERSEDED parent task, pointing at its replacement
+/// children. `br` labels are comma-free, so encode as pipe-separated.
+/// Example: `spur:superseded-by:bd-201|bd-202`
+pub fn superseded_by_label(child_ids: &[String]) -> String {
+    format!("spur:superseded-by:{}", child_ids.join("|"))
+}
+
+/// Label set after a proposer consumes a signal. Preserves the original
+/// `signal:<kind>` label for historical filtering.
+/// Example: `spur:signal-processed:f30c1a2e-...`
+pub fn signal_processed_label(mutation_id: &uuid::Uuid) -> String {
+    format!("spur:signal-processed:{mutation_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +190,26 @@ mod tests {
         assert!(!is_br_legal("with/slash"));
         assert!(!is_br_legal("with space"));
         assert!(!is_br_legal(""));
+    }
+
+    #[test]
+    fn mutation_and_signal_labels_round_trip_br_grammar() {
+        let id = uuid::Uuid::new_v4();
+        let label = mutation_id_label(&id);
+        // br requires kebab-case + single `:` domain separator
+        assert!(label.starts_with("spur:mutation-id:"));
+        assert!(!label.contains(','));
+
+        let by = superseded_by_label(&["bd-201".into(), "bd-202".into()]);
+        assert_eq!(by, "spur:superseded-by:bd-201|bd-202");
+
+        let p = signal_processed_label(&id);
+        assert!(p.starts_with("spur:signal-processed:"));
+        assert!(!p.contains(','));
+
+        // All new labels must be br-legal
+        assert!(is_br_legal(&label));
+        assert!(is_br_legal(&by));
+        assert!(is_br_legal(&p));
     }
 }
