@@ -43,6 +43,10 @@ fn overlay_renders_title_query_and_rows() {
             payload: PalettePayload::Command { name: "/plan".into() },
         },
     ]);
+    // Set a non-empty query so the flat render path is used instead of the
+    // grouped empty-query view (Task 7). "a" matches both "refactor-auth" and
+    // "/plan" (via "plan") so both rows remain visible.
+    state.set_query("a");
     let rendered = render_to_string(&state, 60, 12);
     assert!(rendered.contains("Go to"), "title missing: {rendered}");
     assert!(rendered.contains("refactor-auth"), "session row missing");
@@ -90,4 +94,86 @@ fn overlay_renders_slash_hint_when_no_session_and_query_starts_with_slash() {
         rendered.contains("Slash commands need an active session"),
         "missing slash-without-session hint; got:\n{rendered}"
     );
+}
+
+#[test]
+fn overlay_renders_grouped_sections_when_query_empty() {
+    // Seed one of each kind; empty query; expect section headers.
+    let mut state = PaletteState::new();
+    state.push_raw(vec![
+        PaletteResult {
+            kind: PaletteKind::Command,
+            label: "/help".into(),
+            subtitle: "cmd · show help".into(),
+            payload: PalettePayload::Command { name: "help".into() },
+        },
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "refactor-auth".into(),
+            subtitle: "session · s1".into(),
+            payload: PalettePayload::Session { session_id: "s1".into() },
+        },
+        PaletteResult {
+            kind: PaletteKind::Worker,
+            label: "codex".into(),
+            subtitle: "worker · running".into(),
+            payload: PalettePayload::Worker {
+                session_id: spur_acp::SessionId("w1".into()),
+            },
+        },
+    ]);
+    let rendered = render_to_string_with_session_flag(&state, 80, 24, true);
+    assert!(rendered.contains("COMMANDS"), "missing COMMANDS header:\n{rendered}");
+    assert!(rendered.contains("SESSIONS"), "missing SESSIONS header:\n{rendered}");
+    assert!(rendered.contains("WORKERS"), "missing WORKERS header:\n{rendered}");
+    assert!(
+        rendered.contains("TRACE \u{2014} coming soon") || rendered.contains("TRACE - coming soon"),
+        "missing TRACE placeholder:\n{rendered}"
+    );
+    assert!(rendered.contains("/help"));
+    assert!(rendered.contains("refactor-auth"));
+    assert!(rendered.contains("codex"));
+}
+
+#[test]
+fn overlay_falls_back_to_flat_render_when_query_nonempty() {
+    let mut state = PaletteState::new();
+    state.push_raw(vec![PaletteResult {
+        kind: PaletteKind::Command,
+        label: "/help".into(),
+        subtitle: "cmd · show help".into(),
+        payload: PalettePayload::Command { name: "help".into() },
+    }]);
+    state.set_query("help");
+    let rendered = render_to_string_with_session_flag(&state, 80, 24, true);
+    // Flat render = no section headers.
+    assert!(!rendered.contains("COMMANDS"), "unexpected header in flat render:\n{rendered}");
+    assert!(rendered.contains("/help"));
+}
+
+#[test]
+fn overlay_grouped_view_caps_rows_per_kind() {
+    // 10 sessions; default cap is 5 → at most 5 session labels render.
+    let mut state = PaletteState::new();
+    let mut batch = Vec::new();
+    for i in 0..10 {
+        batch.push(PaletteResult {
+            kind: PaletteKind::Session,
+            label: format!("session-{i:02}"),
+            subtitle: format!("session · s{i}"),
+            payload: PalettePayload::Session {
+                session_id: format!("s{i}"),
+            },
+        });
+    }
+    state.push_raw(batch);
+    let rendered = render_to_string_with_session_flag(&state, 80, 24, true);
+    let shown = (0..10)
+        .filter(|i| rendered.contains(&format!("session-{i:02}")))
+        .count();
+    assert!(
+        shown <= 5,
+        "expected cap of 5 sessions in grouped view; got {shown}:\n{rendered}"
+    );
+    assert!(shown >= 2, "expected at least 2 sessions rendered; got {shown}");
 }
