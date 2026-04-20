@@ -10,6 +10,7 @@ use spur_acp::{
     LicenseBindingMode, LicensePlan as EventLicensePlan, LicenseStateEvent, LicenseStatusEvent,
     LicenseSubjectKind, SessionId, SpurEvent, SpurEventBody,
 };
+use spur_acp::domain::events::BrainRetireReason;
 use spur_core::ExecutorLineage;
 
 #[cfg(feature = "markdown")]
@@ -1031,7 +1032,7 @@ impl App {
             SpurEventBody::SessionCompleted { .. } => {
                 self.brain_status = BrainStatus::Idle;
             }
-            SpurEventBody::BrainRetired { .. } => {
+            SpurEventBody::BrainRetired { reason, .. } => {
                 // Null per-App state that was tied to the retired session.
                 // `brain_status` is intentionally NOT touched here:
                 //  - UserClear: already set to Idle by the ClearSession
@@ -1051,6 +1052,19 @@ impl App {
                         error = %e,
                         "failed to persist cleared last_active on BrainRetired"
                     );
+                }
+                // Defensive belt-and-suspenders reset for the UserClear path.
+                // Idempotent against Action::ClearSession's eager reset.
+                // Gated on UserClear only:
+                //  - ResumeSwitch: in-flight ResumeSession is already loading the next
+                //    brain via BrainSpawned (app.rs:919-975); resetting here would
+                //    briefly blank the new view mid-load.
+                //  - Shutdown: terminal; reset is moot.
+                if matches!(reason, BrainRetireReason::UserClear) {
+                    tracing::info!("BrainRetired{{UserClear}}: defensive view reset");
+                    if let Some(ref mut detail) = self.session_detail {
+                        detail.reset_for_clear();
+                    }
                 }
             }
             SpurEventBody::LicenseUpdated { state } => {
@@ -2612,5 +2626,58 @@ mod brain_retired_tests {
         let detail = app.session_detail.as_ref().unwrap();
         assert!(!detail.stream_in_flight);
         assert!(detail.is_cleared());
+    }
+
+    #[test]
+    fn brain_retired_user_clear_resets_view_defensively() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b1".into()),
+        }));
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainRetired {
+            session: SessionId("b1".into()),
+            reason: BrainRetireReason::UserClear,
+        }));
+
+        let detail = app.session_detail.as_ref().unwrap();
+        assert!(detail.is_cleared());
+        assert!(detail.ready_banner_text().is_some());
+    }
+
+    #[test]
+    fn brain_retired_resume_switch_does_not_reset_view() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b1".into()),
+        }));
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainRetired {
+            session: SessionId("b1".into()),
+            reason: BrainRetireReason::ResumeSwitch,
+        }));
+
+        let detail = app.session_detail.as_ref().unwrap();
+        assert!(!detail.is_cleared(), "ResumeSwitch must NOT trigger view reset");
+        assert!(detail.ready_banner_text().is_none());
+    }
+
+    #[test]
+    fn brain_retired_shutdown_does_not_panic() {
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b1".into()),
+        }));
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainRetired {
+            session: SessionId("b1".into()),
+            reason: BrainRetireReason::Shutdown,
+        }));
+
+        let detail = app.session_detail.as_ref().unwrap();
+        assert!(!detail.is_cleared());
     }
 }
