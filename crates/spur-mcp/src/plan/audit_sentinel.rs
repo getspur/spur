@@ -31,7 +31,7 @@ pub enum AuditSentinelKind {
         #[serde(default)]
         worker_branch: Option<String>,
         #[serde(default)]
-        diff_summary: Option<String>,
+        result_summary: Option<String>,
     },
     Approval {
         delegation_id: String,
@@ -100,7 +100,7 @@ mod tests {
             AuditSentinelKind::Completion {
                 delegation_id: "del-A".into(),
                 worker_branch: Some("feat/x".into()),
-                diff_summary: None,
+                result_summary: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-A".into(),
@@ -150,7 +150,7 @@ mod tests {
             AuditSentinelKind::Completion {
                 delegation_id: "x".into(),
                 worker_branch: None,
-                diff_summary: None,
+                result_summary: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "x".into(),

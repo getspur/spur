@@ -30,8 +30,10 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
+use spur_acp::{DelegationResult, DelegationStatus};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+use spur_mcp::tools::DelegationRequest;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -184,7 +186,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
         "t1",
         "approve",
         Some("all good"),
-        Some(pm_arc.as_ref()),
+        Some(pm_arc.clone()),
         None,
         None,
         None,
@@ -327,7 +329,7 @@ async fn rejection_emits_rejection_sentinel() {
         "t1",
         "reject",
         Some("needs more tests"),
-        Some(pm_arc.as_ref()),
+        Some(pm_arc.clone()),
         None,
         None,
         None,
@@ -351,5 +353,143 @@ async fn rejection_emits_rejection_sentinel() {
         rejection_found,
         "Rejection sentinel must be on task {task_issue_id} with delegation_id=del-reject-001 \
          and feedback='needs more tests'; got: {task_sentinels:?}"
+    );
+}
+
+/// Bug 1 regression guard: request_changes → re-dispatch → completion must
+/// emit a Completion sentinel for the SECOND attempt. Before this fix,
+/// `spawn_completion_future` (the path used by every non-primary dispatcher)
+/// dropped the audit emission silently.
+#[tokio::test]
+async fn request_changes_redispatch_emits_completion_sentinel() {
+    if !br_available() {
+        eprintln!("skipping request_changes_redispatch_emits_completion_sentinel: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+
+    let tasks = vec![PlanTask {
+        task_id: "t1".into(),
+        agent: "codex".into(),
+        task: "Do the redispatch thing.".into(),
+        depends_on: vec![],
+        issue_id: None,
+        context_files: vec![],
+    }];
+
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        "audit-redis-1",
+        "Redispatch Audit Epic",
+        None,
+        &tasks,
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
+
+    let task_issue_id = subgraph
+        .task_map
+        .get("t1")
+        .expect("t1 must be in task_map")
+        .clone();
+
+    let initial_delegation_id = "del-initial-001".to_string();
+    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = Arc::new(pm);
+
+    // Task already AwaitingReview on attempt 1 — as if a worker finished once.
+    let entry = PlanTaskEntry {
+        spec: PlanTask {
+            task_id: "t1".into(),
+            agent: "codex".into(),
+            task: "Do the redispatch thing.".into(),
+            depends_on: vec![],
+            issue_id: Some(task_issue_id.clone()),
+            context_files: vec![],
+        },
+        status: PlanTaskStatus::AwaitingReview {
+            summary: Some("first try narrative".into()),
+        },
+        result: None,
+        worker_branch: Some("feat/v1".into()),
+        attempt: 1,
+        history: vec![],
+        last_delegation_id: Some(initial_delegation_id.clone()),
+    };
+    let plan_state = PlanState {
+        plan_id: "audit-redis-1".into(),
+        tasks: vec![entry],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+        epic_id: Some(subgraph.epic_id.clone()),
+    };
+    let plan_arc_state = Arc::new(Mutex::new(plan_state));
+
+    // Capture the re-dispatched DelegationRequest so we can respond with Success.
+    let (del_tx, mut del_rx) = tokio::sync::mpsc::channel::<DelegationRequest>(4);
+    let tracker = tokio_util::task::TaskTracker::new();
+
+    // Background: when the re-dispatch fires, respond with Success and capture
+    // the new delegation_id.
+    let worker = tokio::spawn(async move {
+        let req = del_rx
+            .recv()
+            .await
+            .expect("re-dispatch must enqueue a DelegationRequest");
+        let new_id = req.id.to_string();
+        let _ = req.respond_to.send(DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("second attempt narrative".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("feat/v2".into()),
+            artifact: None,
+        });
+        new_id
+    });
+
+    spur_mcp::plan::handle_review_task(
+        plan_arc_state.clone(),
+        "audit-redis-1",
+        "t1",
+        "request_changes",
+        Some("please revise"),
+        Some(pm_arc.clone()),
+        None,
+        Some(&del_tx),
+        Some(&tracker),
+    )
+    .await
+    .expect("handle_review_task must succeed");
+
+    let new_delegation_id = worker.await.expect("worker join");
+
+    // Wait for the spawned completion future to finish emitting.
+    tracker.close();
+    tracker.wait().await;
+
+    let task_comments =
+        run_br(dir.path(), &["comments", "list", &task_issue_id]).expect("br comments list task");
+    let sentinels = collect_sentinels(&task_comments);
+
+    let completion_found = sentinels.iter().any(|k| {
+        matches!(
+            k,
+            AuditSentinelKind::Completion { delegation_id, result_summary, worker_branch }
+                if delegation_id == &new_delegation_id
+                    && result_summary.as_deref() == Some("second attempt narrative")
+                    && worker_branch.as_deref() == Some("feat/v2")
+        )
+    });
+    assert!(
+        completion_found,
+        "Completion sentinel for re-dispatched delegation_id={new_delegation_id} must be present \
+         on task {task_issue_id}; got: {sentinels:?}"
     );
 }
