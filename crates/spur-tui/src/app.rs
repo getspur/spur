@@ -925,12 +925,23 @@ impl App {
                     None => true,
                 };
                 if needs_new {
-                    // Defensive: if we're replacing an existing detail whose
-                    // session id differs (agent-side session change / brain
-                    // respawn), flush its unsent draft first so it's
-                    // recoverable under the old id rather than vanishing with
-                    // the old view.
+                    // Carry-over: a cleared view's InputBar text belongs to the NEW
+                    // session, not the retired one. Capture owned text before
+                    // dropping the old view. Source-level gating in
+                    // force_save_draft / draft_save_action (spec §3.5) means
+                    // force_flush_active_draft is a no-op for a cleared view, so
+                    // no call-site gating is required here.
+                    let carryover: Option<String> = self
+                        .session_detail
+                        .as_ref()
+                        .filter(|d| d.is_cleared())
+                        .map(|d| d.input_bar_text());
+                    tracing::debug!(
+                        carryover_len = carryover.as_deref().map(str::len).unwrap_or(0),
+                        "view-replacement: clear-carryover capture"
+                    );
                     self.force_flush_active_draft();
+
                     let agent_cfg = self.resolve_agent_config(agent);
                     let mut view = SessionDetailView::new(
                         session.clone(),
@@ -942,16 +953,17 @@ impl App {
                     );
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
-                    // Seed global input history so Ctrl-P/N works across sessions.
                     view.seed_input_history(self.metadata_store.metadata().input_history.clone());
-                    // Restore draft from metadata, if any.
                     if let Some(entry) = self.metadata_store.entry(&session.0) {
                         view.restore_draft(&entry.draft);
                     }
-                    // Auto-resume banner: if this session matches the
-                    // last_active pointer read at startup, show the banner.
-                    // Clear the pointer afterward so a second spawn this run
-                    // doesn't re-trigger the banner.
+                    // Carry-over wins over any metadata draft (which is normally
+                    // empty for a freshly-minted spur_session_id anyway).
+                    // restore_draft is a no-op on empty input.
+                    if let Some(text) = carryover.as_deref() {
+                        view.restore_draft(text);
+                    }
+                    // Auto-resume banner — unchanged from the pre-revision branch.
                     if self
                         .metadata_store
                         .metadata()
@@ -2662,6 +2674,77 @@ mod brain_retired_tests {
         let detail = app.session_detail.as_ref().unwrap();
         assert!(!detail.is_cleared(), "ResumeSwitch must NOT trigger view reset");
         assert!(detail.ready_banner_text().is_none());
+    }
+
+    #[test]
+    fn draft_carryover_across_clear_to_new_brain_spawn() {
+        // Use unique session IDs to avoid cross-test pollution from the
+        // shared on-disk metadata store.
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("carryover-a".into()),
+        }));
+        // Seed session A's saved draft.
+        app.session_detail
+            .as_mut()
+            .unwrap()
+            .input_bar_mut_for_test()
+            .set_text("draft-A".into(), 7);
+        let _ = app.process_action(Action::SaveDraft {
+            session_id: "carryover-a".into(),
+            draft: "draft-A".into(),
+        });
+
+        // User submits /clear.
+        let _ = app.process_action(Action::ClearSession);
+
+        // User types a new prompt into the preserved InputBar.
+        app.session_detail.as_mut().unwrap().input_bar_mut_for_test().set_text(
+            "post-clear-prompt".into(),
+            17,
+        );
+
+        // New brain B spawns.
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("carryover-b".into()),
+        }));
+
+        // A's saved draft was NOT corrupted.
+        let metadata_a_draft = app
+            .metadata_store
+            .entry("carryover-a")
+            .map(|e| e.draft.clone())
+            .unwrap_or_default();
+        assert_eq!(metadata_a_draft, "draft-A");
+
+        // New view for B has the carryover.
+        let detail = app.session_detail.as_ref().unwrap();
+        assert_eq!(detail.session_id().0, "carryover-b");
+        assert_eq!(detail.input_bar_text(), "post-clear-prompt");
+    }
+
+    #[test]
+    fn draft_carryover_empty_is_noop() {
+        // Use unique session IDs to avoid cross-test pollution from the
+        // shared on-disk metadata store.
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("empty-carryover-a".into()),
+        }));
+        let _ = app.process_action(Action::ClearSession);
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("empty-carryover-b".into()),
+        }));
+
+        let detail = app.session_detail.as_ref().unwrap();
+        assert_eq!(detail.input_bar_text(), "");
+        let md = &app.metadata_store;
+        assert!(md.entry("empty-carryover-a").map(|e| e.draft.clone()).unwrap_or_default().is_empty());
+        assert!(md.entry("empty-carryover-b").map(|e| e.draft.clone()).unwrap_or_default().is_empty());
     }
 
     #[test]
