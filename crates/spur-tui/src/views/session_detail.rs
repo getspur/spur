@@ -934,11 +934,20 @@ impl SessionDetailView {
                     let dec = route(&text, &ranges, &self.command_registry, interrupt);
                     return match dec {
                         SubmitDecision::Empty => None,
-                        SubmitDecision::Send { blocks, interrupt } => Some(Action::SendMessage {
-                            session: self.session_id.clone(),
-                            blocks,
-                            interrupt,
-                        }),
+                        SubmitDecision::Send { mut blocks, interrupt } => {
+                            if self.role == "brain" {
+                                let _ = crate::mentions::hint::prepend_worker_hint(
+                                    &mut blocks,
+                                    &ranges,
+                                    &self.known_worker_names,
+                                );
+                            }
+                            Some(Action::SendMessage {
+                                session: self.session_id.clone(),
+                                blocks,
+                                interrupt,
+                            })
+                        }
                         SubmitDecision::Local { action } => Some(action),
                         SubmitDecision::VendorExec { method, params } => Some(Action::VendorExec {
                             session: self.session_id.clone(),
