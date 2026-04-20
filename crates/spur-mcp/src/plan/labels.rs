@@ -99,11 +99,16 @@ pub fn mutation_id_label(mutation_id: &uuid::Uuid) -> String {
     format!("spur:mutation-id:{mutation_id}")
 }
 
-/// Label attached to the SUPERSEDED parent task, pointing at its replacement
-/// children. `br` labels are comma-free, so encode as pipe-separated.
-/// Example: `spur:superseded-by:bd-201|bd-202`
-pub fn superseded_by_label(child_ids: &[String]) -> String {
-    format!("spur:superseded-by:{}", child_ids.join("|"))
+/// Labels attached to the SUPERSEDED parent task, one per replacement child.
+/// Beads labels don't allow commas, pipes, or other common separators, so we
+/// emit one label per child (labels are a set in beads — the idiomatic form).
+/// Query via `br list --label-any spur:superseded-by:<child>`.
+/// Example: `["spur:superseded-by:bd-201", "spur:superseded-by:bd-202"]`
+pub fn superseded_by_labels(child_ids: &[String]) -> Vec<String> {
+    child_ids
+        .iter()
+        .map(|id| format!("spur:superseded-by:{id}"))
+        .collect()
 }
 
 /// Label set after a proposer consumes a signal. Preserves the original
@@ -200,16 +205,24 @@ mod tests {
         assert!(label.starts_with("spur:mutation-id:"));
         assert!(!label.contains(','));
 
-        let by = superseded_by_label(&["bd-201".into(), "bd-202".into()]);
-        assert_eq!(by, "spur:superseded-by:bd-201|bd-202");
+        let by = superseded_by_labels(&["bd-201".into(), "bd-202".into()]);
+        assert_eq!(
+            by,
+            vec![
+                "spur:superseded-by:bd-201".to_string(),
+                "spur:superseded-by:bd-202".to_string(),
+            ]
+        );
 
         let p = signal_processed_label(&id);
         assert!(p.starts_with("spur:signal-processed:"));
         assert!(!p.contains(','));
 
-        // All new labels must be br-legal
+        // All new labels must be br-legal.
         assert!(is_br_legal(&label));
-        assert!(is_br_legal(&by));
+        for child_label in &by {
+            assert!(is_br_legal(child_label));
+        }
         assert!(is_br_legal(&p));
     }
 }
