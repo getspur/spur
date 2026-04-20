@@ -429,6 +429,20 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub fn palette_state_for_test_mut(&mut self) -> &mut crate::components::palette::PaletteState {
+        &mut self.palette_state
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn handle_crossterm_event_for_test(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) {
+        use crossterm::event::Event;
+        self.handle_crossterm_event(Event::Key(key));
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub fn new_for_palette_test() -> Self {
         // Minimal App for palette-integration tests. Uses the same path as
         // test_support::new_app — no user_input channel, no session picker —
@@ -456,6 +470,73 @@ impl App {
         self.session_detail = Some(
             crate::views::session_detail::SessionDetailView::new_for_palette_test(registry),
         );
+    }
+
+    /// Current ACP session id, if a `session_detail` is active.
+    /// Used by the palette's `Command` accept path to construct
+    /// `Action::SendMessage` / `Action::VendorExec` without a round-trip
+    /// through the session-detail view.
+    fn current_acp_session_id(&self) -> Option<spur_acp::SessionId> {
+        self.session_detail
+            .as_ref()
+            .map(|v| v.session_id().clone())
+    }
+
+    fn result_to_action(
+        &self,
+        result: crate::components::palette::PaletteResult,
+    ) -> Option<crate::action::Action> {
+        use crate::action::{Action, ViewId};
+        use crate::commands::registry::CommandRegistry;
+        use crate::commands::submit_router::{route, SubmitDecision};
+        use crate::components::palette::PalettePayload;
+        match result.payload {
+            PalettePayload::Session { session_id } => {
+                Some(Action::ResumeSession { session_id })
+            }
+            PalettePayload::Worker { session_id } => {
+                Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))
+            }
+            PalettePayload::Command { name } => {
+                // `owned_fallback` is declared before the match so its storage
+                // outlives the borrow produced in the None arm (same idiom as open_palette).
+                let owned_fallback;
+                let registry: &CommandRegistry = match self.session_detail.as_ref() {
+                    Some(view) => &view.command_registry,
+                    None => {
+                        owned_fallback = CommandRegistry::new();
+                        &owned_fallback
+                    }
+                };
+                match route(&format!("/{name}"), &[], registry, false) {
+                    SubmitDecision::Local { action } => Some(action),
+                    SubmitDecision::Send { blocks, interrupt } => {
+                        let session = self.current_acp_session_id()?;
+                        Some(Action::SendMessage {
+                            session,
+                            blocks,
+                            interrupt,
+                        })
+                    }
+                    SubmitDecision::VendorExec { method, params } => {
+                        let session = self.current_acp_session_id()?;
+                        Some(Action::VendorExec {
+                            session,
+                            method,
+                            params,
+                        })
+                    }
+                    SubmitDecision::Empty => None,
+                }
+            }
+            PalettePayload::Trace { entry_idx: _ } => {
+                // TODO(palette-trace-dispatch): wire when stable-id design lands.
+                // Unreachable in practice because TraceSource is omitted from
+                // extend_raw (see open_palette). Kept as a type-exhaustiveness
+                // anchor and a forward-compat hook.
+                None
+            }
+        }
     }
 
     /// Look up the `AgentConfig` for an agent by name (`AgentConfig::name`)
@@ -551,7 +632,7 @@ impl App {
                         Some(PaletteIntent::Accept(result)) => {
                             self.palette_visible = false;
                             self.palette_state.reset();
-                            if let Some(action) = result_to_action(result) {
+                            if let Some(action) = self.result_to_action(result) {
                                 self.process_action(action);
                             }
                             self.dirty = true;
@@ -2197,31 +2278,6 @@ fn render_mermaid_overlay(
         ))),
         chunks[2],
     );
-}
-
-fn result_to_action(
-    result: crate::components::palette::PaletteResult,
-) -> Option<crate::action::Action> {
-    use crate::action::{Action, ViewId};
-    use crate::components::palette::PalettePayload;
-    match result.payload {
-        PalettePayload::Session { session_id } => {
-            Some(Action::ResumeSession { session_id })
-        }
-        PalettePayload::Worker { session_id } => {
-            Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))
-        }
-        PalettePayload::Command { name: _ } => {
-            // Commands dispatched via existing slash-command path. Phase F1.5
-            // will wire a direct dispatch; for MVP accept is a no-op here.
-            None
-        }
-        PalettePayload::Trace { entry_idx: _ } => {
-            // Phase F1.5: add `Action::ScrollToTraceEntry(usize)`. For MVP accept
-            // is a no-op (palette closes, trace stays at anchor).
-            None
-        }
-    }
 }
 
 /// Human-friendly relative time for the resume banner ("5m ago", "2h ago").

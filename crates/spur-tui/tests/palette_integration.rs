@@ -78,3 +78,75 @@ fn open_palette_surfaces_session_command_registry_entries() {
         "expected the dynamic /review command to appear in the palette; got: {labels:?}"
     );
 }
+
+#[test]
+fn accept_spur_local_command_emits_concrete_action() {
+    // /help is a spur-local command → SubmitDecision::Local { Action::ShowHelp }.
+    // Palette should emit Action::ShowHelp on Accept.
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_tui::action::Action;
+    let mut app = util::app_with_seeded_session_and_dynamic_command(
+        "codex",
+        "anything",
+        "unused",
+    );
+    app.try_open_palette_for_test();
+    app.palette_state_for_test_mut().set_query("help");
+    app.handle_crossterm_event_for_test(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ));
+    assert!(
+        matches!(app.last_action_for_test(), Some(Action::ShowHelp)),
+        "expected Action::ShowHelp; got {:?}",
+        app.last_action_for_test()
+    );
+}
+
+#[test]
+fn accept_agent_dynamic_command_emits_send_or_vendor_exec() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_tui::action::Action;
+    let mut app = util::app_with_seeded_session_and_dynamic_command(
+        "codex",
+        "review",
+        "Review the current diff",
+    );
+    app.try_open_palette_for_test();
+    app.palette_state_for_test_mut().set_query("review");
+    app.handle_crossterm_event_for_test(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ));
+    let action = app.last_action_for_test();
+    assert!(
+        matches!(
+            action,
+            Some(Action::SendMessage { .. }) | Some(Action::VendorExec { .. })
+        ),
+        "expected SendMessage or VendorExec; got {:?}",
+        action
+    );
+}
+
+#[test]
+fn accept_spur_local_command_works_without_session() {
+    // No session_detail; spur-local /help still works (it's resident in
+    // the empty CommandRegistry's SpurLocalSource fallback).
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_tui::action::Action;
+    let mut app = spur_tui::app::App::new_for_palette_test();
+    // No session_detail seeded → fallback CommandRegistry::new() with
+    // only spur-local entries.
+    app.try_open_palette_for_test();
+    app.palette_state_for_test_mut().set_query("help");
+    app.handle_crossterm_event_for_test(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ));
+    assert!(
+        matches!(app.last_action_for_test(), Some(Action::ShowHelp)),
+        "spur-local /help should work without a session; got {:?}",
+        app.last_action_for_test()
+    );
+}
