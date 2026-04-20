@@ -1,0 +1,70 @@
+//! Integration tests for `BeadsAdvanced`. Each test spins up a temp `.beads/`
+//! workspace and shells out to the real `br` binary. Tests auto-skip if `br`
+//! is not installed.
+
+use std::path::Path;
+use std::process::Command;
+
+use spur_pm::{BeadsAdapter, BeadsAdvanced, ReadyFilter};
+use tempfile::TempDir;
+
+fn br_available() -> bool {
+    Command::new("br")
+        .arg("--help")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn run_br(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("br")
+        .args(args)
+        .arg("--json")
+        .current_dir(repo)
+        .output()
+        .expect("br invocation failed");
+    assert!(out.status.success(), "br {:?} failed: {:?}", args, out);
+    String::from_utf8(out.stdout).unwrap()
+}
+
+async fn setup_workspace() -> (TempDir, BeadsAdapter) {
+    let dir = TempDir::new().unwrap();
+    run_br(dir.path(), &["init"]);
+    let adapter = BeadsAdapter::connect(dir.path())
+        .await
+        .expect("connect failed");
+    (dir, adapter)
+}
+
+#[tokio::test]
+async fn list_ready_returns_unblocked_issues() {
+    if !br_available() {
+        eprintln!("skipping: `br` binary not on PATH");
+        return;
+    }
+    let (dir, adapter) = setup_workspace().await;
+
+    // Create two tasks with a dependency: A blocks B. Only A is ready.
+    let a = run_br(dir.path(), &["create", "Task A", "--silent", "-t", "task"])
+        .trim()
+        .to_string();
+    let b = run_br(dir.path(), &["create", "Task B", "--silent", "-t", "task"])
+        .trim()
+        .to_string();
+    // Wait a sec — `br create` returns just the ID with --silent.
+    let a_id = a.trim_matches('"').to_string();
+    let b_id = b.trim_matches('"').to_string();
+    run_br(dir.path(), &["dep", "add", &b_id, &a_id]);
+
+    let ready = adapter
+        .list_ready(ReadyFilter {
+            limit: Some(50),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = ready.into_iter().map(|i| i.id).collect();
+    assert!(ids.contains(&a_id), "expected A ({a_id}) in ready, got {ids:?}");
+    assert!(!ids.contains(&b_id), "B ({b_id}) should be blocked");
+}

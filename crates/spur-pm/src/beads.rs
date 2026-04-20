@@ -516,3 +516,106 @@ impl IssueTracker for BeadsAdapter {
         Ok(events)
     }
 }
+
+// ─── BeadsAdvanced impl ───────────────────────────────────────────────
+
+use crate::advanced::{
+    AuditEntry, AuditId, AuditRecordInput, BeadsAdvanced, Comment, CommentId, DependencyCycle,
+    ReadyFilter,
+};
+
+#[derive(serde::Deserialize)]
+struct BrReadyItem {
+    id: String,
+    title: String,
+    status: String,
+    priority: i32,
+    issue_type: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    assignee: Option<String>,
+}
+
+impl From<BrReadyItem> for IssueSummary {
+    fn from(r: BrReadyItem) -> Self {
+        Self {
+            id: r.id.clone(),
+            source: PmSource::Beads,
+            title: r.title,
+            status: r.status,
+            labels: r.labels,
+            url: format!("beads://{}", r.id),
+            priority: Some(r.priority),
+            issue_type: Some(r.issue_type),
+            assignee: r.assignee,
+        }
+    }
+}
+
+#[async_trait]
+impl BeadsAdvanced for BeadsAdapter {
+    async fn list_ready(&self, filter: ReadyFilter) -> anyhow::Result<Vec<IssueSummary>> {
+        let mut args: Vec<String> = vec!["ready".into()];
+
+        if let Some(ref a) = filter.assignee {
+            args.push("--assignee".into());
+            args.push(a.clone());
+        }
+        for l in &filter.labels_all {
+            args.push("-l".into());
+            args.push(l.clone());
+        }
+        for l in &filter.labels_any {
+            args.push("--label-any".into());
+            args.push(l.clone());
+        }
+        if let Some(ref t) = filter.issue_type {
+            args.push("-t".into());
+            args.push(t.clone());
+        }
+        if let Some(p) = filter.priority_min {
+            args.push("-p".into());
+            args.push(p.to_string());
+        }
+        args.push("--limit".into());
+        args.push(filter.limit.unwrap_or(20).to_string());
+
+        let output = self.run_br(args).await?;
+        let items: Vec<BrReadyItem> = serde_json::from_str(&output)
+            .map_err(|e| anyhow::anyhow!("parse `br ready`: {e}\nraw: {output}"))?;
+        Ok(items.into_iter().map(IssueSummary::from).collect())
+    }
+
+    async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<Comment>> {
+        anyhow::bail!("list_comments: not yet implemented")
+    }
+
+    async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<CommentId> {
+        anyhow::bail!("add_comment: not yet implemented")
+    }
+
+    async fn audit_record(
+        &self,
+        _issue_id: &str,
+        _entry: AuditRecordInput,
+    ) -> anyhow::Result<AuditId> {
+        anyhow::bail!("audit_record: not yet implemented")
+    }
+
+    async fn audit_log(&self, _issue_id: &str) -> anyhow::Result<Vec<AuditEntry>> {
+        anyhow::bail!("audit_log: not yet implemented")
+    }
+
+    async fn remove_dependency(
+        &self,
+        _issue_id: &str,
+        _depends_on_id: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("remove_dependency: not yet implemented")
+    }
+
+    async fn dep_cycles(&self) -> anyhow::Result<Vec<DependencyCycle>> {
+        anyhow::bail!("dep_cycles: not yet implemented")
+    }
+}
