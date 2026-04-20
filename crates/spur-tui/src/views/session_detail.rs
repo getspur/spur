@@ -2455,6 +2455,22 @@ mod tests {
     }
 
     #[test]
+    fn reset_for_clear_is_idempotent() {
+        let mut view = SessionDetailView::new_for_palette_test(
+            crate::commands::CommandRegistry::default(),
+        );
+        view.react_trace.clear(); // normalize
+        view.tool_depth.insert("seeded".into(), 1);
+        view.reset_for_clear();
+        let banner1 = view.ready_banner_text().map(str::to_string);
+        view.reset_for_clear();
+        let banner2 = view.ready_banner_text().map(str::to_string);
+        assert_eq!(banner1, banner2);
+        assert!(view.is_cleared());
+        assert!(view.tool_depth.is_empty());
+    }
+
+    #[test]
     fn reset_for_clear_wipes_draft_debounce_locals() {
         let mut view = SessionDetailView::new_for_palette_test(
             crate::commands::CommandRegistry::default(),
