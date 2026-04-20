@@ -177,6 +177,7 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
             worker_branch: None,
             attempt: 1,
             history: vec![],
+            last_delegation_id: None,
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         epic_id: None,
@@ -199,7 +200,7 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
 
     let (dtx, _drx) = mpsc::channel(8);
 
-    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref)).await;
+    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None).await;
 
     let events = sink.events.lock().unwrap();
     let saw_completed = events.iter().any(|e| {
@@ -262,6 +263,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             worker_branch: None,
             attempt: 1,
             history: vec![],
+            last_delegation_id: None,
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         epic_id: None,
@@ -349,6 +351,7 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
             worker_branch: None,
             attempt: 1,
             history: vec![],
+            last_delegation_id: None,
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         epic_id: None,
@@ -361,7 +364,7 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
     let (dtx, _drx) = mpsc::channel(8);
     let plan_arc = Arc::new(Mutex::new(state));
 
-    run_plan(Arc::clone(&plan_arc), dtx, Some(sink_ref)).await;
+    run_plan(Arc::clone(&plan_arc), dtx, Some(sink_ref), None).await;
 
     let st = plan_arc.lock().await;
     assert!(

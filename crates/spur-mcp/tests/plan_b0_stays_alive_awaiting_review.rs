@@ -37,6 +37,7 @@ async fn run_plan_stays_alive_while_task_awaiting_review() {
             worker_branch: None,
             attempt: 1,
             history: vec![],
+            last_delegation_id: None,
         }],
     };
 
@@ -47,7 +48,7 @@ async fn run_plan_stays_alive_while_task_awaiting_review() {
     // while the task is AwaitingReview.
     let plan_for_runner = Arc::clone(&plan);
     let runner = tokio::spawn(async move {
-        run_plan(plan_for_runner, delegation_tx, None).await;
+        run_plan(plan_for_runner, delegation_tx, None, None).await;
     });
 
     // Park well past any reasonable "immediate exit" path. 500ms is
