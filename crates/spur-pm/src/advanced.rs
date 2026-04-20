@@ -1,7 +1,7 @@
 //! Beads-only extension surface.
 //!
 //! These methods expose `br` CLI primitives that have no GitHub-backend
-//! analog (ready, audit, comment CRUD, dep cycles). Only `BeadsAdapter`
+//! analog (ready, comment CRUD, dep cycles). Only `BeadsAdapter`
 //! implements this trait. Callers obtain a `&dyn BeadsAdvanced` from
 //! `PmService::advanced()`, which returns `None` for non-beads backends.
 
