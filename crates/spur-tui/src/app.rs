@@ -6,11 +6,11 @@ use ratatui::Frame;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 
+use spur_acp::domain::events::BrainRetireReason;
 use spur_acp::{
     LicenseBindingMode, LicensePlan as EventLicensePlan, LicenseStateEvent, LicenseStatusEvent,
     LicenseSubjectKind, SessionId, SpurEvent, SpurEventBody,
 };
-use spur_acp::domain::events::BrainRetireReason;
 use spur_core::ExecutorLineage;
 
 #[cfg(feature = "markdown")]
@@ -18,12 +18,14 @@ use ratatui_image::picker::Picker;
 
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
-use crate::components::palette::PaletteIntent;
-use crate::components::palette_sources::{CommandSource, PaletteSource, SessionSource, WorkerSource};
 use crate::components::input_bar::EditMode;
+use crate::components::palette::PaletteIntent;
+use crate::components::palette_sources::{
+    CommandSource, PaletteSource, SessionSource, WorkerSource,
+};
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
-use crate::input_history::{HISTORY_CAP, InputHistoryEntry};
+use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::SessionMetadataStore;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
@@ -417,7 +419,9 @@ impl App {
             kind: PaletteKind::Session,
             label: label.to_string(),
             subtitle: format!("session · {}", session_id),
-            payload: PalettePayload::Session { session_id: session_id.to_string() },
+            payload: PalettePayload::Session {
+                session_id: session_id.to_string(),
+            },
         }]);
     }
 
@@ -437,10 +441,7 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
-    pub fn handle_crossterm_event_for_test(
-        &mut self,
-        key: crossterm::event::KeyEvent,
-    ) {
+    pub fn handle_crossterm_event_for_test(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::Event;
         self.handle_crossterm_event(Event::Key(key));
     }
@@ -463,16 +464,12 @@ impl App {
         use crate::commands::registry::CommandRegistry;
         use spur_acp::{AvailableCommand, CommandsConfig};
         let cfg = CommandsConfig::default();
-        let entry = crate::agents::build_entry(
-            handle,
-            &cfg,
-            &AvailableCommand::new(name, description),
-        );
+        let entry =
+            crate::agents::build_entry(handle, &cfg, &AvailableCommand::new(name, description));
         let mut registry = CommandRegistry::new();
         registry.set_agent_commands(handle, vec![entry]);
-        self.session_detail = Some(
-            crate::views::session_detail::SessionDetailView::new_for_palette_test(registry),
-        );
+        self.session_detail =
+            Some(crate::views::session_detail::SessionDetailView::new_for_palette_test(registry));
     }
 
     /// Current ACP session id, if a `session_detail` is active.
@@ -480,9 +477,7 @@ impl App {
     /// `Action::SendMessage` / `Action::VendorExec` without a round-trip
     /// through the session-detail view.
     fn current_acp_session_id(&self) -> Option<spur_acp::SessionId> {
-        self.session_detail
-            .as_ref()
-            .map(|v| v.session_id().clone())
+        self.session_detail.as_ref().map(|v| v.session_id().clone())
     }
 
     fn result_to_action(
@@ -494,9 +489,7 @@ impl App {
         use crate::commands::submit_router::{route, SubmitDecision};
         use crate::components::palette::PalettePayload;
         match result.payload {
-            PalettePayload::Session { session_id } => {
-                Some(Action::ResumeSession { session_id })
-            }
+            PalettePayload::Session { session_id } => Some(Action::ResumeSession { session_id }),
             PalettePayload::Worker { session_id } => {
                 Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))
             }
@@ -800,7 +793,8 @@ impl App {
             let exec_id = spur_core::lineage::types::ExecutorId::new(executor_id);
             if let Some(node) = self.lineage.node(&exec_id) {
                 let agent_name = node.agent.clone();
-                self.worker_streams.route(executor_id, &agent_name, &notification.update);
+                self.worker_streams
+                    .route(executor_id, &agent_name, &notification.update);
             } else {
                 tracing::trace!(
                     executor_id = %executor_id,
@@ -820,15 +814,15 @@ impl App {
             if let Some(node) = self.lineage.node(&exec_id) {
                 let agent = node.agent.clone();
                 let entries: Vec<_> = node.stream_buffer.iter().cloned().collect();
-                self.worker_streams.seed_from_stream_buffer(id, &agent, entries.iter());
+                self.worker_streams
+                    .seed_from_stream_buffer(id, &agent, entries.iter());
             }
         }
 
         // Reset per-executor trace on retry. Mirrors the lineage
         // projection's `node.stream_buffer.clear()` on the same event.
-        if let spur_acp::domain::events::SpurEventBody::ExecutorRetryStarted {
-            id, ..
-        } = &event.body
+        if let spur_acp::domain::events::SpurEventBody::ExecutorRetryStarted { id, .. } =
+            &event.body
         {
             self.worker_streams.reset(id);
         }
@@ -1989,7 +1983,9 @@ impl App {
                 }
             }
             ViewId::SessionPicker => {
-                if let Some(p) = self.session_picker.as_mut() { p.tick() }
+                if let Some(p) = self.session_picker.as_mut() {
+                    p.tick()
+                }
             }
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {
@@ -2083,10 +2079,9 @@ impl App {
         }
 
         if self.palette_visible {
-            let overlay = crate::components::palette_overlay::PaletteOverlay::new(
-                &self.palette_state,
-            )
-            .with_session_active(self.session_detail.is_some());
+            let overlay =
+                crate::components::palette_overlay::PaletteOverlay::new(&self.palette_state)
+                    .with_session_active(self.session_detail.is_some());
             frame.render_widget(overlay, frame.area());
         }
     }
@@ -2370,9 +2365,9 @@ impl App {
 #[cfg(test)]
 mod worker_stream_routing_tests {
     use super::*;
-    use spur_acp::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent};
     use spur_acp::domain::events::{SpurEvent, SpurEventBody};
     use spur_acp::SessionId;
+    use spur_acp::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent};
 
     fn msg_update(text: &str) -> SessionUpdate {
         SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
@@ -2392,21 +2387,28 @@ mod worker_stream_routing_tests {
     fn worker_notification_populates_per_executor_trace() {
         let mut app = test_app();
         // Seed lineage with the executor first — routing drops orphan events.
-        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
-            id: "exec-42".into(),
-            parent_id: None,
-            session_id: SessionId("abc".into()),
-            agent: "claude".into(),
-            role: spur_acp::Role::Executor,
-            task_spec: String::new(),
-        }));
-        let notif = Box::new(SessionNotification::new("abc", msg_update("hello from worker")));
+        app.lineage
+            .apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+                id: "exec-42".into(),
+                parent_id: None,
+                session_id: SessionId("abc".into()),
+                agent: "claude".into(),
+                role: spur_acp::Role::Executor,
+                task_spec: String::new(),
+            }));
+        let notif = Box::new(SessionNotification::new(
+            "abc",
+            msg_update("hello from worker"),
+        ));
         app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
             brain_session_id: SessionId("brain-1".into()),
             executor_id: "exec-42".into(),
             notification: notif,
         }));
-        let trace = app.worker_streams().get("exec-42").expect("trace for spawned executor");
+        let trace = app
+            .worker_streams()
+            .get("exec-42")
+            .expect("trace for spawned executor");
         assert_eq!(trace.entry_count(), 1);
     }
 
@@ -2451,14 +2453,15 @@ mod worker_stream_routing_tests {
     #[test]
     fn executor_retry_started_resets_trace() {
         let mut app = test_app();
-        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
-            id: "exec-r".into(),
-            parent_id: None,
-            session_id: SessionId("abc".into()),
-            agent: "claude".into(),
-            role: spur_acp::Role::Executor,
-            task_spec: String::new(),
-        }));
+        app.lineage
+            .apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+                id: "exec-r".into(),
+                parent_id: None,
+                session_id: SessionId("abc".into()),
+                agent: "claude".into(),
+                role: spur_acp::Role::Executor,
+                task_spec: String::new(),
+            }));
         app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
             brain_session_id: SessionId("brain-1".into()),
             executor_id: "exec-r".into(),
@@ -2481,14 +2484,15 @@ mod worker_stream_routing_tests {
     #[test]
     fn app_tick_drives_worker_streams_tick_all() {
         let mut app = test_app();
-        app.lineage.apply(&wrap_event(SpurEventBody::ExecutorSpawned {
-            id: "exec-tick".into(),
-            session_id: spur_acp::SessionId("s".into()),
-            parent_id: None,
-            agent: "claude".into(),
-            role: spur_acp::Role::Executor,
-            task_spec: String::new(),
-        }));
+        app.lineage
+            .apply(&wrap_event(SpurEventBody::ExecutorSpawned {
+                id: "exec-tick".into(),
+                session_id: spur_acp::SessionId("s".into()),
+                parent_id: None,
+                agent: "claude".into(),
+                role: spur_acp::Role::Executor,
+                task_spec: String::new(),
+            }));
         app.handle_spur_event(wrap_event(SpurEventBody::WorkerNotification {
             brain_session_id: spur_acp::SessionId("brain-1".into()),
             executor_id: "exec-tick".into(),
@@ -2673,7 +2677,10 @@ mod brain_retired_tests {
         }));
 
         let detail = app.session_detail.as_ref().unwrap();
-        assert!(!detail.is_cleared(), "ResumeSwitch must NOT trigger view reset");
+        assert!(
+            !detail.is_cleared(),
+            "ResumeSwitch must NOT trigger view reset"
+        );
         assert!(detail.ready_banner_text().is_none());
     }
 
@@ -2701,10 +2708,11 @@ mod brain_retired_tests {
         app.process_action(Action::ClearSession);
 
         // User types a new prompt into the preserved InputBar.
-        app.session_detail.as_mut().unwrap().input_bar_mut_for_test().set_text(
-            "post-clear-prompt".into(),
-            17,
-        );
+        app.session_detail
+            .as_mut()
+            .unwrap()
+            .input_bar_mut_for_test()
+            .set_text("post-clear-prompt".into(), 17);
 
         // New brain B spawns.
         app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
@@ -2744,8 +2752,16 @@ mod brain_retired_tests {
         let detail = app.session_detail.as_ref().unwrap();
         assert_eq!(detail.input_bar_text(), "");
         let md = &app.metadata_store;
-        assert!(md.entry("empty-carryover-a").map(|e| e.draft.clone()).unwrap_or_default().is_empty());
-        assert!(md.entry("empty-carryover-b").map(|e| e.draft.clone()).unwrap_or_default().is_empty());
+        assert!(md
+            .entry("empty-carryover-a")
+            .map(|e| e.draft.clone())
+            .unwrap_or_default()
+            .is_empty());
+        assert!(md
+            .entry("empty-carryover-b")
+            .map(|e| e.draft.clone())
+            .unwrap_or_default()
+            .is_empty());
     }
 
     #[test]
@@ -2756,7 +2772,12 @@ mod brain_retired_tests {
             session: SessionId("banner-a".into()),
         }));
         app.process_action(Action::ClearSession);
-        assert!(app.session_detail.as_ref().unwrap().ready_banner_text().is_some());
+        assert!(app
+            .session_detail
+            .as_ref()
+            .unwrap()
+            .ready_banner_text()
+            .is_some());
 
         app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
             agent: "kiro".into(),
@@ -2897,9 +2918,12 @@ mod brain_retired_tests {
             .input_bar_mut_for_test()
             .set_text("post-clear".into(), 10);
         // Force the debounce to trigger (600ms ago).
-        app.session_detail.as_mut().unwrap().test_set_last_draft_change(
-            std::time::Instant::now() - std::time::Duration::from_millis(600),
-        );
+        app.session_detail
+            .as_mut()
+            .unwrap()
+            .test_set_last_draft_change(
+                std::time::Instant::now() - std::time::Duration::from_millis(600),
+            );
         let action = app.session_detail.as_mut().unwrap().draft_save_action();
         assert!(
             action.is_none(),

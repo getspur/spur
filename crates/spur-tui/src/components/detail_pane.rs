@@ -258,11 +258,11 @@ impl DetailPane {
         // inner() is a function of borders + title presence, not content.
         let mut skeleton = Block::default()
             .borders(Borders::ALL)
-            .title(" ")              // matches final top-left (agent name)
-            .title_bottom(" ");      // matches final bottom-left (scroll_label)
+            .title(" ") // matches final top-left (agent name)
+            .title_bottom(" "); // matches final bottom-left (scroll_label)
         if issue_badge.is_some() {
             skeleton = skeleton
-                .title_top(Line::from(" ").alignment(Alignment::Right))   // matches final top-right (badge)
+                .title_top(Line::from(" ").alignment(Alignment::Right)) // matches final top-right (badge)
                 .title_bottom(Line::from(" ").alignment(Alignment::Right)); // matches final bottom-right ([I]ssue)
         }
         let inner = skeleton.inner(area);
@@ -273,8 +273,8 @@ impl DetailPane {
         //       placeholder) paths. For Stream-with-trace, body is owned
         //       by ReactTrace::render_compact; total/visible still
         //       meaningful only for the `scroll_label` derivation. ─────
-        let stream_with_trace = matches!(self.current_tab, DetailTab::Stream)
-            && stream_trace.is_some();
+        let stream_with_trace =
+            matches!(self.current_tab, DetailTab::Stream) && stream_trace.is_some();
 
         // `wrapped` is only populated for paths that render a Paragraph.
         let mut wrapped: Vec<Line<'static>> = Vec::new();
