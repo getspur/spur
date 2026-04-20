@@ -9,7 +9,7 @@ pub mod types;
 
 pub use adapter::{IssueTracker, PrService};
 pub use advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter};
-pub use beads::BeadsAdapter;
+pub use beads::{BeadsAdapter, PollCursor};
 pub use bv::BvAdapter;
 pub use github::GitHubAdapter;
 pub use service::PmService;
