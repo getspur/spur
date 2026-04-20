@@ -115,18 +115,35 @@ impl DetailPane {
         }
     }
 
+    /// Private shared helper. Encodes the per-tab reset invariants so
+    /// every entry point (`cycle_tab`, `jump_to_tab`) cannot accidentally
+    /// diverge. Opens at top (`scroll_offset = 0`) on every tab; sets
+    /// `is_following` based on the destination tab kind; snaps the
+    /// Stream trace to bottom when landing on Stream.
+    fn set_tab(
+        &mut self,
+        tab: DetailTab,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        self.current_tab = tab;
+        self.scroll_offset = 0;
+        match tab {
+            DetailTab::Stream => {
+                self.is_following = true;
+                if let Some(t) = stream_trace {
+                    t.scroll_to_bottom();
+                }
+            }
+            _ => {
+                self.is_following = false;
+            }
+        }
+    }
+
     /// Cycle to the next (or previous) tab.
     ///
-    /// Intent is split by tab kind:
-    /// - **Stream**: snap the trace to latest (`trace.scroll_to_bottom()`)
-    ///   when the trace is available, and set the local follow flag for
-    ///   API symmetry. The badge is actually derived from `trace.is_following()`
-    ///   inside `render`, so the local flag is advisory on this tab.
-    /// - **Non-Stream**: open at the top — `scroll_offset = 0`,
-    ///   `is_following = false`. Previously both `is_following = true` and
-    ///   `scroll_offset = 0` were set, which the render re-clamped to
-    ///   `max_offset` (the bottom), inverting the user's expected "fresh
-    ///   tab" UX.
+    /// Per-tab reset invariants (`scroll_offset = 0`, `is_following`
+    /// per tab kind) are centralised in [`DetailPane::set_tab`].
     pub fn cycle_tab(
         &mut self,
         forward: bool,
@@ -139,19 +156,7 @@ impl DetailPane {
         } else {
             (idx + all.len() - 1) % all.len()
         };
-        self.current_tab = all[next];
-        self.scroll_offset = 0;
-        match self.current_tab {
-            DetailTab::Stream => {
-                self.is_following = true;
-                if let Some(t) = stream_trace {
-                    t.scroll_to_bottom();
-                }
-            }
-            _ => {
-                self.is_following = false;
-            }
-        }
+        self.set_tab(all[next], stream_trace);
     }
 
     pub fn scroll_up(
