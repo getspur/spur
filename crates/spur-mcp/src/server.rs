@@ -597,18 +597,17 @@ impl McpCallbackServer {
                 },
             };
             active.lock().await.remove(&delegation_id);
-            completed
-                .lock()
-                .await
-                .insert(delegation_id.clone(), (result.clone(), tokio::time::Instant::now()));
+            completed.lock().await.insert(
+                delegation_id.clone(),
+                (result.clone(), tokio::time::Instant::now()),
+            );
 
             if let Some(h) = detached {
-                use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
+                use spur_acp::domain::{
+                    BrainContinuation, ContinuationPayload, ContinuationSource,
+                };
 
-                let source = if matches!(
-                    result.status,
-                    DelegationStatus::Cancelled { .. }
-                ) {
+                let source = if matches!(result.status, DelegationStatus::Cancelled { .. }) {
                     ContinuationSource::Cancelled
                 } else {
                     match h.source_kind {
@@ -625,7 +624,7 @@ impl McpCallbackServer {
                         summary: result.summary.clone(),
                         diff_summary: result.diff_summary.clone(),
                         worker_branch: result.worker_branch.clone(),
-                        artifact: None,
+                        artifact: result.artifact.clone(),
                     },
                     created_at: std::time::Instant::now(),
                 };
