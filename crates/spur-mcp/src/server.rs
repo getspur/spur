@@ -326,7 +326,7 @@ pub struct EpicSubgraph {
 }
 
 /// Compose a beads epic + child issues + dependency edges from a
-/// validated plan. Labels each child with `spur.plan_id=<plan_id>` so
+/// validated plan. Labels each child with `spur:plan-id:<plan_id>` so
 /// review_task can correlate approvals back to beads.
 ///
 /// Creates issues in topological order (deps-first) so each child's
@@ -397,7 +397,7 @@ pub fn plan_epic_issue_creates(
         title: epic_title.to_string(),
         description: epic_body.map(String::from),
         issue_type: Some("epic".to_string()),
-        labels: vec![format!("spur.plan_id={}", plan_id)],
+        labels: vec![crate::plan::labels::plan_id(plan_id)],
         ..Default::default()
     };
 
@@ -406,12 +406,12 @@ pub fn plan_epic_issue_creates(
     for idx in order {
         let task = &tasks[idx];
         let mut labels = vec![
-            format!("spur.plan_id={}", plan_id),
-            format!("spur.plan_task_id={}", task.task_id),
-            format!("spur.agent={}", task.agent),
+            crate::plan::labels::plan_id(plan_id),
+            crate::plan::labels::plan_task_id(&task.task_id),
+            crate::plan::labels::agent(&task.agent),
         ];
         if let Some(existing) = &task.issue_id {
-            labels.push(format!("spur.source_issue={}", existing));
+            labels.push(crate::plan::labels::source_issue(existing));
         }
         let child_create = spur_pm::types::IssueCreate {
             title: format!("{}: {}", task.task_id, truncate_for_title(&task.task)),

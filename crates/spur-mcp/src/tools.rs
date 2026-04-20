@@ -460,7 +460,7 @@ fn submit_plan_def() -> ToolDefinition {
                 },
                 "persist_as_epic": {
                     "type": "boolean",
-                    "description": "When true, mirror the plan into beads as an epic with child issues + dependency edges. Each child is labeled `spur.plan_id=<plan_id>` so review_task(approve) can auto-close the matching beads issue. Requires `epic_title` and a beads PM backend. Defaults to false (ephemeral in-memory plan only)."
+                    "description": "When true, mirror the plan into beads as an epic with child issues + dependency edges. Each child is labeled `spur:plan-id:<plan_id>` so review_task(approve) can auto-close the matching beads issue. Requires `epic_title` and a beads PM backend. Defaults to false (ephemeral in-memory plan only)."
                 },
                 "epic_title": {
                     "type": "string",
@@ -560,9 +560,9 @@ fn execute_epic_def() -> ToolDefinition {
         name: "execute_epic".into(),
         description: "Execute a beads epic: hydrate a plan from the epic's \
             children subgraph and dispatch in dependency order. Agent routing \
-            comes from the `spur.agent=<name>` label on each child issue \
+            comes from the `spur:agent:<name>` label on each child issue \
             (inherited from the epic if unset, or from default_agent). Task \
-            text comes from issue.body (override via `spur.task_text=<text>` \
+            text comes from issue.body (override via `spur:task-text:<text>` \
             label). Rejects nested sub-epic children. External blocked_by \
             references must already be `done`. After dispatch, the plan runs \
             under the normal review engine — use get_plan_status / \
@@ -579,7 +579,7 @@ fn execute_epic_def() -> ToolDefinition {
                 },
                 "default_agent": {
                     "type": "string",
-                    "description": "Fallback agent when a child has no `spur.agent=<name>` label and the epic has no inherited label"
+                    "description": "Fallback agent when a child has no `spur:agent:<name>` label and the epic has no inherited label"
                 }
             },
             "required": ["epic_id"]
