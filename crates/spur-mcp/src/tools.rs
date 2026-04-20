@@ -56,7 +56,7 @@ pub struct ToolDefinition {
 fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
-        description: "Delegate a task to a worker agent. Blocks until the worker completes or a 90-second safety timeout is reached. If the worker is still running at timeout, returns a delegation_id — call check_delegation_status to poll for the result. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Use `list_available_workers` when routing is ambiguous.".into(),
+        description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Use `list_available_workers` when routing is ambiguous.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateToWorkerInput>(),
     }
 }
@@ -64,7 +64,7 @@ fn delegate_to_worker_def() -> ToolDefinition {
 fn delegate_parallel_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_parallel".into(),
-        description: "Delegate multiple tasks in parallel. Blocks until all complete. The `delegation_plan.decomposition` field MUST demonstrate subtasks are independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
+        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. The `delegation_plan.decomposition` field MUST demonstrate subtasks are independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateParallelInput>(),
     }
 }
@@ -216,7 +216,7 @@ fn create_pr_def() -> ToolDefinition {
 fn delegate_async_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_async".into(),
-        description: "Delegate a task to a worker agent without blocking. Returns a delegation_id that can be collected later with wait_delegation.".into(),
+        description: "[DEPRECATED — use `delegate_to_worker`; it has equivalent async semantics with auto re-prompt on completion.] Delegate a task to a worker agent without blocking. Returns a delegation_id; the brain is re-prompted automatically when the worker finishes.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateAsyncInput>(),
     }
 }
@@ -224,7 +224,7 @@ fn delegate_async_def() -> ToolDefinition {
 fn wait_delegation_def() -> ToolDefinition {
     ToolDefinition {
         name: "wait_delegation".into(),
-        description: "Block until an async delegation completes and return its result. Use after delegate_async. If the worker is still running after 90 seconds, returns a 'still running' message — call check_delegation_status to poll again.".into(),
+        description: "[DEPRECATED — auto re-prompt from `delegate_to_worker` / `delegate_async` makes this unnecessary.] Block until an async delegation completes and return its result.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -241,7 +241,7 @@ fn wait_delegation_def() -> ToolDefinition {
 fn check_delegation_status_def() -> ToolDefinition {
     ToolDefinition {
         name: "check_delegation_status".into(),
-        description: "Non-blocking poll for a delegation result. Returns the result immediately if the worker has finished, or {\"status\":\"running\"} if still in progress. Use after delegate_async or when delegate_to_worker / wait_delegation returned a delegation_id due to timeout.".into(),
+        description: "Non-blocking status query for a delegation. Returns the result if finished, or `{\"status\":\"running\"}`. Primarily a debugging affordance — brains are re-prompted automatically when delegations complete and normally do not need to call this.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
