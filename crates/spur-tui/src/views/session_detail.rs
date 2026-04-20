@@ -102,13 +102,10 @@ pub struct SessionDetailView {
     /// Populated on each ToolCall; read on subsequent ToolCalls to resolve
     /// the parent's depth. Capped at 8 to prevent runaway indentation.
     tool_depth: std::collections::HashMap<String, u8>,
-    /// Snapshot of worker descriptors used to populate the `@`-picker
-    /// for brain sessions. Empty for direct sessions. Set once at
-    /// construction.
-    worker_snapshot: Vec<crate::mentions::WorkerMentionDescriptor>,
-    /// Derived once from `worker_snapshot`: the set of known worker
-    /// names. Used by `prepend_worker_hint` to filter unknown-name
-    /// atoms out of the hint.
+    /// Set of known worker names, derived once at construction from
+    /// the worker snapshot supplied to `new`. Used by
+    /// `prepend_worker_hint` to filter unknown-name atoms out of
+    /// the hint.
     known_worker_names: std::collections::HashSet<String>,
 }
 
@@ -163,7 +160,6 @@ impl SessionDetailView {
             picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
-            worker_snapshot,
             known_worker_names,
         }
     }
