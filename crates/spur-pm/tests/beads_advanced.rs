@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use spur_pm::{AuditEntryType, AuditRecordInput, BeadsAdapter, BeadsAdvanced, ReadyFilter};
+use spur_pm::{BeadsAdapter, BeadsAdvanced, ReadyFilter};
 use tempfile::TempDir;
 
 fn br_available() -> bool {
@@ -65,7 +65,10 @@ async fn list_ready_returns_unblocked_issues() {
         .unwrap();
 
     let ids: Vec<String> = ready.into_iter().map(|i| i.id).collect();
-    assert!(ids.contains(&a_id), "expected A ({a_id}) in ready, got {ids:?}");
+    assert!(
+        ids.contains(&a_id),
+        "expected A ({a_id}) in ready, got {ids:?}"
+    );
     assert!(!ids.contains(&b_id), "B ({b_id}) should be blocked");
 }
 
@@ -91,35 +94,53 @@ async fn add_comment_then_list_returns_it() {
 
 #[tokio::test]
 async fn remove_dependency_unblocks_task() {
-    if !br_available() { return; }
+    if !br_available() {
+        return;
+    }
     let (dir, adapter) = setup_workspace().await;
     let a = run_br(dir.path(), &["create", "A", "--silent", "-t", "task"])
-        .trim().trim_matches('"').to_string();
+        .trim()
+        .trim_matches('"')
+        .to_string();
     let b = run_br(dir.path(), &["create", "B", "--silent", "-t", "task"])
-        .trim().trim_matches('"').to_string();
+        .trim()
+        .trim_matches('"')
+        .to_string();
     run_br(dir.path(), &["dep", "add", &b, &a]);
 
     adapter.remove_dependency(&b, &a).await.unwrap();
 
     let ready = adapter
-        .list_ready(ReadyFilter { limit: Some(50), ..Default::default() })
+        .list_ready(ReadyFilter {
+            limit: Some(50),
+            ..Default::default()
+        })
         .await
         .unwrap();
     let ids: Vec<String> = ready.into_iter().map(|i| i.id).collect();
-    assert!(ids.contains(&b), "B should be ready after dep removed, got {ids:?}");
+    assert!(
+        ids.contains(&b),
+        "B should be ready after dep removed, got {ids:?}"
+    );
 }
 
 #[tokio::test]
 async fn dep_cycles_detects_cycle() {
-    if !br_available() { return; }
+    if !br_available() {
+        return;
+    }
     let (dir, adapter) = setup_workspace().await;
     let a = run_br(dir.path(), &["create", "A", "--silent", "-t", "task"])
-        .trim().trim_matches('"').to_string();
+        .trim()
+        .trim_matches('"')
+        .to_string();
     let b = run_br(dir.path(), &["create", "B", "--silent", "-t", "task"])
-        .trim().trim_matches('"').to_string();
+        .trim()
+        .trim_matches('"')
+        .to_string();
     run_br(dir.path(), &["dep", "add", &a, &b]); // A blocks on B
-    // Try to create a cycle: B blocks on A. `br` may reject at add time;
-    // if so, the cycle never exists and dep_cycles should return empty.
+                                                 // Try to create a cycle: B blocks on A. `br` may reject at add time;
+                                                 // if so, the cycle never exists and dep_cycles should return empty.
     let maybe_cycle = Command::new("br")
         .args(["dep", "add", &b, &a, "--json"])
         .current_dir(dir.path())
@@ -132,46 +153,11 @@ async fn dep_cycles_detects_cycle() {
         assert!(!cycles.is_empty(), "expected cycle, got {cycles:?}");
     } else {
         // br rejected the cycle; detector should find none.
-        assert!(cycles.is_empty(), "no cycle but detector returned {cycles:?}");
+        assert!(
+            cycles.is_empty(),
+            "no cycle but detector returned {cycles:?}"
+        );
     }
-}
-
-// TODO v0a.2: enable after Task 4 audit transport lands
-#[ignore]
-#[tokio::test]
-async fn audit_record_carries_actor_when_set() {
-    if !br_available() { return; }
-    let dir = TempDir::new().unwrap();
-    run_br(dir.path(), &["init"]);
-
-    let adapter = BeadsAdapter::connect_with_actor(
-        dir.path(),
-        Some("brain:test-session".to_string()),
-        None,
-    )
-    .await
-    .unwrap();
-
-    let id = run_br(dir.path(), &["create", "T", "--silent", "-t", "task"])
-        .trim().trim_matches('"').to_string();
-
-    adapter
-        .audit_record(
-            &id,
-            AuditRecordInput {
-                entry_type: AuditEntryType::PlanSubmit,
-                data: serde_json::json!({}),
-            },
-        )
-        .await
-        .unwrap();
-
-    let log = adapter.audit_log(&id).await.unwrap();
-    let entry = log
-        .iter()
-        .find(|e| e.entry_type == AuditEntryType::PlanSubmit)
-        .expect("expected PlanSubmit entry");
-    assert_eq!(entry.actor, "brain:test-session");
 }
 
 /// B1+B2 regression: `ReadyFilter.priorities` is a set-membership filter
@@ -186,9 +172,18 @@ async fn list_ready_priorities_is_set_membership() {
     let (dir, adapter) = setup_workspace().await;
 
     // Create issues at priorities 0, 2, 4. Use `-p` on create to set initial priority.
-    run_br(dir.path(), &["create", "P0", "--silent", "-t", "task", "-p", "0"]);
-    run_br(dir.path(), &["create", "P2", "--silent", "-t", "task", "-p", "2"]);
-    run_br(dir.path(), &["create", "P4", "--silent", "-t", "task", "-p", "4"]);
+    run_br(
+        dir.path(),
+        &["create", "P0", "--silent", "-t", "task", "-p", "0"],
+    );
+    run_br(
+        dir.path(),
+        &["create", "P2", "--silent", "-t", "task", "-p", "2"],
+    );
+    run_br(
+        dir.path(),
+        &["create", "P4", "--silent", "-t", "task", "-p", "4"],
+    );
 
     // Filter to {0, 2}. Expect exactly two issues, priorities 0 and 2.
     let ready = adapter
@@ -206,9 +201,18 @@ async fn list_ready_priorities_is_set_membership() {
         .collect();
 
     assert_eq!(priorities.len(), 2, "expected 2 items, got {priorities:?}");
-    assert!(priorities.contains(&0), "missing priority 0: {priorities:?}");
-    assert!(priorities.contains(&2), "missing priority 2: {priorities:?}");
-    assert!(!priorities.contains(&4), "priority 4 should be filtered out: {priorities:?}");
+    assert!(
+        priorities.contains(&0),
+        "missing priority 0: {priorities:?}"
+    );
+    assert!(
+        priorities.contains(&2),
+        "missing priority 2: {priorities:?}"
+    );
+    assert!(
+        !priorities.contains(&4),
+        "priority 4 should be filtered out: {priorities:?}"
+    );
 }
 
 /// Empty `priorities` means no priority filter — returns all ready items.
@@ -218,8 +222,14 @@ async fn list_ready_empty_priorities_means_no_filter() {
         return;
     }
     let (dir, adapter) = setup_workspace().await;
-    run_br(dir.path(), &["create", "A", "--silent", "-t", "task", "-p", "0"]);
-    run_br(dir.path(), &["create", "B", "--silent", "-t", "task", "-p", "4"]);
+    run_br(
+        dir.path(),
+        &["create", "A", "--silent", "-t", "task", "-p", "0"],
+    );
+    run_br(
+        dir.path(),
+        &["create", "B", "--silent", "-t", "task", "-p", "4"],
+    );
 
     let ready = adapter
         .list_ready(ReadyFilter {

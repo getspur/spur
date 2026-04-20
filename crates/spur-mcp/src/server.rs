@@ -373,7 +373,53 @@ pub async fn build_epic_subgraph(
         task_map.insert(task_id, child_id);
     }
 
+    if let Err(e) = pm
+        .update_issue(
+            &epic_id,
+            spur_pm::types::IssueUpdate {
+                add_labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            target: "spur.audit.emit_failure",
+            kind = "plan_complete_marker",
+            %epic_id,
+            "failed to emit spur:plan-complete marker on epic (graph is complete, marker missing — reconciler will skip): {e}"
+        );
+    }
+
     Ok(EpicSubgraph { epic_id, task_map })
+}
+
+/// Emit a `[[spur-audit v1]]` `PlanSubmit` sentinel comment on the epic issue.
+///
+/// Advisory: failure is logged via `tracing::warn!` and swallowed. Does not
+/// abort the caller. See docs/superpowers/plans/2026-04-20-adaptive-plan-
+/// repair-v0a.md "Review addendum II" for why comments are the audit
+/// transport.
+pub async fn emit_plan_submit_audit(
+    advanced: &dyn spur_pm::BeadsAdvanced,
+    plan_id: &str,
+    sg: &EpicSubgraph,
+) {
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+        plan_id: plan_id.to_string(),
+        epic_issue_id: sg.epic_id.clone(),
+        task_ids: sg.task_map.values().cloned().collect(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
+        tracing::warn!(
+            target: "spur.audit.emit_failure",
+            kind = "plan_submit",
+            epic_id = %sg.epic_id,
+            plan_id = %plan_id,
+            "PlanSubmit audit comment emission failed (graph is persisted; audit missing): {e}"
+        );
+    }
 }
 
 /// Pure helper: compute the IssueCreate values that build_epic_subgraph
@@ -427,6 +473,44 @@ pub fn plan_epic_issue_creates(
         child_specs.push((task.task_id.clone(), child_create));
     }
     Ok((epic_create, child_specs))
+}
+
+/// Build `PlanTaskEntry` values from a list of `PlanTask`s, optionally
+/// backfilling `spec.issue_id` from a `task_map` produced by
+/// `build_epic_subgraph`.
+///
+/// Backfill rule: a task's `issue_id` is set to the task_map value ONLY when
+/// the field is currently `None`. Pre-existing values are NOT overwritten —
+/// they represent a `spur:source-issue:` reference pointing to a pre-existing
+/// issue and must be preserved so downstream audit logic can distinguish the
+/// source issue from the newly-created beads child.
+///
+/// Ephemeral plans pass `task_map = None`; every entry keeps `issue_id: None`.
+pub fn build_entries_with_task_map(
+    tasks: Vec<crate::plan::PlanTask>,
+    task_map: Option<&std::collections::HashMap<String, String>>,
+) -> Vec<crate::plan::PlanTaskEntry> {
+    tasks
+        .into_iter()
+        .map(|mut spec| {
+            if spec.issue_id.is_none() {
+                if let Some(map) = task_map {
+                    if let Some(beads_id) = map.get(&spec.task_id) {
+                        spec.issue_id = Some(beads_id.clone());
+                    }
+                }
+            }
+            crate::plan::PlanTaskEntry {
+                spec,
+                status: crate::plan::PlanTaskStatus::Pending,
+                result: None,
+                worker_branch: None,
+                attempt: 1,
+                history: Vec::new(),
+                last_delegation_id: None,
+            }
+        })
+        .collect()
 }
 
 /// Truncate a task description to a reasonable issue-title length.
@@ -1823,17 +1907,18 @@ impl McpCallbackServer {
             None
         };
 
-        let entries: Vec<crate::plan::PlanTaskEntry> = tasks
-            .into_iter()
-            .map(|spec| crate::plan::PlanTaskEntry {
-                spec,
-                status: crate::plan::PlanTaskStatus::Pending,
-                result: None,
-                worker_branch: None,
-                attempt: 1,
-                history: Vec::new(),
-            })
-            .collect();
+        // v0a.2: Emit PlanSubmit audit sentinel comment on the epic. Advisory —
+        // failure is warned and swallowed. See docs/superpowers/plans/
+        // 2026-04-20-adaptive-plan-repair-v0a.md "Review addendum II" for why
+        // comments (not br audit record) are the audit transport.
+        if let Some(sg) = &epic_subgraph {
+            if let Some(adv) = self.pm_service.as_deref().and_then(|pm| pm.advanced()) {
+                emit_plan_submit_audit(adv, &plan_id, sg).await;
+            }
+        }
+
+        let entries: Vec<crate::plan::PlanTaskEntry> =
+            build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
 
         let task_count = entries.len();
         let state = crate::plan::PlanState {
@@ -1852,8 +1937,16 @@ impl McpCallbackServer {
         // Spawn the plan executor.
         let delegation_tx = self.delegation_tx.clone();
         let plan_sink = self.event_sink.clone();
-        self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink));
+        let plan_pm = self
+            .pm_service
+            .clone()
+            .map(|p| p as Arc<dyn crate::plan::PmLike>);
+        self.task_tracker.spawn(crate::plan::run_plan(
+            state,
+            delegation_tx,
+            plan_sink,
+            plan_pm,
+        ));
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
@@ -2025,6 +2118,7 @@ impl McpCallbackServer {
                 worker_branch: None,
                 attempt: 1,
                 history: Vec::new(),
+                last_delegation_id: None,
             })
             .collect();
 
@@ -2079,8 +2173,16 @@ impl McpCallbackServer {
         }
         let delegation_tx = self.delegation_tx.clone();
         let plan_sink = self.event_sink.clone();
-        self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink));
+        let plan_pm = self
+            .pm_service
+            .clone()
+            .map(|p| p as Arc<dyn crate::plan::PmLike>);
+        self.task_tracker.spawn(crate::plan::run_plan(
+            state,
+            delegation_tx,
+            plan_sink,
+            plan_pm,
+        ));
 
         info!(
             plan_id = %plan_id,
@@ -2273,11 +2375,12 @@ impl McpCallbackServer {
 
         // INV-5: use handle_review_task so the plan lock is dropped before
         // pm.update_issue() is called.  The pm_service field stores a concrete
-        // Arc<PmService>; deref as &dyn PmLike for the call.
-        let pm_like: Option<&dyn crate::plan::PmLike> = self
+        // Arc<PmService>; coerce to Arc<dyn PmLike> so spawned completion
+        // futures can emit audit sentinels after the lock is released.
+        let pm_arc: Option<std::sync::Arc<dyn crate::plan::PmLike>> = self
             .pm_service
-            .as_deref()
-            .map(|s| s as &dyn crate::plan::PmLike);
+            .clone()
+            .map(|s| s as std::sync::Arc<dyn crate::plan::PmLike>);
 
         let result = crate::plan::handle_review_task(
             plan_arc,
@@ -2285,7 +2388,7 @@ impl McpCallbackServer {
             &task_id,
             decision,
             feedback,
-            pm_like,
+            pm_arc,
             sink,
             Some(&self.delegation_tx),
             Some(&self.task_tracker),
@@ -2294,7 +2397,6 @@ impl McpCallbackServer {
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
-
 }
 
 impl ServerHandler for McpCallbackServer {

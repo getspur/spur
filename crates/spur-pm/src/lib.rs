@@ -8,11 +8,8 @@ pub mod service;
 pub mod types;
 
 pub use adapter::{IssueTracker, PrService};
-pub use advanced::{
-    AuditEntry, AuditEntryType, AuditId, AuditRecordInput, BeadsAdvanced, Comment, CommentId,
-    DependencyCycle, ReadyFilter,
-};
-pub use beads::BeadsAdapter;
+pub use advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter};
+pub use beads::{BeadsAdapter, PollCursor};
 pub use bv::BvAdapter;
 pub use github::GitHubAdapter;
 pub use service::PmService;
