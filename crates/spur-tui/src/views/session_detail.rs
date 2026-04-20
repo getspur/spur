@@ -298,7 +298,19 @@ impl SessionDetailView {
         self.picker_shell = None;
         self.resume_banner = None;
 
-        // Marks — header/status fields land in Task 3; draft locals in Task 4.
+        // Header / status.
+        self.cost = 0.0;
+        self.started_at = std::time::Instant::now();
+        self.current_mode = None;
+        self.react_trace.set_mode(None); // mirror for pane-title badge (set_current_mode pattern)
+        self.context_used = None;
+        self.context_size = None;
+        self.auth_error = None;
+        // Stream flags.
+        self.stream_in_flight = false;
+        self.cancelling_in_flight = false;
+
+        // Marks — draft locals land in Task 4.
         self.cleared = true;
         self.ready_banner = Some(READY_BANNER_TEXT.to_string());
     }
@@ -2363,5 +2375,32 @@ mod tests {
             view.ready_banner_text(),
             Some(READY_BANNER_TEXT)
         );
+    }
+
+    #[test]
+    fn reset_for_clear_clears_header_status_fields() {
+        let mut view = SessionDetailView::new_for_palette_test(
+            crate::commands::CommandRegistry::default(),
+        );
+        // Seed via existing public APIs.
+        view.set_current_mode(Some("plan".into()));
+        view.cost = 1.23;
+        view.context_used = Some(1234);
+        view.context_size = Some(200_000);
+        view.auth_error = Some("auth failed".into());
+        view.stream_in_flight = true;
+        view.cancelling_in_flight = true;
+
+        view.reset_for_clear();
+
+        assert_eq!(view.cost, 0.0);
+        assert_eq!(view.current_mode, None);
+        assert_eq!(view.context_used, None);
+        assert_eq!(view.context_size, None);
+        assert_eq!(view.auth_error, None);
+        assert!(!view.stream_in_flight);
+        assert!(!view.cancelling_in_flight);
+        // react_trace's mode mirror must also reset.
+        assert_eq!(view.react_trace.current_mode(), None);
     }
 }

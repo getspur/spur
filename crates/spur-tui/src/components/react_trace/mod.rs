@@ -255,6 +255,11 @@ impl ReactTrace {
         self.invalidate_cache();
     }
 
+    /// Current session mode id, if set.
+    pub fn current_mode(&self) -> Option<&str> {
+        self.current_mode.as_deref()
+    }
+
     /// Wipe all entries and scroll state. Preserves `agent_kind`,
     /// `mermaid_enabled`, `compact` (config) — only conversation content
     /// and derived caches are cleared. Used by `/clear` view reset.
