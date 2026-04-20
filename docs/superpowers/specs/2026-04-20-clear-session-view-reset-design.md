@@ -120,18 +120,21 @@ This arm is idempotent against §3.3 — calling `reset_for_clear()` twice on an
 
 **Problem (reviewer-flagged [CONCERN]):** `SessionDetailView::force_save_draft` (`session_detail.rs:275-287`) emits `Action::SaveDraft { session_id: self.session_id.0.clone(), draft }`. After §3.1, the view's `session_id` still points at the retired session. When the next `BrainSpawned` arrives, the replacement path at `app.rs:926-975` calls `force_flush_active_draft` (`app.rs:1811-1818`) — which would save whatever the user typed *after* `/clear` into the retired session's metadata entry. The fresh view then calls `restore_draft` (`app.rs:947-948`) keyed on the new `spur_session_id` and finds nothing. Net: the user's post-`/clear` typing is lost to the wrong session.
 
-**Resolution — carry-over via a `cleared` marker:**
+**Resolution — carry-over via a `cleared` marker + source-level save gating:**
 
 1. Add `cleared: bool` field to `SessionDetailView`, default `false`.
-2. `reset_for_clear` sets `cleared = true` and also resets `last_persisted_draft` to `""` and `last_draft_change_at` to `None` (so the debounce cannot fire and write the carryover text back under the retired id).
-3. In `app.rs:926-975` (the `needs_new`-true branch), before constructing the new view:
-   - If `old_detail.cleared == true`, capture `old_detail.input_bar_text().to_string()` into a local `carryover: String`.
-   - **Skip** `force_flush_active_draft` for a `cleared` view (guard: `if !detail.cleared { self.force_flush_active_draft() }`). Its text does not belong to the retired session; writing it there would corrupt that session's saved draft.
-4. After the new view is constructed and `restore_draft` has run:
-   - If `carryover.is_empty() == false`, call `new_view.restore_draft(&carryover)` so the new view's InputBar + `last_persisted_draft` reflect the user's intended prompt. The carryover wins over any metadata draft for the new session (which would normally be empty anyway for a freshly-minted `spur_session_id`).
-5. After replacement, the old view is dropped as usual.
+2. `reset_for_clear` sets `cleared = true` and also resets `last_persisted_draft` to `""` and `last_draft_change_at` to `None`.
+3. **Gate draft emission at the source (critical).** Both `force_save_draft` (`session_detail.rs:275-287`) and `draft_save_action` (`session_detail.rs:250-266`, called from `App::tick`) must return `None` early when `self.cleared == true`. This is the load-bearing guard — the debounce path runs on every keystroke independently of the replacement path, so gating only at the replacement-path call site is insufficient. A cleared view's `session_id` is opaque and any `Action::SaveDraft` keyed on it would corrupt the retired session's metadata.
+4. In the view-replacement branch (`app.rs:919-975`, `needs_new = true`), before constructing the new view:
+   - If `old_detail.is_cleared()`, capture `old_detail.input_bar_text()` into a local `carryover: String` (owned — `input_bar_text` returns `String`).
+   - Call `force_flush_active_draft` unconditionally — the source-level guard in step 3 makes it a no-op for a cleared view, so no extra call-site gating is needed here.
+5. After the new view is constructed and `restore_draft(&entry.draft)` has run:
+   - If `!carryover.is_empty()`, call `new_view.restore_draft(&carryover)`. This overwrites the metadata-restored draft (normally empty on a freshly-minted `spur_session_id`) and marks `last_persisted_draft = carryover` so the next debounce tick is a no-op.
+6. After replacement, the old view is dropped as usual.
 
-**Invariant:** once a view is `cleared`, its `session_id` is treated as opaque — no metadata writes target it. The view exists only to host the banner, the InputBar, and the carryover text until a new `BrainSpawned` replaces it.
+**Invariant:** once a view is `cleared`, no `Action::SaveDraft` keyed on its `session_id` may be emitted by any path — force-flush, debounce tick, or anything else. The cleared view hosts the banner, InputBar, and carry-over text only; it is metadata-inert.
+
+**Why source-level gating, not call-site gating?** `SessionDetailView` emits `SaveDraft` from two methods (`force_save_draft`, `draft_save_action`). The replacement path only invokes one; the other runs on the tick loop every frame while the user is typing post-`/clear`. Guarding only the call site leaves the tick-path leak open. Guarding at the source closes both.
 
 **Why not clear the draft at reset time?** The user may have typed the prompt they want the new brain to see *before* hitting Enter on `/clear` (or between `/clear` and the next prompt). Dropping it would be a UX regression.
 
@@ -196,6 +199,18 @@ Added to `#[cfg(test)] mod brain_retired_tests` in `app.rs`:
     - new view for B has `InputBar` text `"post-clear-prompt"` (carryover applied);
     - new view's `last_persisted_draft == "post-clear-prompt"` (the carryover's `restore_draft` marked it persisted, so the next debounce tick does not re-save it under B).
 11. **`draft_carryover_empty_is_noop`** (edge case) — `/clear` with empty `InputBar`; `BrainSpawned`; assert new view's `InputBar` is empty (no-op carryover) and metadata for neither session was written.
+
+### 3.6 Error handling on `/clear` send failure
+
+`Action::ClearSession` sends `UserInput::NewSessionWithMessage{blocks:empty}` over a bounded channel. The pre-revision code uses `let _ = tx.try_send(...)`, silently dropping on failure. Post-`reset_for_clear`, a silent drop creates a **ghost-cleared state**: the pane is visibly wiped and the ready banner is shown, but the brain is never actually retired.
+
+**Resolution:**
+
+1. Reorder: call `tx.try_send(...)` **before** `reset_for_clear`. Only call `reset_for_clear` if the send succeeded.
+2. On `Err`, emit `tracing::error!(err = ?e, "Action::ClearSession: user_input tx send failed — brain not retired; view NOT reset to avoid ghost-cleared state")`. The user sees nothing changed and will retry — which is the correct affordance.
+3. Also set `brain_status = Idle` only on send success: an `Err` leaves the brain active, so the status line should reflect that.
+
+This trades a very rare edge case (channel full/closed) for a correctness guarantee: the UI state and brain state stay consistent.
 
 ## 7. Risks & open questions
 
