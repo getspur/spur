@@ -19,6 +19,9 @@ use crate::input_history::InputHistoryEntry;
 
 use super::View;
 
+const READY_BANNER_TEXT: &str =
+    "✨ Session cleared — your next prompt starts a fresh brain.";
+
 /// Full-screen view of a brain session's ReAct trace with chat input.
 pub struct SessionDetailView {
     session_id: SessionId,
@@ -107,6 +110,18 @@ pub struct SessionDetailView {
     /// `prepend_worker_hint` to filter unknown-name atoms out of
     /// the hint.
     known_worker_names: std::collections::HashSet<String>,
+
+    /// True once this view has been reset by `/clear` and is waiting for
+    /// the next `BrainSpawned` to be replaced. While `cleared`, the view's
+    /// `session_id` is treated as opaque — `force_save_draft` and
+    /// `draft_save_action` both return `None` early so no metadata write
+    /// can target the retired session. See spec §3.5.
+    cleared: bool,
+
+    /// Transient banner rendered in the same layout slot as
+    /// `resume_banner` when the view has been cleared. Cleared by
+    /// construction of the next view (replacement drops it naturally).
+    ready_banner: Option<String>,
 }
 
 impl SessionDetailView {
@@ -161,6 +176,8 @@ impl SessionDetailView {
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names,
+            cleared: false,
+            ready_banner: None,
         }
     }
 
@@ -218,6 +235,8 @@ impl SessionDetailView {
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names: std::collections::HashSet::new(),
+            cleared: false,
+            ready_banner: None,
         }
     }
 
@@ -306,6 +325,16 @@ impl SessionDetailView {
     /// Current text content of the InputBar (read-only accessor for tests).
     pub fn input_bar_text(&self) -> String {
         self.input_bar.text()
+    }
+
+    /// True once this view has been reset for `/clear` and is awaiting replacement.
+    pub fn is_cleared(&self) -> bool {
+        self.cleared
+    }
+
+    /// The ready-banner text for this view, if any.
+    pub fn ready_banner_text(&self) -> Option<&str> {
+        self.ready_banner.as_deref()
     }
 
     /// Install the graphics `Picker` used to build inline mermaid protocols.
@@ -2234,5 +2263,22 @@ mod extract_tool_call_text_tests {
     fn extract_tool_call_text_returns_none_for_empty_content() {
         let content: Vec<spur_acp::ToolCallContent> = vec![];
         assert!(extract_tool_call_text(&content).is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_view_defaults_cleared_false_and_no_ready_banner() {
+        let view = SessionDetailView::new_for_palette_test(
+            crate::commands::CommandRegistry::default(),
+        );
+        assert!(!view.is_cleared(), "new view must default cleared=false");
+        assert!(
+            view.ready_banner_text().is_none(),
+            "new view must not start with a ready banner"
+        );
     }
 }
