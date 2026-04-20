@@ -421,6 +421,28 @@ impl App {
         spur_acp::AgentConfig::with_defaults(name)
     }
 
+    /// Derive the `WorkerMentionDescriptor` snapshot from the loaded
+    /// agent config. Filtered to roles that can serve as a worker
+    /// (matches `AgentRegistry::worker_capable` semantics).
+    fn build_worker_snapshot(&self) -> Vec<crate::mentions::WorkerMentionDescriptor> {
+        use spur_acp::config::Tier;
+        use spur_acp::types::AgentRole;
+        self.config
+            .agents
+            .entries
+            .iter()
+            .filter(|cfg| matches!(cfg.role, AgentRole::Worker | AgentRole::Both))
+            .map(|cfg| crate::mentions::WorkerMentionDescriptor {
+                name: cfg.name.clone(),
+                description: cfg.delegation.description.clone(),
+                tier: cfg.delegation.tier.map(|t| match t {
+                    Tier::Specialist => "specialist".to_string(),
+                    Tier::Generalist => "generalist".to_string(),
+                }),
+            })
+            .collect()
+    }
+
     /// Dispatch a crossterm event (keyboard, resize, mouse, etc.) to the active view.
     pub fn handle_crossterm_event(&mut self, event: Event) {
         match event {
@@ -763,6 +785,7 @@ impl App {
                         "brain".to_string(),
                         std::env::current_dir().unwrap_or_default(),
                         agent_cfg,
+                        self.build_worker_snapshot(),
                     );
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());

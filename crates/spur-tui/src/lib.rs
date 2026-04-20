@@ -51,6 +51,7 @@ pub mod test_support {
             "brain".to_string(),
             std::path::PathBuf::from("."),
             default_agent_config("test-agent"),
+            Vec::new(),
         )
     }
 

@@ -302,13 +302,19 @@ impl QuerySource for MentionQuerySource {
             .iter()
             .map(|m| {
                 let icon = match m.kind {
-                    MentionKind::Directory => "\u{1F4C1}",
-                    MentionKind::File => "\u{1F4C4}",
+                    MentionKind::Directory => "\u{1F4C1}", // 📁
+                    MentionKind::File => "\u{1F4C4}",      // 📄
+                    MentionKind::Worker => "\u{1F916}",    // 🤖
                 };
+                let tag_render = m
+                    .tag
+                    .clone()
+                    .map(|t| format!("\u{27E8}{}\u{27E9}", t)) // ⟨tier⟩
+                    .unwrap_or_default();
                 RetrievalRow {
                     primary: format!("{} @{}", icon, m.display),
-                    secondary: String::new(),
-                    tag: String::new(),
+                    secondary: m.secondary.clone().unwrap_or_default(),
+                    tag: tag_render,
                     atoms: Vec::new(),
                 }
             })
