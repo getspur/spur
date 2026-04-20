@@ -8,8 +8,9 @@
 //! addendum II in docs/superpowers/plans/2026-04-20-adaptive-plan-repair-v0a.md
 //! for the rationale — upstream AGENTS.md designates bv as the canonical
 //! pick-next-work surface). Fallback: `br ready` via BeadsAdvanced when bv
-//! errors. Both paths filter on the `spur:plan-complete` marker so only
-//! fully-persisted plans are observed.
+//! errors. The bv primary path enforces the `spur:plan-complete` guard; the br
+//! fallback uses `spur:plan-id:<id>` scoping only (degraded-mode semantics —
+//! see `observe_ready_via_br` doc comment).
 //!
 //! # Spawn wiring
 //!
@@ -125,11 +126,38 @@ impl Reconciler {
             }
         }
 
-        // Fallback: br ready with labels_all = [PLAN_COMPLETE, plan_id_label?]
+        // Fallback: br ready via observe_ready_via_br.
+        self.observe_ready_via_br().await
+    }
+
+    /// Fallback ready-task query using `br ready` (BeadsAdvanced) directly.
+    ///
+    /// # Degraded-mode semantics
+    ///
+    /// `spur:plan-complete` is an epic-only marker — tasks never carry it, so
+    /// including it in a `ReadyFilter` (which queries tasks, not epics) always
+    /// returns empty. The `bv` primary path is the real guard against observing
+    /// partially-persisted plan graphs; this fallback scopes only by
+    /// `spur:plan-id:<id>` (when `plan_id` is `Some`), accepting that a partial
+    /// plan could leak through in the rare window where bv is unhealthy and the
+    /// caller passed a plan_id that was not fully persisted. This tradeoff is
+    /// acceptable for v0a.2: fallback only triggers on bv failures, and callers
+    /// are expected to target fully-persisted plans.
+    ///
+    /// "Observe all plans" mode (`plan_id` is `None`): no label filter is
+    /// applied; all unblocked tasks are returned. Partial-plan protection is
+    /// entirely absent in this mode — document as v0a.2 limitation.
+    pub async fn observe_ready_via_br(&self) -> anyhow::Result<Vec<String>> {
+        let label_filter = self.plan_id.as_deref().map(crate::plan::labels::plan_id);
+
         let Some(adv) = self.pm.advanced() else {
             anyhow::bail!("reconciler: no advanced (beads) backend available");
         };
-        let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
+        // Fallback is degraded-mode observation. The PLAN_COMPLETE gate is
+        // enforced in the bv primary path; here we rely on the caller's plan_id
+        // scoping. Partial plans may leak through during fallback — acceptable
+        // tradeoff for v0a.2 since fallback only triggers on bv failures (rare).
+        let mut labels = Vec::new();
         if let Some(pid_label) = label_filter {
             labels.push(pid_label);
         }

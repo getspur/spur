@@ -1,8 +1,9 @@
-//! Integration test: `Reconciler::observe_ready` returns only unblocked tasks
-//! under a plan filter.
+//! Integration tests for `Reconciler`.
 //!
-//! Requires `br` on PATH; skipped otherwise. `bv` is optional — if absent the
-//! reconciler falls back to `br ready` which is what this test exercises.
+//! # `observe_ready_returns_unblocked_task_only`
+//!
+//! Exercises the `observe_ready` bv-primary path (falls through to br if bv
+//! absent). Requires `br` on PATH; skipped otherwise.
 //!
 //! Setup:
 //!   - temp beads workspace, `br init`
@@ -13,6 +14,15 @@
 //! Assertion:
 //!   - `observe_ready` returns a list containing task A's id
 //!   - task B is NOT in the list (blocked by A)
+//!
+//! # `observe_ready_via_br_returns_ready_tasks`
+//!
+//! Exercises the br fallback path (`observe_ready_via_br`) directly, bypassing
+//! the bv primary path entirely. Verifies the corrected filter (plan_id only,
+//! no PLAN_COMPLETE) correctly identifies unblocked tasks.
+//!
+//! Same fixture as above; calls `observe_ready_via_br()` instead of
+//! `observe_ready()`.
 
 use std::path::Path;
 use std::process::Command;
@@ -162,5 +172,92 @@ async fn observe_ready_returns_unblocked_task_only() {
     assert!(
         !ready_ids.contains(&task_b_id),
         "task B ({task_b_id}) is blocked and must not be in ready list; got: {ready_ids:?}"
+    );
+}
+
+/// Exercises the br fallback path directly via `observe_ready_via_br`.
+///
+/// This test bypasses the bv primary path and calls the br fallback helper
+/// directly. It verifies that the corrected filter (spur:plan-id:<id> only,
+/// no spur:plan-complete) correctly identifies unblocked tasks — tasks never
+/// carry PLAN_COMPLETE, which is an epic-only marker.
+#[tokio::test]
+async fn observe_ready_via_br_returns_ready_tasks() {
+    if !br_available() {
+        eprintln!("skipping observe_ready_via_br: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    // --- Create epic + 2 tasks ---
+    let epic_json = run_br_json(
+        dir.path(),
+        &["create", "--type", "epic", "--title", "Plan P1 Epic (br fallback)", "--priority", "2"],
+    );
+    let epic_id = parse_id_from_create(&epic_json);
+
+    let task_a_json = run_br_json(
+        dir.path(),
+        &["create", "--type", "task", "--title", "Task A (unblocked, br path)", "--priority", "2"],
+    );
+    let task_a_id = parse_id_from_create(&task_a_json);
+
+    let task_b_json = run_br_json(
+        dir.path(),
+        &["create", "--type", "task", "--title", "Task B (blocked by A, br path)", "--priority", "2"],
+    );
+    let task_b_id = parse_id_from_create(&task_b_json);
+
+    // --- Task B depends on Task A (B is blocked by A) ---
+    run_br(dir.path(), &["dep", "add", &task_b_id, &task_a_id]);
+
+    // --- Label all three with plan-id:P1 ---
+    let plan_label = labels::plan_id("P1");
+    label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &task_a_id, &plan_label);
+    label_issue(dir.path(), &task_b_id, &plan_label);
+
+    // --- Label epic with spur:plan-complete (tasks do NOT get this label) ---
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    // --- Construct PmService ---
+    let pm = spur_pm::PmService::try_new(
+        None,   // no github_repo
+        true,   // beads_enabled
+        false,  // github_enabled
+        dir.path(),
+        None,   // closed_status default
+    )
+    .await
+    .expect("PmService::try_new failed")
+    .expect("expected Some(PmService) — beads dir must exist after br init");
+    let pm = Arc::new(pm);
+
+    // --- Build reconciler scoped to plan P1 ---
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some("P1".into()),
+    );
+
+    // --- Call the br fallback path directly (bypasses bv entirely) ---
+    let ready_ids = reconciler
+        .observe_ready_via_br()
+        .await
+        .expect("observe_ready_via_br must not fail");
+
+    // Task A is unblocked — must appear in the br fallback result.
+    assert!(
+        ready_ids.contains(&task_a_id),
+        "expected task A ({task_a_id}) in br fallback ready list; got: {ready_ids:?}"
+    );
+
+    // Task B is blocked by A — must NOT appear.
+    assert!(
+        !ready_ids.contains(&task_b_id),
+        "task B ({task_b_id}) is blocked and must not be in br fallback ready list; got: {ready_ids:?}"
     );
 }
