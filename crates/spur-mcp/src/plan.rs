@@ -966,6 +966,18 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                                 obj["diff_summary"] = v;
                             }
                         }
+                        if let Some(ref art) = result.artifact {
+                            obj["artifact"] = serde_json::json!({
+                                "object_ref": art.object_ref,
+                                "blob_sha": art.blob_sha,
+                                "size_bytes": art.size_bytes,
+                                "kind": art.kind,
+                                "retrieval_hint": format!(
+                                    "git cat-file -p {}",
+                                    art.object_ref
+                                ),
+                            });
+                        }
                     }
                 }
                 PlanTaskStatus::Rejected { feedback } => {
@@ -975,6 +987,20 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                     }
                     if let Some(ref wb) = t.worker_branch {
                         obj["worker_branch"] = wb.clone().into();
+                    }
+                    if let Some(ref result) = t.result {
+                        if let Some(ref art) = result.artifact {
+                            obj["artifact"] = serde_json::json!({
+                                "object_ref": art.object_ref,
+                                "blob_sha": art.blob_sha,
+                                "size_bytes": art.size_bytes,
+                                "kind": art.kind,
+                                "retrieval_hint": format!(
+                                    "git cat-file -p {}",
+                                    art.object_ref
+                                ),
+                            });
+                        }
                     }
                 }
                 PlanTaskStatus::Failed { error } => {
@@ -1082,6 +1108,21 @@ pub(crate) fn build_task_diff_fields(
     }
     if let Some(ref s) = result.summary {
         out.push(("summary".into(), json!(s)));
+    }
+    if let Some(art) = &result.artifact {
+        out.push((
+            "artifact".into(),
+            json!({
+                "object_ref": art.object_ref,
+                "blob_sha": art.blob_sha,
+                "size_bytes": art.size_bytes,
+                "kind": art.kind,
+                "retrieval_hint": format!(
+                    "git cat-file -p {}",
+                    art.object_ref
+                ),
+            }),
+        ));
     }
     out
 }
@@ -3206,5 +3247,53 @@ mod tests {
         );
         assert!(!m.contains_key("diff_status"));
         assert!(!m.contains_key("diff_basis"));
+    }
+
+    #[test]
+    fn build_task_diff_fields_includes_artifact_when_present() {
+        use spur_acp::{ArtifactKind, DelegationResult, DelegationStatus, WorkerArtifact};
+
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("truncated".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: Some(WorkerArtifact {
+                object_ref: "refs/spur/artifacts/xyz".into(),
+                blob_sha: "d".repeat(40),
+                size_bytes: 99_999,
+                kind: ArtifactKind::Output,
+            }),
+        };
+        let fields = super::build_task_diff_fields(&result);
+        let map: std::collections::HashMap<String, serde_json::Value> =
+            fields.into_iter().collect();
+        let art = map
+            .get("artifact")
+            .expect("artifact field must be surfaced");
+        assert_eq!(art["object_ref"], "refs/spur/artifacts/xyz");
+        assert_eq!(art["size_bytes"], 99_999);
+        assert_eq!(art["kind"], "output");
+    }
+
+    #[test]
+    fn build_task_diff_fields_omits_artifact_when_absent() {
+        use spur_acp::{DelegationResult, DelegationStatus};
+
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        };
+        let fields = super::build_task_diff_fields(&result);
+        let map: std::collections::HashMap<String, serde_json::Value> =
+            fields.into_iter().collect();
+        assert!(!map.contains_key("artifact"));
     }
 }
