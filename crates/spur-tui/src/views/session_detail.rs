@@ -328,6 +328,7 @@ impl SessionDetailView {
             .as_ref()
             .map(|b| b.should_render())
             .unwrap_or(false)
+            || self.ready_banner.is_some()
     }
 
     /// Test/debug helper. Overrides the internal debounce clock so tests can
@@ -1764,6 +1765,17 @@ impl SessionDetailView {
         // ── Resume banner (top row, if visible) ─────────────────────────
         if let (Some(banner), Some(rect)) = (self.resume_banner.as_ref(), resume_banner_area) {
             banner.render(frame, rect);
+            if self.ready_banner.is_some() {
+                tracing::warn!(
+                    "ready_banner and resume_banner both set — auto-resume wins (spec R3 violation)"
+                );
+            }
+        } else if let (Some(ready_text), Some(rect)) =
+            (self.ready_banner.as_ref(), resume_banner_area)
+        {
+            let styled = Paragraph::new(ready_text.as_str())
+                .style(Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC));
+            frame.render_widget(styled, rect);
         }
     }
 
@@ -2468,6 +2480,52 @@ mod tests {
         assert_eq!(banner1, banner2);
         assert!(view.is_cleared());
         assert!(view.tool_depth.is_empty());
+    }
+
+    #[test]
+    fn ready_banner_renders_when_cleared() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut view = SessionDetailView::new_for_palette_test(
+            crate::commands::CommandRegistry::default(),
+        );
+        view.reset_for_clear();
+
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+            std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        let ctx = crate::views::ViewContext {
+            lineage: &LINEAGE,
+            brain_status: &crate::app::BrainStatus::Idle,
+            license_badge: None,
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                <SessionDetailView as crate::views::View>::render(
+                    &mut view,
+                    f,
+                    f.area(),
+                    &ctx,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("Session cleared"),
+            "ready banner text must appear. Rendered:\n{rendered}"
+        );
     }
 
     #[test]
