@@ -2,10 +2,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_tui::components::input_bar::InputBar;
 
 fn press(bar: &mut InputBar, code: KeyCode) {
-    bar.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    let _ = bar.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
 }
 fn ctrl(bar: &mut InputBar, c: char) {
-    bar.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    let _ = bar.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
 }
 fn type_str(bar: &mut InputBar, s: &str) {
     for c in s.chars() {
