@@ -216,40 +216,108 @@ impl DetailPane {
         issue_badge: Option<&str>,
         stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
     ) {
-        // Source-of-truth for the follow badge:
-        // - Stream tab with a live trace: the trace's own anchor. This is
-        //   the authoritative viewport state for the ReactTrace widget.
-        //   Without this, the pane's local flag would desync from the
-        //   trace's anchor after a user-driven scroll.
-        // - Stream tab without a trace (placeholder path): default to
-        //   "following" so the initial render doesn't look stalled.
-        // - Non-Stream tabs: the pane's own local flag, which tracks the
-        //   per-tab bottom-follow behavior.
-        let following = match self.current_tab {
-            DetailTab::Stream => stream_trace
-                .as_deref()
-                .map(|t| t.is_following())
-                .unwrap_or(true),
-            _ => self.is_following,
+        // ── 1. Compute the trace-follow flag (Stream tab authoritative
+        //       source) before any rendering side-effects. ─────────────
+        let trace_following: Option<bool> = match self.current_tab {
+            DetailTab::Stream => stream_trace.as_deref().map(|t| t.is_following()),
+            _ => None,
         };
-        let following_indicator = if following { " ▼ following " } else { "" };
 
+        // ── 2. Skeleton block — shape-equivalent to the final block so
+        //       Block::inner() returns the same rect. ──────────────────
+        //
+        // Every title POSITION that will appear on the final block must
+        // also appear on the skeleton. Content can be placeholder because
+        // inner() is a function of borders + title presence, not content.
+        let mut skeleton = Block::default()
+            .borders(Borders::ALL)
+            .title(" ")              // matches final top-left (agent name)
+            .title_bottom(" ");      // matches final bottom-left (scroll_label)
+        if issue_badge.is_some() {
+            skeleton = skeleton
+                .title_top(Line::from(" ").alignment(Alignment::Right))   // matches final top-right (badge)
+                .title_bottom(Line::from(" ").alignment(Alignment::Right)); // matches final bottom-right ([I]ssue)
+        }
+        let inner = skeleton.inner(area);
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+        let body_area = chunks[1];
+
+        // ── 3. Compute body content + metrics for non-Stream (and Stream
+        //       placeholder) paths. For Stream-with-trace, body is owned
+        //       by ReactTrace::render_compact; total/visible still
+        //       meaningful only for the `scroll_label` derivation. ─────
+        let stream_with_trace = matches!(self.current_tab, DetailTab::Stream)
+            && stream_trace.is_some();
+
+        // `wrapped` is only populated for paths that render a Paragraph.
+        let mut wrapped: Vec<Line<'static>> = Vec::new();
+        let visible_h = body_area.height as usize;
+        let total: usize;
+
+        if stream_with_trace {
+            // ReactTrace owns the body; we do not wrap. `total` is not used
+            // for the Stream label (trace_following is authoritative).
+            total = 0;
+        } else {
+            let body_lines = match self.current_tab {
+                DetailTab::Stream => {
+                    // No trace materialized yet (orphan event or first-load race).
+                    vec![Line::from(Span::styled(
+                        "(no stream yet)",
+                        Style::default().fg(Color::DarkGray),
+                    ))]
+                }
+                DetailTab::Artifacts => self.render_artifacts(node),
+                DetailTab::Attempts => self.render_attempts(node),
+                DetailTab::Task => self.render_task(node),
+                DetailTab::Review => self.render_review(node),
+            };
+            wrapped = body_lines
+                .iter()
+                .flat_map(|l| crate::components::line_wrap::wrap_line_to_width(l, body_area.width))
+                .collect();
+            total = wrapped.len();
+        }
+
+        // ── 4. Apply the scroll clamp + re-engage-following BEFORE
+        //       deriving the label and rendering the block. This fixes
+        //       the one-frame lag where the border used to show stale
+        //       "not following" on the frame the user reached bottom. ─
+        if !stream_with_trace {
+            let max_offset = total.saturating_sub(visible_h);
+            if self.is_following {
+                self.scroll_offset = max_offset;
+            } else {
+                self.scroll_offset = self.scroll_offset.min(max_offset);
+                if self.scroll_offset >= max_offset && max_offset > 0 {
+                    self.is_following = true;
+                }
+            }
+        }
+
+        // ── 5. Derive the scroll label from final post-clamp state. ──
+        let scroll_label_text = scroll_label(
+            self.current_tab,
+            total,
+            visible_h,
+            self.scroll_offset,
+            self.is_following,
+            trace_following,
+        );
+
+        // ── 6. Build the real block with all titles. ─────────────────
         let mut block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", node.agent))
-            .title_bottom(following_indicator);
-
+            .title_bottom(scroll_label_text.as_ref().to_string());
         if let Some(badge) = issue_badge {
-            block = block.title_top(Line::from(format!(" {} ", badge)).alignment(Alignment::Right));
-            block = block.title_bottom(Line::from(" [I]ssue detail ").alignment(Alignment::Right));
+            block = block
+                .title_top(Line::from(format!(" {} ", badge)).alignment(Alignment::Right))
+                .title_bottom(Line::from(" [I]ssue detail ").alignment(Alignment::Right));
         }
-
-        let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
-
-        // Tab bar
+        // ── 7. Render tabs. ──────────────────────────────────────────
         let titles: Vec<Line> = DetailTab::all()
             .iter()
             .map(|t| {
@@ -273,64 +341,12 @@ impl DetailPane {
             .divider("│");
         frame.render_widget(tabs, chunks[0]);
 
-        // Body
-        let body_area = chunks[1];
-        let visible_h = body_area.height as usize;
-
-        // For the Stream tab, delegate to ReactTrace when available.
-        if self.current_tab == DetailTab::Stream {
-            if let Some(trace) = stream_trace {
-                // Delegate to the compact ReactTrace body renderer.
-                // `render_compact` paints ONLY the body — DetailPane
-                // owns the outer block. Using `ReactTrace::render`
-                // here would double-draw borders.
-                trace.render_compact(frame, body_area);
-                // Scroll state lives on trace.anchor, not DetailPane's
-                // scroll_offset. Other tabs still use scroll_offset.
-                return;
-            }
+        // ── 8. Render body. ──────────────────────────────────────────
+        if stream_with_trace {
+            let trace = stream_trace.expect("stream_with_trace implies Some");
+            trace.render_compact(frame, body_area);
+            return;
         }
-
-        let body_lines = match self.current_tab {
-            DetailTab::Stream => {
-                // No trace materialized yet (orphan event or first-load race).
-                // Placeholder; production code paths always produce a trace
-                // via App::handle_spur_event.
-                vec![Line::from(Span::styled(
-                    "(no stream yet)",
-                    Style::default().fg(Color::DarkGray),
-                ))]
-            }
-            DetailTab::Artifacts => self.render_artifacts(node),
-            DetailTab::Attempts => self.render_attempts(node),
-            DetailTab::Task => self.render_task(node),
-            DetailTab::Review => self.render_review(node),
-        };
-
-        // Pre-wrap at the body width so `max_offset` reflects the actual
-        // number of rendered rows. Previously `Paragraph::wrap` wrapped at
-        // render time while the ceiling was computed from unwrapped
-        // `body_lines.len()`, which clipped scroll above the true bottom
-        // on long single-line content (e.g., a 500-char task spec).
-        let wrapped: Vec<Line<'static>> = body_lines
-            .iter()
-            .flat_map(|l| {
-                crate::components::line_wrap::wrap_line_to_width(l, body_area.width)
-            })
-            .collect();
-        let total = wrapped.len();
-        let max_offset = total.saturating_sub(visible_h);
-        if self.is_following {
-            self.scroll_offset = max_offset;
-        } else {
-            self.scroll_offset = self.scroll_offset.min(max_offset);
-            // Re-engage following when user scrolls to the bottom
-            if self.scroll_offset >= max_offset && max_offset > 0 {
-                self.is_following = true;
-            }
-        }
-
-        // Input is already wrapped; don't re-wrap inside Paragraph.
         let p = Paragraph::new(wrapped).scroll((self.scroll_offset as u16, 0));
         frame.render_widget(p, body_area);
     }
