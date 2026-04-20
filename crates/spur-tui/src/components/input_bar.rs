@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
 use crate::components::completion_trigger::IntentEvent;
-use crate::input_history::{HISTORY_CAP, InputHistoryEntry, InputStateSnapshot};
+use crate::input_history::{InputHistoryEntry, InputStateSnapshot, HISTORY_CAP};
 
 /// A protected byte range inside the text representing an atomic token
 /// (e.g., a resource mention). These ranges are skipped atomically by
@@ -374,51 +374,103 @@ impl InputBar {
 
         match input {
             // ── Movement ────────────────────────────────────────────
-            Input { key: Key::Char('h'), .. } => self.move_cursor_back(),
-            Input { key: Key::Char('j'), .. } => self.textarea.move_cursor(CursorMove::Down),
-            Input { key: Key::Char('k'), .. } => self.textarea.move_cursor(CursorMove::Up),
-            Input { key: Key::Char('l'), .. } => self.move_cursor_forward(),
-            Input { key: Key::Char('w'), .. } => self.textarea.move_cursor(CursorMove::WordForward),
-            Input { key: Key::Char('e'), ctrl: false, .. } => {
+            Input {
+                key: Key::Char('h'),
+                ..
+            } => self.move_cursor_back(),
+            Input {
+                key: Key::Char('j'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Down),
+            Input {
+                key: Key::Char('k'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Up),
+            Input {
+                key: Key::Char('l'),
+                ..
+            } => self.move_cursor_forward(),
+            Input {
+                key: Key::Char('w'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::WordForward),
+            Input {
+                key: Key::Char('e'),
+                ctrl: false,
+                ..
+            } => {
                 self.textarea.move_cursor(CursorMove::WordEnd);
                 if matches!(mode, VimMode::Operator(_)) {
                     self.textarea.move_cursor(CursorMove::Forward);
                 }
             }
-            Input { key: Key::Char('b'), ctrl: false, .. } => {
+            Input {
+                key: Key::Char('b'),
+                ctrl: false,
+                ..
+            } => {
                 self.textarea.move_cursor(CursorMove::WordBack);
             }
-            Input { key: Key::Char('^'), .. } => self.textarea.move_cursor(CursorMove::Head),
-            Input { key: Key::Char('0'), .. } => self.textarea.move_cursor(CursorMove::Head),
-            Input { key: Key::Char('$'), .. } => self.textarea.move_cursor(CursorMove::End),
-            Input { key: Key::Char('g'), ctrl: false, .. } => {
+            Input {
+                key: Key::Char('^'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Head),
+            Input {
+                key: Key::Char('0'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Head),
+            Input {
+                key: Key::Char('$'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::End),
+            Input {
+                key: Key::Char('g'),
+                ctrl: false,
+                ..
+            } => {
                 self.vim_pending = Some(input);
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('G'), ctrl: false, .. } => {
+            Input {
+                key: Key::Char('G'),
+                ctrl: false,
+                ..
+            } => {
                 self.textarea.move_cursor(CursorMove::Bottom);
             }
 
             // ── Editing (Normal only) ───────────────────────────────
-            Input { key: Key::Char('D'), .. } if mode == VimMode::Normal => {
+            Input {
+                key: Key::Char('D'),
+                ..
+            } if mode == VimMode::Normal => {
                 self.textarea.delete_line_by_end();
                 self.rebuild_line_cache();
                 self.protected_ranges.clear();
                 self.set_mode(EditMode::Vim(VimMode::Normal));
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
-            Input { key: Key::Char('C'), .. } if mode == VimMode::Normal => {
+            Input {
+                key: Key::Char('C'),
+                ..
+            } if mode == VimMode::Normal => {
                 self.textarea.delete_line_by_end();
                 self.rebuild_line_cache();
                 self.protected_ranges.clear();
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
-            Input { key: Key::Char('x'), .. } => {
+            Input {
+                key: Key::Char('x'),
+                ..
+            } => {
                 self.delete_char_after_cursor();
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
-            Input { key: Key::Char('p'), .. } if mode == VimMode::Normal => {
+            Input {
+                key: Key::Char('p'),
+                ..
+            } if mode == VimMode::Normal => {
                 self.textarea.paste();
                 self.rebuild_line_cache();
                 self.protected_ranges.clear();
@@ -426,7 +478,11 @@ impl InputBar {
             }
 
             // ── Operator entry (Normal → Operator) ──────────────────
-            Input { key: Key::Char(op @ ('d' | 'c' | 'y')), ctrl: false, .. } if mode == VimMode::Normal => {
+            Input {
+                key: Key::Char(op @ ('d' | 'c' | 'y')),
+                ctrl: false,
+                ..
+            } if mode == VimMode::Normal => {
                 self.textarea.start_selection();
                 self.set_mode(EditMode::Vim(VimMode::Operator(op)));
                 self.vim_pending = Some(input);
@@ -434,37 +490,55 @@ impl InputBar {
             }
 
             // ── Mode entry ──────────────────────────────────────────
-            Input { key: Key::Char('i'), .. } if mode != VimMode::Visual => {
+            Input {
+                key: Key::Char('i'),
+                ..
+            } if mode != VimMode::Visual => {
                 self.textarea.cancel_selection();
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('a'), .. } if mode != VimMode::Visual => {
+            Input {
+                key: Key::Char('a'),
+                ..
+            } if mode != VimMode::Visual => {
                 self.textarea.cancel_selection();
                 self.textarea.move_cursor(CursorMove::Forward);
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
-            Input { key: Key::Char('A'), .. } if mode != VimMode::Visual => {
+            Input {
+                key: Key::Char('A'),
+                ..
+            } if mode != VimMode::Visual => {
                 self.textarea.cancel_selection();
                 self.textarea.move_cursor(CursorMove::End);
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
-            Input { key: Key::Char('I'), .. } if mode != VimMode::Visual => {
+            Input {
+                key: Key::Char('I'),
+                ..
+            } if mode != VimMode::Visual => {
                 self.textarea.cancel_selection();
                 self.textarea.move_cursor(CursorMove::Head);
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
-            Input { key: Key::Char('o'), .. } if mode == VimMode::Normal => {
+            Input {
+                key: Key::Char('o'),
+                ..
+            } if mode == VimMode::Normal => {
                 self.textarea.move_cursor(CursorMove::End);
                 self.textarea.insert_newline();
                 self.rebuild_line_cache();
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
-            Input { key: Key::Char('O'), .. } if mode == VimMode::Normal => {
+            Input {
+                key: Key::Char('O'),
+                ..
+            } if mode == VimMode::Normal => {
                 self.textarea.move_cursor(CursorMove::Head);
                 self.textarea.insert_newline();
                 self.textarea.move_cursor(CursorMove::Up);
@@ -474,12 +548,20 @@ impl InputBar {
             }
 
             // ── Visual mode ─────────────────────────────────────────
-            Input { key: Key::Char('v'), ctrl: false, .. } if mode == VimMode::Normal => {
+            Input {
+                key: Key::Char('v'),
+                ctrl: false,
+                ..
+            } if mode == VimMode::Normal => {
                 self.textarea.start_selection();
                 self.set_mode(EditMode::Vim(VimMode::Visual));
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('V'), ctrl: false, .. } if mode == VimMode::Normal => {
+            Input {
+                key: Key::Char('V'),
+                ctrl: false,
+                ..
+            } if mode == VimMode::Normal => {
                 self.textarea.move_cursor(CursorMove::Head);
                 self.textarea.start_selection();
                 self.textarea.move_cursor(CursorMove::End);
@@ -487,21 +569,33 @@ impl InputBar {
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
             Input { key: Key::Esc, .. }
-            | Input { key: Key::Char('v'), ctrl: false, .. } if mode == VimMode::Visual => {
+            | Input {
+                key: Key::Char('v'),
+                ctrl: false,
+                ..
+            } if mode == VimMode::Visual => {
                 self.textarea.cancel_selection();
                 self.set_mode(EditMode::Vim(VimMode::Normal));
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
 
             // ── Visual operations ───────────────────────────────────
-            Input { key: Key::Char('y'), ctrl: false, .. } if mode == VimMode::Visual => {
+            Input {
+                key: Key::Char('y'),
+                ctrl: false,
+                ..
+            } if mode == VimMode::Visual => {
                 self.textarea.move_cursor(CursorMove::Forward);
                 self.textarea.copy();
                 self.textarea.cancel_selection();
                 self.set_mode(EditMode::Vim(VimMode::Normal));
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('d'), ctrl: false, .. } if mode == VimMode::Visual => {
+            Input {
+                key: Key::Char('d'),
+                ctrl: false,
+                ..
+            } if mode == VimMode::Visual => {
                 self.textarea.move_cursor(CursorMove::Forward);
                 self.textarea.cut();
                 self.rebuild_line_cache();
@@ -509,7 +603,11 @@ impl InputBar {
                 self.set_mode(EditMode::Vim(VimMode::Normal));
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
-            Input { key: Key::Char('c'), ctrl: false, .. } if mode == VimMode::Visual => {
+            Input {
+                key: Key::Char('c'),
+                ctrl: false,
+                ..
+            } if mode == VimMode::Visual => {
                 self.textarea.move_cursor(CursorMove::Forward);
                 self.textarea.cut();
                 self.rebuild_line_cache();
@@ -519,27 +617,51 @@ impl InputBar {
             }
 
             // ── Scroll ──────────────────────────────────────────────
-            Input { key: Key::Char('d'), ctrl: true, .. } => {
+            Input {
+                key: Key::Char('d'),
+                ctrl: true,
+                ..
+            } => {
                 self.textarea.scroll(tui_textarea::Scrolling::HalfPageDown);
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('u'), ctrl: true, .. } => {
+            Input {
+                key: Key::Char('u'),
+                ctrl: true,
+                ..
+            } => {
                 self.textarea.scroll(tui_textarea::Scrolling::HalfPageUp);
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('f'), ctrl: true, .. } => {
+            Input {
+                key: Key::Char('f'),
+                ctrl: true,
+                ..
+            } => {
                 self.textarea.scroll(tui_textarea::Scrolling::PageDown);
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('b'), ctrl: true, .. } => {
+            Input {
+                key: Key::Char('b'),
+                ctrl: true,
+                ..
+            } => {
                 self.textarea.scroll(tui_textarea::Scrolling::PageUp);
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('e'), ctrl: true, .. } => {
+            Input {
+                key: Key::Char('e'),
+                ctrl: true,
+                ..
+            } => {
                 self.textarea.scroll((1, 0));
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Char('y'), ctrl: true, .. } => {
+            Input {
+                key: Key::Char('y'),
+                ctrl: true,
+                ..
+            } => {
                 self.textarea.scroll((-1, 0));
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
@@ -560,12 +682,18 @@ impl InputBar {
                 self.set_mode(EditMode::Vim(VimMode::Normal));
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            Input { key: Key::Enter, alt: true, .. } => {
+            Input {
+                key: Key::Enter,
+                alt: true,
+                ..
+            } => {
                 self.textarea.insert_newline();
                 self.rebuild_line_cache();
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
-            Input { key: Key::Enter, .. } => {
+            Input {
+                key: Key::Enter, ..
+            } => {
                 return match self.submit() {
                     Some((t, interrupt)) => HandleOutcome::Submit(t, interrupt),
                     None => HandleOutcome::Key(IntentEvent::NoOp),

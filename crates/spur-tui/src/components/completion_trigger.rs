@@ -47,19 +47,14 @@ pub enum IntentEvent {
 }
 
 /// Internal state of the trigger detector.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum TriggerState {
+    #[default]
     Idle,
     Composing {
         kind: TriggerKind,
         prefix_start: usize,
     },
-}
-
-impl Default for TriggerState {
-    fn default() -> Self {
-        TriggerState::Idle
-    }
 }
 
 /// Transition emitted by `TriggerDetector::step` describing what the view
@@ -127,8 +122,8 @@ impl TriggerDetector {
                 TriggerKind::Mention => '@',
                 TriggerKind::Slash => '/',
             };
-            let still_valid = prefix_start < text.len()
-                && text[prefix_start..].chars().next() == Some(expected);
+            let still_valid =
+                prefix_start < text.len() && text[prefix_start..].starts_with(expected);
             if !still_valid {
                 self.state = TriggerState::Idle;
                 return TriggerTransition::Close;
@@ -152,9 +147,7 @@ impl TriggerDetector {
             }
 
             // Composing + anything: delegated.
-            (TriggerState::Composing { .. }, _) => {
-                self.advance_composing(event, text, cursor)
-            }
+            (TriggerState::Composing { .. }, _) => self.advance_composing(event, text, cursor),
         }
     }
 
@@ -532,8 +525,18 @@ mod detector_tests {
         let mut det = d();
         let text = "@src/foo.rs and @docs/bar.md";
         let ranges = [
-            ProtectedRange { start: 0, end: 11, uri: "a".into(), name: "a".into() },
-            ProtectedRange { start: 16, end: 28, uri: "b".into(), name: "b".into() },
+            ProtectedRange {
+                start: 0,
+                end: 11,
+                uri: "a".into(),
+                name: "a".into(),
+            },
+            ProtectedRange {
+                start: 16,
+                end: 28,
+                uri: "b".into(),
+                name: "b".into(),
+            },
         ];
         let mut opens = 0;
         for cursor in 0..=text.len() {
