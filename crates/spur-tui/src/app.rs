@@ -498,8 +498,14 @@ impl App {
                 Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))
             }
             PalettePayload::Command { name } => {
-                // `owned_fallback` is declared before the match so its storage
-                // outlives the borrow produced in the None arm (same idiom as open_palette).
+                // IMPORTANT — DO NOT "SIMPLIFY":
+                // `owned_fallback` is declared on its own line BEFORE the match so its
+                // storage outlives the `&owned_fallback` reference returned from the
+                // `None` arm. Rewriting this as `match ... { None => &CommandRegistry::new() }`
+                // will NOT compile: the temporary returned by `CommandRegistry::new()`
+                // would be dropped at the end of the arm, leaving a dangling reference.
+                // This idiom is intentionally identical to the one in `open_palette`
+                // (CommandRegistry is not Clone, so we can't sidestep with .clone()).
                 let owned_fallback;
                 let registry: &CommandRegistry = match self.session_detail.as_ref() {
                     Some(view) => &view.command_registry,
