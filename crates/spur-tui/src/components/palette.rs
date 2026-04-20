@@ -105,6 +105,7 @@ impl PaletteState {
     fn rerank(&mut self) {
         use nucleo_matcher::{pattern::{CaseMatching, Normalization, Pattern}, Utf32Str};
 
+        let _rerank_start = std::time::Instant::now();
         self.order.clear();
         if self.query.is_empty() {
             // Empty-query path: identity order, no scoring, no cloning.
@@ -128,6 +129,7 @@ impl PaletteState {
             query_len = self.query.len(),
             n = self.raw.len(),
             m = self.order.len(),
+            elapsed_us = _rerank_start.elapsed().as_micros() as u64,
             "rerank: complete"
         );
         // Clamp cursor to new ranked length.

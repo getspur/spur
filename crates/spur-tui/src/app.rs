@@ -356,22 +356,20 @@ impl App {
         let cmd_batch = cmd_src.collect();
         let sess_batch = sess_src.collect();
         let worker_batch = worker_src.collect();
-        let trace_skipped = self.session_detail.is_some();
+        let trace_source_skipped = self.session_detail.is_some();
         tracing::debug!(
             target: "palette",
             commands = cmd_batch.len(),
             sessions = sess_batch.len(),
             workers = worker_batch.len(),
-            trace_count_skipped = trace_skipped,
+            trace_source_skipped,
             "open_palette: sources collected"
         );
         let batches = vec![cmd_batch, sess_batch, worker_batch];
         // Trace source is intentionally skipped until trace-dispatch lands;
         // see docs/superpowers/specs/2026-04-20-palette-end-to-end-integration-design.md (U3c).
-        if let Some(_view) = self.session_detail.as_ref() {
-            // Trace will be re-enabled when Action::ScrollToTraceEntry is wired.
-            let _ = _view; // borrow-check silence
-        }
+        // TODO(palette-trace-dispatch): re-add a TraceSource batch here when
+        // Action::ScrollToTraceEntry lands with a stable-id design for TraceEntry.
         self.palette_state.extend_raw(batches);
 
         self.palette_visible = true;
