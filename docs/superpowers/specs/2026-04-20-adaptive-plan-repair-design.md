@@ -1,7 +1,42 @@
 # Adaptive Plan Repair — Design
 
-**Status:** design (rev 1, 2026-04-20)
+**Status:** design (rev 2, 2026-04-21)
 **Date:** 2026-04-20
+**Revised:** 2026-04-21
+
+## Revision Notes
+
+This section documents the reconciliations between the original design and the shipped v0a.2/v0a.3 implementation.
+
+### v0a.2 Reconciliations (2026-04-21)
+
+**(a) Audit transport: `[[spur-audit v1]]` sentinel, NOT `br audit record`**
+
+The design specified `br audit record` as the primary audit transport. This proved empirically unsuitable — beads drops the `data` field on persist and provides no CLI to query interactions.
+
+Shipped: audit entries are now encoded as `[[spur-audit v1]]` sentinel comments on beads issues, parsed via `crates/spur-mcp/src/plan/audit_sentinel.rs`. The JSON schema in §Information Flow → "Audit entry schema" still applies, but it's embedded in a comment body, not passed via `--data`.
+
+**(b) v0a reconciler is observation-only**
+
+The design described G1/G2 dispatch by the reconciler. In v0a.2/v0a.3, the reconciler observes/parity-checks beads state only — it does NOT dispatch ACP work. Dispatch lands in v0b.
+
+**(c) `BeadsAdvanced::audit_record`/`audit_log` removed**
+
+The design specified `BeadsAdvanced::audit_record` / `audit_log` methods. These were removed; the sentinel parser/encoder at `crates/spur-mcp/src/plan/audit_sentinel.rs` is now the audit surface.
+
+**(d) Cursor path production-wiring (F2) and actor threading (A4)**
+
+The design proposed fixes F1 (cursor race) and A4 (actor threading). These are implemented and verified live in v0a.2/v0a.3.
+
+### v0a.3 Reconciliations (2026-04-21)
+
+**(e) Reconciler spawn at server startup**
+
+The design proposed G1 (reconciler task spawned on MCP server start). v0a.3 ships this: `Reconciler::run` is spawned via `tokio::spawn` when the server starts, gated by a `mcp.reconciler.enabled` config flag (default: true for beads backends, false for github).
+
+---
+
+Original design follows below.
 **Reference specs:**
 - `docs/superpowers/specs/2026-04-19-brain-worker-integration-invariants.md`
 - `docs/superpowers/specs/2026-04-20-async-first-delegate-migration-design.md`

@@ -25,6 +25,7 @@ use tracing::{debug, error, info};
 use spur_acp::*;
 use spur_pm::{IssueFilter, IssueUpdate, PmService, PrParams};
 
+use crate::plan::reconciler::{Reconciler, ReconcilerConfig};
 use crate::tools::{self, DelegationChannel, DelegationRequest};
 
 /// How long completed delegation results are retained before lazy eviction.
@@ -231,6 +232,14 @@ pub struct McpCallbackServer {
     /// to the detached collector. Default `0` — pure async-first.
     /// Wired from `SpurConfig.delegation.inline_wait_ms`.
     inline_wait: std::time::Duration,
+    /// v0a.3: if true, spawn the reconciler on server start. Default true
+    /// for beads backends, false for github. Wired via `set_reconciler_enabled`.
+    reconciler_enabled: bool,
+    /// Fast-forward trigger for the reconciler. When the plan executor completes
+    /// a task (transitions to AwaitingReview), it notifies the reconciler so it can
+    /// immediately tick instead of waiting for the next interval. Only meaningful
+    /// when `reconciler_enabled` is true.
+    reconciler_fast_forward: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -645,6 +654,8 @@ impl McpCallbackServer {
             cancellation_control: None,
             continuation_ctx: Arc::new(continuation_ctx),
             inline_wait: std::time::Duration::from_millis(0),
+            reconciler_enabled: false,
+            reconciler_fast_forward: None,
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -658,13 +669,25 @@ impl McpCallbackServer {
         self.cancellation_control = Some(cc);
     }
 
-    /// Phase 1c: set how long `handle_delegate_to_worker` /
-    /// `handle_delegate_parallel` wait inline for the worker oneshot before
+/// Phase 1c: set how long `handle_delegate_to_worker` /
+    /// `handle_delegate_parallel` wait inline for a worker's oneshot before
     /// falling through to the detached collector. Default is `0`
     /// (async-first); orchestrator wires this from
     /// `SpurConfig.delegation.inline_wait_ms` at server construction.
     pub fn set_inline_wait(&mut self, d: std::time::Duration) {
         self.inline_wait = d;
+    }
+
+    /// v0a.3: Enable the reconciler on server start. Must be called BEFORE
+    /// `start()`. The reconciler is only spawned if the PM service has a beads
+    /// backend (determined via `PmService::advanced()` at start time).
+    ///
+    /// - `enable` — when true, attempt to spawn the reconciler.
+    /// - `fast_forward` — optional Notify channel. When provided, the reconciler ticks
+    ///   immediately when notified (e.g., after a task completes).
+    pub fn set_reconciler_enabled(&mut self, enable: bool, fast_forward: Option<Arc<tokio::sync::Notify>>) {
+        self.reconciler_enabled = enable;
+        self.reconciler_fast_forward = fast_forward;
     }
 
     /// Spawn a background task that awaits a delegation oneshot and stores
@@ -874,9 +897,56 @@ impl McpCallbackServer {
 
         info!(url = %url, "MCP callback server listening (streamable HTTP)");
 
+        // v0a.3: Spawn reconciler if enabled.
+        // The reconciler is observation-only (does NOT dispatch in v0a). It observes ready
+        // tasks via bv/br, logs metrics, and surfaces signals for the brain.
+        // Dispatch lands in v0b.
+        let reconciler_task = if self.reconciler_enabled {
+            let pm = self.pm_service.as_ref();
+            let fast_forward = self.reconciler_fast_forward.as_ref().cloned();
+            let reconciler_enabled = self.reconciler_enabled;
+            if reconciler_enabled && pm.is_some() {
+                let pm = pm.unwrap();
+                // Only spawn if PmService has an advanced() (beads) backend.
+                let spawn_reconciler = pm.advanced().is_some();
+                if spawn_reconciler {
+                    let pm = Arc::clone(&pm);
+                    let fast = fast_forward.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
+                    let fast_clone = Arc::clone(&fast);
+                    info!("spawning plan reconciler (beads backend detected)");
+                    let handle = tokio::spawn(async move {
+                        let reconciler = Reconciler::new(
+                            ReconcilerConfig::default(),
+                            pm,
+                            fast_clone,
+                            None, // plan_id: observe all plans when None
+                        );
+                        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                        // Store cancel handle so shutdown() can signal it.
+                        std::mem::forget(cancel_tx);
+                        reconciler.run(cancel_rx).await;
+                    });
+                    Some(handle)
+                } else {
+                    tracing::debug!("reconciler disabled: PM has no beads advanced() backend");
+                    None
+                }
+            } else {
+                tracing::debug!("reconciler disabled: not enabled or no PM service");
+                None
+            }
+        } else {
+            tracing::debug!("reconciler disabled: reconciler_enabled = false");
+            None
+        };
+
         let handle = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, router).await {
                 debug!(%error, "RMCP callback server exited");
+            }
+            // Wait for reconciler to finish on shutdown.
+            if let Some(rh) = reconciler_task {
+                let _ = rh.await;
             }
         });
 
