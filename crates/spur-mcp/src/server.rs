@@ -27,10 +27,10 @@ use spur_pm::{IssueFilter, IssueUpdate, PmService, PrParams};
 
 use crate::tools::{self, DelegationChannel, DelegationRequest};
 
-/// Maximum time to block on a delegation result before falling back to
-/// async polling.  Must be well under the brain's MCP-client timeout
-/// (typically 120 s) to leave margin for HTTP round-trip overhead.
-const DELEGATION_BLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Upper bound for `wait_delegation` polling loops — must stay well under
+/// the brain's MCP-client HTTP timeout (typically 120 s) to leave margin
+/// for round-trip overhead.
+const WAIT_DELEGATION_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// How long completed delegation results are retained before lazy eviction.
 /// Generous: the brain should poll within seconds, but we keep results
@@ -946,26 +946,27 @@ impl McpCallbackServer {
                         )
                     }
                 };
+                // Response shape (spec §8.3, post-review): content[0].text is
+                // PURE JSON so brains can `json.loads(text)` without stripping
+                // a leading shadow sentence. Human-readable context lives in
+                // the `description` field.
                 let payload = json!({
                     "status": "completed",
                     "delegation_id": request_id,
-                    "result": result_json,
                     "continuation_will_fire": false,
+                    "description": format!(
+                        "Delegation to '{agent}' completed inline (delegation_id={request_id})."
+                    ),
+                    "result": result_json,
                 });
                 let payload_text = serde_json::to_string_pretty(&payload)
                     .unwrap_or_else(|_| payload.to_string());
-                // Response shape (spec §8.3): stringified JSON is the source
-                // of truth; a one-line human-readable shadow is prefixed for
-                // legacy pattern-matchers.
-                let shadow = format!(
-                    "Delegation to '{agent}' completed inline (delegation_id={request_id}).",
-                );
                 JsonRpcResponse::success(
                     id,
                     json!({
                         "content": [{
                             "type": "text",
-                            "text": format!("{shadow}\n{payload_text}")
+                            "text": payload_text
                         }]
                     }),
                 )
@@ -992,19 +993,20 @@ impl McpCallbackServer {
                     "status": "pending",
                     "delegation_id": request_id,
                     "continuation_will_fire": true,
+                    "description": format!(
+                        "Delegation to '{agent}' is running in the background \
+                         (delegation_id={request_id}); a continuation will fire \
+                         when the worker completes."
+                    ),
                 });
                 let payload_text = serde_json::to_string_pretty(&payload)
                     .unwrap_or_else(|_| payload.to_string());
-                let shadow = format!(
-                    "Delegation to '{agent}' is running in the background (delegation_id={request_id}); \
-                     a continuation will fire when the worker completes.",
-                );
                 JsonRpcResponse::success(
                     id,
                     json!({
                         "content": [{
                             "type": "text",
-                            "text": format!("{shadow}\n{payload_text}")
+                            "text": payload_text
                         }]
                     }),
                 )
@@ -1086,8 +1088,11 @@ impl McpCallbackServer {
                         "status": "completed",
                         "delegation_id": request_id,
                         "agent": agent,
-                        "result": result_json,
                         "continuation_will_fire": false,
+                        "description": format!(
+                            "Delegation to '{agent}' completed inline (delegation_id={request_id})."
+                        ),
+                        "result": result_json,
                     })
                 }
                 _ = tokio::time::sleep(inline_wait) => {
@@ -1107,6 +1112,11 @@ impl McpCallbackServer {
                         "delegation_id": request_id,
                         "agent": agent,
                         "continuation_will_fire": true,
+                        "description": format!(
+                            "Delegation to '{agent}' is running in the background \
+                             (delegation_id={request_id}); a continuation will fire \
+                             when the worker completes."
+                        ),
                     })
                 }
             };
@@ -2340,7 +2350,7 @@ impl McpCallbackServer {
         }
 
         // Poll with a bounded wait so we never exceed the brain's HTTP timeout.
-        let deadline = tokio::time::Instant::now() + DELEGATION_BLOCK_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + WAIT_DELEGATION_POLL_MAX;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
