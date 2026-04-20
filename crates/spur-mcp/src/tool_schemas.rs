@@ -25,21 +25,6 @@ pub struct DelegateToWorkerInput {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct DelegateAsyncInput {
-    /// Name of the worker agent to delegate to
-    pub agent: String,
-    /// Task description for the worker
-    pub task: String,
-    /// Optional list of file paths to provide as context
-    pub context_files: Option<Vec<String>>,
-    /// Structured reasoning for this delegation. At minimum pass {chosen, rationale}. For 2+ subtasks or >3 files, include candidates and decomposition.
-    pub delegation_plan: Option<DelegationPlan>,
-    /// Optional beads issue ID to auto-track
-    pub issue_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct DelegateParallelTaskInput {
     /// Worker agent name
     pub agent: String,

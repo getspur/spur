@@ -20,22 +20,22 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use spur_acp::*;
 use spur_pm::{IssueFilter, IssueUpdate, PmService, PrParams};
 
 use crate::tools::{self, DelegationChannel, DelegationRequest};
 
-/// Upper bound for `wait_delegation` polling loops — must stay well under
-/// the brain's MCP-client HTTP timeout (typically 120 s) to leave margin
-/// for round-trip overhead.
-const WAIT_DELEGATION_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(90);
-
 /// How long completed delegation results are retained before lazy eviction.
-/// Generous: the brain should poll within seconds, but we keep results
-/// around for 10 minutes to tolerate slow or distracted brains.
-const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+///
+/// Phase 4: the `completed_delegations` map is preserved as a TTL-bounded
+/// debug buffer (per the async-first design spec). After Part A removed
+/// `delegate_async` / `wait_delegation`, no handler writes the map under
+/// normal operation — `BlockTimeout` collectors skip it (INV-ASYNC-2).
+/// The 60 s TTL is generous for any residual debug-injection use; the
+/// map is allowed to stay permanently empty in production.
+const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
@@ -196,12 +196,15 @@ pub struct McpCallbackServer {
     /// Brain session this server belongs to. INV-2: typed as BrainSessionId.
     brain_session_id: spur_acp::BrainSessionId,
     /// Delegation IDs whose background collector is still awaiting a result.
-    active_delegations: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    active_delegations: Arc<tokio::sync::Mutex<HashSet<DelegationId>>>,
     /// Results that a background collector has received but the brain has
-    /// not yet polled via `check_delegation_status` / `wait_delegation`.
-    /// Stored with insertion timestamp for TTL-based lazy eviction.
+    /// not yet polled via `check_delegation_status`. Stored with insertion
+    /// timestamp for TTL-based lazy eviction. Phase 4: normally empty —
+    /// `BlockTimeout` collectors skip the write (INV-ASYNC-2) and the
+    /// `AsyncRequested` path retired with `delegate_async` / `wait_delegation`.
+    /// Retained as a TTL-bounded debug-injection buffer.
     completed_delegations:
-        Arc<tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>>,
+        Arc<tokio::sync::Mutex<HashMap<DelegationId, (DelegationResult, tokio::time::Instant)>>>,
     /// Tracks spawned result-collector tasks for graceful shutdown.
     task_tracker: TaskTracker,
     /// Optional PM service for direct issue/PR operations.
@@ -301,7 +304,7 @@ pub fn parse_parallel_tasks(
         let delegation_plan = parse_delegation_plan(task_obj)?;
         let (tx, _rx) = tokio::sync::oneshot::channel();
         out.push(DelegationRequest {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: DelegationId::new(),
             agent,
             task,
             context_files,
@@ -592,11 +595,11 @@ impl McpCallbackServer {
     #[doc(hidden)]
     pub fn spawn_result_collector(
         tracker: &TaskTracker,
-        delegation_id: String,
+        delegation_id: DelegationId,
         rx: tokio::sync::oneshot::Receiver<DelegationResult>,
-        active: Arc<tokio::sync::Mutex<HashSet<String>>>,
+        active: Arc<tokio::sync::Mutex<HashSet<DelegationId>>>,
         completed: Arc<
-            tokio::sync::Mutex<HashMap<String, (DelegationResult, tokio::time::Instant)>>,
+            tokio::sync::Mutex<HashMap<DelegationId, (DelegationResult, tokio::time::Instant)>>,
         >,
         detached: Option<DetachedCompletionHandle>,
     ) {
@@ -618,22 +621,20 @@ impl McpCallbackServer {
             active.lock().await.remove(&delegation_id);
 
             // INV-ASYNC-2 (source_kind-gated): the continuation bridge is the
-            // SOLE delivery channel for `BlockTimeout` (the new async-first
+            // SOLE delivery channel for `BlockTimeout` (the async-first
             // path — `delegate_to_worker` auto-reprompt). Writing to the
             // map on that path would let `check_delegation_status` redeliver
             // what the brain already received as a continuation turn — the
             // double-delivery failure mode closed by INV-ASYNC-1.
             //
-            // For `AsyncRequested` (legacy `delegate_async` + `wait_delegation`
-            // flow) the map write is PRESERVED: `handle_wait_delegation`
-            // (server.rs:2282+) reads from this map to return results to
-            // callers that still use the deprecated polling API. Phase 3
-            // removes `wait_delegation`; at that point this arm can drop
-            // too. Any pre-existing double-delivery on the AsyncRequested
-            // path (bridge + wait_delegation for the same id) is unchanged
-            // from pre-Phase-1a behavior and is not introduced here.
+            // Phase 4: the `AsyncRequested` source_kind is retained only as a
+            // legacy-debugging affordance — the `delegate_async` /
+            // `wait_delegation` RPCs that drove it were removed in this
+            // phase. In production nothing constructs `AsyncRequested`
+            // handles, so the map write below is effectively dead code
+            // unless a test/injection harness wires one explicitly.
             //
-            // `detached = None` is also retained as a fallback for unit
+            // `detached = None` is retained as a fallback for unit
             // tests exercising the collector directly.
             let keep_map_entry = match &detached {
                 None => true,
@@ -676,7 +677,7 @@ impl McpCallbackServer {
                 // the injected callback (wired in spur-core to avoid a
                 // circular dependency). The delegation_id is used as a
                 // worker_session proxy for the DelegationCompleted UI event.
-                (h.ctx.on_complete)(cont, delegation_id.clone()).await;
+                (h.ctx.on_complete)(cont, delegation_id.clone().into()).await;
             }
         });
     }
@@ -755,7 +756,7 @@ impl McpCallbackServer {
         self.completed_delegations
             .lock()
             .await
-            .contains_key(delegation_id)
+            .contains_key(&DelegationId::from(delegation_id))
     }
 
     /// Remove completed delegation results older than `COMPLETED_TTL`.
@@ -846,8 +847,6 @@ impl McpCallbackServer {
         match tool_name.as_str() {
             "delegate_to_worker" => self.handle_delegate_to_worker(id, arguments).await,
             "delegate_parallel" => self.handle_delegate_parallel(id, arguments).await,
-            "delegate_async" => self.handle_delegate_async(id, arguments).await,
-            "wait_delegation" => self.handle_wait_delegation(id, arguments).await,
             "check_delegation_status" => self.handle_check_delegation_status(id, arguments).await,
             "cancel_delegation" => self.handle_cancel_delegation(id, arguments).await,
             "list_available_workers" => self.handle_list_available_workers(id).await,
@@ -908,7 +907,7 @@ impl McpCallbackServer {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = DelegationId::new();
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let delegation = DelegationRequest {
@@ -1206,8 +1205,8 @@ impl McpCallbackServer {
     }
 
     async fn handle_check_delegation_status(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
-            Some(d) => d.to_string(),
+        let delegation_id: DelegationId = match args.get("delegation_id").and_then(|v| v.as_str()) {
+            Some(d) => d.into(),
             None => {
                 return JsonRpcResponse::invalid_params(
                     id,
@@ -1260,8 +1259,8 @@ impl McpCallbackServer {
     }
 
     async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
-            Some(d) => d.to_string(),
+        let delegation_id: DelegationId = match args.get("delegation_id").and_then(|v| v.as_str()) {
+            Some(d) => d.into(),
             None => {
                 return JsonRpcResponse::invalid_params(
                     id,
@@ -1298,7 +1297,7 @@ impl McpCallbackServer {
             .contains(&delegation_id)
         {
             if let Some(ref cc) = self.cancellation_control {
-                let outcome = cc.cancel(&delegation_id).await;
+                let outcome = cc.cancel(delegation_id.as_str()).await;
                 info!(delegation_id = %delegation_id, ?outcome, "Cancellation requested via CancellationControl");
                 match outcome {
                     CancelOutcome::Cancelled => {
@@ -2296,187 +2295,6 @@ impl McpCallbackServer {
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
 
-    async fn handle_delegate_async(&self, id: Value, args: Value) -> JsonRpcResponse {
-        // Phase 3 deprecation telemetry: `delegate_to_worker` now provides
-        // equivalent async semantics (auto re-prompt on completion via the
-        // continuation bridge). Phase 4 removes this handler entirely.
-        warn!(
-            tool = "delegate_async",
-            replacement = "delegate_to_worker",
-            "DEPRECATED tool invoked — use `delegate_to_worker`; \
-             Phase 3 warning, removed in Phase 4"
-        );
-        let bad_params = |message| JsonRpcResponse::invalid_params(id.clone(), message);
-        let agent = match args.get("agent").and_then(|v| v.as_str()) {
-            Some(a) => a.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'agent'"),
-        };
-        let task = match args.get("task").and_then(|v| v.as_str()) {
-            Some(t) => t.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'task'"),
-        };
-        let context_files: Vec<String> = args
-            .get("context_files")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let delegation_plan = match parse_delegation_plan(&args).map_err(bad_params) {
-            Ok(plan) => plan,
-            Err(response) => return response,
-        };
-        let issue_id = args
-            .get("issue_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        let delegation = DelegationRequest {
-            id: request_id.clone(),
-            agent: agent.clone(),
-            task,
-            context_files,
-            respond_to: tx,
-            brain_session_id: self.brain_session_id.clone(),
-            delegation_plan,
-            issue_id,
-        };
-
-        info!(agent = %agent, request_id = %request_id, "Sending async delegation request");
-
-        if let Err(_e) = self.delegation_tx.send(delegation).await {
-            return JsonRpcResponse::internal_error(id, "Failed to send delegation request");
-        }
-
-        self.active_delegations
-            .lock()
-            .await
-            .insert(request_id.clone());
-
-        // Build the detached handle so the result-collector can route the
-        // completion back into the orchestrator ingress via the `on_complete`
-        // callback wired in spur-core.
-        let detached = Some(DetachedCompletionHandle {
-            ctx: Arc::clone(&self.continuation_ctx),
-            source_kind: DetachedSourceKind::AsyncRequested,
-        });
-
-        Self::spawn_result_collector(
-            &self.task_tracker,
-            request_id.clone(),
-            rx,
-            Arc::clone(&self.active_delegations),
-            Arc::clone(&self.completed_delegations),
-            detached,
-        );
-
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": json!({"delegation_id": request_id}).to_string()
-                }]
-            }),
-        )
-    }
-
-    async fn handle_wait_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
-        // Phase 3 deprecation telemetry: auto re-prompt via the continuation
-        // bridge makes this RPC unnecessary. Phase 4 removes the handler.
-        let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
-            Some(d) => d.to_string(),
-            None => {
-                return JsonRpcResponse::invalid_params(
-                    id,
-                    "Missing required field 'delegation_id'",
-                )
-            }
-        };
-        warn!(
-            tool = "wait_delegation",
-            replacement = "delegate_to_worker",
-            delegation_id = %delegation_id,
-            "DEPRECATED tool invoked — use `delegate_to_worker`; \
-             Phase 3 warning, removed in Phase 4"
-        );
-
-        self.evict_stale_completions().await;
-
-        // Already completed — return immediately.
-        if let Some((result, _ts)) = self
-            .completed_delegations
-            .lock()
-            .await
-            .remove(&delegation_id)
-        {
-            let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
-            return JsonRpcResponse::success(
-                id,
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": serde_json::to_string_pretty(&result_json)
-                            .unwrap_or_else(|_| result_json.to_string())
-                    }]
-                }),
-            );
-        }
-
-        // Unknown delegation.
-        if !self
-            .active_delegations
-            .lock()
-            .await
-            .contains(&delegation_id)
-        {
-            return JsonRpcResponse::error(
-                id,
-                -32602,
-                format!("Unknown or already-collected delegation: {delegation_id}"),
-            );
-        }
-
-        // Poll with a bounded wait so we never exceed the brain's HTTP timeout.
-        let deadline = tokio::time::Instant::now() + WAIT_DELEGATION_POLL_MAX;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-            if let Some((result, _ts)) = self
-                .completed_delegations
-                .lock()
-                .await
-                .remove(&delegation_id)
-            {
-                let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
-                return JsonRpcResponse::success(
-                    id,
-                    json!({
-                        "content": [{
-                            "type": "text",
-                            "text": serde_json::to_string_pretty(&result_json)
-                                .unwrap_or_else(|_| result_json.to_string())
-                        }]
-                    }),
-                );
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return JsonRpcResponse::success(
-                    id,
-                    json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!(
-                                "Delegation '{delegation_id}' is still running. \
-                                 Call check_delegation_status with this delegation_id to poll again."
-                            )
-                        }]
-                    }),
-                );
-            }
-        }
-    }
 }
 
 impl ServerHandler for McpCallbackServer {

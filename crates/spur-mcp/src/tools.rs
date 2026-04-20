@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use spur_acp::DelegationResult;
+use spur_acp::{DelegationId, DelegationResult};
 use tokio::sync::oneshot;
 
 // ─── Request/Response types for orchestrator communication ────────────
@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 /// ID-based matching, no dropped messages.
 #[derive(Debug)]
 pub struct DelegationRequest {
-    pub id: String,
+    pub id: DelegationId,
     pub agent: String,
     pub task: String,
     pub context_files: Vec<String>,
@@ -209,31 +209,6 @@ fn create_pr_def() -> ToolDefinition {
                 }
             },
             "required": ["title", "body", "branch"]
-        }),
-    }
-}
-
-fn delegate_async_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "delegate_async".into(),
-        description: "[DEPRECATED — use `delegate_to_worker`; it has equivalent async semantics with auto re-prompt on completion.] Delegate a task to a worker agent without blocking. Returns a delegation_id; the brain is re-prompted automatically when the worker finishes.".into(),
-        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateAsyncInput>(),
-    }
-}
-
-fn wait_delegation_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "wait_delegation".into(),
-        description: "[DEPRECATED — auto re-prompt from `delegate_to_worker` / `delegate_async` makes this unnecessary.] Block until an async delegation completes and return its result.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "delegation_id": {
-                    "type": "string",
-                    "description": "The delegation_id returned by delegate_async"
-                }
-            },
-            "required": ["delegation_id"]
         }),
     }
 }
@@ -617,8 +592,6 @@ pub fn tools_list() -> Vec<ToolDefinition> {
     vec![
         delegate_to_worker_def(),
         delegate_parallel_def(),
-        delegate_async_def(),
-        wait_delegation_def(),
         check_delegation_status_def(),
         cancel_delegation_def(),
         list_available_workers_def(),

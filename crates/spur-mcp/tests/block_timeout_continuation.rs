@@ -39,7 +39,7 @@ async fn test_block_timeout_fires_continuation() {
         source_kind: DetachedSourceKind::BlockTimeout,
     });
 
-    let request_id = "test-request-123".to_string();
+    let request_id: spur_acp::DelegationId = "test-request-123".into();
 
     spur_mcp::server::McpCallbackServer::spawn_result_collector(
         &tracker,

@@ -910,7 +910,7 @@ impl Orchestrator {
                         let evicted = scheduler.note_session_swap(None);
                         for c in evicted {
                             self.funnel.emit(SpurEventBody::ContinuationDropped {
-                                delegation_id: c.delegation_id,
+                                delegation_id: c.delegation_id.into(),
                                 reason:
                                     spur_acp::domain::events::ContinuationDropReason::SessionSwap,
                             });
@@ -985,7 +985,7 @@ impl Orchestrator {
                         let evicted = scheduler.note_session_swap(None);
                         for c in evicted {
                             self.funnel.emit(SpurEventBody::ContinuationDropped {
-                                delegation_id: c.delegation_id,
+                                delegation_id: c.delegation_id.into(),
                                 reason:
                                     spur_acp::domain::events::ContinuationDropReason::SessionSwap,
                             });
@@ -1324,7 +1324,7 @@ impl Orchestrator {
                         let evicted = scheduler.note_session_swap(new_sid);
                         for c in evicted {
                             self.funnel.emit(SpurEventBody::ContinuationDropped {
-                                delegation_id: c.delegation_id,
+                                delegation_id: c.delegation_id.into(),
                                 reason:
                                     spur_acp::domain::events::ContinuationDropReason::SessionSwap,
                             });
@@ -2713,6 +2713,13 @@ impl Orchestrator {
                 delegation_plan,
                 issue_id,
             } = request;
+            // Phase 4: `DelegationRequest.id` is now a typed `DelegationId`
+            // newtype. Downstream delegation plumbing (funnel events,
+            // SessionId, PmService, log fields) still speaks plain `String`,
+            // so lower the wrapper to its inner representation at the
+            // orchestrator boundary rather than threading the newtype
+            // through every call site.
+            let request_id: String = request_id.into();
 
             debug!(
                 agent = %agent,

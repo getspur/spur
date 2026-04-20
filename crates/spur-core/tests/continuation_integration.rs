@@ -174,7 +174,7 @@ async fn test_no_double_delivery_on_block_timeout() {
     // observe map state by id.
     let worker_handle = tokio::spawn(async move {
         let req = channel.request_rx.recv().await.expect("delegation request");
-        let delegation_id = req.id.clone();
+        let delegation_id: String = req.id.clone().into();
         tokio::time::sleep(Duration::from_secs(WORKER_DELAY_SECS)).await;
         let _ = req.respond_to.send(DelegationResult {
             status: DelegationStatus::Success,
@@ -296,7 +296,7 @@ async fn test_no_double_delivery_on_fast_path() {
 
     let worker_handle = tokio::spawn(async move {
         let req = channel.request_rx.recv().await.expect("delegation request");
-        let delegation_id = req.id.clone();
+        let delegation_id: String = req.id.clone().into();
         tokio::time::sleep(Duration::from_secs(WORKER_DELAY_SECS)).await;
         let _ = req.respond_to.send(DelegationResult {
             status: DelegationStatus::Success,

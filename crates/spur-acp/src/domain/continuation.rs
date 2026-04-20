@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::domain::delegation::DelegationStatus;
+use crate::domain::delegation::{DelegationId, DelegationStatus};
 use crate::domain::events::DiffSummary;
 
 /// Why SPUR is re-entering the brain with a continuation turn.
@@ -41,8 +41,8 @@ pub struct ContinuationPayload {
 /// One detached delegation result awaiting brain re-entry.
 #[derive(Debug, Clone)]
 pub struct BrainContinuation {
-    /// Correlation key (UUID string; migrates to `DelegationId` newtype when INV-1 lands).
-    pub delegation_id: String,
+    /// Correlation key.
+    pub delegation_id: DelegationId,
     /// Why this continuation fired.
     pub source: ContinuationSource,
     /// Narrow projection of the worker outcome.
@@ -98,7 +98,7 @@ mod tests {
             },
             created_at: Instant::now(),
         };
-        assert_eq!(c.delegation_id, "uuid-1");
+        assert_eq!(c.delegation_id.as_str(), "uuid-1");
         assert!(matches!(c.source, ContinuationSource::AsyncRequested));
     }
 
