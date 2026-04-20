@@ -82,6 +82,11 @@ pub struct DelegationResult {
     pub estimated_cost_usd: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_branch: Option<String>,
+    /// Side-channel reference to persisted worker stdout when `summary`
+    /// would otherwise lose bytes to `truncate_summary`. See
+    /// `crate::domain::artifact::WorkerArtifact`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<crate::domain::artifact::WorkerArtifact>,
 }
 
 /// Structured reasoning trace the brain passes alongside each
@@ -243,6 +248,7 @@ mod delegation_result_tests {
             summary: Some("did the thing".into()),
             estimated_cost_usd: 0.42,
             worker_branch: None,
+            artifact: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         let back: DelegationResult = serde_json::from_str(&json).unwrap();
@@ -258,5 +264,51 @@ mod delegation_result_tests {
         let json = r#"{"status":"Success","diff":null,"summary":null,"estimated_cost_usd":0.0}"#;
         let back: DelegationResult = serde_json::from_str(json).unwrap();
         assert!(back.diff_summary.is_none());
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+    use crate::domain::artifact::{ArtifactKind, WorkerArtifact};
+
+    #[test]
+    fn delegation_result_omits_artifact_when_none() {
+        let r = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("ok".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("\"artifact\""),
+            "artifact should be omitted when None: {json}"
+        );
+    }
+
+    #[test]
+    fn delegation_result_round_trips_with_artifact() {
+        let art = WorkerArtifact {
+            object_ref: "refs/spur/artifacts/s1".into(),
+            blob_sha: "a".repeat(40),
+            size_bytes: 10_000,
+            kind: ArtifactKind::Output,
+        };
+        let r = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("truncated".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: Some(art.clone()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: DelegationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.artifact, Some(art));
     }
 }

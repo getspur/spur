@@ -2790,6 +2790,7 @@ impl Orchestrator {
                                 summary: None,
                                 estimated_cost_usd: 0.0,
                                 worker_branch: None,
+                                artifact: None,
                             },
                             None,
                         )
@@ -2941,6 +2942,7 @@ impl Orchestrator {
                     summary: None,
                     estimated_cost_usd: 0.0,
                     worker_branch: None,
+                    artifact: None,
                 },
                 None,
             );
@@ -2961,6 +2963,7 @@ impl Orchestrator {
                         summary: None,
                         estimated_cost_usd: 0.0,
                         worker_branch: None,
+                        artifact: None,
                     },
                     None,
                 );
@@ -3596,6 +3599,7 @@ impl Drop for DelegationGuard {
                 summary: None,
                 estimated_cost_usd: 0.0,
                 worker_branch: None,
+                artifact: None,
             });
         }
     }
@@ -3627,6 +3631,7 @@ fn finalize(
         summary,
         estimated_cost_usd: total_cost,
         worker_branch,
+        artifact: None,
     }
 }
 

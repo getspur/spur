@@ -3164,6 +3164,7 @@ mod tests {
             status: spur_acp::DelegationStatus::Success,
             estimated_cost_usd: 0.0,
             worker_branch: None,
+            artifact: None,
         };
         let fields = super::build_task_diff_fields(&result);
         let m: std::collections::HashMap<String, serde_json::Value> = fields.into_iter().collect();
@@ -3194,6 +3195,7 @@ mod tests {
             status: spur_acp::DelegationStatus::Success,
             estimated_cost_usd: 0.0,
             worker_branch: None,
+            artifact: None,
         };
         let fields = super::build_task_diff_fields(&result);
         let m: std::collections::HashMap<String, serde_json::Value> = fields.into_iter().collect();

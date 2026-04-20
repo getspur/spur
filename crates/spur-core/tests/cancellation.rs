@@ -37,6 +37,7 @@ async fn cancel_wins_over_slow_worker() {
                     summary: None,
                     estimated_cost_usd: 0.0,
                     worker_branch: None,
+                    artifact: None,
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
@@ -47,6 +48,7 @@ async fn cancel_wins_over_slow_worker() {
                     summary: Some("completed normally".into()),
                     estimated_cost_usd: 0.0,
                     worker_branch: None,
+                    artifact: None,
                 }
             }
         };
@@ -119,6 +121,7 @@ async fn cancel_emits_delegation_completed() {
                     summary: None,
                     estimated_cost_usd: 0.0,
                     worker_branch: None,
+                    artifact: None,
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
@@ -129,6 +132,7 @@ async fn cancel_emits_delegation_completed() {
                     summary: None,
                     estimated_cost_usd: 0.0,
                     worker_branch: None,
+                    artifact: None,
                 }
             }
         };
