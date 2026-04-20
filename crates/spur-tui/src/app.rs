@@ -2748,6 +2748,26 @@ mod brain_retired_tests {
     }
 
     #[test]
+    fn clear_session_banner_cleared_on_next_brain_spawn() {
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("banner-a".into()),
+        }));
+        let _ = app.process_action(Action::ClearSession);
+        assert!(app.session_detail.as_ref().unwrap().ready_banner_text().is_some());
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("banner-b".into()),
+        }));
+
+        let detail = app.session_detail.as_ref().unwrap();
+        assert!(detail.ready_banner_text().is_none());
+        assert!(!detail.is_cleared());
+    }
+
+    #[test]
     fn brain_retired_shutdown_does_not_panic() {
         let mut app = App::new_for_tests();
         app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
