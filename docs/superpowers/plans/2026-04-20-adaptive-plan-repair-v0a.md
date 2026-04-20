@@ -65,6 +65,36 @@ No new user-visible features in v0a (adaptive mutation itself is v0b). The stand
 - **Correlation is missing for persisted plans.** Current `submit_plan` persists a `task_map` but does not backfill those beads child IDs into `PlanState.tasks[*].spec.issue_id`, and current `execute_epic` still initializes `PlanState.epic_id` as `None`. Before any audit or reconciler work, add a correlation step so the runtime state carries the actual beads IDs it intends to reference.
 - **Do not let the reconciler see partial subgraphs by default.** `build_epic_subgraph` explicitly allows partial beads state on failure. Until v0a defines a completion marker or registry gate for fully persisted plans, the reconciler must not scan all candidate labels and treat every matching task as dispatchable/observable work.
 
+### Review addendum II (2026-04-20, post-v0a.1 empirical verification)
+
+Three rounds of empirical probing against real `br 0.1.14` (help output + temp-workspace round-trips + `br schema all --format json` + the author's AGENTS.md in `Dicklesworthstone/beads_rust`) changed several assumptions. v0a.1 ships with these assumption corrections already merged on `main` (see commits `841945a`, `d97ecf1`, `1f6fbbc`). The remaining items below are v0a.2 inputs.
+
+- **B5 — label vocabulary was incompatible with `br` grammar** (resolved in `841945a`). `br 0.1.14` enforces labels `[A-Za-z0-9_:-]+`; the v0a.0 namespace `spur.plan_id=<id>` / `spur.plan_task_id=<id>` / `spur.agent=<name>` / `spur.source_issue=<id>` contained illegal `.` and `=`. Migrated to `spur:plan-id:<id>`, `spur:plan-task-id:<id>`, `spur:agent:<name>`, `spur:source-issue:<id>`. New integration test `crates/spur-mcp/tests/labels_br_round_trip.rs` round-trips every constructor through real `br label add`. This supersedes the "Label namespace must stay grounded in current code" item above — the pre-existing namespace was never functional against `br 0.1.14`.
+
+- **B1 + B2 — `ReadyFilter` priority semantics** (resolved in `d97ecf1`). `br ready -p <n>` is empirically a repeatable set-membership filter (`-p 0 -p 2` returns P0 ∪ P2), not a range and not exact-match-single. Prior `priority_min`/`priority_max` misrepresented br's model and silently dropped `priority_max`. Replaced with `priorities: Vec<i32>` that bijectively maps to `br`'s flag surface.
+
+- **D1 — `poll()` mutex across `fs::write`** (resolved in `1f6fbbc`). `std::sync::Mutex` was held across synchronous `save_cursor` fs::write in an async context. Released before I/O.
+
+- **Task 4 audit transport — DOA, not gated.** The blocker above offered three transport options; empirical testing on `br 0.1.14`:
+  - Option 2 (`br audit record --stdin`) is **structurally broken**: the `data` field in the stdin JSON is silently dropped on persist (`.beads/interactions.jsonl` stores only `{id, kind, created_at, actor, issue_id}`), AND there is no CLI to query interactions (`br audit log` returns issue events, not interactions). The author's AGENTS.md does not document `br audit record` as an agent contract. No `AuditEntry` schema in `br schema all` (9 public schemas only: `BlockedIssue, ErrorEnvelope, Issue, IssueDetails, IssueWithCounts, ReadyIssue, StaleIssue, Statistics, TreeNode`).
+  - Option 3 (upstream br change) is out of scope.
+  - **Option 1 (SPUR-owned comment breadcrumbs) is the only viable path.** Verified end-to-end: `br comments add <issue> <body> --actor <actor> --json` preserves the full body text verbatim including embedded newlines and JSON; `br comments list <issue> --json` round-trips cleanly. Extends Task 11's `[[spur-signal v1]]` pattern to `[[spur-audit v1]]`.
+  - **Redraft Tasks 4, 12, 13, 14** around comment-sentinel transport. `BeadsAdvanced::audit_record` / `audit_log` should be **deleted from the trait** (or repurposed as fire-and-forget stubs for the unindexed `interactions.jsonl` side channel). The primary breadcrumb API becomes `add_comment` + a new `plan/audit_sentinel.rs` parser that reuses the sentinel parser pattern from `plan/signals.rs`.
+
+- **B4 — Task 8 proposed status filter is invalid.** Plan Task 8's rewrite at line ~1270 uses `-s "open,in_progress,blocked"`. Empirically: `br list -s` is "can be repeated" (set membership, same pattern as `-p`), and comma-separated single arg is rejected with `INVALID_STATUS` (exit 4). Correct form for the Task 8 rewrite: `"-s", "open", "-s", "in_progress", "-s", "blocked"` (three argv pairs).
+
+- **B3 — `br ready` JSON omits `labels`.** Per `br schema ready-issue --json`, the `ReadyIssue` type has no `labels` field. Our `BrReadyItem` has `#[serde(default)] labels: Vec<String>`, so `IssueSummary.labels` from `list_ready` is always empty. Server-side `-l <label>` filter works; reconciler **must not inspect returned labels** on `list_ready` results. Either tolerate server-side-only filtering, enrich each ID via a separate `br show <id>` call, or use `br list --json -l <label>` (which DOES return labels per the `IssueWithCounts` schema) and filter to "ready" in Rust.
+
+- **Reconciler engine choice — use `bv` as primary, not raw `br ready`.** The author's AGENTS.md explicitly designates `bv --robot-triage` as the "single entry point" for agent pick-next-work workflows. `bv v0.15.2` outputs include `recommendations`, `quick_wins`, `blockers_to_clear`, `project_health`, `--robot-plan` (parallel execution tracks), `--robot-priority` (priority misalignment detection) — all directly modeling the observation/parity work Task 15-16 needs. SPUR already has a `BvAdapter` wired via `PmService::analyzer()`. Redesign the reconciler around `bv` primary with `br ready` fallback.
+
+- **`br sync --flush-only` in agent workflow.** AGENTS.md prescribes `br sync --flush-only && git add .beads/` before session end. Default behavior auto-flushes (the `--no-auto-flush` flag is opt-out). The wrapper does not currently invoke explicit sync. For v0a.2 plan persistence across SPUR sessions, confirm reliance on auto-flush is intentional or add an explicit sync hook at persist boundaries.
+
+- **`labels::superseded_by` was illegal (removed in `841945a`).** Comma-separated IDs violate br's label grammar. Unused at time of removal. v0b mutation work will need one label per superseder (e.g. iterate `for id in child_ids { br label add <parent> -l (format!("superseded-by:{id}")) }`) rather than a single multi-ID label.
+
+- **`spur:task-text:<text>` label key is structurally misaligned.** Task text can contain `.`, `=`, whitespace — all illegal as label chars. The key migration landed in `841945a` but values remain problematic. Follow-up: migrate task text onto the issue `description` field (or a sentinel-framed comment), remove the `spur:task-text:` label path entirely.
+
+- **Grammar documentation.** `br`'s label grammar `[A-Za-z0-9_:-]+` is enforced at runtime via `VALIDATION_FAILED` but undocumented in AGENTS.md. `plan/labels.rs` now encodes it in the `is_br_legal` test helper and module docstring. When adding label constructors, extend the constructor-emits-legal-labels test.
+
 ---
 
 ## Task 1: Scaffolding — create `advanced.rs` with types + trait skeleton
