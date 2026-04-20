@@ -1,3 +1,6 @@
+#[path = "palette_integration/util.rs"]
+mod util;
+
 use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use spur_tui::test_support::new_app;
 
@@ -55,4 +58,20 @@ fn palette_session_accept_emits_resume_session_action() {
         }
         other => panic!("expected ResumeSession, got {:?}", other),
     }
+}
+
+#[test]
+fn open_palette_surfaces_session_command_registry_entries() {
+    let mut app = util::app_with_seeded_session_and_dynamic_command(
+        "codex",
+        "review",
+        "Review the current diff",
+    );
+    app.try_open_palette_for_test();
+    let state = app.palette_state_for_test();
+    let labels: Vec<&str> = state.iter_ranked().map(|r| r.label.as_str()).collect();
+    assert!(
+        labels.contains(&"review"),
+        "expected the dynamic /review command to appear in the palette; got: {labels:?}"
+    );
 }
