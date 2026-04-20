@@ -585,10 +585,7 @@ impl IssueTracker for BeadsAdapter {
 
 // ─── BeadsAdvanced impl ───────────────────────────────────────────────
 
-use crate::advanced::{
-    AuditEntry, AuditId, AuditRecordInput, BeadsAdvanced, Comment, CommentId, DependencyCycle,
-    ReadyFilter,
-};
+use crate::advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter};
 
 #[derive(serde::Deserialize)]
 struct BrReadyItem {
@@ -714,18 +711,6 @@ impl BeadsAdvanced for BeadsAdapter {
             other => anyhow::bail!("unexpected id type from br comments add: {other}"),
         };
         Ok(id_str)
-    }
-
-    async fn audit_record(
-        &self,
-        _issue_id: &str,
-        _entry: AuditRecordInput,
-    ) -> anyhow::Result<AuditId> {
-        anyhow::bail!("audit_record: not yet implemented")
-    }
-
-    async fn audit_log(&self, _issue_id: &str) -> anyhow::Result<Vec<AuditEntry>> {
-        anyhow::bail!("audit_log: not yet implemented")
     }
 
     async fn remove_dependency(
