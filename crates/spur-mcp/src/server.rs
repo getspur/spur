@@ -902,23 +902,18 @@ impl McpCallbackServer {
         // tasks via bv/br, logs metrics, and surfaces signals for the brain.
         // Dispatch lands in v0b.
         let reconciler_task = if self.reconciler_enabled {
-            let pm = self.pm_service.as_ref();
             let fast_forward = self.reconciler_fast_forward.as_ref().cloned();
-            let reconciler_enabled = self.reconciler_enabled;
-            if reconciler_enabled && pm.is_some() {
-                let pm = pm.unwrap();
+            if let Some(pm) = self.pm_service.as_ref() {
                 // Only spawn if PmService has an advanced() (beads) backend.
-                let spawn_reconciler = pm.advanced().is_some();
-                if spawn_reconciler {
-                    let pm = Arc::clone(&pm);
+                if pm.advanced().is_some() {
+                    let pm = Arc::clone(pm);
                     let fast = fast_forward.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
-                    let fast_clone = Arc::clone(&fast);
                     info!("spawning plan reconciler (beads backend detected)");
                     let handle = tokio::spawn(async move {
                         let reconciler = Reconciler::new(
                             ReconcilerConfig::default(),
                             pm,
-                            fast_clone,
+                            fast,
                             None, // plan_id: observe all plans when None
                         );
                         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
@@ -932,7 +927,7 @@ impl McpCallbackServer {
                     None
                 }
             } else {
-                tracing::debug!("reconciler disabled: not enabled or no PM service");
+                tracing::debug!("reconciler disabled: no PM service");
                 None
             }
         } else {
