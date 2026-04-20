@@ -662,13 +662,45 @@ impl BeadsAdvanced for BeadsAdapter {
 
     async fn remove_dependency(
         &self,
-        _issue_id: &str,
-        _depends_on_id: &str,
+        issue_id: &str,
+        depends_on_id: &str,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("remove_dependency: not yet implemented")
+        self.run_br(vec![
+            "dep".into(),
+            "remove".into(),
+            issue_id.into(),
+            depends_on_id.into(),
+        ])
+        .await?;
+        Ok(())
     }
 
     async fn dep_cycles(&self) -> anyhow::Result<Vec<DependencyCycle>> {
-        anyhow::bail!("dep_cycles: not yet implemented")
+        #[derive(serde::Deserialize)]
+        struct BrCycle {
+            #[serde(default)]
+            issues: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct BrCyclesOutput {
+            #[serde(default)]
+            cycles: Vec<BrCycle>,
+        }
+        let output = self.run_br(vec!["dep".into(), "cycles".into()]).await?;
+        // `br dep cycles --json` returns either an array or {"cycles": [...]};
+        // try the wrapped form first, then fall back to a bare array.
+        if let Ok(wrapped) = serde_json::from_str::<BrCyclesOutput>(&output) {
+            return Ok(wrapped
+                .cycles
+                .into_iter()
+                .map(|c| DependencyCycle { issues: c.issues })
+                .collect());
+        }
+        let bare: Vec<BrCycle> = serde_json::from_str(&output)
+            .map_err(|e| anyhow::anyhow!("parse `br dep cycles`: {e}\nraw: {output}"))?;
+        Ok(bare
+            .into_iter()
+            .map(|c| DependencyCycle { issues: c.issues })
+            .collect())
     }
 }
