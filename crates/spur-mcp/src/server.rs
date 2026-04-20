@@ -384,6 +384,8 @@ pub async fn build_epic_subgraph(
         .await
     {
         tracing::warn!(
+            target: "spur.audit.emit_failure",
+            kind = "plan_complete_marker",
             %epic_id,
             "failed to emit spur:plan-complete marker on epic (graph is complete, marker missing — reconciler will skip): {e}"
         );
@@ -411,6 +413,8 @@ pub async fn emit_plan_submit_audit(
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
         tracing::warn!(
+            target: "spur.audit.emit_failure",
+            kind = "plan_submit",
             epic_id = %sg.epic_id,
             plan_id = %plan_id,
             "PlanSubmit audit comment emission failed (graph is persisted; audit missing): {e}"

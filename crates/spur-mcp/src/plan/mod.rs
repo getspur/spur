@@ -575,6 +575,8 @@ pub async fn emit_dispatch_audit(
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
         warn!(
+            target: "spur.audit.emit_failure",
+            kind = "dispatch",
             issue_id = %issue_id,
             plan_id = %plan_id,
             delegation_id = %delegation_id,
@@ -604,6 +606,8 @@ pub async fn emit_completion_audit(
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
         warn!(
+            target: "spur.audit.emit_failure",
+            kind = "completion",
             issue_id = %issue_id,
             plan_id = %plan_id,
             delegation_id = %delegation_id,
@@ -629,6 +633,8 @@ pub(crate) async fn emit_approval_audit(
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
         warn!(
+            target: "spur.audit.emit_failure",
+            kind = "approval",
             issue_id = %issue_id,
             plan_id = %plan_id,
             delegation_id = %delegation_id,
@@ -656,6 +662,8 @@ pub(crate) async fn emit_rejection_audit(
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
         warn!(
+            target: "spur.audit.emit_failure",
+            kind = "rejection",
             issue_id = %issue_id,
             plan_id = %plan_id,
             delegation_id = %delegation_id,
