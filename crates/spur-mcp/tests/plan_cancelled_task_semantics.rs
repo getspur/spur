@@ -41,6 +41,7 @@ async fn test_non_cascade_on_dep() {
                 worker_branch: None,
                 attempt: 1,
                 history: vec![],
+                last_delegation_id: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -56,6 +57,7 @@ async fn test_non_cascade_on_dep() {
                 worker_branch: None,
                 attempt: 1,
                 history: vec![],
+                last_delegation_id: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -71,6 +73,7 @@ async fn test_non_cascade_on_dep() {
                 worker_branch: None,
                 attempt: 1,
                 history: vec![],
+                last_delegation_id: None,
             },
         ],
     };
@@ -125,6 +128,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
                 worker_branch: None,
                 attempt: 1,
                 history: vec![],
+                last_delegation_id: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -140,6 +144,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
                 worker_branch: None,
                 attempt: 1,
                 history: vec![],
+                last_delegation_id: None,
             },
         ],
     };
@@ -149,7 +154,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
     let plan_clone = plan.clone();
 
     let handle = tokio::spawn(async move {
-        run_plan(plan_clone, dtx, None).await;
+        run_plan(plan_clone, dtx, None, None).await;
     });
 
     // t1 should be dispatched immediately since it has no deps.
@@ -229,6 +234,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
                 worker_branch: None,
                 attempt: 1,
                 history: vec![],
+                last_delegation_id: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -244,6 +250,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
                 worker_branch: None,
                 attempt: 1,
                 history: vec![],
+                last_delegation_id: None,
             },
         ],
     };
@@ -256,7 +263,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
     let (dtx, _drx) = mpsc::channel(8);
 
     // run_plan will immediately exit since both tasks are terminal
-    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref)).await;
+    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None).await;
 
     let events = sink.events.lock().unwrap();
 

@@ -503,6 +503,7 @@ pub fn build_entries_with_task_map(
                 worker_branch: None,
                 attempt: 1,
                 history: Vec::new(),
+                last_delegation_id: None,
             }
         })
         .collect()
@@ -1934,8 +1935,9 @@ impl McpCallbackServer {
         // Spawn the plan executor.
         let delegation_tx = self.delegation_tx.clone();
         let plan_sink = self.event_sink.clone();
+        let plan_pm = self.pm_service.clone().map(|p| p as Arc<dyn crate::plan::PmLike>);
         self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink));
+            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink, plan_pm));
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
@@ -2107,6 +2109,7 @@ impl McpCallbackServer {
                 worker_branch: None,
                 attempt: 1,
                 history: Vec::new(),
+                last_delegation_id: None,
             })
             .collect();
 
@@ -2161,8 +2164,9 @@ impl McpCallbackServer {
         }
         let delegation_tx = self.delegation_tx.clone();
         let plan_sink = self.event_sink.clone();
+        let plan_pm = self.pm_service.clone().map(|p| p as Arc<dyn crate::plan::PmLike>);
         self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink));
+            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink, plan_pm));
 
         info!(
             plan_id = %plan_id,
