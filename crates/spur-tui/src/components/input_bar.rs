@@ -224,6 +224,14 @@ impl InputBar {
                 self.delete_char_after_cursor();
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
+            KeyCode::Home => {
+                self.textarea.move_cursor(CursorMove::Head);
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
+            KeyCode::End => {
+                self.textarea.move_cursor(CursorMove::End);
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.textarea.insert_newline();
                 self.rebuild_line_cache();
@@ -648,6 +656,14 @@ impl InputBar {
             KeyCode::Delete => {
                 self.delete_char_after_cursor();
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
+            }
+            KeyCode::Home => {
+                self.textarea.move_cursor(CursorMove::Head);
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
+            KeyCode::End => {
+                self.textarea.move_cursor(CursorMove::End);
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
             KeyCode::Char(c) => {
                 self.insert_char_with_protected_check(c);
