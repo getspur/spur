@@ -41,6 +41,14 @@ impl PollCursor {
     }
 }
 
+/// Maximum rows fetched per `poll()` call via `br list --limit N`.
+///
+/// Chosen to comfortably exceed realistic concurrent-update volume between
+/// two poll ticks. If a single poll returns exactly this many rows, the
+/// backend may hold additional qualifying rows that were truncated — see
+/// [`BeadsAdapter::poll_with_limit`] for the saturation data-loss guard.
+pub const POLL_FETCH_LIMIT: usize = 500;
+
 // ─── Private error type ───────────────────────────────────────────────
 
 enum BrCallError {
@@ -385,6 +393,114 @@ impl BeadsAdapter {
         None
     }
 
+    /// Poll for open-issue updates, fetching up to `limit` rows.
+    ///
+    /// Production always uses [`POLL_FETCH_LIMIT`] via [`IssueTracker::poll`].
+    /// This inherent helper exists so integration tests can drive the
+    /// saturation boundary (`items.len() == limit`) deterministically at a
+    /// small N without creating hundreds of real issues.
+    pub async fn poll_with_limit(&self, limit: usize) -> anyhow::Result<Vec<PmEvent>> {
+        let output = self
+            .run_br(vec![
+                "list".into(),
+                "-s".into(),
+                "open".into(),
+                "--limit".into(),
+                limit.to_string(),
+            ])
+            .await?;
+
+        let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output).map_err(|e| {
+            anyhow::anyhow!("Failed to parse `br list` poll output: {e}\nRaw: {output}")
+        })?;
+
+        // Saturation sentinel: `br list --limit N` truncates. If the returned
+        // batch is exactly `limit` rows, more qualifying rows may exist on the
+        // backend with `updated_at <= max(fetched.ts)`. Advancing the cursor
+        // past `max(fetched.ts)` would hide those rows forever.
+        let saturated = issues.len() == limit;
+
+        // Snapshot the cursor under the lock, then release immediately.
+        let prior_cursor: Option<PollCursor> = {
+            let guard = self
+                .last_poll
+                .lock()
+                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
+            guard.clone()
+        };
+
+        // Apply the boundary-safe filter: emit only items that pass the cursor predicate.
+        let had_prior = prior_cursor.is_some();
+        let kept: Vec<BrIssueWithCounts> = issues
+            .into_iter()
+            .filter(|item| match &prior_cursor {
+                None => true,
+                Some(c) => c.allows(&item.id, item.updated_at),
+            })
+            .collect();
+
+        // Advance the cursor based on the kept items.
+        let new_cursor: PollCursor = if !kept.is_empty() {
+            if saturated {
+                // Data-loss guard: emit observed events but preserve the prior
+                // cursor (or seed fresh if none). Callers dedup on `id` when
+                // the next poll refetches this batch.
+                tracing::warn!(
+                    limit,
+                    kept_count = kept.len(),
+                    "poll() fetch saturated --limit; preserving cursor to avoid \
+                     boundary-row data loss. Consider raising POLL_FETCH_LIMIT \
+                     or investigating row-update velocity."
+                );
+                prior_cursor.clone().unwrap_or(PollCursor {
+                    ts: Utc::now(),
+                    ids_at_boundary: HashSet::new(),
+                })
+            } else {
+                let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap(); // safe: kept non-empty
+                let ids_at_max: HashSet<String> = kept
+                    .iter()
+                    .filter(|i| i.updated_at == max_ts)
+                    .map(|i| i.id.clone())
+                    .collect();
+                PollCursor {
+                    ts: max_ts,
+                    ids_at_boundary: ids_at_max,
+                }
+            }
+        } else if let Some(existing) = prior_cursor {
+            existing
+        } else {
+            PollCursor {
+                ts: Utc::now(),
+                ids_at_boundary: HashSet::new(),
+            }
+        };
+
+        let events: Vec<PmEvent> = kept
+            .into_iter()
+            .map(|item| {
+                let summary = IssueSummary::from(item);
+                if had_prior {
+                    PmEvent::IssueUpdated(summary)
+                } else {
+                    PmEvent::IssueCreated(summary)
+                }
+            })
+            .collect();
+
+        {
+            let mut guard = self
+                .last_poll
+                .lock()
+                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
+            *guard = Some(new_cursor.clone());
+        }
+        self.save_cursor(&new_cursor);
+
+        Ok(events)
+    }
+
     /// Persist the poll cursor to disk (if `cursor_path` is set).
     /// Failures are logged as warnings and do not abort the poll (best-effort).
     fn save_cursor(&self, cursor: &PollCursor) {
@@ -598,99 +714,7 @@ impl IssueTracker for BeadsAdapter {
     }
 
     async fn poll(&self) -> anyhow::Result<Vec<PmEvent>> {
-        let output = self
-            .run_br(vec![
-                "list".into(),
-                "-s".into(),
-                "open".into(),
-                "--limit".into(),
-                "20".into(),
-            ])
-            .await?;
-
-        let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output).map_err(|e| {
-            anyhow::anyhow!("Failed to parse `br list` poll output: {e}\nRaw: {output}")
-        })?;
-
-        // Snapshot the cursor under the lock, then release immediately.
-        let prior_cursor: Option<PollCursor> = {
-            let guard = self
-                .last_poll
-                .lock()
-                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
-            guard.clone()
-        };
-
-        // Apply the boundary-safe filter: emit only items that pass the cursor predicate.
-        let had_prior = prior_cursor.is_some();
-        let kept: Vec<BrIssueWithCounts> = issues
-            .into_iter()
-            .filter(|item| match &prior_cursor {
-                None => true,
-                Some(c) => c.allows(&item.id, item.updated_at),
-            })
-            .collect();
-
-        // Advance the cursor based on the kept items.
-        let new_cursor: PollCursor = if !kept.is_empty() {
-            // New ts = max(kept.updated_at).
-            let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap(); // safe: kept non-empty
-                                                                           // ids_at_boundary is bounded by the `br list --limit N` fetch cap
-                                                                           // (currently 20; see the list call above). If the cap grows or is
-                                                                           // removed, revisit this — the cursor file size scales linearly.
-            let ids_at_max: HashSet<String> = kept
-                .iter()
-                .filter(|i| i.updated_at == max_ts)
-                .map(|i| i.id.clone())
-                .collect();
-            debug_assert!(
-                ids_at_max.len() <= 200,
-                "ids_at_boundary grew beyond expected fetch-cap bound: {}",
-                ids_at_max.len()
-            );
-            PollCursor {
-                ts: max_ts,
-                ids_at_boundary: ids_at_max,
-            }
-        } else if let Some(existing) = prior_cursor {
-            // No new items AND we had a prior cursor: don't advance (keep existing).
-            existing
-        } else {
-            // No new items AND no prior cursor: seed cursor at now with empty ids
-            // so the next poll only sees future writes.
-            PollCursor {
-                ts: Utc::now(),
-                ids_at_boundary: HashSet::new(),
-            }
-        };
-
-        let events: Vec<PmEvent> = kept
-            .into_iter()
-            .map(|item| {
-                let summary = IssueSummary::from(item);
-                if had_prior {
-                    PmEvent::IssueUpdated(summary)
-                } else {
-                    PmEvent::IssueCreated(summary)
-                }
-            })
-            .collect();
-
-        // Update in-memory cursor under lock, then RELEASE the guard before
-        // the synchronous fs::write in save_cursor(). Holding a std::sync::Mutex
-        // across blocking I/O in an async context serializes other pollers
-        // behind disk latency unnecessarily — cursor persistence is best-effort
-        // and does not need to happen atomically with the in-memory update.
-        {
-            let mut guard = self
-                .last_poll
-                .lock()
-                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
-            *guard = Some(new_cursor.clone());
-        } // guard drops here
-        self.save_cursor(&new_cursor);
-
-        Ok(events)
+        self.poll_with_limit(POLL_FETCH_LIMIT).await
     }
 }
 
