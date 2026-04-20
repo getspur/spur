@@ -40,6 +40,13 @@ pub enum AuditSentinelKind {
         delegation_id: String,
         feedback: String,
     },
+    /// Forward-compat fallback. When a future SPUR release adds a new audit
+    /// sentinel variant and emits it into a beads comment, older clients
+    /// parsing that comment will deserialize it into `Unknown` instead of
+    /// hard-failing with `ParseError::Json`. Callers iterating sentinels
+    /// should skip `Unknown`; the encode path must never emit it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl AuditSentinelKind {
@@ -51,12 +58,22 @@ impl AuditSentinelKind {
             Self::Completion { .. } => "completion",
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
+            Self::Unknown => "unknown",
         }
     }
 }
 
 /// Encode a kind as a full sentinel comment body ready for `br comments add`.
+///
+/// The `Unknown` forward-compat variant is a parse-only fallback; emitting it
+/// would write a `{"kind":"unknown"}` breadcrumb that downstream readers can't
+/// interpret. Internal callers only ever construct known variants, so guard
+/// the invariant with a debug assertion.
 pub fn encode_comment(kind: &AuditSentinelKind) -> String {
+    debug_assert!(
+        !matches!(kind, AuditSentinelKind::Unknown),
+        "encode_comment must not be called with the Unknown forward-compat variant"
+    );
     let json = serde_json::to_string(kind).expect("AuditSentinelKind always serializes");
     format!("{SENTINEL_PREFIX}\n{json}")
 }
@@ -135,6 +152,23 @@ mod tests {
         let body = format!("   \n  {}", encode_comment(&k));
         let parsed = parse_comment(&body).unwrap().unwrap();
         assert_eq!(parsed, k);
+    }
+
+    #[test]
+    fn parse_unknown_future_variant_returns_unknown_not_error() {
+        // Simulate a future SPUR version's comment with a `kind` we don't know
+        // about. Before the Unknown forward-compat variant, this hard-fails at
+        // ParseError::Json(unknown variant). After: deserializes as Unknown so
+        // older clients tolerate a rolling upgrade / rollback.
+        let future_comment = format!(
+            "{SENTINEL_PREFIX}\n{{\"kind\":\"mutation-applied\",\"mutation_id\":\"uuid-123\"}}"
+        );
+        let parsed = parse_comment(&future_comment).unwrap();
+        assert!(
+            parsed.is_ok(),
+            "unknown future variants must deserialize as Unknown fallback, got: {parsed:?}"
+        );
+        assert_eq!(parsed.unwrap(), AuditSentinelKind::Unknown);
     }
 
     #[test]
