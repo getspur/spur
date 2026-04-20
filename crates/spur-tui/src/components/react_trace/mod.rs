@@ -26,6 +26,26 @@ use super::MAX_LOG_ENTRIES;
 /// Spinner frames for delegation animation.
 pub(super) const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Which render surface most recently painted this trace. Used by scroll
+/// mutators (`shift_anchor_by`) to pick the correct cache for anchor
+/// resolution — `line_cache` for Full, `compact_cache` for Compact.
+///
+/// Tracking the painted surface (rather than "whichever cache is populated")
+/// avoids stale-cache ambiguity if a trace is ever rendered via both paths
+/// in a single session.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Surface {
+    /// No render has happened yet in this session.
+    #[default]
+    None,
+    /// Last painted by `render` / `render_with_ctx` (DetailPane-owned or
+    /// SessionDetailView-owned full body with block + scrollbar).
+    Full,
+    /// Last painted by `render_compact` (dashboard DetailPane stream tab,
+    /// body-only layout, one row per entry).
+    Compact,
+}
+
 pub struct ReactTrace {
     pub(super) entries: Vec<TraceEntry>,
     pub(super) anchor: crate::components::react_trace::types::ScrollAnchor,
@@ -34,6 +54,9 @@ pub struct ReactTrace {
     pub(super) last_total_lines: usize,
     /// Cached visible height from last render.
     pub(super) last_visible_height: usize,
+    /// The render surface most recently painted. Drives cache selection
+    /// in `shift_anchor_by`.
+    pub(super) last_surface: Surface,
     /// Width hint from the most-recent render call; used by scroll mutators
     /// to compute fresh row counts without stale last_total_lines.
     pub(super) last_render_width: Option<u16>,
@@ -72,8 +95,6 @@ pub struct ReactTrace {
 /// Assumes `entry_row_starts[0] == 0` (builder invariant). For `row`
 /// values smaller than `entry_row_starts[0]`, `within` would underflow
 /// in release mode; callers must clamp inputs.
-///
-#[cfg(feature = "markdown")]
 fn row_to_anchor(row: usize, entry_row_starts: &[usize]) -> (usize, usize) {
     if entry_row_starts.is_empty() {
         return (0, 0);
@@ -190,6 +211,7 @@ impl ReactTrace {
             tick_counter: 0,
             last_total_lines: 0,
             last_visible_height: 20,
+            last_surface: Surface::None,
             last_render_width: None,
             mermaid_enabled: true,
             agent_kind: AgentKind::Generic,
@@ -521,6 +543,36 @@ impl ReactTrace {
         self.anchor = crate::components::react_trace::types::ScrollAnchor::Following;
     }
 
+    /// Layout selection for scroll math. Returns `(entry_row_starts, total_rows)`
+    /// for whichever cache was last painted. Cloning `entry_row_starts` keeps
+    /// the subsequent `&mut self` mutation of the anchor borrow-safe.
+    ///
+    /// Non-markdown full-render path returns `None` because `LineCacheEntry`
+    /// does not yet track per-entry row boundaries — tracked as a follow-up.
+    fn layout_for_scroll(&self) -> Option<(Vec<usize>, usize)> {
+        match self.last_surface {
+            Surface::None => None,
+            Surface::Compact => self
+                .compact_cache
+                .as_ref()
+                .map(|c| (c.entry_row_starts.clone(), c.lines.len())),
+            Surface::Full => {
+                #[cfg(feature = "markdown")]
+                {
+                    self.line_cache
+                        .as_ref()
+                        .map(|c| (c.entry_row_starts.clone(), c.rows.len()))
+                }
+                #[cfg(not(feature = "markdown"))]
+                {
+                    // Non-markdown full path: LineCacheEntry has no
+                    // entry_row_starts; preserve pre-existing no-op behavior.
+                    None
+                }
+            }
+        }
+    }
+
     /// Apply a row delta to the current anchor by:
     /// 1. resolving the current anchor against the cached layout from the
     ///    most recent render (P2-δ — guarantees scroll math uses the same
@@ -528,25 +580,25 @@ impl ReactTrace {
     /// 2. computing the target row,
     /// 3. converting back to a Row anchor at the target row.
     ///
-    /// If `line_cache` is `None` (first tick before any render), this is a
+    /// Cache selection is driven by `last_surface` (not "whichever cache is
+    /// populated") so scroll math always agrees with the layout painted on
+    /// the most recent render. If no surface has painted yet, this is a
     /// no-op — anchor remains in its initial state.
     /// If the target row is the last visible row, transitions to Following.
     /// When `total <= visible_h` (entire content fits on-screen), all scroll
     /// inputs transition to `Following` — there is nothing to scroll.
-    #[cfg(feature = "markdown")]
     fn shift_anchor_by(&mut self, delta: isize) {
         use crate::components::react_trace::types::ScrollAnchor;
 
-        let Some(cache) = self.line_cache.as_ref() else {
+        let Some((starts_vec, total)) = self.layout_for_scroll() else {
             return;
         };
-        let total = cache.rows.len();
+        let starts: &[usize] = &starts_vec;
         let visible_h = self.last_visible_height.max(1);
 
         let current_row = crate::components::react_trace::render::resolve_anchor(
             &self.anchor,
-            &cache.byte_ranges,
-            &cache.entry_row_starts,
+            starts,
             total,
             visible_h,
         );
@@ -560,16 +612,11 @@ impl ReactTrace {
             return;
         }
 
-        let (entry_idx, row_within_entry) = row_to_anchor(target, &cache.entry_row_starts);
+        let (entry_idx, row_within_entry) = row_to_anchor(target, starts);
         self.anchor = ScrollAnchor::Row {
             entry_idx,
             row_within_entry,
         };
-    }
-
-    #[cfg(not(feature = "markdown"))]
-    fn shift_anchor_by(&mut self, _delta: isize) {
-        // Non-markdown build keeps scroll_offset semantics; no-op for now.
     }
 
     /// Called on each tick: advance spinner counter and decrement pending
@@ -1114,6 +1161,9 @@ impl ReactTrace {
             fence_gen: 0,
         });
         self.last_render_width = Some(width);
+        // Simulate a Full-surface render so shift_anchor_by picks
+        // line_cache when tests invoke scroll mutators.
+        self.last_surface = Surface::Full;
     }
 
     pub fn build_display_lines_for_tests(

@@ -1049,7 +1049,7 @@ fn sim_render_offset_reflects_scroll_input() {
     trace.append_message(&payload, "claude", "10:00".into());
     trace.force_flush_all(&StateLookup::empty());
 
-    let (rows_initial, entry_row_starts, byte_ranges) =
+    let (rows_initial, entry_row_starts, _byte_ranges) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     trace.set_visible_height_for_tests(5);
     // Seed line_cache so shift_anchor_by can resolve the anchor.
@@ -1059,7 +1059,6 @@ fn sim_render_offset_reflects_scroll_input() {
     trace.scroll_to_top();
     let row0 = crate::components::react_trace::render::resolve_anchor(
         &trace.anchor_for_tests(),
-        &byte_ranges,
         &entry_row_starts,
         total,
         5,
@@ -1067,7 +1066,6 @@ fn sim_render_offset_reflects_scroll_input() {
     trace.scroll_down_by(5);
     let row5 = crate::components::react_trace::render::resolve_anchor(
         &trace.anchor_for_tests(),
-        &byte_ranges,
         &entry_row_starts,
         total,
         5,
@@ -1225,11 +1223,10 @@ fn sim_mermaid_state_mismatch_in_shift() {
             row_within_entry: _,
         } => {
             // Resolve back to a row index using the REAL ready layout.
-            let (_, starts_real, ranges_real) =
+            let (_, starts_real, _ranges_real) =
                 trace.build_virtual_rows_for_tests(0, 80, &ready_states, None);
             let resolved = crate::components::react_trace::render::resolve_anchor(
                 &anchor,
-                &ranges_real,
                 &starts_real,
                 rows_real.len(),
                 3,
@@ -1393,11 +1390,10 @@ fn phase3_counter_streaming_pageup_monotonic() {
         trace.page_up();
 
         // Resolve against the SAME cache the shift used.
-        let (rows2, starts2, byte_ranges2) =
+        let (rows2, starts2, _byte_ranges2) =
             trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
         let resolved = crate::components::react_trace::render::resolve_anchor(
             &trace.anchor_for_tests(),
-            &byte_ranges2,
             &starts2,
             rows2.len(),
             10,
@@ -1470,11 +1466,10 @@ fn phase3_edge_stale_cache_safe() {
     eprintln!("EDGE-3 stale-shift anchor: {:?}", anchor_after_stale_shift);
 
     // Now build the FRESH layout (this is what the next real render would do).
-    let (rows, starts, byte_ranges) =
+    let (rows, starts, _byte_ranges) =
         trace.build_virtual_rows_for_tests(0, 80, &std::collections::HashMap::new(), None);
     let resolved = crate::components::react_trace::render::resolve_anchor(
         &trace.anchor_for_tests(),
-        &byte_ranges,
         &starts,
         rows.len(),
         3,
@@ -1533,16 +1528,16 @@ fn phase3_edge_mermaid_pending_to_ready_stable() {
         entry_idx: 0,
         row_within_entry: 1,
     };
+    let _ = &ranges_p;
+    let _ = &ranges_r;
     let row_p = crate::components::react_trace::render::resolve_anchor(
         &anchor,
-        &ranges_p,
         &starts_p,
         rows_p.len(),
         5,
     );
     let row_r = crate::components::react_trace::render::resolve_anchor(
         &anchor,
-        &ranges_r,
         &starts_r,
         rows_r.len(),
         5,
