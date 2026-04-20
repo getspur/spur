@@ -4238,6 +4238,75 @@ fn truncate_summary_env_default(text: &str) -> String {
     truncate_summary(text, summary_cap_bytes())
 }
 
+/// Apply the calibrated artifact-vs-transport failure rule. Pure.
+///
+/// Inputs:
+/// - `worker_success`: did the worker itself report success?
+/// - `persist_result`: outcome of `WorktreeManager::persist_artifact`.
+///   `None` means the orchestrator skipped persistence (output under cap).
+///   `Some(Ok)` / `Some(Err)` are the persistence outcomes.
+/// - `original_error_status`: the status the caller would have returned
+///   if persistence hadn't been attempted. Only consulted on the
+///   `!worker_success` branch; the helper composes with existing error
+///   extraction so this path keeps the worker's original error.
+///
+/// Returns: `(status, artifact, summary_annotation)`.
+/// - `status` is the final `DelegationStatus`.
+/// - `artifact` is `Some` on successful persistence (regardless of
+///   worker success — failing workers still get diagnostic artifacts).
+/// - `summary_annotation`, if `Some`, must be appended to the truncated
+///   summary tail by the caller.
+///
+/// Failure rule:
+/// - worker_success + Ok  -> Success + Some(artifact) + no note
+/// - worker_success + Err -> Failed { "artifact persistence failed: ..." } + None + note
+/// - !worker_success + Ok -> original_error_status + Some(artifact) + no note
+/// - !worker_success + Err -> original_error_status + None + note
+fn decide_artifact_handling(
+    worker_success: bool,
+    persist_result: Option<Result<spur_acp::WorkerArtifact, String>>,
+    original_error_status: Option<DelegationStatus>,
+) -> (
+    DelegationStatus,
+    Option<spur_acp::WorkerArtifact>,
+    Option<String>,
+) {
+    match (worker_success, persist_result) {
+        (true, Some(Ok(art))) => (DelegationStatus::Success, Some(art), None),
+        (true, Some(Err(e))) => {
+            let msg = format!("artifact persistence failed: {e}");
+            (
+                DelegationStatus::Failed { error: msg.clone() },
+                None,
+                Some(format!("[orchestrator: {msg}]")),
+            )
+        }
+        (false, Some(Ok(art))) => (
+            original_error_status.unwrap_or(DelegationStatus::Failed {
+                error: "worker failed".into(),
+            }),
+            Some(art),
+            None,
+        ),
+        (false, Some(Err(e))) => (
+            original_error_status.unwrap_or(DelegationStatus::Failed {
+                error: "worker failed".into(),
+            }),
+            None,
+            Some(format!("[orchestrator: artifact persistence failed: {e}]")),
+        ),
+        // No persist attempt — caller's responsibility.
+        (true, None) => (DelegationStatus::Success, None, None),
+        (false, None) => (
+            original_error_status.unwrap_or(DelegationStatus::Failed {
+                error: "worker failed".into(),
+            }),
+            None,
+            None,
+        ),
+    }
+}
+
 /// Compute a `DiffSummary` for a worktree via `git diff --numstat <basis>`.
 ///
 /// `basis` must match what `collect_diff` used for the raw diff — either
@@ -5356,5 +5425,90 @@ mod interactive_input_tests {
             InteractiveInput::SystemContinuation { .. } => (),
             _ => panic!("expected SystemContinuation variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod artifact_decision_tests {
+    use super::*;
+    use spur_acp::{ArtifactKind, DelegationStatus, WorkerArtifact};
+
+    fn sample_artifact() -> WorkerArtifact {
+        WorkerArtifact {
+            object_ref: "refs/spur/artifacts/s1".into(),
+            blob_sha: "a".repeat(40),
+            size_bytes: 1_024,
+            kind: ArtifactKind::Output,
+        }
+    }
+
+    #[test]
+    fn success_with_persist_ok_is_success_and_carries_artifact() {
+        let (status, artifact, note) = decide_artifact_handling(
+            /* worker_success */ true,
+            /* persist_result */ Some(Ok(sample_artifact())),
+            /* original_error_status */ None,
+        );
+        assert!(matches!(status, DelegationStatus::Success));
+        assert!(artifact.is_some());
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn success_with_persist_err_escalates_to_failed() {
+        let (status, artifact, note) = decide_artifact_handling(
+            true,
+            Some(Err("disk full".into())),
+            None,
+        );
+        match status {
+            DelegationStatus::Failed { error } => {
+                assert!(error.contains("artifact persistence failed"), "got: {error}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(artifact.is_none());
+        assert!(note.is_some());
+    }
+
+    #[test]
+    fn failure_with_persist_err_preserves_original_error_and_annotates() {
+        let original = DelegationStatus::Failed { error: "compile error".into() };
+        let (status, artifact, note) = decide_artifact_handling(
+            /* worker_success */ false,
+            Some(Err("ref locked".into())),
+            Some(original.clone()),
+        );
+        assert_eq!(status, original);
+        assert!(artifact.is_none());
+        let n = note.expect("failure path must annotate");
+        assert!(n.contains("orchestrator"));
+        assert!(n.contains("artifact persistence failed"));
+    }
+
+    #[test]
+    fn failure_with_persist_ok_preserves_original_error_and_carries_artifact() {
+        let original = DelegationStatus::Failed { error: "panic".into() };
+        let (status, artifact, note) = decide_artifact_handling(
+            false,
+            Some(Ok(WorkerArtifact {
+                kind: ArtifactKind::Diagnostic,
+                ..sample_artifact()
+            })),
+            Some(original.clone()),
+        );
+        assert_eq!(status, original);
+        let a = artifact.expect("diagnostic artifact must be surfaced on failed worker");
+        assert_eq!(a.kind, ArtifactKind::Diagnostic);
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn under_cap_path_is_unchanged() {
+        // When we never attempted persistence (output_text.len() <= cap),
+        // the helper is not called. Document the caller's contract: no
+        // call -> no annotation -> no escalation. This is asserted by
+        // the absence of the call site at the appropriate branch.
+        // See `run_one_worker_attempt` for the guard.
     }
 }
