@@ -2269,3 +2269,136 @@ fn compact_incremental_rebuild_preserves_entry_row_starts() {
         "incremental rebuild must produce same entry_row_starts as cold build"
     );
 }
+
+#[test]
+fn compact_cache_survives_width_change() {
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+    for i in 0..4 {
+        trace.append_think(&format!("th-{}", i), "12:00".into());
+        trace.append_message(&format!("msg-{}", i), "bot", "12:00".into());
+    }
+
+    let mut term = Terminal::new(TestBackend::new(60, 5)).unwrap();
+    term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 5)))
+        .unwrap();
+    term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 60, 5)))
+        .unwrap();
+
+    let starts = trace.compact_entry_row_starts_for_tests().unwrap();
+    assert_eq!(starts.len(), trace.entries_for_tests().len());
+
+    trace.scroll_up();
+    let anchor = trace.anchor_for_tests();
+    let resolved = crate::components::react_trace::render::resolve_anchor(
+        &anchor,
+        &starts,
+        trace.last_total_lines,
+        trace.last_visible_height,
+    );
+
+    assert!(matches!(anchor, crate::components::react_trace::types::ScrollAnchor::Row { .. }));
+    assert_eq!(resolved, trace.last_total_lines - trace.last_visible_height - 1);
+    assert!(resolved > 0, "width-change scroll must not snap to row 0");
+}
+
+#[test]
+fn drop_compact_cache_stops_scroll_until_repaint() {
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+    for i in 0..4 {
+        trace.append_think(&format!("th-{}", i), "12:00".into());
+        trace.append_message(&format!("msg-{}", i), "bot", "12:00".into());
+    }
+
+    let mut term = Terminal::new(TestBackend::new(40, 5)).unwrap();
+    term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 5)))
+        .unwrap();
+
+    trace.scroll_up();
+    let anchor_before_drop = trace.anchor_for_tests();
+    trace.drop_compact_cache();
+    trace.scroll_up();
+
+    assert_eq!(
+        trace.anchor_for_tests(),
+        anchor_before_drop,
+        "dropping the compact cache leaves last_surface=Compact, so scroll stays parked until repaint repopulates the cache"
+    );
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn mixed_full_then_compact_on_same_trace_uses_compact_layout() {
+    use std::collections::HashMap;
+
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+
+    let mut trace = ReactTrace::new_for_tests();
+    trace.append_think("plan", "12:00".into());
+    trace.append_message("alpha\nbeta\ngamma\ndelta", "claude", "12:01".into());
+    trace.append_user_message("ping", "12:02".into());
+    trace.force_flush_all(&StateLookup::empty());
+
+    let full_total = trace
+        .build_virtual_rows_for_tests(0, 18, &HashMap::new(), None)
+        .0
+        .len();
+    let compact_total = trace.build_compact_lines_for_tests(20).len();
+    assert!(full_total > compact_total, "precondition: full layout must differ");
+
+    let registry = HashMap::new();
+    let ctx = crate::components::react_trace::RenderContext {
+        mermaid_registry: &registry,
+        picker: None,
+    };
+    let mut term = Terminal::new(TestBackend::new(20, 6)).unwrap();
+    term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, 20, 6), &ctx, None))
+        .unwrap();
+    term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 20, 2)))
+        .unwrap();
+
+    let starts = trace.compact_entry_row_starts_for_tests().unwrap();
+    trace.scroll_up();
+    let resolved = crate::components::react_trace::render::resolve_anchor(
+        &trace.anchor_for_tests(),
+        &starts,
+        trace.last_total_lines,
+        trace.last_visible_height,
+    );
+
+    assert_eq!(resolved, trace.last_total_lines - trace.last_visible_height - 1);
+}
+
+#[test]
+fn compact_scroll_survives_entry_eviction() {
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+
+    let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+    for i in 0..=(crate::components::MAX_LOG_ENTRIES) {
+        trace.append_message(&format!("entry-{}", i), &format!("bot-{}", i), "12:00".into());
+    }
+    assert_eq!(trace.entries_for_tests().len(), crate::components::MAX_LOG_ENTRIES);
+
+    let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
+    term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 6)))
+        .unwrap();
+
+    let starts = trace.compact_entry_row_starts_for_tests().unwrap();
+    trace.scroll_up();
+    let anchor = trace.anchor_for_tests();
+    let resolved = crate::components::react_trace::render::resolve_anchor(
+        &anchor,
+        &starts,
+        trace.last_total_lines,
+        trace.last_visible_height,
+    );
+
+    assert!(matches!(anchor, crate::components::react_trace::types::ScrollAnchor::Row { .. }));
+    assert!(resolved < trace.last_total_lines);
+}
