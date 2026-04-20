@@ -565,14 +565,19 @@ impl IssueTracker for BeadsAdapter {
             })
             .collect();
 
+        // Update in-memory cursor under lock, then RELEASE the guard before
+        // the synchronous fs::write in save_cursor(). Holding a std::sync::Mutex
+        // across blocking I/O in an async context serializes other pollers
+        // behind disk latency unnecessarily — cursor persistence is best-effort
+        // and does not need to happen atomically with the in-memory update.
         {
             let mut guard = self
                 .last_poll
                 .lock()
                 .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
             *guard = Some(now);
-            self.save_cursor(now);
-        }
+        } // guard drops here
+        self.save_cursor(now);
 
         Ok(events)
     }
