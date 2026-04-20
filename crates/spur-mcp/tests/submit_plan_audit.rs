@@ -120,7 +120,9 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
                 } => {
                     plan_id == "P1"
                         && epic_issue_id == subgraph.epic_id
-                        && task_ids.into_iter().collect::<std::collections::HashSet<_>>()
+                        && task_ids
+                            .into_iter()
+                            .collect::<std::collections::HashSet<_>>()
                             == expected_task_ids
                 }
                 _ => false,

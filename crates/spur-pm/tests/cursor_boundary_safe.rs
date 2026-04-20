@@ -10,7 +10,9 @@ use std::collections::HashSet;
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 fn ts(rfc: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(rfc).unwrap().with_timezone(&Utc)
+    DateTime::parse_from_rfc3339(rfc)
+        .unwrap()
+        .with_timezone(&Utc)
 }
 
 fn cursor_with_ids(ts_str: &str, ids: &[&str]) -> PollCursor {

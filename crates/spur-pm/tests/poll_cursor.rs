@@ -28,20 +28,18 @@ fn run_br(repo: &Path, args: &[&str]) -> String {
 
 #[tokio::test]
 async fn disk_cursor_survives_adapter_restart() {
-    if !br_available() { return; }
+    if !br_available() {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]);
     let cursor_file = dir.path().join(".spur-test-cursor");
 
     // First session: create one issue, poll it.
     {
-        let adapter = BeadsAdapter::connect_with_actor(
-            dir.path(),
-            None,
-            Some(cursor_file.clone()),
-        )
-        .await
-        .unwrap();
+        let adapter = BeadsAdapter::connect_with_actor(dir.path(), None, Some(cursor_file.clone()))
+            .await
+            .unwrap();
         run_br(dir.path(), &["create", "Issue1", "--silent", "-t", "task"]);
         let _ = adapter.poll().await.unwrap();
     }
@@ -49,13 +47,9 @@ async fn disk_cursor_survives_adapter_restart() {
     // Second session: open adapter with SAME cursor file. Poll should return
     // zero events (cursor persisted).
     {
-        let adapter = BeadsAdapter::connect_with_actor(
-            dir.path(),
-            None,
-            Some(cursor_file.clone()),
-        )
-        .await
-        .unwrap();
+        let adapter = BeadsAdapter::connect_with_actor(dir.path(), None, Some(cursor_file.clone()))
+            .await
+            .unwrap();
         let events = adapter.poll().await.unwrap();
         assert!(
             events.is_empty(),

@@ -161,7 +161,9 @@ async fn plan_audit_coverage_all_four_sentinels() {
             issue_id: Some(task_issue_id.clone()),
             context_files: vec![],
         },
-        status: PlanTaskStatus::AwaitingReview { summary: Some("looks good".into()) },
+        status: PlanTaskStatus::AwaitingReview {
+            summary: Some("looks good".into()),
+        },
         result: None,
         worker_branch: Some("feat/worker-branch-1".into()),
         attempt: 1,
@@ -196,17 +198,17 @@ async fn plan_audit_coverage_all_four_sentinels() {
     let epic_comments =
         run_br(dir.path(), &["comments", "list", &epic_issue_id]).expect("br comments list epic");
     let epic_sentinels = collect_sentinels(&epic_comments);
-    let plan_submit_found = epic_sentinels.iter().any(|k| {
-        matches!(k, AuditSentinelKind::PlanSubmit { plan_id, .. } if plan_id == "audit-plan-1")
-    });
+    let plan_submit_found = epic_sentinels.iter().any(
+        |k| matches!(k, AuditSentinelKind::PlanSubmit { plan_id, .. } if plan_id == "audit-plan-1"),
+    );
     assert!(
         plan_submit_found,
         "PlanSubmit sentinel must be on epic {epic_issue_id}; got: {epic_sentinels:?}"
     );
 
     // Task: Dispatch → Completion → Approval in order.
-    let task_comments = run_br(dir.path(), &["comments", "list", &task_issue_id])
-        .expect("br comments list task");
+    let task_comments =
+        run_br(dir.path(), &["comments", "list", &task_issue_id]).expect("br comments list task");
     let task_sentinels = collect_sentinels(&task_comments);
 
     let dispatch_pos = task_sentinels.iter().position(|k| {
@@ -301,7 +303,9 @@ async fn rejection_emits_rejection_sentinel() {
             issue_id: Some(task_issue_id.clone()),
             context_files: vec![],
         },
-        status: PlanTaskStatus::AwaitingReview { summary: Some("worker done".into()) },
+        status: PlanTaskStatus::AwaitingReview {
+            summary: Some("worker done".into()),
+        },
         result: None,
         worker_branch: Some("feat/worker-branch-rej".into()),
         attempt: 1,
@@ -332,8 +336,8 @@ async fn rejection_emits_rejection_sentinel() {
     .expect("handle_review_task must succeed");
 
     // Fetch comments and assert Rejection sentinel is present.
-    let task_comments = run_br(dir.path(), &["comments", "list", &task_issue_id])
-        .expect("br comments list task");
+    let task_comments =
+        run_br(dir.path(), &["comments", "list", &task_issue_id]).expect("br comments list task");
     let task_sentinels = collect_sentinels(&task_comments);
 
     let rejection_found = task_sentinels.iter().any(|k| {

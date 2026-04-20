@@ -86,7 +86,11 @@ pub fn parse_source_issue(label: &str) -> Option<&str> {
 /// (not a bucketed variant `signal:<kind>:<bucket>`).
 pub fn parse_signal_kind(label: &str) -> Option<&str> {
     let rest = label.strip_prefix("signal:")?;
-    if rest.contains(':') { None } else { Some(rest) }
+    if rest.contains(':') {
+        None
+    } else {
+        Some(rest)
+    }
 }
 
 #[cfg(test)]

@@ -1913,10 +1913,8 @@ impl McpCallbackServer {
             }
         }
 
-        let entries: Vec<crate::plan::PlanTaskEntry> = build_entries_with_task_map(
-            tasks,
-            epic_subgraph.as_ref().map(|sg| &sg.task_map),
-        );
+        let entries: Vec<crate::plan::PlanTaskEntry> =
+            build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
 
         let task_count = entries.len();
         let state = crate::plan::PlanState {
@@ -1935,9 +1933,16 @@ impl McpCallbackServer {
         // Spawn the plan executor.
         let delegation_tx = self.delegation_tx.clone();
         let plan_sink = self.event_sink.clone();
-        let plan_pm = self.pm_service.clone().map(|p| p as Arc<dyn crate::plan::PmLike>);
-        self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink, plan_pm));
+        let plan_pm = self
+            .pm_service
+            .clone()
+            .map(|p| p as Arc<dyn crate::plan::PmLike>);
+        self.task_tracker.spawn(crate::plan::run_plan(
+            state,
+            delegation_tx,
+            plan_sink,
+            plan_pm,
+        ));
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
@@ -2164,9 +2169,16 @@ impl McpCallbackServer {
         }
         let delegation_tx = self.delegation_tx.clone();
         let plan_sink = self.event_sink.clone();
-        let plan_pm = self.pm_service.clone().map(|p| p as Arc<dyn crate::plan::PmLike>);
-        self.task_tracker
-            .spawn(crate::plan::run_plan(state, delegation_tx, plan_sink, plan_pm));
+        let plan_pm = self
+            .pm_service
+            .clone()
+            .map(|p| p as Arc<dyn crate::plan::PmLike>);
+        self.task_tracker.spawn(crate::plan::run_plan(
+            state,
+            delegation_tx,
+            plan_sink,
+            plan_pm,
+        ));
 
         info!(
             plan_id = %plan_id,
@@ -2380,7 +2392,6 @@ impl McpCallbackServer {
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
-
 }
 
 impl ServerHandler for McpCallbackServer {

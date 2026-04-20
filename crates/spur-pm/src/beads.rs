@@ -378,7 +378,10 @@ impl BeadsAdapter {
             });
         }
 
-        tracing::warn!(?path, "cursor file content unparseable as JSON or RFC3339; starting without cursor");
+        tracing::warn!(
+            ?path,
+            "cursor file content unparseable as JSON or RFC3339; starting without cursor"
+        );
         None
     }
 
@@ -632,9 +635,9 @@ impl IssueTracker for BeadsAdapter {
         let new_cursor: PollCursor = if !kept.is_empty() {
             // New ts = max(kept.updated_at).
             let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap(); // safe: kept non-empty
-            // ids_at_boundary is bounded by the `br list --limit N` fetch cap
-            // (currently 20; see the list call above). If the cap grows or is
-            // removed, revisit this — the cursor file size scales linearly.
+                                                                           // ids_at_boundary is bounded by the `br list --limit N` fetch cap
+                                                                           // (currently 20; see the list call above). If the cap grows or is
+                                                                           // removed, revisit this — the cursor file size scales linearly.
             let ids_at_max: HashSet<String> = kept
                 .iter()
                 .filter(|i| i.updated_at == max_ts)
@@ -821,11 +824,7 @@ impl BeadsAdvanced for BeadsAdapter {
         Ok(id_str)
     }
 
-    async fn remove_dependency(
-        &self,
-        issue_id: &str,
-        depends_on_id: &str,
-    ) -> anyhow::Result<()> {
+    async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         self.run_br(vec![
             "dep".into(),
             "remove".into(),

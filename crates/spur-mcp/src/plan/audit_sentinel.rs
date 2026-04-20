@@ -102,7 +102,9 @@ mod tests {
                 worker_branch: Some("feat/x".into()),
                 diff_summary: None,
             },
-            AuditSentinelKind::Approval { delegation_id: "del-A".into() },
+            AuditSentinelKind::Approval {
+                delegation_id: "del-A".into(),
+            },
             AuditSentinelKind::Rejection {
                 delegation_id: "del-A".into(),
                 feedback: "try again".into(),
@@ -140,10 +142,23 @@ mod tests {
         // Ensure the accessor agrees with the serde serialization.
         for k in [
             sample_plan_submit(),
-            AuditSentinelKind::Dispatch { delegation_id: "x".into(), worker: "y".into(), attempt: 0 },
-            AuditSentinelKind::Completion { delegation_id: "x".into(), worker_branch: None, diff_summary: None },
-            AuditSentinelKind::Approval { delegation_id: "x".into() },
-            AuditSentinelKind::Rejection { delegation_id: "x".into(), feedback: "f".into() },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "x".into(),
+                worker: "y".into(),
+                attempt: 0,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "x".into(),
+                worker_branch: None,
+                diff_summary: None,
+            },
+            AuditSentinelKind::Approval {
+                delegation_id: "x".into(),
+            },
+            AuditSentinelKind::Rejection {
+                delegation_id: "x".into(),
+                feedback: "f".into(),
+            },
         ] {
             let json = serde_json::to_value(&k).unwrap();
             assert_eq!(json["kind"].as_str(), Some(k.kind_str()));
