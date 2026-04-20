@@ -286,3 +286,326 @@ impl TriggerDetector {
         TriggerTransition::Update { query }
     }
 }
+
+#[cfg(test)]
+mod detector_tests {
+    use super::*;
+    use crate::components::input_bar::ProtectedRange;
+
+    fn d() -> TriggerDetector {
+        TriggerDetector::new()
+    }
+
+    // ── Task 3: Idle transitions (11 tests) ──────────────────────────
+
+    #[test]
+    fn idle_typed_at_at_offset_zero_opens_mention() {
+        let mut det = d();
+        let t = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        match t {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.kind, TriggerKind::Mention);
+                assert_eq!(trigger.prefix_start, 0);
+                assert_eq!(trigger.query, "");
+            }
+            other => panic!("expected Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idle_typed_slash_at_offset_zero_opens_slash() {
+        let mut det = d();
+        let t = det.step(IntentEvent::TypedChar('/'), "/", 1, &[]);
+        match t {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.kind, TriggerKind::Slash);
+                assert_eq!(trigger.prefix_start, 0);
+            }
+            other => panic!("expected Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idle_typed_slash_at_nonzero_offset_stays_idle() {
+        let mut det = d();
+        let t = det.step(IntentEvent::TypedChar('/'), "a/", 2, &[]);
+        assert!(matches!(t, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn idle_typed_at_after_non_whitespace_stays_idle() {
+        let mut det = d();
+        let t = det.step(IntentEvent::TypedChar('@'), "foo@", 4, &[]);
+        assert!(matches!(t, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn idle_typed_at_after_whitespace_opens() {
+        let mut det = d();
+        let t = det.step(IntentEvent::TypedChar('@'), "foo @", 5, &[]);
+        match t {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.prefix_start, 4);
+            }
+            other => panic!("expected Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idle_typed_at_where_byte_is_atom_start_stays_idle() {
+        let mut det = d();
+        let ranges = [ProtectedRange {
+            start: 0,
+            end: 4,
+            uri: "u".into(),
+            name: "n".into(),
+        }];
+        let t = det.step(IntentEvent::TypedChar('@'), "@foo", 1, &ranges);
+        assert!(matches!(t, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn idle_moved_cursor_stays_idle_emits_none() {
+        let mut det = d();
+        let t = det.step(IntentEvent::MovedCursor, "hello @world", 12, &[]);
+        assert!(matches!(t, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn idle_deleted_char_stays_idle() {
+        let mut det = d();
+        let t = det.step(IntentEvent::DeletedChar, "hello", 5, &[]);
+        assert!(matches!(t, TriggerTransition::None));
+    }
+
+    #[test]
+    fn idle_pasted_stays_idle() {
+        let mut det = d();
+        let t = det.step(IntentEvent::Pasted, "pasted @alice text", 18, &[]);
+        assert!(matches!(t, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn idle_set_text_stays_idle() {
+        let mut det = d();
+        let t = det.step(IntentEvent::SetText, "recalled @foo", 13, &[]);
+        assert!(matches!(t, TriggerTransition::None));
+    }
+
+    #[test]
+    fn idle_noop_emits_none() {
+        let mut det = d();
+        let t = det.step(IntentEvent::NoOp, "", 0, &[]);
+        assert!(matches!(t, TriggerTransition::None));
+    }
+
+    // ── Task 4: Composing transitions (12 tests) ─────────────────────
+
+    #[test]
+    fn composing_typed_char_emits_update_with_growing_query() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let t = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
+        match t {
+            TriggerTransition::Update { query } => assert_eq!(query, "f"),
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composing_deleted_char_emits_update_with_shrunken_query() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
+        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[]);
+        let t = det.step(IntentEvent::DeletedChar, "@f", 2, &[]);
+        match t {
+            TriggerTransition::Update { query } => assert_eq!(query, "f"),
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composing_moved_cursor_inside_window_emits_update() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
+        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[]);
+        let _ = det.step(IntentEvent::TypedChar('o'), "@foo", 4, &[]);
+        let t = det.step(IntentEvent::MovedCursor, "@foo", 3, &[]);
+        match t {
+            TriggerTransition::Update { query } => assert_eq!(query, "fo"),
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composing_typed_whitespace_emits_close() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
+        let t = det.step(IntentEvent::TypedChar(' '), "@f ", 3, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn composing_moved_cursor_out_of_window_emits_close() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
+        let t = det.step(IntentEvent::MovedCursor, "@f", 0, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn composing_deleted_trigger_char_emits_close_via_defensive_check() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
+        let _ = det.step(IntentEvent::DeletedChar, "@", 1, &[]);
+        let t = det.step(IntentEvent::DeletedChar, "", 0, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn composing_pasted_emits_close() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let t = det.step(IntentEvent::Pasted, "@ hello world", 13, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn composing_set_text_emits_close() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let t = det.step(IntentEvent::SetText, "recalled text", 13, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+    }
+
+    #[test]
+    fn composing_accepted_emits_close() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let t = det.step(IntentEvent::Accepted, "@atom", 5, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+    }
+
+    #[test]
+    fn composing_dismissed_emits_close() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let t = det.step(IntentEvent::Dismissed, "@", 1, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+    }
+
+    #[test]
+    fn composing_submitted_emits_close() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let t = det.step(IntentEvent::Submitted, "", 0, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+    }
+
+    #[test]
+    fn composing_noop_emits_none_and_stays_composing() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let t = det.step(IntentEvent::NoOp, "@", 1, &[]);
+        assert!(matches!(t, TriggerTransition::None));
+        assert!(!det.is_idle());
+    }
+
+    // ── Task 5: journeys + defensive re-check (6 tests) ──────────────
+
+    #[test]
+    fn j1_power_user_walks_cursor_across_atoms_zero_opens() {
+        let mut det = d();
+        let text = "@src/foo.rs and @docs/bar.md";
+        let ranges = [
+            ProtectedRange { start: 0, end: 11, uri: "a".into(), name: "a".into() },
+            ProtectedRange { start: 16, end: 28, uri: "b".into(), name: "b".into() },
+        ];
+        let mut opens = 0;
+        for cursor in 0..=text.len() {
+            let t = det.step(IntentEvent::MovedCursor, text, cursor, &ranges);
+            if matches!(t, TriggerTransition::Open { .. }) {
+                opens += 1;
+            }
+        }
+        assert_eq!(opens, 0, "cursor motion must never open picker");
+    }
+
+    #[test]
+    fn j6_auto_repeat_left_arrow_across_stray_at_zero_opens() {
+        let mut det = d();
+        let text = "please see @foo bar";
+        let mut opens = 0;
+        for _ in 0..50 {
+            let t = det.step(IntentEvent::MovedCursor, text, 15, &[]);
+            if matches!(t, TriggerTransition::Open { .. }) {
+                opens += 1;
+            }
+        }
+        assert_eq!(opens, 0);
+    }
+
+    #[test]
+    fn j7_selection_drag_across_stray_at_zero_opens() {
+        let mut det = d();
+        let text = "text @alice more";
+        let mut opens = 0;
+        for cursor in 0..=text.len() {
+            let t = det.step(IntentEvent::MovedCursor, text, cursor, &[]);
+            if matches!(t, TriggerTransition::Open { .. }) {
+                opens += 1;
+            }
+        }
+        assert_eq!(opens, 0);
+    }
+
+    #[test]
+    fn j2b_typo_fix_after_esc_stays_closed_on_motion() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
+        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[]);
+        let close = det.step(IntentEvent::Dismissed, "@fo", 3, &[]);
+        assert!(matches!(close, TriggerTransition::Close));
+        let mot = det.step(IntentEvent::MovedCursor, "@fo", 2, &[]);
+        assert!(matches!(mot, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn reset_puts_detector_in_idle() {
+        let mut det = d();
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        assert!(!det.is_idle());
+        det.reset();
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn defensive_reset_when_prefix_start_past_text_len() {
+        // White-box: construct a Composing state with prefix_start past text.
+        let mut det = TriggerDetector {
+            state: TriggerState::Composing {
+                kind: TriggerKind::Mention,
+                prefix_start: 100,
+            },
+        };
+        let t = det.step(IntentEvent::MovedCursor, "abc", 3, &[]);
+        assert!(matches!(t, TriggerTransition::Close));
+        assert!(det.is_idle());
+    }
+}
