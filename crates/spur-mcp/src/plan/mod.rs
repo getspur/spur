@@ -8,6 +8,7 @@
 pub mod audit_sentinel;
 pub mod labels;
 pub mod mutation;
+pub mod proposers;
 pub mod reconciler;
 pub mod signals;
 
