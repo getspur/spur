@@ -148,27 +148,30 @@ dispatch = "prompt_text"
 [agents.entries.permissions]
 session_mode = "full-auto"
 
-# ── gemini ────────────────────────────────────────────────────────
+# ── gemini-acp ────────────────────────────────────────────────────
 [[agents.entries]]
-name = "gemini"
+name = "gemini-acp"
 command = "gemini"
-args = []
-transport = "cli-wrap"
+args = ["--acp", "-y", "-m", "deep-thinker"]
+transport = "acp"
 kind = "generic"
-role = "worker"
+role = "both"
 cost_tier = "low"
 
 [agents.entries.display]
-handle = "gemini"
+handle = "gemini-acp"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
+
+[agents.entries.permissions]
+session_mode = "full-auto"
 
 # ── opencode-acp ──────────────────────────────────────────────────
 [[agents.entries]]
 name = "opencode-acp"
 command = "opencode"
-args = ["acp"]
+args = ["-m", "openrouter/z-ai/glm-5.1", "acp"]
 transport = "acp"
 kind = "generic"
 role = "both"
