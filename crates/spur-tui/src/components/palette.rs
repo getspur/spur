@@ -36,7 +36,9 @@ pub struct PaletteResult {
 ///   - **O(N) time** where N = `raw.len()`.
 ///   - **O(M · 4 bytes)** new memory per rerank, where M = matched entries.
 ///   - **Exactly 2 allocations** on the non-empty-query path: one `Pattern`
-///     parse and one scratch `Vec<(u32, u32)>` for scoring.
+///     parse and one scratch `Vec<(u32, u32)>` for scoring. `self.scratch`
+///     is reused between label and subtitle scoring (one `clear()` between)
+///     so the second Utf32Str conversion does not allocate.
 ///   - **Zero clones** of `PaletteResult` fields (label/subtitle are not
 ///     copied during rerank; we rank by index into `raw`).
 ///
@@ -115,8 +117,23 @@ impl PaletteState {
             let mut tmp: Vec<(u32, u32)> = Vec::with_capacity(self.raw.len());
             for (i, entry) in self.raw.iter().enumerate() {
                 self.scratch.clear();
-                let utf = Utf32Str::new(&entry.label, &mut self.scratch);
-                if let Some(score) = pattern.score(utf, &mut self.matcher) {
+                let label_utf = Utf32Str::new(&entry.label, &mut self.scratch);
+                let label_score = pattern.score(label_utf, &mut self.matcher);
+
+                self.scratch.clear();
+                let sub_utf = Utf32Str::new(&entry.subtitle, &mut self.scratch);
+                let sub_score = pattern.score(sub_utf, &mut self.matcher);
+
+                // Weighted max: label matches are primary; subtitle counts at 0.7x.
+                // Reusing self.scratch between the two scorings keeps the rerank
+                // 2-allocation budget intact (see tests/palette_rerank_bench_smoke.rs).
+                let weighted = match (label_score, sub_score) {
+                    (Some(a), Some(b)) => Some(a.max(((b as f32) * 0.7) as u32)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(((b as f32) * 0.7) as u32),
+                    (None, None) => None,
+                };
+                if let Some(score) = weighted {
                     tmp.push((score, i as u32));
                 }
             }
