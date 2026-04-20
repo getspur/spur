@@ -2768,6 +2768,55 @@ mod brain_retired_tests {
     }
 
     #[test]
+    fn clear_end_to_end_flow() {
+        let (mut app, _rx) = app_with_user_input_tx();
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("e2e-a".into()),
+        }));
+        app.session_detail
+            .as_mut()
+            .unwrap()
+            .input_bar_mut_for_test()
+            .set_text("mid-thought".into(), 11);
+
+        let _ = app.process_action(Action::ClearSession);
+        {
+            let d = app.session_detail.as_ref().unwrap();
+            assert!(d.is_cleared());
+            assert!(d.ready_banner_text().is_some());
+            assert_eq!(d.input_bar_text(), "mid-thought");
+        }
+
+        app.handle_spur_event(wrap(SpurEventBody::BrainRetired {
+            session: SessionId("e2e-a".into()),
+            reason: BrainRetireReason::UserClear,
+        }));
+        {
+            let d = app.session_detail.as_ref().unwrap();
+            assert!(d.is_cleared());
+            assert_eq!(d.input_bar_text(), "mid-thought");
+        }
+
+        app.session_detail
+            .as_mut()
+            .unwrap()
+            .input_bar_mut_for_test()
+            .set_text("explain quicksort".into(), 17);
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("e2e-b".into()),
+        }));
+
+        let d = app.session_detail.as_ref().unwrap();
+        assert_eq!(d.session_id().0, "e2e-b");
+        assert!(!d.is_cleared());
+        assert!(d.ready_banner_text().is_none());
+        assert_eq!(d.input_bar_text(), "explain quicksort");
+    }
+
+    #[test]
     fn brain_retired_shutdown_does_not_panic() {
         let mut app = App::new_for_tests();
         app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
