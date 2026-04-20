@@ -248,7 +248,11 @@ inherit_defaults = true
 [[agents.entries]]
 name = "opencode-acp"
 command = "opencode"
-args = ["acp"]
+args = [
+    "-m",
+    "openrouter/z-ai/glm-5.1",
+    "acp"
+]
 transport = "acp"
 kind = "generic"
 role = "both"
