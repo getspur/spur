@@ -51,7 +51,7 @@ response = []
 static = []
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = ["--dangerously-skip-permissions"]
 
 [agents.entries.delegation]
@@ -97,7 +97,7 @@ path = "commands"
 item_schema = "acp_available_command"
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = ["--trust-all-tools"]
 
 [agents.entries.delegation]
@@ -141,7 +141,7 @@ response = []
 static = []
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = []
 session_mode = "bypassPermissions"
 
