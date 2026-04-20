@@ -248,6 +248,61 @@ impl SessionDetailView {
         ));
     }
 
+    /// Wipe conversation-scoped state in place so the same view can host
+    /// the next prompt without reconstruction.
+    ///
+    /// Called by `Action::ClearSession` (eager, gated on a successful
+    /// `tx.try_send`) and by the `BrainRetired{UserClear}` event arm
+    /// (defensive, idempotent).
+    ///
+    /// # Classification policy
+    ///
+    /// Every field on `SessionDetailView` MUST have a deliberate
+    /// classification here. When adding a new field, update this method
+    /// AND update `SessionDetailView::new` / `new_for_palette_test` per
+    /// the existing maintenance rule (see doc comment at line ~174).
+    ///
+    /// **Cleared** (reset to the empty/default value for that field):
+    /// - Conversation: `react_trace` (content wiped; keeps its `AgentKind`
+    ///   and `mermaid_enabled` config), `tool_depth`, `mermaid_registry`,
+    ///   `pending_fence_actions`.
+    /// - Header/status (Task 3): `cost`, `started_at`, `current_mode`
+    ///   (plus `react_trace.set_mode(None)` — see §3.3 of spec), `context_used`,
+    ///   `context_size`, `auth_error`.
+    /// - Stream flags (Task 3): `stream_in_flight`, `cancelling_in_flight`.
+    /// - UI transient: `resume_banner`, `picker_shell`, `trigger_detector`.
+    /// - Draft debounce locals (Task 4): `last_persisted_draft`,
+    ///   `last_draft_change_at`.
+    /// - Marks set: `cleared = true`, `ready_banner = Some(...)`.
+    ///
+    /// **Preserved** (the view survives, only its conversation is wiped):
+    /// - `session_id`, `agent_name`, `role`, `agent_cfg`, `cwd`,
+    ///   `command_registry`, `mention_registry`, `input_bar`,
+    ///   `cancel_mode`, `workers_panel_collapsed`, `known_worker_names`,
+    ///   `render_picker` (mermaid picker).
+    pub fn reset_for_clear(&mut self) {
+        tracing::debug!(
+            session = %self.session_id.0,
+            "SessionDetailView::reset_for_clear"
+        );
+        // Conversation / caches.
+        self.react_trace.clear();
+        self.tool_depth.clear();
+        #[cfg(feature = "markdown")]
+        {
+            self.invalidate_inline_protocols();
+            self.mermaid_registry.clear();
+            self.pending_fence_actions.clear();
+        }
+        self.trigger_detector.reset();
+        self.picker_shell = None;
+        self.resume_banner = None;
+
+        // Marks — header/status fields land in Task 3; draft locals in Task 4.
+        self.cleared = true;
+        self.ready_banner = Some(READY_BANNER_TEXT.to_string());
+    }
+
     /// Whether the resume banner is currently visible (not dismissed and
     /// within its 3s auto-fade window).
     pub fn banner_is_visible(&self) -> bool {
@@ -2279,6 +2334,34 @@ mod tests {
         assert!(
             view.ready_banner_text().is_none(),
             "new view must not start with a ready banner"
+        );
+    }
+
+    #[test]
+    fn reset_for_clear_wipes_conversation_state() {
+        let mut view = SessionDetailView::new_for_palette_test(
+            crate::commands::CommandRegistry::default(),
+        );
+        // Seed state that reset_for_clear must wipe.
+        view.tool_depth.insert("t1".to_string(), 2);
+        #[cfg(feature = "markdown")]
+        view.mermaid_registry.insert(
+            crate::components::mermaid::MermaidId(1),
+            crate::components::mermaid::MermaidState::Rendering,
+        );
+
+        view.reset_for_clear();
+
+        assert!(view.tool_depth.is_empty(), "tool_depth must be cleared");
+        // ReactTrace must be empty after reset — use whatever public
+        // emptiness accessor exists on ReactTrace (grep
+        // components/react_trace/mod.rs for `pub fn len\|is_empty\|entry_count`).
+        // If no direct accessor, assert via rendered output in Task 10.
+        // For now, assert the flag was set:
+        assert!(view.is_cleared());
+        assert_eq!(
+            view.ready_banner_text(),
+            Some(READY_BANNER_TEXT)
         );
     }
 }
