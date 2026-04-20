@@ -403,3 +403,68 @@ impl DetailPane {
         super::review_card::render_review(node)
     }
 }
+
+#[cfg(test)]
+mod scroll_label_tests {
+    use super::*;
+
+    #[test]
+    fn stream_with_trace_following_shows_following() {
+        let s = scroll_label(DetailTab::Stream, 0, 0, 0, false, Some(true));
+        assert_eq!(s, Cow::Borrowed(" ▼ following "));
+    }
+
+    #[test]
+    fn stream_with_trace_paused_shows_paused() {
+        let s = scroll_label(DetailTab::Stream, 0, 0, 0, false, Some(false));
+        assert_eq!(s, Cow::Borrowed(" ▲ paused "));
+    }
+
+    #[test]
+    fn stream_without_trace_shows_following() {
+        // Placeholder path — no trace yet but pane wants to look live.
+        let s = scroll_label(DetailTab::Stream, 1, 10, 0, true, None);
+        assert_eq!(s, Cow::Borrowed(" ▼ following "));
+    }
+
+    #[test]
+    fn non_stream_empty_total_shows_blank() {
+        let s = scroll_label(DetailTab::Artifacts, 0, 20, 0, false, None);
+        assert_eq!(s, Cow::Borrowed(""));
+    }
+
+    #[test]
+    fn non_stream_content_fits_viewport_shows_down() {
+        // total=10, visible=20 → max_offset=0 → content fits.
+        let s = scroll_label(DetailTab::Task, 10, 20, 0, false, None);
+        assert_eq!(s, Cow::Borrowed(" ▼ "));
+    }
+
+    #[test]
+    fn non_stream_at_end_following_shows_down() {
+        // total=100, visible=20, offset=80, following → " ▼ ".
+        let s = scroll_label(DetailTab::Attempts, 100, 20, 80, true, None);
+        assert_eq!(s, Cow::Borrowed(" ▼ "));
+    }
+
+    #[test]
+    fn non_stream_at_top_shows_top() {
+        // total=100, visible=20, offset=0, not following → " top ".
+        let s = scroll_label(DetailTab::Review, 100, 20, 0, false, None);
+        assert_eq!(s, Cow::Borrowed(" top "));
+    }
+
+    #[test]
+    fn non_stream_at_end_not_following_shows_end() {
+        // total=100, visible=20, offset=80 (= max_offset), not following.
+        let s = scroll_label(DetailTab::Artifacts, 100, 20, 80, false, None);
+        assert_eq!(s, Cow::Borrowed(" end "));
+    }
+
+    #[test]
+    fn non_stream_mid_scroll_shows_arrow_count() {
+        // total=100, visible=20, offset=42 → " ▲ 42 ↑ ".
+        let s = scroll_label(DetailTab::Artifacts, 100, 20, 42, false, None);
+        assert_eq!(s, Cow::<'static, str>::Owned(" ▲ 42 ↑ ".to_string()));
+    }
+}
