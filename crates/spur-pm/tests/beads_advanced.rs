@@ -68,3 +68,23 @@ async fn list_ready_returns_unblocked_issues() {
     assert!(ids.contains(&a_id), "expected A ({a_id}) in ready, got {ids:?}");
     assert!(!ids.contains(&b_id), "B ({b_id}) should be blocked");
 }
+
+#[tokio::test]
+async fn add_comment_then_list_returns_it() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let (dir, adapter) = setup_workspace().await;
+    let id_raw = run_br(dir.path(), &["create", "T", "--silent", "-t", "task"]);
+    let id = id_raw.trim().trim_matches('"').to_string();
+
+    let cid = adapter.add_comment(&id, "hello world").await.unwrap();
+    assert!(!cid.is_empty(), "expected non-empty comment id");
+
+    let comments = adapter.list_comments(&id).await.unwrap();
+    assert!(
+        comments.iter().any(|c| c.body.contains("hello world")),
+        "expected comment with body 'hello world', got {comments:?}"
+    );
+}
