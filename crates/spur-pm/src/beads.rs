@@ -1,13 +1,53 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::adapter::IssueTracker;
 use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
+
+// ─── Poll cursor ──────────────────────────────────────────────────────
+
+/// Boundary-safe poll cursor.
+///
+/// A single `DateTime<Utc>` boundary causes "boundary replay": any row whose
+/// `updated_at` equals the cursor ts re-emits on every subsequent poll.
+///
+/// The fix: track the set of IDs seen at the boundary timestamp. On the next
+/// poll a row passes only if:
+///   - `item.updated_at > cursor.ts`   (strictly newer), OR
+///   - `item.updated_at == cursor.ts && !ids_at_boundary.contains(&item.id)`
+///     (same ts but a genuinely new item we haven't returned yet).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PollCursor {
+    pub ts: DateTime<Utc>,
+    pub ids_at_boundary: HashSet<String>,
+}
+
+impl PollCursor {
+    /// Returns `true` if `item` should be included in the current poll's output.
+    pub fn allows(&self, item_id: &str, item_updated_at: DateTime<Utc>) -> bool {
+        if item_updated_at > self.ts {
+            true
+        } else if item_updated_at == self.ts {
+            !self.ids_at_boundary.contains(item_id)
+        } else {
+            false
+        }
+    }
+}
+
+/// Maximum rows fetched per `poll()` call via `br list --limit N`.
+///
+/// Chosen to comfortably exceed realistic concurrent-update volume between
+/// two poll ticks. If a single poll returns exactly this many rows, the
+/// backend may hold additional qualifying rows that were truncated — see
+/// [`BeadsAdapter::poll_with_limit`] for the saturation data-loss guard.
+pub const POLL_FETCH_LIMIT: usize = 500;
 
 // ─── Private error type ───────────────────────────────────────────────
 
@@ -146,7 +186,7 @@ impl From<BrIssueWithCounts> for IssueSummary {
 
 pub struct BeadsAdapter {
     cwd: PathBuf,
-    last_poll: Mutex<Option<DateTime<Utc>>>,
+    last_poll: Mutex<Option<PollCursor>>,
     default_actor: Option<String>,
     cursor_path: Option<PathBuf>, // used by Task 9; present now for forward compat
 }
@@ -309,20 +349,171 @@ impl BeadsAdapter {
     }
 
     /// Load the poll cursor from disk (if `cursor_path` is set and file exists).
-    fn load_cursor(&self) -> Option<DateTime<Utc>> {
+    ///
+    /// Disk format is JSON-serialized `PollCursor`. For backward compatibility
+    /// with v0a.1 cursor files that stored a bare RFC3339 string, we first attempt
+    /// JSON deserialization; if that fails, we try parsing the raw content as an
+    /// RFC3339 datetime and produce a `PollCursor` with an empty `ids_at_boundary`
+    /// set. This ensures a clean upgrade without losing the cursor position.
+    fn load_cursor(&self) -> Option<PollCursor> {
         let path = self.cursor_path.as_ref()?;
-        let contents = std::fs::read_to_string(path).ok()?;
-        let parsed: DateTime<Utc> = contents.trim().parse().ok()?;
-        Some(parsed)
+        // Distinguish "file does not exist yet" (fresh install) from
+        // "file exists but unreadable" (permissions, IO error): the latter
+        // is worth a warn so operators notice silent-replay risk.
+        let contents = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                tracing::warn!(
+                    ?path,
+                    "cursor file exists but unreadable ({e}); starting without cursor — next poll may replay"
+                );
+                return None;
+            }
+        };
+        let trimmed = contents.trim();
+
+        // Try JSON first (new format).
+        if let Ok(cursor) = serde_json::from_str::<PollCursor>(trimmed) {
+            return Some(cursor);
+        }
+
+        // Backward-compat: v0a.1 stored a bare RFC3339 string.
+        if let Ok(ts) = trimmed.parse::<DateTime<Utc>>() {
+            return Some(PollCursor {
+                ts,
+                ids_at_boundary: HashSet::new(),
+            });
+        }
+
+        tracing::warn!(
+            ?path,
+            "cursor file content unparseable as JSON or RFC3339; starting without cursor"
+        );
+        None
+    }
+
+    /// Poll for open-issue updates, fetching up to `limit` rows.
+    ///
+    /// Production always uses [`POLL_FETCH_LIMIT`] via [`IssueTracker::poll`].
+    /// This inherent helper exists so integration tests can drive the
+    /// saturation boundary (`items.len() == limit`) deterministically at a
+    /// small N without creating hundreds of real issues.
+    pub async fn poll_with_limit(&self, limit: usize) -> anyhow::Result<Vec<PmEvent>> {
+        let output = self
+            .run_br(vec![
+                "list".into(),
+                "-s".into(),
+                "open".into(),
+                "--limit".into(),
+                limit.to_string(),
+            ])
+            .await?;
+
+        let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output).map_err(|e| {
+            anyhow::anyhow!("Failed to parse `br list` poll output: {e}\nRaw: {output}")
+        })?;
+
+        // Saturation sentinel: `br list --limit N` truncates. If the returned
+        // batch is exactly `limit` rows, more qualifying rows may exist on the
+        // backend with `updated_at <= max(fetched.ts)`. Advancing the cursor
+        // past `max(fetched.ts)` would hide those rows forever.
+        let saturated = issues.len() == limit;
+
+        // Snapshot the cursor under the lock, then release immediately.
+        let prior_cursor: Option<PollCursor> = {
+            let guard = self
+                .last_poll
+                .lock()
+                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
+            guard.clone()
+        };
+
+        // Apply the boundary-safe filter: emit only items that pass the cursor predicate.
+        let had_prior = prior_cursor.is_some();
+        let kept: Vec<BrIssueWithCounts> = issues
+            .into_iter()
+            .filter(|item| match &prior_cursor {
+                None => true,
+                Some(c) => c.allows(&item.id, item.updated_at),
+            })
+            .collect();
+
+        // Advance the cursor based on the kept items.
+        let new_cursor: PollCursor = if !kept.is_empty() {
+            if saturated {
+                // Data-loss guard: emit observed events but preserve the prior
+                // cursor (or seed fresh if none). Callers dedup on `id` when
+                // the next poll refetches this batch.
+                tracing::warn!(
+                    limit,
+                    kept_count = kept.len(),
+                    "poll() fetch saturated --limit; preserving cursor to avoid \
+                     boundary-row data loss. Consider raising POLL_FETCH_LIMIT \
+                     or investigating row-update velocity."
+                );
+                prior_cursor.clone().unwrap_or(PollCursor {
+                    ts: Utc::now(),
+                    ids_at_boundary: HashSet::new(),
+                })
+            } else {
+                let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap(); // safe: kept non-empty
+                let ids_at_max: HashSet<String> = kept
+                    .iter()
+                    .filter(|i| i.updated_at == max_ts)
+                    .map(|i| i.id.clone())
+                    .collect();
+                PollCursor {
+                    ts: max_ts,
+                    ids_at_boundary: ids_at_max,
+                }
+            }
+        } else if let Some(existing) = prior_cursor {
+            existing
+        } else {
+            PollCursor {
+                ts: Utc::now(),
+                ids_at_boundary: HashSet::new(),
+            }
+        };
+
+        let events: Vec<PmEvent> = kept
+            .into_iter()
+            .map(|item| {
+                let summary = IssueSummary::from(item);
+                if had_prior {
+                    PmEvent::IssueUpdated(summary)
+                } else {
+                    PmEvent::IssueCreated(summary)
+                }
+            })
+            .collect();
+
+        {
+            let mut guard = self
+                .last_poll
+                .lock()
+                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
+            *guard = Some(new_cursor.clone());
+        }
+        self.save_cursor(&new_cursor);
+
+        Ok(events)
     }
 
     /// Persist the poll cursor to disk (if `cursor_path` is set).
-    fn save_cursor(&self, cursor: DateTime<Utc>) {
+    /// Failures are logged as warnings and do not abort the poll (best-effort).
+    fn save_cursor(&self, cursor: &PollCursor) {
         if let Some(path) = self.cursor_path.as_ref() {
-            // RFC3339 format is round-trippable via FromStr<DateTime<Utc>>.
-            let s = cursor.to_rfc3339();
-            if let Err(e) = std::fs::write(path, s) {
-                tracing::warn!(?path, "failed to write cursor file: {e}");
+            match serde_json::to_string(cursor) {
+                Ok(s) => {
+                    if let Err(e) = std::fs::write(path, s) {
+                        tracing::warn!(?path, "failed to write cursor file: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to serialize cursor: {e}");
+                }
             }
         }
     }
@@ -523,72 +714,13 @@ impl IssueTracker for BeadsAdapter {
     }
 
     async fn poll(&self) -> anyhow::Result<Vec<PmEvent>> {
-        let output = self
-            .run_br(vec![
-                "list".into(),
-                "-s".into(),
-                "open".into(),
-                "--limit".into(),
-                "20".into(),
-            ])
-            .await?;
-
-        let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output).map_err(|e| {
-            anyhow::anyhow!("Failed to parse `br list` poll output: {e}\nRaw: {output}")
-        })?;
-
-        let now = Utc::now();
-        let last_poll = {
-            let guard = self
-                .last_poll
-                .lock()
-                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
-            *guard
-        };
-
-        let events: Vec<PmEvent> = issues
-            .into_iter()
-            .filter(|item| {
-                if let Some(last) = last_poll {
-                    item.updated_at >= last
-                } else {
-                    true
-                }
-            })
-            .map(|item| {
-                let summary = IssueSummary::from(item);
-                if last_poll.is_some() {
-                    PmEvent::IssueUpdated(summary)
-                } else {
-                    PmEvent::IssueCreated(summary)
-                }
-            })
-            .collect();
-
-        // Update in-memory cursor under lock, then RELEASE the guard before
-        // the synchronous fs::write in save_cursor(). Holding a std::sync::Mutex
-        // across blocking I/O in an async context serializes other pollers
-        // behind disk latency unnecessarily — cursor persistence is best-effort
-        // and does not need to happen atomically with the in-memory update.
-        {
-            let mut guard = self
-                .last_poll
-                .lock()
-                .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
-            *guard = Some(now);
-        } // guard drops here
-        self.save_cursor(now);
-
-        Ok(events)
+        self.poll_with_limit(POLL_FETCH_LIMIT).await
     }
 }
 
 // ─── BeadsAdvanced impl ───────────────────────────────────────────────
 
-use crate::advanced::{
-    AuditEntry, AuditId, AuditRecordInput, BeadsAdvanced, Comment, CommentId, DependencyCycle,
-    ReadyFilter,
-};
+use crate::advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter};
 
 #[derive(serde::Deserialize)]
 struct BrReadyItem {
@@ -716,23 +848,7 @@ impl BeadsAdvanced for BeadsAdapter {
         Ok(id_str)
     }
 
-    async fn audit_record(
-        &self,
-        _issue_id: &str,
-        _entry: AuditRecordInput,
-    ) -> anyhow::Result<AuditId> {
-        anyhow::bail!("audit_record: not yet implemented")
-    }
-
-    async fn audit_log(&self, _issue_id: &str) -> anyhow::Result<Vec<AuditEntry>> {
-        anyhow::bail!("audit_log: not yet implemented")
-    }
-
-    async fn remove_dependency(
-        &self,
-        issue_id: &str,
-        depends_on_id: &str,
-    ) -> anyhow::Result<()> {
+    async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         self.run_br(vec![
             "dep".into(),
             "remove".into(),

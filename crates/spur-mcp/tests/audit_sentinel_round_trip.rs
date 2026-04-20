@@ -1,0 +1,104 @@
+//! Integration test: [[spur-audit v1]] sentinel comments round-trip through
+//! real `br comments add` + `br comments list --json`.
+
+use std::path::Path;
+use std::process::Command;
+
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
+use tempfile::TempDir;
+
+fn br_available() -> bool {
+    Command::new("br")
+        .arg("--help")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("br")
+        .args(args)
+        .arg("--json")
+        .current_dir(repo)
+        .env("RUST_LOG", "error")
+        .output()
+        .expect("br invocation");
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(format!(
+            "br {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+fn extract_id(json: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap();
+    v.get("id")
+        .and_then(|x| x.as_str())
+        .expect("id")
+        .to_string()
+}
+
+#[test]
+fn every_audit_sentinel_variant_round_trips_through_br_comments() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    run_br(dir.path(), &["init"]).unwrap();
+    let id = extract_id(&run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap());
+
+    let variants = vec![
+        AuditSentinelKind::PlanSubmit {
+            plan_id: "P1".into(),
+            epic_issue_id: id.clone(),
+            task_ids: vec!["bd-a".into(), "bd-b".into()],
+        },
+        AuditSentinelKind::Dispatch {
+            delegation_id: "del-1".into(),
+            worker: "codex".into(),
+            attempt: 1,
+        },
+        AuditSentinelKind::Completion {
+            delegation_id: "del-1".into(),
+            worker_branch: Some("feat/x".into()),
+            result_summary: Some("worker narrative: three refactors".into()),
+        },
+        AuditSentinelKind::Approval {
+            delegation_id: "del-1".into(),
+        },
+        AuditSentinelKind::Rejection {
+            delegation_id: "del-1".into(),
+            feedback: "needs more tests".into(),
+        },
+    ];
+
+    for v in &variants {
+        let body = audit_sentinel::encode_comment(v);
+        run_br(dir.path(), &["comments", "add", &id, &body]).unwrap();
+    }
+
+    let list_out = run_br(dir.path(), &["comments", "list", &id]).unwrap();
+    let items: serde_json::Value = serde_json::from_str(&list_out).unwrap();
+    let texts: Vec<String> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from))
+        .collect();
+
+    for v in &variants {
+        let found = texts.iter().any(|t| {
+            audit_sentinel::parse_comment(t)
+                .and_then(|r| r.ok())
+                .is_some_and(|k| k == *v)
+        });
+        assert!(
+            found,
+            "variant {v:?} did not round-trip through br comments: {texts:?}"
+        );
+    }
+}

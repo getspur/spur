@@ -5,7 +5,7 @@
 //! pure helper that decides WHAT IssueCreate values the handler would
 //! dispatch given a plan + epic fields.
 
-use spur_mcp::{plan_epic_issue_creates, tools_list};
+use spur_mcp::{build_entries_with_task_map, plan_epic_issue_creates, tools_list};
 // `pub mod plan;` is declared in lib.rs, so spur_mcp::plan::PlanTask is accessible.
 use spur_mcp::plan::PlanTask;
 
@@ -177,6 +177,7 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
             worker_branch: None,
             attempt: 1,
             history: vec![],
+            last_delegation_id: None,
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         epic_id: None,
@@ -199,7 +200,7 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
 
     let (dtx, _drx) = mpsc::channel(8);
 
-    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref)).await;
+    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None).await;
 
     let events = sink.events.lock().unwrap();
     let saw_completed = events.iter().any(|e| {
@@ -262,6 +263,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             worker_branch: None,
             attempt: 1,
             history: vec![],
+            last_delegation_id: None,
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         epic_id: None,
@@ -282,7 +284,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             "t1",
             "approve",
             Some("ok"),
-            Some(sleepy_pm.as_ref()),
+            Some(sleepy_pm),
             None,
             None,
             None,
@@ -349,6 +351,7 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
             worker_branch: None,
             attempt: 1,
             history: vec![],
+            last_delegation_id: None,
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         epic_id: None,
@@ -361,7 +364,7 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
     let (dtx, _drx) = mpsc::channel(8);
     let plan_arc = Arc::new(Mutex::new(state));
 
-    run_plan(Arc::clone(&plan_arc), dtx, Some(sink_ref)).await;
+    run_plan(Arc::clone(&plan_arc), dtx, Some(sink_ref), None).await;
 
     let st = plan_arc.lock().await;
     assert!(
@@ -382,5 +385,115 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
     assert_eq!(
         pc, 1,
         "stuck Pending task must be counted as failed in PlanCompleted"
+    );
+}
+
+// ─── Task 1: build_entries_with_task_map backfill tests ──────────────────────
+
+/// Helper: three tasks a (no issue_id), b (no issue_id), c (no issue_id).
+fn tasks_abc() -> Vec<PlanTask> {
+    vec![
+        PlanTask {
+            task_id: "a".into(),
+            agent: "claude-code-acp".into(),
+            task: "Do A.".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        },
+        PlanTask {
+            task_id: "b".into(),
+            agent: "claude-code-acp".into(),
+            task: "Do B.".into(),
+            depends_on: vec!["a".into()],
+            issue_id: None,
+            context_files: Vec::new(),
+        },
+        PlanTask {
+            task_id: "c".into(),
+            agent: "codex".into(),
+            task: "Do C.".into(),
+            depends_on: vec!["b".into()],
+            issue_id: None,
+            context_files: Vec::new(),
+        },
+    ]
+}
+
+/// Case 1: ephemeral plan (task_map = None) — every entry must have issue_id == None.
+#[test]
+fn build_entries_ephemeral_keeps_all_issue_ids_none() {
+    let tasks = tasks_abc();
+    let entries = build_entries_with_task_map(tasks, None);
+    for entry in &entries {
+        assert!(
+            entry.spec.issue_id.is_none(),
+            "ephemeral plan: expected issue_id=None for task {}, got {:?}",
+            entry.spec.task_id,
+            entry.spec.issue_id,
+        );
+    }
+}
+
+/// Case 2: persisted plan with partial task_map — matched tasks get beads IDs,
+/// unmatched task ("c") keeps None.
+#[test]
+fn build_entries_backfills_task_map_and_leaves_unmatched_none() {
+    use std::collections::HashMap;
+    let tasks = tasks_abc();
+    let mut task_map = HashMap::new();
+    task_map.insert("a".to_string(), "bd-1".to_string());
+    task_map.insert("b".to_string(), "bd-2".to_string());
+
+    let entries = build_entries_with_task_map(tasks, Some(&task_map));
+
+    let entry_a = entries.iter().find(|e| e.spec.task_id == "a").unwrap();
+    let entry_b = entries.iter().find(|e| e.spec.task_id == "b").unwrap();
+    let entry_c = entries.iter().find(|e| e.spec.task_id == "c").unwrap();
+
+    assert_eq!(
+        entry_a.spec.issue_id.as_deref(),
+        Some("bd-1"),
+        "task 'a' must be backfilled with bd-1"
+    );
+    assert_eq!(
+        entry_b.spec.issue_id.as_deref(),
+        Some("bd-2"),
+        "task 'b' must be backfilled with bd-2"
+    );
+    assert!(
+        entry_c.spec.issue_id.is_none(),
+        "task 'c' has no task_map entry and must remain None"
+    );
+}
+
+/// Case 3: pre-existing issue_id is NOT overwritten by task_map value.
+/// Rationale: the incoming issue_id on PlanTask is a spur:source-issue reference
+/// pointing to a pre-existing issue. The task_map value is the newly-created beads
+/// child. Only populate when the field is None — the source-issue reference takes
+/// precedence.
+#[test]
+fn build_entries_does_not_overwrite_existing_issue_id() {
+    use std::collections::HashMap;
+    let tasks = vec![PlanTask {
+        task_id: "a".into(),
+        agent: "claude-code-acp".into(),
+        task: "Do A.".into(),
+        depends_on: Vec::new(),
+        // pre-existing source-issue reference
+        issue_id: Some("bd-42".into()),
+        context_files: Vec::new(),
+    }];
+    let mut task_map = HashMap::new();
+    // task_map carries the newly-created beads child ID
+    task_map.insert("a".to_string(), "bd-99".to_string());
+
+    let entries = build_entries_with_task_map(tasks, Some(&task_map));
+
+    assert_eq!(
+        entries[0].spec.issue_id.as_deref(),
+        Some("bd-42"),
+        "pre-existing source-issue ref must NOT be overwritten by task_map; got {:?}",
+        entries[0].spec.issue_id,
     );
 }

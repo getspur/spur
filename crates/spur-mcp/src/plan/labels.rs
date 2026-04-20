@@ -46,6 +46,11 @@ pub fn signal_kind_bucket(kind: &str, bucket: &str) -> String {
 
 pub const SIGNAL_LATE_ARRIVAL: &str = "signal:late-arrival";
 pub const READY_FOR_REVIEW: &str = "ready-for-review";
+/// Marker applied to an epic after `build_epic_subgraph` successfully creates
+/// ALL children + dependency edges. The v0a.2 reconciler filters on this label
+/// to avoid observing partially-persisted plan graphs as ready work.
+/// If creation fails mid-loop, the epic will NOT carry this label.
+pub const PLAN_COMPLETE: &str = "spur:plan-complete";
 
 pub fn mutation_id(mutation_id: &uuid::Uuid) -> String {
     format!("mutation-id:{mutation_id}")
@@ -81,7 +86,11 @@ pub fn parse_source_issue(label: &str) -> Option<&str> {
 /// (not a bucketed variant `signal:<kind>:<bucket>`).
 pub fn parse_signal_kind(label: &str) -> Option<&str> {
     let rest = label.strip_prefix("signal:")?;
-    if rest.contains(':') { None } else { Some(rest) }
+    if rest.contains(':') {
+        None
+    } else {
+        Some(rest)
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +110,7 @@ mod tests {
             "signal:scope-drift:high"
         );
         assert_eq!(SIGNAL_LATE_ARRIVAL, "signal:late-arrival");
+        assert_eq!(PLAN_COMPLETE, "spur:plan-complete");
     }
 
     #[test]
@@ -138,6 +148,10 @@ mod tests {
         ] {
             assert!(is_br_legal(&s), "constructor emitted br-illegal label: {s}");
         }
+        assert!(
+            is_br_legal(PLAN_COMPLETE),
+            "PLAN_COMPLETE is br-illegal: {PLAN_COMPLETE}"
+        );
     }
 
     #[test]

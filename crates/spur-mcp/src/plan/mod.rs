@@ -5,7 +5,9 @@
 //! deps run in parallel, blocked tasks wait. Individual delegations flow
 //! through the existing `DelegationRequest` → orchestrator pipeline.
 
+pub mod audit_sentinel;
 pub mod labels;
+pub mod reconciler;
 pub mod signals;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -85,12 +87,23 @@ pub struct PlanTaskEntry {
     /// Prior attempts (1..attempt-1). Empty for first-iteration tasks.
     #[serde(default)]
     pub history: Vec<AttemptRecord>,
+    /// The delegation_id of the most recently dispatched attempt for this task.
+    /// Set when status transitions to Dispatched; retained through AwaitingReview
+    /// so audit sentinels (Approval, Rejection) can reference it.
+    #[serde(default)]
+    pub last_delegation_id: Option<String>,
 }
 
 #[allow(dead_code)] // used via #[serde(default = "default_attempt")] — rustc doesn't track serde attrs
 fn default_attempt() -> u32 {
     1
 }
+
+/// The attempt number for a task's first dispatch. Re-dispatches triggered
+/// by `request_changes` bump to `entry.attempt + 1` in
+/// `apply_decision_and_extract`; both initial dispatchers (`run_plan` and
+/// `dispatch_newly_ready`) emit this value for their audit sentinels.
+const FIRST_DISPATCH_ATTEMPT: u32 = 1;
 
 /// Runtime state of a submitted plan.
 #[derive(Debug)]
@@ -226,18 +239,12 @@ pub fn derive_epic_plan_from_issues(
 
         // 4d. Resolve task text.
         //
-        // NOTE: `spur:task-text:<text>` as a LABEL is structurally broken against
-        // br 0.1.14's label grammar `[A-Za-z0-9_:-]+`. Any realistic task text
-        // will contain forbidden chars (`.`, `=`, space, etc) and be rejected by
-        // `br label add`. This label convention should migrate off labels to the
-        // issue `description` field (tracked as v0a.2 follow-up). Kept here for
-        // backward compatibility with pre-v0a callers that never actually wrote
-        // these labels through `br`.
-        let task_text = if let Some(text) = label_value(&child.labels, "spur:task-text:") {
-            text.to_string()
-        } else {
-            child.body.clone()
-        };
+        // Task text comes from the issue body (description field). The former
+        // `spur:task-text:<text>` label override was removed because its VALUE
+        // can never round-trip through br 0.1.14's label grammar
+        // `[A-Za-z0-9_:-]+` — realistic task text contains spaces, `.`, `=`,
+        // etc. Task text belongs in the issue body, not a label.
+        let task_text = child.body.clone();
 
         // 4e. Map blocked_by: keep intra-subgraph deps; validate/warn external.
         //
@@ -542,6 +549,129 @@ fn has_cycle(tasks: &[PlanTask]) -> bool {
     sorted != tasks.len()
 }
 
+// ─── Audit emission helpers ───────────────────────────────────────────
+
+/// Emit a `[[spur-audit v1]] Dispatch` sentinel comment on the task issue.
+/// Silently skips when `pm` is `None`, `issue_id` is `None`, or the backend
+/// has no `BeadsAdvanced` surface (e.g. GitHub). Every failure is advisory —
+/// logged at WARN and execution continues.
+pub async fn emit_dispatch_audit(
+    pm: Option<&dyn PmLike>,
+    issue_id: &Option<String>,
+    plan_id: &str,
+    delegation_id: &str,
+    worker: &str,
+    attempt: u32,
+) {
+    let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
+        return;
+    };
+    let Some(adv) = pm.advanced() else { return };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+        delegation_id: delegation_id.to_string(),
+        worker: worker.to_string(),
+        attempt,
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(e) = adv.add_comment(issue_id, &body).await {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "dispatch",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "Dispatch audit comment emission failed: {e}"
+        );
+    }
+}
+
+/// Emit a `[[spur-audit v1]] Completion` sentinel comment on the task issue.
+pub async fn emit_completion_audit(
+    pm: Option<&dyn PmLike>,
+    issue_id: &Option<String>,
+    plan_id: &str,
+    delegation_id: &str,
+    worker_branch: Option<&str>,
+    result_summary: Option<&str>,
+) {
+    let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
+        return;
+    };
+    let Some(adv) = pm.advanced() else { return };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+        delegation_id: delegation_id.to_string(),
+        worker_branch: worker_branch.map(String::from),
+        result_summary: result_summary.map(String::from),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(e) = adv.add_comment(issue_id, &body).await {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "completion",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "Completion audit comment emission failed: {e}"
+        );
+    }
+}
+
+/// Emit a `[[spur-audit v1]] Approval` sentinel comment on the task issue.
+pub(crate) async fn emit_approval_audit(
+    pm: Option<&dyn PmLike>,
+    issue_id: &Option<String>,
+    plan_id: &str,
+    delegation_id: &str,
+) {
+    let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
+        return;
+    };
+    let Some(adv) = pm.advanced() else { return };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::Approval {
+        delegation_id: delegation_id.to_string(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(e) = adv.add_comment(issue_id, &body).await {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "approval",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "Approval audit comment emission failed: {e}"
+        );
+    }
+}
+
+/// Emit a `[[spur-audit v1]] Rejection` sentinel comment on the task issue.
+pub(crate) async fn emit_rejection_audit(
+    pm: Option<&dyn PmLike>,
+    issue_id: &Option<String>,
+    plan_id: &str,
+    delegation_id: &str,
+    feedback: &str,
+) {
+    let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
+        return;
+    };
+    let Some(adv) = pm.advanced() else { return };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::Rejection {
+        delegation_id: delegation_id.to_string(),
+        feedback: feedback.to_string(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(e) = adv.add_comment(issue_id, &body).await {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "rejection",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "Rejection audit comment emission failed: {e}"
+        );
+    }
+}
+
 // ─── Executor ────────────────────────────────────────────────────────
 
 /// Run a submitted plan to completion. Dispatches tasks through the
@@ -553,6 +683,7 @@ pub async fn run_plan(
     plan: Arc<Mutex<PlanState>>,
     delegation_tx: mpsc::Sender<DelegationRequest>,
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+    pm: Option<Arc<dyn PmLike>>,
 ) {
     let plan_id = plan.lock().await.plan_id.clone();
     info!(plan_id = %plan_id, "Plan executor started");
@@ -585,6 +716,7 @@ pub async fn run_plan(
                     entry.status = PlanTaskStatus::Dispatched {
                         delegation_id: delegation_id.clone(),
                     };
+                    entry.last_delegation_id = Some(delegation_id.clone());
                     batch.push((entry.spec.clone(), delegation_id));
                 }
             }
@@ -595,7 +727,7 @@ pub async fn run_plan(
             let (tx, rx) = oneshot::channel::<DelegationResult>();
 
             let request = DelegationRequest {
-                id: delegation_id.into(),
+                id: delegation_id.clone().into(),
                 agent: task_spec.agent.clone(),
                 task: task_spec.task.clone(),
                 context_files: task_spec.context_files.clone(),
@@ -631,13 +763,35 @@ pub async fn run_plan(
                 "Plan task dispatched"
             );
 
+            // Emit Dispatch audit sentinel — outside the plan lock.
+            emit_dispatch_audit(
+                pm.as_deref(),
+                &task_spec.issue_id,
+                &plan_id,
+                &delegation_id,
+                &task_spec.agent,
+                FIRST_DISPATCH_ATTEMPT,
+            )
+            .await;
+
             let tid = task_spec.task_id.clone();
             let plan_ref = Arc::clone(&plan);
             let pid = plan_id.clone();
+            let pm_ref = pm.clone();
+            let issue_id_for_completion = task_spec.issue_id.clone();
+            let delegation_id_for_completion = delegation_id.clone();
 
             in_flight.spawn(async move {
                 match rx.await {
                     Ok(result) => {
+                        // Collect completion data before acquiring lock.
+                        let completion_success = matches!(
+                            result.status,
+                            DelegationStatus::Success | DelegationStatus::Modified { .. }
+                        );
+                        let result_worker_branch = result.worker_branch.clone();
+                        let result_summary = result.summary.clone();
+
                         let mut p = plan_ref.lock().await;
                         if let Some(entry) =
                             p.tasks.iter_mut().find(|t| t.spec.task_id == tid)
@@ -670,6 +824,19 @@ pub async fn run_plan(
                                 }
                             }
                             entry.result = Some(result);
+                        }
+                        // Lock released at end of block — emit Completion audit outside.
+                        drop(p);
+                        if completion_success {
+                            emit_completion_audit(
+                                pm_ref.as_deref(),
+                                &issue_id_for_completion,
+                                &pid,
+                                &delegation_id_for_completion,
+                                result_worker_branch.as_deref(),
+                                result_summary.as_deref(),
+                            )
+                            .await;
                         }
                     }
                     Err(_) => {
@@ -1229,6 +1396,8 @@ pub async fn review_task(
             if let (Some(tx), Some(tracker), Some(arc)) =
                 (delegation_tx, task_tracker, plan_arc.clone())
             {
+                let mut _unused_audit_emits: Vec<PendingAuditEmit> = Vec::new();
+                // test-only review_task has no Arc<dyn PmLike> — audit no-ops.
                 dispatch_newly_ready(
                     plan_id,
                     state,
@@ -1238,6 +1407,8 @@ pub async fn review_task(
                     sink,
                     &mut warnings,
                     &mut new_dispatches,
+                    &mut _unused_audit_emits,
+                    None,
                 );
             }
         }
@@ -1428,13 +1599,17 @@ pub async fn review_task(
                 delegation_id: delegation_id.clone(),
             };
 
-            // Spawn completion future.
+            // Spawn completion future. test-only review_task does not emit the
+            // Completion audit sentinel — pm threading is covered by
+            // apply_decision_and_extract's request_changes path.
             spawn_completion_future(
                 task_id.to_string(),
                 delegation_id.clone(),
                 resp_rx,
                 arc,
                 tracker,
+                None,
+                plan_id.to_string(),
             );
 
             new_dispatches.push((task_id.to_string(), new_attempt, delegation_id));
@@ -1542,6 +1717,11 @@ pub async fn review_task(
 pub trait PmLike: Send + Sync + 'static {
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()>;
     fn closed_status(&self) -> &str;
+    /// Returns the `BeadsAdvanced` extension surface if the backend is beads.
+    /// Returns `None` for non-beads backends (GitHub) and test fakes.
+    fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+        None
+    }
 }
 
 #[async_trait::async_trait]
@@ -1551,6 +1731,9 @@ impl PmLike for spur_pm::PmService {
     }
     fn closed_status(&self) -> &str {
         spur_pm::PmService::closed_status(self)
+    }
+    fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+        spur_pm::PmService::advanced(self)
     }
 }
 
@@ -1580,6 +1763,30 @@ enum PendingEvent {
     },
 }
 
+/// Pending audit sentinel emission: collected by `apply_decision_and_extract`
+/// (sync, under the plan lock) and flushed by `handle_review_task` after the
+/// lock is released. Advisory — failures are logged at WARN and continue.
+enum PendingAuditEmit {
+    Approval {
+        issue_id: Option<String>,
+        plan_id: String,
+        delegation_id: String,
+    },
+    Rejection {
+        issue_id: Option<String>,
+        plan_id: String,
+        delegation_id: String,
+        feedback: String,
+    },
+    Dispatch {
+        issue_id: Option<String>,
+        plan_id: String,
+        delegation_id: String,
+        worker: String,
+        attempt: u32,
+    },
+}
+
 /// Everything produced by `apply_decision_and_extract` under the plan lock.
 struct DecisionOutcome {
     /// JSON response to return to the caller.
@@ -1588,6 +1795,8 @@ struct DecisionOutcome {
     beads_ops: Vec<PendingBeadsOp>,
     /// Events to emit after the lock is released.
     events: Vec<PendingEvent>,
+    /// Audit sentinel emissions to flush after the lock is released.
+    audit_emits: Vec<PendingAuditEmit>,
 }
 
 /// Sync state-mutation half of `handle_review_task`.
@@ -1607,9 +1816,11 @@ fn apply_decision_and_extract(
     task_tracker: Option<&tokio_util::task::TaskTracker>,
     plan_arc: Option<std::sync::Arc<tokio::sync::Mutex<PlanState>>>,
     sink: Option<&dyn crate::events::McpEventSink>,
+    pm_arc: Option<&Arc<dyn PmLike>>,
 ) -> Result<DecisionOutcome, String> {
     let mut warnings: Vec<String> = Vec::new();
     let mut beads_ops: Vec<PendingBeadsOp> = Vec::new();
+    let mut audit_emits: Vec<PendingAuditEmit> = Vec::new();
 
     // Validate the task exists and is in AwaitingReview.
     let (summary, current_attempt) = {
@@ -1646,10 +1857,18 @@ fn apply_decision_and_extract(
                 .iter_mut()
                 .find(|t| t.spec.task_id == task_id)
                 .unwrap();
+            let issue_id = entry.spec.issue_id.clone();
+            let last_del_id = entry.last_delegation_id.clone();
             entry.status = PlanTaskStatus::Approved {
                 summary: summary.clone(),
             };
-            let issue_id = entry.spec.issue_id.clone();
+
+            // Stage audit sentinel — emitted outside the lock.
+            audit_emits.push(PendingAuditEmit::Approval {
+                issue_id: issue_id.clone(),
+                plan_id: plan_id.to_string(),
+                delegation_id: last_del_id.unwrap_or_default(),
+            });
 
             // Stage beads sync — executes outside the lock.
             if let (Some(closed_status), Some(id)) = (pm_closed_status, issue_id) {
@@ -1681,6 +1900,8 @@ fn apply_decision_and_extract(
                     sink,
                     &mut warnings,
                     &mut new_dispatches,
+                    &mut audit_emits,
+                    pm_arc,
                 );
             }
         }
@@ -1690,17 +1911,24 @@ fn apply_decision_and_extract(
                 .iter_mut()
                 .find(|t| t.spec.task_id == task_id)
                 .unwrap();
+            let issue_id = entry.spec.issue_id.clone();
+            let last_del_id = entry.last_delegation_id.clone();
+            let feedback_str = feedback.unwrap_or("does not meet requirements");
             entry.status = PlanTaskStatus::Rejected {
                 feedback: feedback.map(String::from),
             };
-            let issue_id = entry.spec.issue_id.clone();
+
+            // Stage audit sentinel — emitted outside the lock.
+            audit_emits.push(PendingAuditEmit::Rejection {
+                issue_id: issue_id.clone(),
+                plan_id: plan_id.to_string(),
+                delegation_id: last_del_id.unwrap_or_default(),
+                feedback: feedback_str.to_string(),
+            });
 
             // Stage beads sync — executes outside the lock.
             if let Some(id) = issue_id {
-                let comment = format!(
-                    "Brain rejected: {}",
-                    feedback.unwrap_or("does not meet requirements")
-                );
+                let comment = format!("Brain rejected: {feedback_str}");
                 let update = spur_pm::IssueUpdate {
                     status: Some("open".to_string()),
                     comment: Some(comment),
@@ -1731,12 +1959,21 @@ fn apply_decision_and_extract(
                     );
                     let issue_id = entry.spec.issue_id.clone();
                     let attempt_at_reject = entry.attempt;
+                    let last_del_id = entry.last_delegation_id.clone();
                     entry.status = PlanTaskStatus::Rejected {
                         feedback: Some(exhausted_fb.clone()),
                     };
                     warnings.push(format!(
                         "auto-rejected: MAX_ATTEMPTS ({MAX_ATTEMPTS}) reached"
                     ));
+
+                    // Stage audit sentinel — emitted outside the lock.
+                    audit_emits.push(PendingAuditEmit::Rejection {
+                        issue_id: issue_id.clone(),
+                        plan_id: plan_id.to_string(),
+                        delegation_id: last_del_id.unwrap_or_default(),
+                        feedback: exhausted_fb.clone(),
+                    });
 
                     // Rejection cascade.
                     mark_descendants_failed(task_id, state, &mut warnings);
@@ -1785,6 +2022,7 @@ fn apply_decision_and_extract(
                         resp,
                         beads_ops,
                         events,
+                        audit_emits,
                     });
                 }
             }
@@ -1852,6 +2090,7 @@ fn apply_decision_and_extract(
             entry.status = PlanTaskStatus::Dispatched {
                 delegation_id: delegation_id.clone(),
             };
+            entry.last_delegation_id = Some(delegation_id.clone());
 
             spawn_completion_future(
                 task_id.to_string(),
@@ -1859,12 +2098,24 @@ fn apply_decision_and_extract(
                 resp_rx,
                 arc,
                 tracker,
+                pm_arc.cloned(),
+                plan_id.to_string(),
             );
 
             new_dispatches.push((task_id.to_string(), new_attempt, delegation_id.clone()));
 
-            // Stage beads audit comment — executes outside the lock.
+            // Stage Dispatch audit sentinel for the re-dispatched attempt.
+            let agent_for_audit = entry.spec.agent.clone();
             let issue_id_for_audit = entry.spec.issue_id.clone();
+            audit_emits.push(PendingAuditEmit::Dispatch {
+                issue_id: issue_id_for_audit.clone(),
+                plan_id: plan_id.to_string(),
+                delegation_id: delegation_id.clone(),
+                worker: agent_for_audit,
+                attempt: new_attempt,
+            });
+
+            // Stage beads audit comment — executes outside the lock.
             let superseded_branch: Option<String> =
                 entry.history.last().and_then(|h| h.worker_branch.clone());
             if let Some(id) = issue_id_for_audit {
@@ -1944,6 +2195,7 @@ fn apply_decision_and_extract(
         resp,
         beads_ops,
         events,
+        audit_emits,
     })
 }
 
@@ -1960,12 +2212,12 @@ pub async fn handle_review_task(
     task_id: &str,
     decision: &str,
     feedback: Option<&str>,
-    pm: Option<&dyn PmLike>,
+    pm: Option<Arc<dyn PmLike>>,
     sink: Option<&dyn crate::events::McpEventSink>,
     delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>>,
     task_tracker: Option<&tokio_util::task::TaskTracker>,
 ) -> Result<serde_json::Value, String> {
-    let pm_closed_status = pm.map(|p| p.closed_status().to_string());
+    let pm_closed_status = pm.as_deref().map(|p| p.closed_status().to_string());
 
     // 1) Sync mutation under lock — no .await inside this block.
     let outcome = {
@@ -1981,11 +2233,12 @@ pub async fn handle_review_task(
             task_tracker,
             Some(plan_arc.clone()),
             sink,
+            pm.as_ref(),
         )
     }?; // lock released here.
 
     // 2) Async beads I/O — outside the lock.
-    if let Some(pm) = pm {
+    if let Some(pm) = pm.as_deref() {
         for op in outcome.beads_ops {
             if let Err(e) = pm.update_issue(&op.issue_id, op.update).await {
                 // Beads failures are best-effort; already baked into warnings
@@ -1994,6 +2247,45 @@ pub async fn handle_review_task(
                     "handle_review_task: beads update failed for {}: {e}",
                     op.issue_id
                 );
+            }
+        }
+
+        // 2b) Flush audit sentinel emissions — advisory, outside the lock.
+        for emit in outcome.audit_emits {
+            match emit {
+                PendingAuditEmit::Approval {
+                    issue_id,
+                    plan_id,
+                    delegation_id,
+                } => {
+                    emit_approval_audit(Some(pm), &issue_id, &plan_id, &delegation_id).await;
+                }
+                PendingAuditEmit::Rejection {
+                    issue_id,
+                    plan_id,
+                    delegation_id,
+                    feedback,
+                } => {
+                    emit_rejection_audit(Some(pm), &issue_id, &plan_id, &delegation_id, &feedback)
+                        .await;
+                }
+                PendingAuditEmit::Dispatch {
+                    issue_id,
+                    plan_id,
+                    delegation_id,
+                    worker,
+                    attempt,
+                } => {
+                    emit_dispatch_audit(
+                        Some(pm),
+                        &issue_id,
+                        &plan_id,
+                        &delegation_id,
+                        &worker,
+                        attempt,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -2106,6 +2398,8 @@ fn dispatch_newly_ready(
     sink: Option<&dyn crate::events::McpEventSink>,
     warnings: &mut Vec<String>,
     new_dispatches: &mut Vec<(String, u32, String)>,
+    audit_emits: &mut Vec<PendingAuditEmit>,
+    pm_arc: Option<&Arc<dyn PmLike>>,
 ) {
     let ready_ids: Vec<String> = state
         .tasks
@@ -2145,10 +2439,10 @@ fn dispatch_newly_ready(
 
         let req = crate::tools::DelegationRequest {
             id: delegation_id.clone().into(),
-            agent,
+            agent: agent.clone(),
             task,
             delegation_plan: None,
-            issue_id,
+            issue_id: issue_id.clone(),
             context_files,
             respond_to: resp_tx,
             brain_session_id,
@@ -2164,14 +2458,25 @@ fn dispatch_newly_ready(
                 entry.status = PlanTaskStatus::Dispatched {
                     delegation_id: delegation_id.clone(),
                 };
+                entry.last_delegation_id = Some(delegation_id.clone());
                 spawn_completion_future(
                     task_id.clone(),
                     delegation_id.clone(),
                     resp_rx,
                     plan_arc.clone(),
                     task_tracker,
+                    pm_arc.cloned(),
+                    plan_id.to_string(),
                 );
-                new_dispatches.push((task_id.clone(), 1, delegation_id));
+                new_dispatches.push((task_id.clone(), 1, delegation_id.clone()));
+                // Stage Dispatch audit sentinel — emitted outside the lock by caller.
+                audit_emits.push(PendingAuditEmit::Dispatch {
+                    issue_id,
+                    plan_id: plan_id.to_string(),
+                    delegation_id,
+                    worker: agent,
+                    attempt: FIRST_DISPATCH_ATTEMPT,
+                });
             }
             Err(e) => {
                 let entry = state
@@ -2186,18 +2491,25 @@ fn dispatch_newly_ready(
             }
         }
     }
-    let _ = (plan_id, sink); // reserved for future event emission on cascade dispatch
+    let _ = sink; // reserved for future event emission on cascade dispatch
 }
 
 /// Spawn a future that awaits a DelegationResult and writes it back to PlanState.
 /// Guards against stale completions (if the task was iterated again before this
 /// resolved, the delegation_id no longer matches — result is discarded).
+///
+/// After the PlanState mutation under-lock, releases the lock and emits a
+/// Completion `[[spur-audit v1]]` sentinel when the result was Success/Modified.
+/// Mirrors the emission in `run_plan`'s primary spawn (see mod.rs ~820) so the
+/// re-dispatch / approval-cascade paths have the same audit breadcrumb.
 fn spawn_completion_future(
     task_id: String,
     expected_delegation_id: String,
     rx: tokio::sync::oneshot::Receiver<DelegationResult>,
     plan_arc: std::sync::Arc<tokio::sync::Mutex<PlanState>>,
     task_tracker: &tokio_util::task::TaskTracker,
+    pm: Option<Arc<dyn PmLike>>,
+    plan_id: String,
 ) {
     task_tracker.spawn(async move {
         let Ok(result) = rx.await else {
@@ -2236,12 +2548,21 @@ fn spawn_completion_future(
         }
 
         let mut transitioned_to_failed = false;
+        let mut completion_success = false;
+        let mut issue_id_for_audit: Option<String> = None;
+        let mut worker_branch_for_audit: Option<String> = None;
+        let mut result_summary_for_audit: Option<String> = None;
+
         match &result.status {
             DelegationStatus::Success | DelegationStatus::Modified { .. } => {
                 entry.status = PlanTaskStatus::AwaitingReview {
                     summary: result.summary.clone(),
                 };
                 entry.worker_branch = result.worker_branch.clone();
+                completion_success = true;
+                issue_id_for_audit = entry.spec.issue_id.clone();
+                worker_branch_for_audit = result.worker_branch.clone();
+                result_summary_for_audit = result.summary.clone();
             }
             DelegationStatus::Failed { error } => {
                 entry.status = PlanTaskStatus::Failed {
@@ -2270,6 +2591,21 @@ fn spawn_completion_future(
         if transitioned_to_failed {
             let mut warnings = Vec::new();
             mark_descendants_failed(&task_id, &mut state, &mut warnings);
+        }
+
+        // Release lock before audit emission (same discipline as run_plan's
+        // primary spawn — beads I/O must not happen under the plan lock).
+        drop(state);
+        if completion_success {
+            emit_completion_audit(
+                pm.as_deref(),
+                &issue_id_for_audit,
+                &plan_id,
+                &expected_delegation_id,
+                worker_branch_for_audit.as_deref(),
+                result_summary_for_audit.as_deref(),
+            )
+            .await;
         }
     });
 }
@@ -2511,13 +2847,10 @@ mod tests {
         let labels = vec![
             "spur:agent:codex".to_string(),
             "priority=high".to_string(),
-            "spur:task-text:custom".to_string(),
+            "spur:plan-id:custom".to_string(),
         ];
         assert_eq!(super::label_value(&labels, "spur:agent:"), Some("codex"));
-        assert_eq!(
-            super::label_value(&labels, "spur:task-text:"),
-            Some("custom")
-        );
+        assert_eq!(super::label_value(&labels, "spur:plan-id:"), Some("custom"));
         assert_eq!(super::label_value(&labels, "missing="), None);
     }
 
@@ -2526,7 +2859,7 @@ mod tests {
         let labels = vec![
             "spur:agent:codex".to_string(),
             "area:auth".to_string(),
-            "spur:task-text:x".to_string(),
+            "spur:plan-id:x".to_string(),
             "bug".to_string(),
         ];
         let kept = super::strip_spur_labels(&labels);
@@ -2868,33 +3201,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_uses_spur_task_text_override() {
-        let epic = make_issue(
-            "bd-216",
-            Some("epic"),
-            vec!["spur:agent:codex".to_string()],
-            "body",
-            vec![],
-        );
-        let child = make_issue(
-            "bd-217",
-            Some("task"),
-            vec!["spur:task-text:custom task text".to_string()],
-            "issue body (should be ignored)",
-            vec![],
-        );
-        let derived = super::derive_epic_plan_from_issues(
-            &epic,
-            &[child],
-            &std::collections::HashMap::new(),
-            None,
-            &["codex"],
-        )
-        .unwrap();
-        assert_eq!(derived.plan_tasks[0].task, "custom task text");
-    }
-
-    #[test]
     fn derive_rejects_empty_agent_label() {
         // A `spur:agent:` label with empty value resolves to ""; must fail
         // the known_agents check with an actionable error.
@@ -2915,39 +3221,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("not configured"), "got: {err}");
-    }
-
-    #[test]
-    fn derive_accepts_empty_spur_task_text_override() {
-        // Document the current behavior: `spur:task-text:` (empty value)
-        // yields an empty PlanTask.task (override beats body). This is the
-        // intended contract — an empty value is still an explicit override.
-        let epic = make_issue(
-            "bd-232",
-            Some("epic"),
-            vec!["spur:agent:codex".to_string()],
-            "body",
-            vec![],
-        );
-        let child = make_issue(
-            "bd-233",
-            Some("task"),
-            vec!["spur:task-text:".to_string()],
-            "issue body (should be ignored)",
-            vec![],
-        );
-        let derived = super::derive_epic_plan_from_issues(
-            &epic,
-            &[child],
-            &std::collections::HashMap::new(),
-            None,
-            &["codex"],
-        )
-        .unwrap();
-        assert_eq!(
-            derived.plan_tasks[0].task, "",
-            "empty override should beat body"
-        );
     }
 
     #[test]
@@ -3025,6 +3298,7 @@ mod tests {
                     worker_branch: None,
                     attempt: 1,
                     history: Vec::new(),
+                    last_delegation_id: None,
                 })
                 .collect(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
@@ -3145,6 +3419,7 @@ mod tests {
                     feedback: "fix that".into(),
                 },
             ],
+            last_delegation_id: None,
         };
         let mut state = PlanState {
             plan_id: "p1".into(),
@@ -3307,5 +3582,39 @@ mod tests {
         let map: std::collections::HashMap<String, serde_json::Value> =
             fields.into_iter().collect();
         assert!(!map.contains_key("artifact"));
+    }
+
+    #[test]
+    fn derive_uses_child_body_as_task_text() {
+        // task_text always comes from child.body — no label override.
+        let epic = make_issue(
+            "bd-250",
+            Some("epic"),
+            vec!["spur:agent:codex".to_string()],
+            "epic body",
+            vec![],
+        );
+        let child_with_body = make_issue("bd-251", Some("task"), vec![], "do the work", vec![]);
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child_with_body],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap();
+        assert_eq!(derived.plan_tasks[0].task, "do the work");
+
+        // When child.body is empty, task_text is empty — no fallback.
+        let child_empty_body = make_issue("bd-252", Some("task"), vec![], "", vec![]);
+        let derived2 = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child_empty_body],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap();
+        assert_eq!(derived2.plan_tasks[0].task, "");
     }
 }
