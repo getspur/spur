@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,13 +7,24 @@ use rmcp::{
     serve_server, ServiceExt,
 };
 use serde_json::{json, Value};
+use spur_acp::domain::delegation::DelegationStatus;
 use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use tokio::sync::{oneshot, Notify};
 
-fn test_continuation_ctx() -> DetachedContinuationCtx {
+/// Observing continuation ctx: counts callback invocations and, for each
+/// `Failed` completion, tracks the error string so tests can assert that the
+/// collector finished cleanly after `shutdown()`.
+fn observing_continuation_ctx(failed_count: Arc<AtomicUsize>) -> DetachedContinuationCtx {
     DetachedContinuationCtx {
-        on_complete: Arc::new(|_cont, _worker| Box::pin(async {})),
+        on_complete: Arc::new(move |cont, _worker| {
+            let failed_count = Arc::clone(&failed_count);
+            Box::pin(async move {
+                if matches!(cont.payload.status, DelegationStatus::Failed { .. }) {
+                    failed_count.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        }),
     }
 }
 
@@ -39,10 +51,6 @@ fn delegation_id(result: &rmcp::model::CallToolResult) -> String {
         .to_string()
 }
 
-fn wait_payload(result: &rmcp::model::CallToolResult) -> Value {
-    serde_json::from_str(&tool_text(result)).expect("wait_delegation should return JSON text")
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn std::error::Error>> {
     const N: usize = 3;
@@ -53,8 +61,17 @@ async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn s
     // releasing/sending `respond_to` on task teardown, the same pending
     // collectors exercised here will keep `server.shutdown()` blocked and
     // this regression test will trip the 2s timeout.
+    // Phase 1c: detached collectors deliver through the continuation bridge
+    // only — the `completed_delegations` map is no longer written. Observe
+    // shutdown cleanliness via a counting on_complete callback.
+    let failed_count = Arc::new(AtomicUsize::new(0));
     let brain_sid = BrainSessionId::new(SessionId::new());
-    let (server, channel) = McpCallbackServer::new(&brain_sid, None, None, test_continuation_ctx());
+    let (server, channel) = McpCallbackServer::new(
+        &brain_sid,
+        None,
+        None,
+        observing_continuation_ctx(Arc::clone(&failed_count)),
+    );
     let server = Arc::new(server);
     let (client_io, server_io) = tokio::io::duplex(16 * 1024);
     let server_service_task = tokio::spawn({
@@ -136,6 +153,28 @@ async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn s
         .await
         .expect("shutdown must stay bounded with pending collectors")?;
 
+    // Phase 1c (source_kind-gated): `AsyncRequested` delegations (the
+    // `delegate_async` path) deliver through BOTH the continuation bridge
+    // AND `completed_delegations`, so the test now asserts both channels
+    // recovered cleanly. `BlockTimeout` (the new auto-reprompt path) is
+    // bridge-only and covered by `test_no_double_delivery_on_block_timeout`
+    // in spur-core/tests/continuation_integration.rs.
+    //
+    // (1) Continuation bridge: each dropped `respond_to` sender should have
+    //     surfaced as a `Failed { error: "Orchestrator disconnected" }`
+    //     completion through the `on_complete` callback.
+    assert_eq!(
+        failed_count.load(Ordering::SeqCst),
+        N,
+        "every pending collector should have reported a Failed completion via the \
+         continuation bridge after shutdown",
+    );
+
+    // (2) `wait_delegation` RPC: legacy callers that drain the map must
+    //     still observe the same Failed completion. Regression catcher for
+    //     the spec gap noticed in Phase 1c review: if the `AsyncRequested`
+    //     arm of the collector ever stops writing the map, this loop
+    //     times out instead of returning results, breaking legacy flows.
     for delegation_id in &delegation_ids {
         let result = client
             .call_tool(
@@ -144,11 +183,13 @@ async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn s
                 }))),
             )
             .await?;
-        let payload = wait_payload(&result);
+        let payload: Value = serde_json::from_str(&tool_text(&result))
+            .expect("wait_delegation should return JSON text");
         assert_eq!(
             payload["status"]["Failed"]["error"],
             Value::String("Orchestrator disconnected".into()),
-            "collector should finish cleanly rather than panic or deadlock",
+            "wait_delegation must still surface Failed completions for \
+             AsyncRequested collectors (source_kind-gated map write)",
         );
     }
 
