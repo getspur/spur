@@ -90,7 +90,13 @@ fn stream_footer_badge_reflects_trace_anchor() {
     // Render once while following: badge should appear.
     let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
     term.draw(|f| {
-        pane.render(f, Rect::new(0, 0, 80, 12), &node(""), None, Some(&mut trace));
+        pane.render(
+            f,
+            Rect::new(0, 0, 80, 12),
+            &node(""),
+            None,
+            Some(&mut trace),
+        );
     })
     .unwrap();
     let frame_following = term.backend().buffer().clone();
@@ -109,7 +115,13 @@ fn stream_footer_badge_reflects_trace_anchor() {
 
     // Re-render: badge must NOT appear.
     term.draw(|f| {
-        pane.render(f, Rect::new(0, 0, 80, 12), &node(""), None, Some(&mut trace));
+        pane.render(
+            f,
+            Rect::new(0, 0, 80, 12),
+            &node(""),
+            None,
+            Some(&mut trace),
+        );
     })
     .unwrap();
     let frame_scrolled = term.backend().buffer().clone();
