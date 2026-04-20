@@ -12,11 +12,20 @@ use crate::components::palette::{PaletteKind, PaletteState};
 
 pub struct PaletteOverlay<'a> {
     state: &'a PaletteState,
+    session_active: bool,
 }
 
 impl<'a> PaletteOverlay<'a> {
     pub fn new(state: &'a PaletteState) -> Self {
-        Self { state }
+        Self {
+            state,
+            session_active: false,
+        }
+    }
+
+    pub fn with_session_active(mut self, active: bool) -> Self {
+        self.session_active = active;
+        self
     }
 }
 
@@ -77,10 +86,12 @@ impl<'a> Widget for PaletteOverlay<'a> {
 
         // Results or empty-state placeholder.
         if self.state.ranked_len() == 0 {
-            let msg = if self.state.query().is_empty() {
-                "type to filter"
+            let msg: String = if self.state.query().is_empty() {
+                "type to filter".to_string()
+            } else if self.state.query().starts_with('/') && !self.session_active {
+                "Slash commands need an active session.".to_string()
             } else {
-                "no matches"
+                "No matches. Try shorter or different keywords.".to_string()
             };
             Paragraph::new(Line::from(Span::styled(
                 msg,

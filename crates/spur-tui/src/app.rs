@@ -2035,7 +2035,8 @@ impl App {
         if self.palette_visible {
             let overlay = crate::components::palette_overlay::PaletteOverlay::new(
                 &self.palette_state,
-            );
+            )
+            .with_session_active(self.session_detail.is_some());
             frame.render_widget(overlay, frame.area());
         }
     }
