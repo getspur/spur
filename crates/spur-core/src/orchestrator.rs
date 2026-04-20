@@ -4132,23 +4132,55 @@ async fn run_one_worker_attempt(
     let duration = start.elapsed();
     let cost = spur_cost::estimator::estimate_cost(ctx.agent_config.cost_tier, duration);
 
-    let summary = if output_text.is_empty() {
+    // Attempt side-channel artifact persistence BEFORE building the
+    // truncated summary. Only fires when output would otherwise lose
+    // bytes to truncate_summary — the predicate is purely size-based
+    // so mixed workers (diff + long rationale) and failure diagnostics
+    // are both covered.
+    let persist_result: Option<Result<spur_acp::WorkerArtifact, String>> =
+        if output_text.len() > summary_cap_bytes() {
+            let kind = if worker_success {
+                spur_acp::ArtifactKind::Output
+            } else {
+                spur_acp::ArtifactKind::Diagnostic
+            };
+            match worktrees
+                .persist_artifact(&worker_session, &output_text, kind)
+                .await
+            {
+                Ok(a) => Some(Ok(a)),
+                Err(e) => {
+                    tracing::warn!(
+                        session = %worker_session,
+                        error = %e,
+                        "artifact persistence failed"
+                    );
+                    Some(Err(e.to_string()))
+                }
+            }
+        } else {
+            None
+        };
+
+    // Build the summary FIRST so the error-extraction path on the
+    // failure branch can read from it — preserving the existing
+    // behaviour at `orchestrator.rs:4116-4130` byte-for-byte.
+    // (Raw-output sourcing would diverge when `SPUR_SUMMARY_MAX_BYTES`
+    // is lowered below 500; we want this refactor to be a pure
+    // no-op on the current failure-message semantics.)
+    let summary_pre_annotation: Option<String> = if output_text.is_empty() {
         None
     } else {
         Some(truncate_summary_env_default(&output_text))
     };
 
-    let candidate_status = if worker_success {
-        DelegationStatus::Success
+    // Build the "original" error status by extracting from the
+    // POST-truncation summary. Identical in shape to the existing
+    // block at `orchestrator.rs:4116-4130`.
+    let original_error_status = if worker_success {
+        None
     } else {
-        // Capture the last ~500 bytes of the already-truncated summary
-        // as the error message (last 500 bytes of the UTF-8-safe text
-        // the previous step produced, aligned to a char boundary). For
-        // LLM/tool workers this is almost always the actual failure
-        // (compiler error, test assertion, panic). `summary` already
-        // ran through truncate_summary_env_default, so reusing its
-        // tail avoids re-running the full truncation logic.
-        let error = summary
+        let error = summary_pre_annotation
             .as_deref()
             .map(|s| {
                 let tail_bytes = 500usize.min(s.len());
@@ -4163,8 +4195,32 @@ async fn run_one_worker_attempt(
             })
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "Worker reported errors (no output captured)".into());
-        DelegationStatus::Failed { error }
+        Some(DelegationStatus::Failed { error })
     };
+
+    let (candidate_status, artifact, persist_failure_note) =
+        decide_artifact_handling(worker_success, persist_result, original_error_status);
+
+    // Surface a success-path tracing event for observability. Warn
+    // on failure is already emitted above inside the persist match.
+    if let Some(a) = &artifact {
+        tracing::info!(
+            session = %worker_session,
+            object_ref = %a.object_ref,
+            blob_sha = %a.blob_sha,
+            size_bytes = a.size_bytes,
+            "worker artifact persisted"
+        );
+    }
+
+    // Apply the persist-failure annotation to the summary tail (if any).
+    let summary = summary_pre_annotation.map(|mut s| {
+        if let Some(note) = persist_failure_note.as_deref() {
+            s.push('\n');
+            s.push_str(note);
+        }
+        s
+    });
 
     Ok(WorkerAttemptOutcome {
         worker_session,
@@ -4174,7 +4230,7 @@ async fn run_one_worker_attempt(
         summary,
         cost,
         worktree_path,
-        artifact: None,
+        artifact,
     })
 }
 
