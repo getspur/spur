@@ -36,3 +36,72 @@ Valid types include `feat`, `fix`, `test`, `docs`, `refactor`, and `chore`. Keep
 
 ## Plan-Driven Workflow
 Non-trivial work should flow from spec to plan to implementation. Before executing an older plan, verify it against current code and pay attention to established invariants around broadcast sizing, TUI event draining, ACP sequencing, and notification grace windows.
+
+---
+
+## SPUR Signal Conventions (v1)
+
+SPUR uses sentinel conventions embedded in beads comment bodies to propagate structured metadata between brain, workers, and the reconciler. Workers and the MCP server emit these signals; the brain consumes them.
+
+### `[[spur-signal v1]]` — Worker-to-Brain Signals
+
+Workers emit signals as sentinel-fenced JSON inside a beads comment, plus a `signal:<kind>` label. The brain parses comments to derive signals.
+
+**Comment format:**
+```
+[[spur-signal v1]]
+{
+  "signal_id": "<uuid-v4>",
+  "kind": "scope_drift",
+  "severity": 0.82,
+  "reason": "auth refactor pulls in 4 new subsystems",
+  "estimated_subtasks": 3
+}
+```
+
+**Label format:** `signal:<kind>`, optionally bucketed as `signal:<kind>:<bucket>` (e.g., `signal:scope-drift:high`).
+
+The brain MUST deduplicate signals by `signal_id` across polls — workers may emit the same signal multiple times.
+
+### `[[spur-audit v1]]` — Audit Trail
+
+SPUR emits audit breadcrumbs as sentinel comments on beads issues. This replaces `br audit record` (which drops data on persist).
+
+**Audit sentinel variants:**
+
+| Kind | Purpose | Key fields |
+|---|---|---|
+| `plan-submit` | Plan persisted | `plan_id`, `epic_issue_id`, `task_ids[]` |
+| `dispatch` | Task dispatched to worker | `delegation_id`, `worker`, `attempt` |
+| `completion` | Worker completed | `delegation_id`, `worker_branch`, `result_summary` |
+| `approval` | Brain approved | `delegation_id` |
+| `rejection` | Brain rejected | `delegation_id`, `feedback` |
+
+**Comment format:**
+```
+[[spur-audit v1]]
+{
+  "kind": "dispatch",
+  "delegation_id": "del-A",
+  "worker": "codex",
+  "attempt": 1
+}
+```
+
+### Label Vocabulary
+
+| Label | Purpose | Set by |
+|---|---|---|
+| `spur:plan-id:<id>` | Plan ID scope | brain at submit |
+| `spur:plan-task-id:<id>` | Task ID scope | brain at submit |
+| `spur:plan-complete` | Epic fully persisted | server on epic creation |
+| `spur:agent:<name>` | Worker agent | brain at submit |
+| `spur:source-issue:<id>` | Source issue reference | server at submit |
+| `delegation-id:<id>` | ACP delegation | reconciler on dispatch |
+| `signal:<kind>` | Signal present | worker via MCP tool |
+| `signal:<kind>:<bucket>` | Signal severity bucket | worker via MCP tool |
+| `signal:late-arrival` | Signal after terminal | brain signal handler |
+| `mutation-id:<uuid>` | Mutation batch ID | brain mutation executor |
+| `ready-for-review` | Explicit review-ready | reconciler on completion |
+
+All labels must use br-legal characters: `[A-Za-z0-9_:-]+`.

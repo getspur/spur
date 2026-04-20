@@ -682,6 +682,17 @@ impl Orchestrator {
         mcp_server.set_inline_wait(std::time::Duration::from_millis(
             self.config.delegation.inline_wait_ms,
         ));
+        // v0a.3: enable reconciler for beads backends only (not github).
+        // Reconciler is observation-only in v0a; dispatch lands in v0b.
+        let reconciler_enabled = self
+            .pm_service
+            .as_ref()
+            .map(|pm| pm.source_str() == "beads")
+            .unwrap_or(false);
+        if reconciler_enabled {
+            info!("reconciler enabled (beads backend)");
+        }
+        mcp_server.set_reconciler_enabled(reconciler_enabled, None);
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1846,6 +1857,17 @@ impl Orchestrator {
         mcp_server.set_inline_wait(std::time::Duration::from_millis(
             self.config.delegation.inline_wait_ms,
         ));
+        // v0a.3: enable reconciler for beads backends only (not github).
+        // Reconciler is observation-only in v0a; dispatch lands in v0b.
+        let reconciler_enabled = self
+            .pm_service
+            .as_ref()
+            .map(|pm| pm.source_str() == "beads")
+            .unwrap_or(false);
+        if reconciler_enabled {
+            info!("reconciler enabled (beads backend)");
+        }
+        mcp_server.set_reconciler_enabled(reconciler_enabled, None);
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
