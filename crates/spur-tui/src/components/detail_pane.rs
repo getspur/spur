@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -48,6 +50,60 @@ impl Default for DetailPane {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Compute the bottom-border scroll label for a DetailPane state.
+///
+/// Pure function — no ratatui dependencies, no borrow of `DetailPane`.
+/// Exhaustive state coverage per the design spec's state table.
+///
+/// Arguments:
+///   - `tab`: current tab
+///   - `total`: number of wrapped body rows (0 if empty/placeholder)
+///   - `visible_h`: viewport height in rows
+///   - `scroll_offset`: current scroll offset in rows
+///   - `is_following`: pane's own follow flag (authoritative for non-Stream)
+///   - `stream_trace_following`: Some(trace.is_following()) when on Stream
+///     with a trace present; None when on Stream placeholder or on a
+///     non-Stream tab.
+fn scroll_label(
+    tab: DetailTab,
+    total: usize,
+    visible_h: usize,
+    scroll_offset: usize,
+    is_following: bool,
+    stream_trace_following: Option<bool>,
+) -> Cow<'static, str> {
+    // Stream tab — follow flag comes from the trace (if present).
+    if matches!(tab, DetailTab::Stream) {
+        return match stream_trace_following {
+            Some(true) => Cow::Borrowed(" ▼ following "),
+            Some(false) => Cow::Borrowed(" ▲ paused "),
+            // No trace yet — placeholder path. Default to "following"
+            // so the initial render does not look stalled.
+            None => Cow::Borrowed(" ▼ following "),
+        };
+    }
+
+    // Non-Stream tabs — authoritative scroll + follow state on DetailPane.
+    if total == 0 {
+        return Cow::Borrowed("");
+    }
+    let max_offset = total.saturating_sub(visible_h);
+    if max_offset == 0 {
+        // Content fits viewport; nothing to scroll.
+        return Cow::Borrowed(" ▼ ");
+    }
+    if is_following {
+        return Cow::Borrowed(" ▼ ");
+    }
+    if scroll_offset == 0 {
+        return Cow::Borrowed(" top ");
+    }
+    if scroll_offset >= max_offset {
+        return Cow::Borrowed(" end ");
+    }
+    Cow::Owned(format!(" ▲ {} ↑ ", scroll_offset))
 }
 
 impl DetailPane {
@@ -347,4 +403,3 @@ impl DetailPane {
         super::review_card::render_review(node)
     }
 }
-
