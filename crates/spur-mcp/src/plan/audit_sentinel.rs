@@ -84,7 +84,15 @@ pub fn encode_comment(kind: &AuditSentinelKind) -> String {
 pub fn parse_comment(body: &str) -> Option<Result<AuditSentinelKind, ParseError>> {
     let rest = body.trim_start().strip_prefix(SENTINEL_PREFIX)?;
     let json = rest.trim_start();
-    Some(serde_json::from_str(json).map_err(ParseError::Json))
+    let result = serde_json::from_str::<AuditSentinelKind>(json).map_err(ParseError::Json);
+    if matches!(result, Ok(AuditSentinelKind::Unknown)) {
+        tracing::debug!(
+            kind = "unknown",
+            sentinel_prefix = SENTINEL_PREFIX,
+            "parsed future-compat Unknown variant"
+        );
+    }
+    Some(result)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -193,9 +201,59 @@ mod tests {
                 delegation_id: "x".into(),
                 feedback: "f".into(),
             },
+            AuditSentinelKind::Unknown,
         ] {
             let json = serde_json::to_value(&k).unwrap();
             assert_eq!(json["kind"].as_str(), Some(k.kind_str()));
         }
+    }
+
+    #[test]
+    fn parse_missing_kind_errors() {
+        // No `kind` discriminator at all — serde must reject (NOT silently
+        // fall back to Unknown). Without the discriminator we cannot tell
+        // whether this is a known or future variant.
+        let body = format!("{SENTINEL_PREFIX}\n{{\"delegation_id\":\"x\"}}");
+        assert!(parse_comment(&body).unwrap().is_err());
+    }
+
+    #[test]
+    fn parse_null_kind_errors() {
+        // `kind: null` is not a string and must not match any tag, including
+        // the `#[serde(other)]` Unknown fallback (which requires a string).
+        let body = format!("{SENTINEL_PREFIX}\n{{\"kind\":null}}");
+        assert!(parse_comment(&body).unwrap().is_err());
+    }
+
+    #[test]
+    fn parse_empty_after_prefix_errors() {
+        // Prefix present, body empty → invalid JSON, must error (not Unknown).
+        let body = format!("{SENTINEL_PREFIX}\n");
+        assert!(parse_comment(&body).unwrap().is_err());
+    }
+
+    #[test]
+    fn parse_known_variant_with_extra_field_tolerates() {
+        // Forward-compat WITHIN a known variant: if a future SPUR release adds
+        // a new optional field to `Approval`, older clients must still parse
+        // the known fields cleanly and silently ignore the extras — not fall
+        // through to Unknown, not error.
+        let body = format!(
+            "{SENTINEL_PREFIX}\n{{\"kind\":\"approval\",\"delegation_id\":\"del-A\",\"future_field\":\"ignored\"}}"
+        );
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        assert_eq!(
+            parsed,
+            AuditSentinelKind::Approval {
+                delegation_id: "del-A".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn kind_str_unknown_returns_expected_string() {
+        // Locks in the logging bucket name used by the tracing::debug! call
+        // in parse_comment. If this changes, update the observability story.
+        assert_eq!(AuditSentinelKind::Unknown.kind_str(), "unknown");
     }
 }
