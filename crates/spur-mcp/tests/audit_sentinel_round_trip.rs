@@ -65,7 +65,7 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
         AuditSentinelKind::Completion {
             delegation_id: "del-1".into(),
             worker_branch: Some("feat/x".into()),
-            diff_summary: Some("3 files changed".into()),
+            result_summary: Some("worker narrative: three refactors".into()),
         },
         AuditSentinelKind::Approval {
             delegation_id: "del-1".into(),

@@ -2371,11 +2371,12 @@ impl McpCallbackServer {
 
         // INV-5: use handle_review_task so the plan lock is dropped before
         // pm.update_issue() is called.  The pm_service field stores a concrete
-        // Arc<PmService>; deref as &dyn PmLike for the call.
-        let pm_like: Option<&dyn crate::plan::PmLike> = self
+        // Arc<PmService>; coerce to Arc<dyn PmLike> so spawned completion
+        // futures can emit audit sentinels after the lock is released.
+        let pm_arc: Option<std::sync::Arc<dyn crate::plan::PmLike>> = self
             .pm_service
-            .as_deref()
-            .map(|s| s as &dyn crate::plan::PmLike);
+            .clone()
+            .map(|s| s as std::sync::Arc<dyn crate::plan::PmLike>);
 
         let result = crate::plan::handle_review_task(
             plan_arc,
@@ -2383,7 +2384,7 @@ impl McpCallbackServer {
             &task_id,
             decision,
             feedback,
-            pm_like,
+            pm_arc,
             sink,
             Some(&self.delegation_tx),
             Some(&self.task_tracker),
