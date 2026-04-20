@@ -1248,22 +1248,43 @@ impl App {
             }
 
             Action::ClearSession => {
-                // /clear is a spur-local META command: retire the active
-                // brain via the existing NewSessionWithMessage{blocks:empty}
-                // primitive. The orchestrator's arm aborts delegation/mcp
-                // /pump handles and stashes the initialized connection
-                // for reuse by the next user prompt (lazy-spawn). The
-                // resulting fresh spur_session_id drives the TUI to
-                // open a clean SessionDetail view.
-                self.brain_status = BrainStatus::Idle;
-                if let Some(ref tx) = self.user_input_tx {
-                    let _ = tx.try_send(UserInput::NewSessionWithMessage {
+                // /clear is a spur-local META command. Spec §3.6 requires
+                // send-first ordering: if the channel send fails, the brain is
+                // NOT retired, so we must NOT visually reset the view —
+                // otherwise the user sees "cleared" while the stale brain is
+                // still active (ghost-cleared state).
+                let send_ok = match self.user_input_tx.as_ref() {
+                    Some(tx) => match tx.try_send(UserInput::NewSessionWithMessage {
                         blocks: vec![],
                         interrupt: false,
-                    });
+                    }) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::error!(
+                                err = ?e,
+                                "Action::ClearSession: user_input tx send failed — \
+                                 brain NOT retired; view NOT reset to avoid ghost-cleared state"
+                            );
+                            false
+                        }
+                    },
+                    None => {
+                        tracing::error!(
+                            "Action::ClearSession: user_input_tx is None; \
+                             cannot retire brain — view NOT reset"
+                        );
+                        false
+                    }
+                };
+
+                if send_ok {
+                    self.brain_status = BrainStatus::Idle;
+                    if let Some(ref mut detail) = self.session_detail {
+                        detail.reset_for_clear();
+                    }
+                    self.sync_brain_status();
+                    self.dirty = true;
                 }
-                self.sync_brain_status();
-                self.dirty = true;
             }
 
             Action::NewSessionWithMessage { blocks, interrupt } => {
@@ -2475,6 +2496,16 @@ mod brain_retired_tests {
         SpurEvent::now(body)
     }
 
+    /// Construct an `App` with a live `user_input_tx` so tests that go
+    /// through `Action::ClearSession` (which requires `tx.try_send` to
+    /// succeed for the send-first reset gate) can observe the reset.
+    /// Returns the receiver so the channel stays open for the test's
+    /// lifetime.
+    fn app_with_user_input_tx() -> (App, tokio::sync::mpsc::Receiver<UserInput>) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<UserInput>(8);
+        (App::new(Some(tx), false), rx)
+    }
+
     #[test]
     fn brain_retired_nulls_brain_name() {
         let mut app = App::new_for_tests();
@@ -2526,5 +2557,60 @@ mod brain_retired_tests {
             app.metadata_store.last_active_acp().is_none(),
             "last_active_acp must be cleared on retire so /clear+quit doesn't auto-resume"
         );
+    }
+
+    #[test]
+    fn clear_session_resets_session_detail_on_successful_send() {
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b1".into()),
+        }));
+
+        let sid_before = app.session_detail.as_ref().unwrap().session_id().clone();
+        let _ = app.process_action(Action::ClearSession);
+
+        let detail = app.session_detail.as_ref().expect("view must still exist");
+        assert!(detail.is_cleared());
+        assert!(detail.ready_banner_text().is_some());
+        assert_eq!(detail.session_id(), &sid_before, "session_id stays retired");
+        assert_eq!(app.brain_status, BrainStatus::Idle);
+    }
+
+    #[test]
+    fn clear_session_preserves_input_bar_contents() {
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b1".into()),
+        }));
+        app.session_detail
+            .as_mut()
+            .unwrap()
+            .input_bar_mut_for_test()
+            .set_text("typed before clear".into(), 18);
+
+        let _ = app.process_action(Action::ClearSession);
+
+        assert_eq!(
+            app.session_detail.as_ref().unwrap().input_bar_text(),
+            "typed before clear"
+        );
+    }
+
+    #[test]
+    fn clear_while_streaming_does_not_panic_and_resets_flags() {
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("b1".into()),
+        }));
+        app.session_detail.as_mut().unwrap().stream_in_flight = true;
+
+        let _ = app.process_action(Action::ClearSession);
+
+        let detail = app.session_detail.as_ref().unwrap();
+        assert!(!detail.stream_in_flight);
+        assert!(detail.is_cleared());
     }
 }
