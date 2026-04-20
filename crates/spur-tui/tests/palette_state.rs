@@ -152,3 +152,43 @@ fn label_match_beats_weaker_subtitle_match() {
         "label match should rank above subtitle-only match"
     );
 }
+
+#[test]
+fn subtitle_weight_actually_demotes_subtitle_only_matches() {
+    // Two entries with IDENTICAL fuzzy-match material:
+    //   * Entry A: label = "alpha" (perfect short match), subtitle = "irrelevant"
+    //   * Entry B: label = "irrelevant", subtitle = "alpha" (perfect short match)
+    //
+    // nucleo gives both the same raw score against query "alpha". Without
+    // the subtitle weight, the entries would tie and `sort_by` (stable)
+    // would preserve insertion order — so the FIRST-inserted entry would
+    // rank first. We insert B first deliberately, so a weight of 1.0
+    // would put B at rank 0. Any weight < 1.0 puts A at rank 0.
+    //
+    // This test fails if SUBTITLE_WEIGHT is regressed to 1.0.
+    let mut s = PaletteState::new();
+    s.push_raw(vec![
+        // Insert subtitle-only match FIRST so insertion-order tie-break
+        // would favor it under weight=1.0.
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "irrelevant".into(),
+            subtitle: "alpha".into(),
+            payload: PalettePayload::Session { session_id: "b".into() },
+        },
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "alpha".into(),
+            subtitle: "irrelevant".into(),
+            payload: PalettePayload::Session { session_id: "a".into() },
+        },
+    ]);
+    s.set_query("alpha");
+    assert_eq!(s.ranked_len(), 2);
+    assert_eq!(
+        s.nth_ranked(0).unwrap().label,
+        "alpha",
+        "label-only match must outrank subtitle-only match when raw scores tie; \
+         this assertion fails if SUBTITLE_WEIGHT is regressed to 1.0"
+    );
+}

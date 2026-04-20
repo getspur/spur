@@ -3,6 +3,12 @@
 //! A modal overlay that fuzzy-searches across sessions, workers-in-lineage,
 //! commands, and the current-session trace. Dispatches an `Action` on Enter.
 
+/// Subtitle scores in `rerank` are weighted by this multiplier before
+/// being compared with label scores. < 1.0 biases toward label matches
+/// while still allowing strong subtitle matches to dominate weak label
+/// matches. Tune in one place.
+const SUBTITLE_WEIGHT: f32 = 0.7;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteKind {
     Command,
@@ -128,9 +134,9 @@ impl PaletteState {
                 // Reusing self.scratch between the two scorings keeps the rerank
                 // 2-allocation budget intact (see tests/palette_rerank_bench_smoke.rs).
                 let weighted = match (label_score, sub_score) {
-                    (Some(a), Some(b)) => Some(a.max(((b as f32) * 0.7) as u32)),
+                    (Some(a), Some(b)) => Some(a.max(((b as f32) * SUBTITLE_WEIGHT) as u32)),
                     (Some(a), None) => Some(a),
-                    (None, Some(b)) => Some(((b as f32) * 0.7) as u32),
+                    (None, Some(b)) => Some(((b as f32) * SUBTITLE_WEIGHT) as u32),
                     (None, None) => None,
                 };
                 if let Some(score) = weighted {
