@@ -1080,6 +1080,13 @@ impl ReactTrace {
         self.anchor
     }
 
+    /// Clone of `compact_cache.entry_row_starts` if the compact cache is
+    /// populated. Used by scroll-correctness tests to assert the
+    /// cache-row-layout invariant produced by `render_compact`.
+    pub fn compact_entry_row_starts_for_tests(&self) -> Option<Vec<usize>> {
+        self.compact_cache.as_ref().map(|c| c.entry_row_starts.clone())
+    }
+
     pub fn set_visible_height_for_tests(&mut self, height: usize) {
         self.last_visible_height = height;
     }

@@ -22,6 +22,13 @@ pub(in crate::components::react_trace) struct CompactCacheEntry {
     pub generation: u64,
     pub width: u16,
     pub lines: Vec<Line<'static>>,
+    /// Row index where each entry's content line begins. `entry_row_starts[i]`
+    /// is the index into `lines` of entry `i`'s content line (NOT the
+    /// preceding kind-transition separator, if any).
+    ///
+    /// Invariant: `entry_row_starts.len() == covered_entries`, strictly
+    /// non-decreasing, `entry_row_starts[0] == 0`.
+    pub entry_row_starts: Vec<usize>,
     /// Number of `ReactTrace.entries` the cache covers. Anything past
     /// this index is dirty and must be rebuilt on the next render.
     pub covered_entries: usize,
@@ -121,6 +128,7 @@ impl ReactTrace {
             generation: gen,
             width,
             lines: lines.clone(),
+            entry_row_starts: Vec::new(),
             covered_entries: entry_count,
         });
         self.dirty_from = None;
