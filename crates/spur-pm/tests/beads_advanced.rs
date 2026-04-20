@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use spur_pm::{AuditEntryType, AuditRecordInput, BeadsAdapter, BeadsAdvanced, ReadyFilter};
+use spur_pm::{BeadsAdapter, BeadsAdvanced, ReadyFilter};
 use tempfile::TempDir;
 
 fn br_available() -> bool {
@@ -134,44 +134,6 @@ async fn dep_cycles_detects_cycle() {
         // br rejected the cycle; detector should find none.
         assert!(cycles.is_empty(), "no cycle but detector returned {cycles:?}");
     }
-}
-
-// TODO v0a.2: enable after Task 4 audit transport lands
-#[ignore]
-#[tokio::test]
-async fn audit_record_carries_actor_when_set() {
-    if !br_available() { return; }
-    let dir = TempDir::new().unwrap();
-    run_br(dir.path(), &["init"]);
-
-    let adapter = BeadsAdapter::connect_with_actor(
-        dir.path(),
-        Some("brain:test-session".to_string()),
-        None,
-    )
-    .await
-    .unwrap();
-
-    let id = run_br(dir.path(), &["create", "T", "--silent", "-t", "task"])
-        .trim().trim_matches('"').to_string();
-
-    adapter
-        .audit_record(
-            &id,
-            AuditRecordInput {
-                entry_type: AuditEntryType::PlanSubmit,
-                data: serde_json::json!({}),
-            },
-        )
-        .await
-        .unwrap();
-
-    let log = adapter.audit_log(&id).await.unwrap();
-    let entry = log
-        .iter()
-        .find(|e| e.entry_type == AuditEntryType::PlanSubmit)
-        .expect("expected PlanSubmit entry");
-    assert_eq!(entry.actor, "brain:test-session");
 }
 
 /// B1+B2 regression: `ReadyFilter.priorities` is a set-membership filter

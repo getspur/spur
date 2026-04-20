@@ -33,46 +33,9 @@ pub struct ReadyFilter {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditRecordInput {
-    pub entry_type: AuditEntryType,
-    pub data: serde_json::Value,
-}
-
-// ─── Closed vocabulary for audit entry types ──────────────────────────
-
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AuditEntryType {
-    PlanSubmit,
-    Dispatch,
-    Completion,
-    Approval,
-    Rejection,
-    Signal,
-    MutationPlan,
-    MutationCommit,
-    MutationInvariantViolation,
-    MutationCancelled,
-    LateSignal,
-    OrphanDepDetected,
-}
-
 // ─── Output types ─────────────────────────────────────────────────────
 
-pub type AuditId = String;
 pub type CommentId = String;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEntry {
-    pub id: AuditId,
-    pub issue_id: String,
-    pub entry_type: AuditEntryType,
-    pub actor: String,
-    pub timestamp: DateTime<Utc>,
-    pub data: serde_json::Value,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Comment {
@@ -98,14 +61,6 @@ pub trait BeadsAdvanced: Send + Sync {
 
     async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<CommentId>;
 
-    async fn audit_record(
-        &self,
-        issue_id: &str,
-        entry: AuditRecordInput,
-    ) -> anyhow::Result<AuditId>;
-
-    async fn audit_log(&self, issue_id: &str) -> anyhow::Result<Vec<AuditEntry>>;
-
     async fn remove_dependency(
         &self,
         issue_id: &str,
@@ -120,35 +75,6 @@ pub trait BeadsAdvanced: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn audit_entry_type_serializes_kebab_case() {
-        let t = AuditEntryType::MutationPlan;
-        let s = serde_json::to_string(&t).unwrap();
-        assert_eq!(s, "\"mutation-plan\"");
-    }
-
-    #[test]
-    fn audit_entry_type_round_trips() {
-        for t in [
-            AuditEntryType::PlanSubmit,
-            AuditEntryType::Dispatch,
-            AuditEntryType::Completion,
-            AuditEntryType::Approval,
-            AuditEntryType::Rejection,
-            AuditEntryType::Signal,
-            AuditEntryType::MutationPlan,
-            AuditEntryType::MutationCommit,
-            AuditEntryType::MutationInvariantViolation,
-            AuditEntryType::MutationCancelled,
-            AuditEntryType::LateSignal,
-            AuditEntryType::OrphanDepDetected,
-        ] {
-            let s = serde_json::to_string(&t).unwrap();
-            let back: AuditEntryType = serde_json::from_str(&s).unwrap();
-            assert_eq!(t, back);
-        }
-    }
 
     #[test]
     fn ready_filter_default_is_empty() {
