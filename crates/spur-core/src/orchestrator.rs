@@ -3034,6 +3034,7 @@ impl Orchestrator {
                             None,
                             total_cost,
                             None,
+                            None,
                         ),
                         executor_id.clone(),
                     );
@@ -3069,6 +3070,7 @@ impl Orchestrator {
                         outcome.summary,
                         total_cost,
                         preserved_branch,
+                        None,
                     ),
                     executor_id.clone(),
                 );
@@ -3115,6 +3117,7 @@ impl Orchestrator {
                             outcome.summary,
                             total_cost,
                             preserved_branch,
+                            None,
                         ),
                         executor_id.clone(),
                     );
@@ -3191,6 +3194,7 @@ impl Orchestrator {
                             outcome.summary,
                             total_cost,
                             preserved_branch,
+                            None,
                         ),
                         executor_id.clone(),
                     );
@@ -3224,6 +3228,7 @@ impl Orchestrator {
                             outcome.summary,
                             total_cost,
                             preserved_branch,
+                            None,
                         ),
                         executor_id.clone(),
                     );
@@ -3256,6 +3261,7 @@ impl Orchestrator {
                             outcome.summary,
                             total_cost,
                             preserved_branch,
+                            None,
                         ),
                         executor_id.clone(),
                     );
@@ -3288,6 +3294,7 @@ impl Orchestrator {
                             outcome.summary,
                             total_cost,
                             preserved_branch,
+                            None,
                         ),
                         executor_id.clone(),
                     );
@@ -3328,6 +3335,7 @@ impl Orchestrator {
                                 outcome.summary,
                                 total_cost,
                                 preserved_branch,
+                                None,
                             ),
                             executor_id.clone(),
                         );
@@ -3430,6 +3438,7 @@ impl Orchestrator {
                             outcome.summary,
                             total_cost,
                             preserved_branch,
+                            None,
                         ),
                         executor_id.clone(),
                     );
@@ -3619,6 +3628,7 @@ fn finalize(
     summary: Option<String>,
     total_cost: f64,
     worker_branch: Option<String>,
+    artifact: Option<spur_acp::WorkerArtifact>,
 ) -> DelegationResult {
     funnel.emit(SpurEventBody::DelegationCompleted {
         worker_session,
@@ -3631,7 +3641,7 @@ fn finalize(
         summary,
         estimated_cost_usd: total_cost,
         worker_branch,
-        artifact: None,
+        artifact,
     }
 }
 
@@ -3677,6 +3687,10 @@ struct WorkerAttemptOutcome {
     /// `Rejected` / `TimedOut` — worktree removal is deferred to
     /// after the review gate.
     worktree_path: PathBuf,
+    /// Side-channel artifact (persisted stdout when output > summary cap).
+    /// `None` when the worker's stdout fit under the cap.
+    #[allow(dead_code)] // Populated in Task 8 (artifact persistence wiring).
+    artifact: Option<spur_acp::WorkerArtifact>,
 }
 
 /// Map a transport kind to its `CancelMode`. Single source of truth used
@@ -4144,6 +4158,7 @@ async fn run_one_worker_attempt(
         summary,
         cost,
         worktree_path,
+        artifact: None,
     })
 }
 
