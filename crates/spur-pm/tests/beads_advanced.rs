@@ -88,3 +88,50 @@ async fn add_comment_then_list_returns_it() {
         "expected comment with body 'hello world', got {comments:?}"
     );
 }
+
+#[tokio::test]
+async fn remove_dependency_unblocks_task() {
+    if !br_available() { return; }
+    let (dir, adapter) = setup_workspace().await;
+    let a = run_br(dir.path(), &["create", "A", "--silent", "-t", "task"])
+        .trim().trim_matches('"').to_string();
+    let b = run_br(dir.path(), &["create", "B", "--silent", "-t", "task"])
+        .trim().trim_matches('"').to_string();
+    run_br(dir.path(), &["dep", "add", &b, &a]);
+
+    adapter.remove_dependency(&b, &a).await.unwrap();
+
+    let ready = adapter
+        .list_ready(ReadyFilter { limit: Some(50), ..Default::default() })
+        .await
+        .unwrap();
+    let ids: Vec<String> = ready.into_iter().map(|i| i.id).collect();
+    assert!(ids.contains(&b), "B should be ready after dep removed, got {ids:?}");
+}
+
+#[tokio::test]
+async fn dep_cycles_detects_cycle() {
+    if !br_available() { return; }
+    let (dir, adapter) = setup_workspace().await;
+    let a = run_br(dir.path(), &["create", "A", "--silent", "-t", "task"])
+        .trim().trim_matches('"').to_string();
+    let b = run_br(dir.path(), &["create", "B", "--silent", "-t", "task"])
+        .trim().trim_matches('"').to_string();
+    run_br(dir.path(), &["dep", "add", &a, &b]); // A blocks on B
+    // Try to create a cycle: B blocks on A. `br` may reject at add time;
+    // if so, the cycle never exists and dep_cycles should return empty.
+    let maybe_cycle = Command::new("br")
+        .args(["dep", "add", &b, &a, "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("br invocation");
+
+    let cycles = adapter.dep_cycles().await.unwrap();
+    if maybe_cycle.status.success() {
+        // br allowed the cycle; detector must find it.
+        assert!(!cycles.is_empty(), "expected cycle, got {cycles:?}");
+    } else {
+        // br rejected the cycle; detector should find none.
+        assert!(cycles.is_empty(), "no cycle but detector returned {cycles:?}");
+    }
+}
