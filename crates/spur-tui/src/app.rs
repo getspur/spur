@@ -2928,4 +2928,70 @@ mod brain_retired_tests {
         let detail = app.session_detail.as_ref().unwrap();
         assert!(!detail.is_cleared());
     }
+
+    #[test]
+    fn clear_session_with_no_tx_does_not_reset_view() {
+        // Spec §3.6: Action::ClearSession must NOT reset the view when
+        // `user_input_tx` is None. No brain retirement can be requested,
+        // so a visual reset here would produce a ghost-cleared state
+        // (view says "cleared" while the stale brain is still active).
+        let mut app = App::new_for_tests(); // user_input_tx = None
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("no-tx-a".into()),
+        }));
+        // Set brain_status to a distinctive non-Idle value so we can
+        // assert it is NOT forced to Idle by the ghost-clear path.
+        app.brain_status = BrainStatus::Thinking;
+
+        let _ = app.process_action(Action::ClearSession);
+
+        let detail = app.session_detail.as_ref().expect("view must still exist");
+        assert!(
+            !detail.is_cleared(),
+            "view must NOT enter cleared state without a successful send"
+        );
+        assert!(
+            detail.ready_banner_text().is_none(),
+            "no ready banner without a successful clear"
+        );
+        assert_eq!(
+            app.brain_status,
+            BrainStatus::Thinking,
+            "brain_status must be unchanged when send is skipped (not forced to Idle)"
+        );
+    }
+
+    #[test]
+    fn clear_session_with_full_tx_does_not_reset_view() {
+        // Spec §3.6: Action::ClearSession must NOT reset the view when
+        // `tx.try_send` returns an Err. Dropping the receiver forces
+        // `TrySendError::Closed`, which exercises the same Err branch
+        // as a saturated channel (both are the send-failure gate).
+        let (tx, rx) = tokio::sync::mpsc::channel::<UserInput>(1);
+        drop(rx); // subsequent try_send returns TrySendError::Closed
+        let mut app = App::new(Some(tx), false);
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("full-tx-a".into()),
+        }));
+        app.brain_status = BrainStatus::Thinking;
+
+        let _ = app.process_action(Action::ClearSession);
+
+        let detail = app.session_detail.as_ref().expect("view must still exist");
+        assert!(
+            !detail.is_cleared(),
+            "view must NOT enter cleared state when send fails"
+        );
+        assert!(
+            detail.ready_banner_text().is_none(),
+            "no ready banner without a successful clear"
+        );
+        assert_eq!(
+            app.brain_status,
+            BrainStatus::Thinking,
+            "brain_status must be unchanged on send failure (not forced to Idle)"
+        );
+    }
 }
