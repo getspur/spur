@@ -207,6 +207,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
         | PlanTaskStatus::Approved { .. }
         | PlanTaskStatus::Rejected { .. }
         | PlanTaskStatus::Cancelled { .. }
+        | PlanTaskStatus::Superseded { .. }
         | PlanTaskStatus::Ready => {}
     }
 }

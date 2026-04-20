@@ -57,6 +57,25 @@ pub enum PlanTaskStatus {
     Failed { error: String },
     /// Task was cancelled (e.g. by brain or system)
     Cancelled { reason: String },
+    /// Task was superseded by a mutation (v0b). `by` lists the child task IDs
+    /// that replace this task in the plan graph. Lineage preserved for future
+    /// MCTS reward backprop.
+    Superseded {
+        mutation_id: String,
+        by: Vec<String>,
+    },
+}
+
+impl PlanTaskStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Approved { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. }
+                | Self::Superseded { .. }
+        )
+    }
 }
 
 /// Record of a single attempt at a plan task. Stored in `PlanTaskEntry.history`
@@ -950,7 +969,8 @@ pub async fn run_plan(
                 PlanTaskStatus::Approved { .. }
                 | PlanTaskStatus::Rejected { .. }
                 | PlanTaskStatus::Failed { .. }
-                | PlanTaskStatus::Cancelled { .. } => {}
+                | PlanTaskStatus::Cancelled { .. }
+                | PlanTaskStatus::Superseded { .. } => {}
             }
         }
     }
@@ -1051,6 +1071,9 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             PlanTaskStatus::Rejected { .. } => n_rejected += 1,
             PlanTaskStatus::Failed { .. } => n_failed += 1,
             PlanTaskStatus::Cancelled { .. } => n_cancelled += 1,
+            // v0b: Superseded is a terminal "no outcome" state — fold with
+            // cancelled for aggregate metrics. Lineage tracked via `by`.
+            PlanTaskStatus::Superseded { .. } => n_cancelled += 1,
         }
     }
 
@@ -1189,6 +1212,11 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                 PlanTaskStatus::Cancelled { reason } => {
                     obj["status"] = "cancelled".into();
                     obj["reason"] = reason.clone().into();
+                }
+                PlanTaskStatus::Superseded { mutation_id, by } => {
+                    obj["status"] = "superseded".into();
+                    obj["mutation_id"] = mutation_id.clone().into();
+                    obj["superseded_by"] = serde_json::json!(by);
                 }
             }
             obj
@@ -2704,6 +2732,27 @@ mod tests {
         assert!(super::is_terminal_plan_status("has_rejections"));
         assert!(super::is_terminal_plan_status("partial"));
         assert!(!super::is_terminal_plan_status("unknown"));
+    }
+
+    #[test]
+    fn superseded_status_serializes_with_mutation_id() {
+        let status = PlanTaskStatus::Superseded {
+            mutation_id: "mut-V".into(),
+            by: vec!["bd-201".into(), "bd-202".into()],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"status\":\"superseded\""));
+        assert!(json.contains("\"mutation_id\":\"mut-V\""));
+        assert!(json.contains("\"by\":[\"bd-201\",\"bd-202\"]"));
+    }
+
+    #[test]
+    fn superseded_is_terminal() {
+        assert!(PlanTaskStatus::Superseded {
+            mutation_id: "mut-V".into(),
+            by: vec![],
+        }
+        .is_terminal());
     }
 
     #[test]
