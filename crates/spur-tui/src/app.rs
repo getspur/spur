@@ -2817,6 +2817,102 @@ mod brain_retired_tests {
     }
 
     #[test]
+    fn double_clear_session_is_idempotent() {
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("double-a".into()),
+        }));
+        let _ = app.process_action(Action::ClearSession);
+        let _ = app.process_action(Action::ClearSession);
+        let d = app.session_detail.as_ref().unwrap();
+        assert!(d.is_cleared());
+        assert!(d.ready_banner_text().is_some());
+    }
+
+    #[test]
+    fn clear_over_resume_banner_takes_precedence() {
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("resume-banner-a".into()),
+        }));
+        app.session_detail
+            .as_mut()
+            .unwrap()
+            .show_resume_banner("t".into(), "1s ago".into());
+
+        let _ = app.process_action(Action::ClearSession);
+
+        let d = app.session_detail.as_ref().unwrap();
+        // reset_for_clear wipes resume_banner; ready_banner is now the only one.
+        assert!(
+            !d.has_resume_banner(),
+            "resume_banner must be cleared by reset_for_clear"
+        );
+        assert!(d.ready_banner_text().is_some());
+    }
+
+    #[test]
+    fn clear_mid_tool_call_clears_tool_depth() {
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("mid-tool-a".into()),
+        }));
+        {
+            let detail = app.session_detail.as_mut().unwrap();
+            detail.tool_depth_for_test_mut().insert("t1".into(), 1);
+            detail.tool_depth_for_test_mut().insert("t2".into(), 2);
+        }
+
+        let _ = app.process_action(Action::ClearSession);
+
+        assert!(app
+            .session_detail
+            .as_ref()
+            .unwrap()
+            .tool_depth_for_test()
+            .is_empty());
+    }
+
+    #[test]
+    fn debounce_tick_after_clear_does_not_save_to_retired_session() {
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("debounce-a".into()),
+        }));
+        // User had a draft 'draft-A' saved.
+        let _ = app.process_action(Action::SaveDraft {
+            session_id: "debounce-a".into(),
+            draft: "draft-A".into(),
+        });
+        // /clear + new typing.
+        let _ = app.process_action(Action::ClearSession);
+        app.session_detail
+            .as_mut()
+            .unwrap()
+            .input_bar_mut_for_test()
+            .set_text("post-clear".into(), 10);
+        // Force the debounce to trigger (600ms ago).
+        app.session_detail.as_mut().unwrap().test_set_last_draft_change(
+            std::time::Instant::now() - std::time::Duration::from_millis(600),
+        );
+        let action = app.session_detail.as_mut().unwrap().draft_save_action();
+        assert!(
+            action.is_none(),
+            "cleared view must not emit SaveDraft from tick"
+        );
+
+        // A's draft must still be 'draft-A'.
+        assert_eq!(
+            app.metadata_store.entry("debounce-a").unwrap().draft,
+            "draft-A"
+        );
+    }
+
+    #[test]
     fn brain_retired_shutdown_does_not_panic() {
         let mut app = App::new_for_tests();
         app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
