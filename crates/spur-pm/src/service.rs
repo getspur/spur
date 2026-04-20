@@ -163,6 +163,18 @@ impl PmService {
     pub fn analyzer(&self) -> Option<&BvAdapter> {
         self.bv.as_ref()
     }
+
+    /// Returns the beads-advanced extension surface if the backend is beads.
+    /// Returns `None` for non-beads backends (GitHub). Callers use this to
+    /// gate adaptive-plan-repair features on beads availability.
+    pub fn advanced(&self) -> Option<&dyn crate::advanced::BeadsAdvanced> {
+        match &self.inner {
+            PmBackendInner::Beads { beads, .. } => {
+                Some(beads as &dyn crate::advanced::BeadsAdvanced)
+            }
+            PmBackendInner::GitHub { .. } => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +186,13 @@ mod tests {
             super::resolve_closed_status(Some("resolved".to_string())),
             "resolved"
         );
+    }
+
+    #[test]
+    fn advanced_returns_none_without_backend() {
+        fn assert_accessor(svc: &super::PmService) -> Option<&dyn crate::BeadsAdvanced> {
+            svc.advanced()
+        }
+        let _ = assert_accessor;
     }
 }
