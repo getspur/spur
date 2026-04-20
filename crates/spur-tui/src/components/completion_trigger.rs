@@ -17,53 +17,6 @@ pub struct Trigger {
     pub query: String,
 }
 
-/// Decide whether a popup should be open given `(text, cursor)`.
-///
-/// Rules (v1):
-///   * `/` fires only at byte offset 0.
-///   * `@` fires at byte offset 0 OR immediately after ASCII whitespace.
-///   * Any whitespace character between the trigger char and the cursor
-///     closes the popup.
-pub fn detect(text: &str, cursor: usize) -> Option<Trigger> {
-    if cursor == 0 || cursor > text.len() {
-        return None;
-    }
-    let before = &text[..cursor];
-
-    // Slash: at offset 0 only.
-    if let Some(query) = before.strip_prefix('/') {
-        if !query.contains(char::is_whitespace) {
-            return Some(Trigger {
-                kind: TriggerKind::Slash,
-                prefix_start: 0,
-                query: query.to_string(),
-            });
-        }
-    }
-
-    // Mention: find the last '@' preceded by start-of-string or whitespace,
-    // then verify no whitespace intervenes between '@' and cursor.
-    if let Some(at_pos) = before.rfind('@') {
-        let prev_is_boundary = at_pos == 0
-            || before[..at_pos]
-                .chars()
-                .last()
-                .is_none_or(|c| c.is_whitespace());
-        if prev_is_boundary {
-            let query = &before[at_pos + 1..];
-            if !query.contains(char::is_whitespace) {
-                return Some(Trigger {
-                    kind: TriggerKind::Mention,
-                    prefix_start: at_pos,
-                    query: query.to_string(),
-                });
-            }
-        }
-    }
-
-    None
-}
-
 /// User-intent event fed to the trigger state machine. Classified at the
 /// dispatch site (InputBar::handle_key for key events; session_detail
 /// emits the non-key variants at their call sites). See the design spec
@@ -94,7 +47,6 @@ pub enum IntentEvent {
 }
 
 /// Internal state of the trigger detector.
-#[allow(dead_code)] // Wired into TriggerDetector in Task 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TriggerState {
     Idle,
@@ -131,144 +83,207 @@ pub enum TriggerTransition {
     Close,
 }
 
-/// Stateful wrapper over `detect()`. Remembers the last-emitted trigger so
-/// consecutive `step` calls can classify transitions. History-mode shells
-/// (`Ctrl+R`, `QueryMode::OwnedByShell`) are NOT managed by this detector —
-/// the view checks shell mode before calling `step`, and the detector only
-/// produces transitions for trigger-driven (`QueryMode::ReadFromInputBar`)
-/// popups.
+/// Stateful trigger recognizer. Trigger liveness is a function of user
+/// intent events — not text content. See the design spec.
+///
+/// History-mode shells (`QueryMode::OwnedByShell`) are NOT managed by this
+/// detector; the view must skip calling `step` while such a shell is open.
 #[derive(Debug, Default)]
 pub struct TriggerDetector {
-    last: Option<Trigger>,
+    state: TriggerState,
 }
 
 impl TriggerDetector {
     pub fn new() -> Self {
-        Self { last: None }
+        Self::default()
     }
 
-    /// Feed current (text, cursor). Returns a transition describing what
-    /// should happen to the trigger-driven shell. Callers invoke this after
-    /// every InputBar text change.
-    pub fn step(&mut self, text: &str, cursor: usize) -> TriggerTransition {
-        let new = detect(text, cursor);
-        let transition = match (&self.last, &new) {
-            (None, None) => TriggerTransition::None,
-            (Some(old), Some(new_t))
-                if old.kind == new_t.kind && old.prefix_start == new_t.prefix_start =>
-            {
-                TriggerTransition::Update {
-                    query: new_t.query.clone(),
+    /// `true` when the detector is in the Idle state. The view uses this
+    /// to skip the detector entirely on non-opening events (fast path).
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, TriggerState::Idle)
+    }
+
+    /// Reset the detector to Idle. Call after the view accepts or cancels
+    /// a trigger-driven shell.
+    pub fn reset(&mut self) {
+        self.state = TriggerState::Idle;
+    }
+
+    /// Feed an intent event plus the current text/cursor context. Returns
+    /// a transition describing what should happen to the picker shell.
+    pub fn step(
+        &mut self,
+        event: IntentEvent,
+        text: &str,
+        cursor: usize,
+        protected_ranges: &[crate::components::input_bar::ProtectedRange],
+    ) -> TriggerTransition {
+        // Defensive re-check: if Composing state references a prefix_start
+        // that no longer holds the trigger char (upstream path forgot to
+        // send Pasted/SetText), force Idle + Close.
+        if let TriggerState::Composing { kind, prefix_start } = self.state {
+            let expected = match kind {
+                TriggerKind::Mention => '@',
+                TriggerKind::Slash => '/',
+            };
+            let still_valid = prefix_start < text.len()
+                && text[prefix_start..].chars().next() == Some(expected);
+            if !still_valid {
+                self.state = TriggerState::Idle;
+                return TriggerTransition::Close;
+            }
+        }
+
+        match (&self.state, &event) {
+            // Fast Idle cases — just stay Idle.
+            (TriggerState::Idle, IntentEvent::NoOp)
+            | (TriggerState::Idle, IntentEvent::MovedCursor)
+            | (TriggerState::Idle, IntentEvent::DeletedChar)
+            | (TriggerState::Idle, IntentEvent::Pasted)
+            | (TriggerState::Idle, IntentEvent::SetText)
+            | (TriggerState::Idle, IntentEvent::Accepted)
+            | (TriggerState::Idle, IntentEvent::Dismissed)
+            | (TriggerState::Idle, IntentEvent::Submitted) => TriggerTransition::None,
+
+            // Idle + TypedChar: maybe open.
+            (TriggerState::Idle, IntentEvent::TypedChar(c)) => {
+                self.maybe_open(*c, text, cursor, protected_ranges)
+            }
+
+            // Composing + anything: delegated.
+            (TriggerState::Composing { .. }, _) => {
+                self.advance_composing(event, text, cursor)
+            }
+        }
+    }
+
+    /// Idle → Composing transition logic for TypedChar events.
+    fn maybe_open(
+        &mut self,
+        c: char,
+        text: &str,
+        cursor: usize,
+        protected_ranges: &[crate::components::input_bar::ProtectedRange],
+    ) -> TriggerTransition {
+        // cursor is post-type; the typed char lives at cursor-1 byte-wise.
+        let typed_byte = cursor.saturating_sub(c.len_utf8());
+        if typed_byte >= text.len() {
+            return TriggerTransition::None;
+        }
+
+        // Guard: the typed char's byte position must not be the start of a
+        // protected range (I4 — committed atoms are opaque).
+        if protected_ranges.iter().any(|r| r.start == typed_byte) {
+            return TriggerTransition::None;
+        }
+
+        match c {
+            '/' => {
+                if typed_byte != 0 {
+                    return TriggerTransition::None;
+                }
+                self.state = TriggerState::Composing {
+                    kind: TriggerKind::Slash,
+                    prefix_start: 0,
+                };
+                TriggerTransition::Open {
+                    trigger: Trigger {
+                        kind: TriggerKind::Slash,
+                        prefix_start: 0,
+                        query: String::new(),
+                    },
                 }
             }
-            (_, Some(new_t)) => TriggerTransition::Open {
-                trigger: new_t.clone(),
-            },
-            (Some(_), None) => TriggerTransition::Close,
+            '@' => {
+                // Boundary: offset 0 OR prev char is whitespace.
+                let prev_is_boundary = typed_byte == 0
+                    || text[..typed_byte]
+                        .chars()
+                        .last()
+                        .is_none_or(|ch| ch.is_whitespace());
+                if !prev_is_boundary {
+                    return TriggerTransition::None;
+                }
+                self.state = TriggerState::Composing {
+                    kind: TriggerKind::Mention,
+                    prefix_start: typed_byte,
+                };
+                TriggerTransition::Open {
+                    trigger: Trigger {
+                        kind: TriggerKind::Mention,
+                        prefix_start: typed_byte,
+                        query: String::new(),
+                    },
+                }
+            }
+            _ => TriggerTransition::None,
+        }
+    }
+
+    /// Composing → Composing|Idle transition logic.
+    fn advance_composing(
+        &mut self,
+        event: IntentEvent,
+        text: &str,
+        cursor: usize,
+    ) -> TriggerTransition {
+        let (kind, prefix_start) = match self.state {
+            TriggerState::Composing { kind, prefix_start } => (kind, prefix_start),
+            TriggerState::Idle => unreachable!("called with Idle state"),
         };
-        self.last = new;
-        transition
-    }
 
-    /// Reset the detector's memory of the last trigger. Call after the view
-    /// accepts or cancels a trigger-driven shell, so the next `step` treats
-    /// a re-appearing trigger as a fresh Open rather than a spurious Update.
-    pub fn reset(&mut self) {
-        self.last = None;
-    }
-}
-
-#[cfg(test)]
-mod detector_tests {
-    use super::*;
-
-    #[test]
-    fn detector_starts_with_no_trigger() {
-        let mut d = TriggerDetector::new();
-        let t = d.step("", 0);
-        assert!(matches!(t, TriggerTransition::None));
-    }
-
-    #[test]
-    fn detector_reports_open_on_first_trigger_appearance() {
-        let mut d = TriggerDetector::new();
-        let t = d.step("@", 1);
-        match t {
-            TriggerTransition::Open { trigger } => {
-                assert_eq!(trigger.kind, TriggerKind::Mention);
-                assert_eq!(trigger.prefix_start, 0);
-                assert_eq!(trigger.query, "");
+        // Terminal events — always Close.
+        match event {
+            IntentEvent::Pasted
+            | IntentEvent::SetText
+            | IntentEvent::Accepted
+            | IntentEvent::Dismissed
+            | IntentEvent::Submitted => {
+                self.state = TriggerState::Idle;
+                return TriggerTransition::Close;
             }
-            other => panic!("expected Open, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn detector_reports_update_when_query_changes_same_trigger() {
-        let mut d = TriggerDetector::new();
-        let _ = d.step("@", 1);
-        let t = d.step("@f", 2);
-        match t {
-            TriggerTransition::Update { query } => assert_eq!(query, "f"),
-            other => panic!("expected Update, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn detector_reports_close_when_trigger_goes_away() {
-        let mut d = TriggerDetector::new();
-        let _ = d.step("@foo", 4);
-        let t = d.step("@foo ", 5); // whitespace terminates mention
-        assert!(matches!(t, TriggerTransition::Close));
-    }
-
-    #[test]
-    fn detector_reports_open_on_kind_change_even_if_position_matches() {
-        // '/help' at offset 0, then user deletes and types '@': position
-        // happens to still be 0 but kind flipped from Slash to Mention —
-        // this MUST be an Open (fresh shell), not an Update.
-        let mut d = TriggerDetector::new();
-        let _ = d.step("/", 1);
-        let t = d.step("@", 1);
-        match t {
-            TriggerTransition::Open { trigger } => {
-                assert_eq!(trigger.kind, TriggerKind::Mention);
+            IntentEvent::NoOp => {
+                return TriggerTransition::None;
             }
-            other => panic!("expected Open on kind change, got {other:?}"),
+            _ => {}
         }
-    }
 
-    #[test]
-    fn detector_reports_open_on_prefix_start_change() {
-        // Mention at offset 0, then a leading space + new mention at offset 1.
-        let mut d = TriggerDetector::new();
-        let _ = d.step("@foo", 4);
-        // After moving to a different mention trigger (e.g. " @bar"):
-        let t = d.step(" @bar", 5);
-        match t {
-            TriggerTransition::Open { trigger } => {
-                assert_eq!(trigger.prefix_start, 1);
+        // Whitespace TypedChar closes.
+        if let IntentEvent::TypedChar(c) = event {
+            if c.is_whitespace() {
+                self.state = TriggerState::Idle;
+                return TriggerTransition::Close;
             }
-            other => panic!("expected Open on prefix_start change, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn detector_reports_none_when_neither_last_nor_current_has_trigger() {
-        let mut d = TriggerDetector::new();
-        let _ = d.step("hello", 5);
-        let t = d.step("hello world", 11);
-        assert!(matches!(t, TriggerTransition::None));
-    }
+        // Determine window_end: first whitespace at or after prefix_start+1,
+        // else text.len().
+        let query_region_start = prefix_start + 1;
+        let window_end = text[query_region_start.min(text.len())..]
+            .char_indices()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(i, _)| query_region_start + i)
+            .unwrap_or(text.len());
 
-    #[test]
-    fn detector_reset_clears_last_trigger_so_next_step_reports_open() {
-        let mut d = TriggerDetector::new();
-        let _ = d.step("@foo", 4);
-        d.reset();
-        // Without reset this would be Update; after reset the detector
-        // treats @foo as a fresh appearance.
-        let t = d.step("@foo", 4);
-        assert!(matches!(t, TriggerTransition::Open { .. }));
+        // MovedCursor: close if cursor outside window.
+        if matches!(event, IntentEvent::MovedCursor) {
+            let in_window = cursor > prefix_start && cursor <= window_end;
+            if !in_window {
+                self.state = TriggerState::Idle;
+                return TriggerTransition::Close;
+            }
+        }
+
+        // DeletedChar: the defensive re-check at the top of step() handles
+        // "trigger char gone → Close". Here we just fall through to Update.
+
+        // Compute query slice as text[prefix_start+1 .. cursor], clamped.
+        let clamped_end = cursor.min(window_end).min(text.len());
+        let query_start = query_region_start.min(clamped_end);
+        let query = text[query_start..clamped_end].to_string();
+
+        let _ = kind; // silences unused; kind is carried in state only.
+        TriggerTransition::Update { query }
     }
 }
