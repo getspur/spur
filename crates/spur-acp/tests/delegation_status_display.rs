@@ -14,6 +14,7 @@ fn base(status: DelegationStatus) -> DelegationResult {
         summary: Some("s".into()),
         estimated_cost_usd: 0.0,
         worker_branch: None,
+        artifact: None,
     }
 }
 

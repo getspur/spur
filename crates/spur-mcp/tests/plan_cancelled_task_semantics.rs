@@ -166,6 +166,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
         diff: None,
         diff_summary: None,
         estimated_cost_usd: 0.0,
+        artifact: None,
     });
 
     // Wait briefly to allow run_plan to process the completion

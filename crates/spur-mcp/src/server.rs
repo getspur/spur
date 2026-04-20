@@ -593,6 +593,7 @@ impl McpCallbackServer {
                     summary: None,
                     estimated_cost_usd: 0.0,
                     worker_branch: None,
+                    artifact: None,
                 },
             };
             active.lock().await.remove(&delegation_id);
