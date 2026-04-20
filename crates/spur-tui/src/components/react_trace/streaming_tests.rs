@@ -1966,6 +1966,46 @@ fn compact_render_truncates_long_text_with_ellipsis() {
 }
 
 #[test]
+fn compact_render_respects_width_at_narrow_widths() {
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use spur_acp::AgentKind;
+    use unicode_width::UnicodeWidthStr;
+
+    let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
+    for i in 0..3 {
+        trace.append_user_message(&format!("user {}", i), "12:00".into());
+        trace.append_message(&format!("bot {}", i), "bot", "12:00".into());
+    }
+
+    for width in [8, 12] {
+        let lines = trace.build_compact_lines_for_tests(width);
+        for line in &lines {
+            let cols: usize = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            assert!(cols <= width as usize, "line width {cols} exceeds {width}");
+        }
+
+        let mut term = Terminal::new(TestBackend::new(width, 3)).unwrap();
+        term.draw(|f| trace.render_compact(f, Rect::new(0, 0, width, 3)))
+            .unwrap();
+        let starts = trace.compact_entry_row_starts_for_tests().unwrap();
+        trace.scroll_up();
+        let resolved = crate::components::react_trace::render::resolve_anchor(
+            &trace.anchor_for_tests(),
+            &starts,
+            trace.last_total_lines,
+            trace.last_visible_height,
+        );
+
+        assert!(resolved < trace.last_total_lines);
+        trace.scroll_to_bottom();
+    }
+}
+
+#[test]
 fn render_compact_does_not_panic_and_updates_dimensions() {
     use crate::components::react_trace::ReactTrace;
     use ratatui::{backend::TestBackend, layout::Rect, Terminal};

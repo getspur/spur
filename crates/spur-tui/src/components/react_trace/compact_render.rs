@@ -15,6 +15,12 @@ use unicode_width::UnicodeWidthStr;
 use super::types::{ActStatus, TraceEntry, TraceKind};
 use super::ReactTrace;
 
+/// Below 10 columns, the widest compact prefix (`"  > "`, 4 cols) plus
+/// the timestamp display (`" 12:00"`, 6 cols) no longer fit on one row.
+/// Emit a placeholder row instead so compact mode never relies on
+/// `Paragraph::wrap` to add hidden rows.
+const MINIMUM_COMPACT_WIDTH: usize = 10;
+
 /// Cache entry for the compact render path. Keyed by `(generation, width)`.
 /// Independent from the full-render `line_cache` because the two paths
 /// produce different row layouts.
@@ -273,10 +279,11 @@ fn build_compact_lines_from(
         let kind_tag = compact_kind_tag(&entry.kind);
         if let Some(pk) = prev_kind_tag {
             if pk != kind_tag {
-                let sep: String = " ─"
-                    .chars()
-                    .chain(std::iter::repeat_n('─', w.saturating_sub(3)))
-                    .collect();
+                let sep: String = match w {
+                    0 => String::new(),
+                    1 => "─".to_string(),
+                    _ => " ".chars().chain(std::iter::repeat_n('─', w - 1)).collect(),
+                };
                 lines.push(Line::from(Span::styled(
                     sep,
                     Style::default().fg(Color::DarkGray),
@@ -308,6 +315,17 @@ fn build_compact_lines_from(
             .chars()
             .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
             .collect();
+
+        if w < MINIMUM_COMPACT_WIDTH {
+            let placeholder = if w == 0 {
+                String::new()
+            } else {
+                "…".to_string()
+            };
+            lines.push(Line::from(Span::styled(placeholder, style)));
+            row += 1;
+            continue;
+        }
 
         let prefix_cols = UnicodeWidthStr::width(prefix);
         let ts_cols = UnicodeWidthStr::width(ts_display.as_str());
