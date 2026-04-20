@@ -101,9 +101,10 @@ fn brain_send_without_worker_atom_has_no_hint() {
 
 #[test]
 fn direct_session_skips_hint_even_with_worker_atom_pasted() {
-    // Direct (non-brain) view; pretend the user somehow has a worker atom
-    // (won't normally happen because WorkerMentionSource isn't registered
-    // in direct sessions — defense in depth).
+    // Direct (non-brain) view. Even with a populated worker snapshot, the
+    // `role == "brain"` guard in the send-path arm must prevent any hint.
+    // Verifies the role guard itself; we type only plain text (the atom
+    // path is exercised by the brain-session test above).
     let tmp = tempfile::tempdir().unwrap();
     let mut v = SessionDetailView::new(
         spur_acp::SessionId::new(),

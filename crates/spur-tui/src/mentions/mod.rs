@@ -1,6 +1,6 @@
 pub mod entry;
 pub mod file_source;
-pub mod hint;
+pub(crate) mod hint;
 pub mod registry;
 pub mod worker_source;
 
