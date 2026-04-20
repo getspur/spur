@@ -423,6 +423,11 @@ impl SessionDetailView {
         self.ready_banner.as_deref()
     }
 
+    /// True if this view currently carries a resume banner (not fade-state-aware).
+    pub fn has_resume_banner(&self) -> bool {
+        self.resume_banner.is_some()
+    }
+
     /// Install the graphics `Picker` used to build inline mermaid protocols.
     /// Called by `App` once after view construction. Cheap clone of a small value.
     /// Also forwards the capability bit into `ReactTrace` so new per-entry
@@ -1791,6 +1796,22 @@ impl SessionDetailView {
     #[doc(hidden)]
     pub fn input_bar_mut_for_test(&mut self) -> &mut crate::components::input_bar::InputBar {
         &mut self.input_bar
+    }
+
+    /// Test-only: read tool_depth map.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn tool_depth_for_test(&self) -> &std::collections::HashMap<String, u8> {
+        &self.tool_depth
+    }
+
+    /// Test-only: mutable tool_depth map for seeding tests.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn tool_depth_for_test_mut(
+        &mut self,
+    ) -> &mut std::collections::HashMap<String, u8> {
+        &mut self.tool_depth
     }
 }
 
