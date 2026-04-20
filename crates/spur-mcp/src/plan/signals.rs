@@ -1,0 +1,125 @@
+//! Worker signal encoding + parsing.
+//!
+//! Workers emit structured signals as sentinel-fenced JSON inside a beads
+//! comment, plus a `signal:<kind>` label. v0a defines the format; v0b adds
+//! the `report_signal` MCP tool that produces them and the brain-side
+//! consumer. Shipping the parser in v0a locks the format before consumption.
+//!
+//! See spec §Information Flow → Signal schema.
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+pub const SENTINEL_PREFIX: &str = "[[spur-signal v1]]";
+
+/// The full worker-signal enum. v0 ships `ScopeDrift` only; future variants
+/// land as additional `#[non_exhaustive]` entries.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkerSignal {
+    ScopeDrift {
+        signal_id: Uuid,
+        severity: f32,
+        reason: String,
+        #[serde(default)]
+        estimated_subtasks: Option<u8>,
+    },
+}
+
+impl WorkerSignal {
+    /// Returns the `signal_id` regardless of variant.
+    pub fn signal_id(&self) -> Uuid {
+        match self {
+            WorkerSignal::ScopeDrift { signal_id, .. } => *signal_id,
+        }
+    }
+
+    /// Returns the kind-string used for `signal:<kind>` labels.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            WorkerSignal::ScopeDrift { .. } => "scope-drift",
+        }
+    }
+}
+
+/// Encode a `WorkerSignal` as a full sentinel comment body ready for
+/// `br comments add`.
+pub fn encode_comment(signal: &WorkerSignal) -> String {
+    let json =
+        serde_json::to_string(signal).expect("WorkerSignal always serializes");
+    format!("{SENTINEL_PREFIX}\n{json}")
+}
+
+/// Parse a comment body. Returns `None` if the body does not begin with the
+/// sentinel prefix. Returns `Some(Err(_))` if the sentinel is present but
+/// the JSON is malformed or the variant is unknown.
+pub fn parse_comment(body: &str) -> Option<Result<WorkerSignal, ParseError>> {
+    let rest = body.trim_start().strip_prefix(SENTINEL_PREFIX)?;
+    let json = rest.trim_start();
+    Some(serde_json::from_str(json).map_err(ParseError::Json))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("sentinel JSON parse error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_then_parse_round_trips() {
+        let sig = WorkerSignal::ScopeDrift {
+            signal_id: Uuid::nil(),
+            severity: 0.82,
+            reason: "auth refactor pulls in token store".to_string(),
+            estimated_subtasks: Some(3),
+        };
+        let body = encode_comment(&sig);
+        assert!(body.starts_with(SENTINEL_PREFIX));
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        assert_eq!(parsed, sig);
+    }
+
+    #[test]
+    fn parse_returns_none_for_non_sentinel_comment() {
+        let got = parse_comment("ordinary human comment");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn parse_returns_err_for_malformed_sentinel() {
+        let body = format!("{SENTINEL_PREFIX}\nnot json");
+        let got = parse_comment(&body).unwrap();
+        assert!(got.is_err());
+    }
+
+    #[test]
+    fn parse_tolerates_leading_whitespace() {
+        let sig = WorkerSignal::ScopeDrift {
+            signal_id: Uuid::nil(),
+            severity: 0.1,
+            reason: "r".into(),
+            estimated_subtasks: None,
+        };
+        let body = format!("   \n  {}", encode_comment(&sig));
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        assert_eq!(parsed, sig);
+    }
+
+    #[test]
+    fn signal_id_accessor_returns_value() {
+        let id = Uuid::new_v4();
+        let sig = WorkerSignal::ScopeDrift {
+            signal_id: id,
+            severity: 0.1,
+            reason: "r".into(),
+            estimated_subtasks: None,
+        };
+        assert_eq!(sig.signal_id(), id);
+        assert_eq!(sig.kind_label(), "scope-drift");
+    }
+}

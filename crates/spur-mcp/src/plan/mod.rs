@@ -6,6 +6,7 @@
 //! through the existing `DelegationRequest` → orchestrator pipeline.
 
 pub mod labels;
+pub mod signals;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
