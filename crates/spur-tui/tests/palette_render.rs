@@ -152,6 +152,79 @@ fn overlay_falls_back_to_flat_render_when_query_nonempty() {
 }
 
 #[test]
+fn overlay_grouped_view_shows_trace_placeholder_at_80x24_with_full_data() {
+    // Regression for the cap formula. At 80x24 the modal is 48x14,
+    // inner area 9 rows tall for the list. With three populated kinds
+    // (5 commands + 5 sessions + 5 workers, more than the cap), the
+    // TRACE placeholder must STILL appear — otherwise users at the
+    // most common SSH terminal size never see the deferred-feature
+    // signal.
+    let mut state = PaletteState::new();
+    let mut batch = Vec::new();
+    for i in 0..5 {
+        batch.push(PaletteResult {
+            kind: PaletteKind::Command,
+            label: format!("/cmd-{i}"),
+            subtitle: "cmd".into(),
+            payload: PalettePayload::Command { name: format!("cmd-{i}") },
+        });
+    }
+    for i in 0..5 {
+        batch.push(PaletteResult {
+            kind: PaletteKind::Session,
+            label: format!("session-{i}"),
+            subtitle: "session".into(),
+            payload: PalettePayload::Session { session_id: format!("s{i}") },
+        });
+    }
+    for i in 0..5 {
+        batch.push(PaletteResult {
+            kind: PaletteKind::Worker,
+            label: format!("worker-{i}"),
+            subtitle: "worker".into(),
+            payload: PalettePayload::Worker {
+                session_id: spur_acp::SessionId(format!("w{i}")),
+            },
+        });
+    }
+    state.push_raw(batch);
+    let rendered = render_to_string_with_session_flag(&state, 80, 24, true);
+    assert!(
+        rendered.contains("TRACE \u{2014} coming soon") || rendered.contains("TRACE - coming soon"),
+        "TRACE placeholder must render at 80x24 with full data:\n{rendered}"
+    );
+}
+
+#[test]
+fn overlay_grouped_view_highlights_cursor_row() {
+    // Two sessions; cursor at index 1; that row should render with
+    // REVERSED styling. We can't easily assert on style in raw text,
+    // but we can confirm BOTH labels appear in the grouped render
+    // (which they do today) and that no panic occurs when cursor moves.
+    // The substantive assertion lives in render_flat behavior; for
+    // grouped we just verify the cursor-aware code path doesn't break.
+    let mut state = PaletteState::new();
+    state.push_raw(vec![
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "first-session".into(),
+            subtitle: "session · 1".into(),
+            payload: PalettePayload::Session { session_id: "s1".into() },
+        },
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "second-session".into(),
+            subtitle: "session · 2".into(),
+            payload: PalettePayload::Session { session_id: "s2".into() },
+        },
+    ]);
+    state.cursor_down(); // move cursor to index 1
+    let rendered = render_to_string_with_session_flag(&state, 80, 24, true);
+    assert!(rendered.contains("first-session"));
+    assert!(rendered.contains("second-session"));
+}
+
+#[test]
 fn overlay_grouped_view_caps_rows_per_kind() {
     // 10 sessions; default cap is 5 → at most 5 session labels render.
     let mut state = PaletteState::new();

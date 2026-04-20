@@ -59,31 +59,55 @@ impl<'a> PaletteOverlay<'a> {
     }
 
     fn render_grouped(&self, area: Rect, buf: &mut Buffer) {
-        // Partition ranked results by kind, preserving order within each kind.
-        let mut commands: Vec<&crate::components::palette::PaletteResult> = Vec::new();
-        let mut sessions: Vec<&crate::components::palette::PaletteResult> = Vec::new();
-        let mut workers: Vec<&crate::components::palette::PaletteResult> = Vec::new();
-        for r in self.state.iter_ranked() {
+        use crate::components::palette::PaletteResult;
+
+        // Partition ranked results by kind. Track each row's global index
+        // (its position in iter_ranked) so we can apply the REVERSED
+        // selection highlight to the row at state.cursor().
+        let mut commands: Vec<(usize, &PaletteResult)> = Vec::new();
+        let mut sessions: Vec<(usize, &PaletteResult)> = Vec::new();
+        let mut workers: Vec<(usize, &PaletteResult)> = Vec::new();
+        for (i, r) in self.state.iter_ranked().enumerate() {
             match r.kind {
-                PaletteKind::Command => commands.push(r),
-                PaletteKind::Session => sessions.push(r),
-                PaletteKind::Worker => workers.push(r),
-                PaletteKind::Trace => { /* skipped upstream; placeholder rendered below */ }
+                PaletteKind::Command => commands.push((i, r)),
+                PaletteKind::Session => sessions.push((i, r)),
+                PaletteKind::Worker => workers.push((i, r)),
+                PaletteKind::Trace => { /* skipped upstream */ }
             }
         }
 
-        // Per-kind cap: default 5, scale down to fit available height.
-        // Three section headers + a trace placeholder row + per-kind rows
-        // must fit in `area.height`. Minimum cap is 2.
-        let headers: u16 = 3 + 1; // COMMANDS, SESSIONS, WORKERS, TRACE placeholder
-        let available = area.height.saturating_sub(headers);
-        let cap = (available / 3).clamp(2, 5) as usize;
+        // Reserve ONE row for the "TRACE — coming soon" placeholder up front.
+        // Then count the non-empty kinds — only those need a header. Compute
+        // the per-kind cap from the rows that remain after subtracting the
+        // headers. The cap can go to 0; we still render headers/placeholder.
+        const TRACE_ROW: u16 = 1;
+        const PER_KIND_MAX: u16 = 5;
+        let kinds_with_data: u16 = [
+            commands.is_empty(),
+            sessions.is_empty(),
+            workers.is_empty(),
+        ]
+        .iter()
+        .filter(|empty| !*empty)
+        .count() as u16;
 
+        let header_rows = kinds_with_data;
+        let available_for_data = area
+            .height
+            .saturating_sub(TRACE_ROW + header_rows);
+        let cap: usize = if kinds_with_data == 0 {
+            0
+        } else {
+            ((available_for_data / kinds_with_data).min(PER_KIND_MAX)) as usize
+        };
+
+        let cursor = self.state.cursor();
         let mut y = area.y;
 
         macro_rules! render_section {
             ($title:expr, $rows:expr) => {
-                if y < area.y + area.height {
+                if !$rows.is_empty() && y < area.y + area.height {
+                    // Section header
                     Paragraph::new(Line::from(Span::styled(
                         $title.to_string(),
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -93,14 +117,22 @@ impl<'a> PaletteOverlay<'a> {
                         buf,
                     );
                     y = y.saturating_add(1);
-                    for r in $rows.iter().take(cap) {
-                        if y >= area.y + area.height { break; }
+
+                    for (global_idx, r) in $rows.iter().take(cap) {
+                        if y >= area.y + area.height {
+                            break;
+                        }
+                        let label_style = if *global_idx == cursor {
+                            Style::default().add_modifier(Modifier::REVERSED)
+                        } else {
+                            Style::default()
+                        };
                         let spans = vec![
                             Span::styled(
                                 format!("  {}  ", badge_for(&r.kind)),
                                 Style::default().fg(Color::Cyan),
                             ),
-                            Span::raw(r.label.clone()),
+                            Span::styled(r.label.clone(), label_style),
                             Span::raw("   "),
                             Span::styled(
                                 r.subtitle.clone(),
@@ -122,7 +154,9 @@ impl<'a> PaletteOverlay<'a> {
         render_section!("SESSIONS", sessions);
         render_section!("WORKERS", workers);
 
-        // Trace placeholder — honest about the deferred feature.
+        // TRACE placeholder — discoverability anchor for the deferred
+        // feature. The TRACE_ROW reservation above guarantees there is room
+        // for this line at all reasonable terminal sizes.
         if y < area.y + area.height {
             Paragraph::new(Line::from(Span::styled(
                 "TRACE \u{2014} coming soon",
