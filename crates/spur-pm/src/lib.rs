@@ -4,6 +4,7 @@ pub mod beads;
 pub mod bv;
 pub mod github;
 pub mod graph;
+pub mod pidfile;
 pub mod service;
 pub mod types;
 

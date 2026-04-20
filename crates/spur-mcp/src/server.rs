@@ -23,7 +23,7 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info};
 
 use spur_acp::*;
-use spur_pm::{IssueFilter, IssueUpdate, PmService, PrParams};
+use spur_pm::{pidfile::PidFileGuard, IssueFilter, IssueUpdate, PmService, PrParams};
 
 use crate::plan::reconciler::{Reconciler, ReconcilerConfig};
 use crate::tools::{self, DelegationChannel, DelegationRequest};
@@ -240,6 +240,14 @@ pub struct McpCallbackServer {
     /// immediately tick instead of waiting for the next interval. Only meaningful
     /// when `reconciler_enabled` is true.
     reconciler_fast_forward: Option<Arc<tokio::sync::Notify>>,
+    /// Repository root for constructing paths to `.beads/`. Set by
+    /// `set_repo_root` before `start()`.
+    repo_root: Option<std::path::PathBuf>,
+    /// Pidfile guard for I4 single-brain enforcement. Acquired at `start()`
+    /// when a beads backend is detected. `None` for GitHub-only backends.
+    /// The guard is moved into the spawned task and kept alive there.
+    #[allow(dead_code)]
+    brain_pidfile: Option<spur_pm::pidfile::PidFileGuard>,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -656,6 +664,8 @@ impl McpCallbackServer {
             inline_wait: std::time::Duration::from_millis(0),
             reconciler_enabled: false,
             reconciler_fast_forward: None,
+            repo_root: None,
+            brain_pidfile: None,
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -692,6 +702,11 @@ impl McpCallbackServer {
     ) {
         self.reconciler_enabled = enable;
         self.reconciler_fast_forward = fast_forward;
+    }
+
+    /// Set the repository root path. Required for pidfile acquisition.
+    pub fn set_repo_root(&mut self, root: std::path::PathBuf) {
+        self.repo_root = Some(root);
     }
 
     /// Spawn a background task that awaits a delegation oneshot and stores
@@ -884,6 +899,14 @@ impl McpCallbackServer {
     /// Returns the MCP endpoint URL (e.g. `http://127.0.0.1:12345/mcp`) and
     /// a `JoinHandle`.
     pub async fn start(self: Arc<Self>) -> Result<(String, JoinHandle<()>)> {
+        // Extract data needed for pidfile acquisition before moving self into the async block.
+        let repo_root = self.repo_root.clone();
+        let has_beads_backend = self
+            .pm_service
+            .as_ref()
+            .map(|pm| pm.advanced().is_some())
+            .unwrap_or(false);
+
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("Failed to bind TCP listener")?;
@@ -939,7 +962,28 @@ impl McpCallbackServer {
             None
         };
 
+        // I4: acquire single-brain pidfile when beads backend is present.
+        let brain_pidfile = if has_beads_backend {
+            let repo_root = repo_root
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("repo_root not set on McpCallbackServer"))?;
+            let pid_path = repo_root.join(".beads").join(".spur-brain.pid");
+            match PidFileGuard::acquire(&pid_path) {
+                Ok(guard) => {
+                    info!("acquired brain pidfile at {:?}", pid_path);
+                    Some(guard)
+                }
+                Err(e) => {
+                    anyhow::bail!("another SPUR brain session already owns this .beads/: {e}");
+                }
+            }
+        } else {
+            None
+        };
+
         let handle = tokio::spawn(async move {
+            // I4: keep pidfile alive for the duration of the server.
+            let _brain_pidfile = brain_pidfile;
             if let Err(error) = axum::serve(listener, router).await {
                 debug!(%error, "RMCP callback server exited");
             }
