@@ -22,6 +22,7 @@ fn mk_cont(id: &str) -> BrainContinuation {
             summary: Some("ok".into()),
             diff_summary: None,
             worker_branch: None,
+            artifact: None,
         },
         created_at: Instant::now(),
     }

@@ -625,6 +625,7 @@ impl McpCallbackServer {
                         summary: result.summary.clone(),
                         diff_summary: result.diff_summary.clone(),
                         worker_branch: result.worker_branch.clone(),
+                        artifact: None,
                     },
                     created_at: std::time::Instant::now(),
                 };

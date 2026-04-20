@@ -307,6 +307,7 @@ mod tests {
             payload: ContinuationPayload {
                 status: DelegationStatus::Success,
                 summary: None, diff_summary: None, worker_branch: None,
+                artifact: None,
             },
             created_at: Instant::now(),
         }
