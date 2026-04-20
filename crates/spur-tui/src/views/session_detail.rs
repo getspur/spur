@@ -310,7 +310,13 @@ impl SessionDetailView {
         self.stream_in_flight = false;
         self.cancelling_in_flight = false;
 
-        // Marks — draft locals land in Task 4.
+        // Draft debounce locals (spec §3.5). Gate is ALSO at the source in
+        // force_save_draft/draft_save_action — this local wipe is
+        // belt-and-suspenders for the debounce's own state machine.
+        self.last_persisted_draft.clear();
+        self.last_draft_change_at = None;
+
+        // Marks.
         self.cleared = true;
         self.ready_banner = Some(READY_BANNER_TEXT.to_string());
     }
@@ -334,6 +340,10 @@ impl SessionDetailView {
     /// last change, returns a `SaveDraft` action and arms the debounce for
     /// the next edit. Otherwise returns `None`. Called from `App`'s tick loop.
     pub fn draft_save_action(&mut self) -> Option<Action> {
+        if self.cleared {
+            self.last_draft_change_at = None;
+            return None;
+        }
         let at = self.last_draft_change_at?;
         if at.elapsed() < std::time::Duration::from_millis(500) {
             return None;
@@ -359,6 +369,14 @@ impl SessionDetailView {
     /// different session id) so metadata reflects the latest on-screen text
     /// before any code reads it (e.g., the confirm-switch banner decision).
     pub fn force_save_draft(&mut self) -> Option<Action> {
+        if self.cleared {
+            // A cleared view's session_id is opaque; any SaveDraft keyed
+            // on it would corrupt the retired session's metadata.
+            // Carry-over into the next view happens in the App-side
+            // replacement path via `restore_draft`. See spec §3.5.
+            self.last_draft_change_at = None;
+            return None;
+        }
         let current = self.input_bar.text().to_string();
         if current == self.last_persisted_draft {
             self.last_draft_change_at = None;
@@ -2402,5 +2420,49 @@ mod tests {
         assert!(!view.cancelling_in_flight);
         // react_trace's mode mirror must also reset.
         assert_eq!(view.react_trace.current_mode(), None);
+    }
+
+    #[test]
+    fn cleared_view_suppresses_force_save_draft() {
+        let mut view = SessionDetailView::new_for_palette_test(
+            crate::commands::CommandRegistry::default(),
+        );
+        view.reset_for_clear();
+        // Even with new text in the InputBar, force_save_draft must not
+        // emit an Action keyed on the retired session_id.
+        view.input_bar.set_text("new text".into(), 8);
+        assert!(
+            view.force_save_draft().is_none(),
+            "cleared view must suppress force_save_draft"
+        );
+    }
+
+    #[test]
+    fn cleared_view_suppresses_draft_save_action() {
+        let mut view = SessionDetailView::new_for_palette_test(
+            crate::commands::CommandRegistry::default(),
+        );
+        view.reset_for_clear();
+        view.input_bar.set_text("new text".into(), 8);
+        // Simulate a debounce trigger: set last_draft_change_at 600ms ago.
+        view.test_set_last_draft_change(
+            std::time::Instant::now() - std::time::Duration::from_millis(600),
+        );
+        assert!(
+            view.draft_save_action().is_none(),
+            "cleared view must suppress draft_save_action (debounce tick)"
+        );
+    }
+
+    #[test]
+    fn reset_for_clear_wipes_draft_debounce_locals() {
+        let mut view = SessionDetailView::new_for_palette_test(
+            crate::commands::CommandRegistry::default(),
+        );
+        view.last_persisted_draft = "stale".into();
+        view.last_draft_change_at = Some(std::time::Instant::now());
+        view.reset_for_clear();
+        assert_eq!(view.last_persisted_draft, "");
+        assert!(view.last_draft_change_at.is_none());
     }
 }
