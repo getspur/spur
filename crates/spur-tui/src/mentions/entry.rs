@@ -4,15 +4,21 @@ use std::path::Path;
 pub enum MentionKind {
     File,
     Directory,
+    Worker,
 }
 
 #[derive(Debug, Clone)]
 pub struct MentionEntry {
     pub kind: MentionKind,
-    /// File URI, e.g. "file:///abs/src/foo.rs".
+    /// File URI (`file:///abs/...`) or worker URI (`worker://<name>`).
     pub uri: String,
-    /// Relative path for display (directories end with '/').
+    /// Display label. For files: relative path (dirs end with `/`).
+    /// For workers: `worker:<name>` (e.g. `worker:claude-code`).
     pub display: String,
+    /// Optional one-line description (worker description; None for files).
+    pub secondary: Option<String>,
+    /// Optional right-aligned tag (worker tier; None for files).
+    pub tag: Option<String>,
 }
 
 pub trait MentionSource: Send {
@@ -22,6 +28,7 @@ pub trait MentionSource: Send {
 }
 
 /// Convert an absolute path under cwd into a `MentionEntry`.
+/// Only produces `File` and `Directory` kinds; never `Worker`.
 pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
     let rel = abs.strip_prefix(cwd).ok()?;
     let rel_str = rel.to_str()?;
@@ -33,8 +40,15 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
     let display = match kind {
         MentionKind::Directory => format!("{}/", rel_str),
         MentionKind::File => rel_str.to_string(),
+        MentionKind::Worker => unreachable!("entry_for_path never builds Worker"),
     };
     let abs_str = abs.to_str()?;
     let uri = format!("file://{}", abs_str);
-    Some(MentionEntry { kind, uri, display })
+    Some(MentionEntry {
+        kind,
+        uri,
+        display,
+        secondary: None,
+        tag: None,
+    })
 }
