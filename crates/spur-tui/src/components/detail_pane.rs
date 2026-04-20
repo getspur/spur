@@ -59,7 +59,23 @@ impl DetailPane {
         }
     }
 
-    pub fn cycle_tab(&mut self, forward: bool) {
+    /// Cycle to the next (or previous) tab.
+    ///
+    /// Intent is split by tab kind:
+    /// - **Stream**: snap the trace to latest (`trace.scroll_to_bottom()`)
+    ///   when the trace is available, and set the local follow flag for
+    ///   API symmetry. The badge is actually derived from `trace.is_following()`
+    ///   inside `render`, so the local flag is advisory on this tab.
+    /// - **Non-Stream**: open at the top — `scroll_offset = 0`,
+    ///   `is_following = false`. Previously both `is_following = true` and
+    ///   `scroll_offset = 0` were set, which the render re-clamped to
+    ///   `max_offset` (the bottom), inverting the user's expected "fresh
+    ///   tab" UX.
+    pub fn cycle_tab(
+        &mut self,
+        forward: bool,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
         let all = DetailTab::all();
         let idx = all.iter().position(|t| *t == self.current_tab).unwrap_or(0);
         let next = if forward {
@@ -69,7 +85,17 @@ impl DetailPane {
         };
         self.current_tab = all[next];
         self.scroll_offset = 0;
-        self.is_following = true;
+        match self.current_tab {
+            DetailTab::Stream => {
+                self.is_following = true;
+                if let Some(t) = stream_trace {
+                    t.scroll_to_bottom();
+                }
+            }
+            _ => {
+                self.is_following = false;
+            }
+        }
     }
 
     pub fn scroll_up(
@@ -134,11 +160,23 @@ impl DetailPane {
         issue_badge: Option<&str>,
         stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
     ) {
-        let following_indicator = if self.is_following {
-            " ▼ following "
-        } else {
-            ""
+        // Source-of-truth for the follow badge:
+        // - Stream tab with a live trace: the trace's own anchor. This is
+        //   the authoritative viewport state for the ReactTrace widget.
+        //   Without this, the pane's local flag would desync from the
+        //   trace's anchor after a user-driven scroll.
+        // - Stream tab without a trace (placeholder path): default to
+        //   "following" so the initial render doesn't look stalled.
+        // - Non-Stream tabs: the pane's own local flag, which tracks the
+        //   per-tab bottom-follow behavior.
+        let following = match self.current_tab {
+            DetailTab::Stream => stream_trace
+                .as_deref()
+                .map(|t| t.is_following())
+                .unwrap_or(true),
+            _ => self.is_following,
         };
+        let following_indicator = if following { " ▼ following " } else { "" };
 
         let mut block = Block::default()
             .borders(Borders::ALL)

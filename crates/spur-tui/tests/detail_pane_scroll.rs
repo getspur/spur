@@ -155,7 +155,7 @@ fn cycle_tab_opens_task_at_top() {
 
     // Cycle Stream → Artifacts → Attempts → Task.
     for _ in 0..3 {
-        pane.cycle_tab(true);
+        pane.cycle_tab(true, None);
     }
     assert_eq!(pane.current_tab, DetailTab::Task);
 
@@ -178,5 +178,28 @@ fn cycle_tab_opens_task_at_top() {
     );
 }
 
-// T-D4b: `cycle_tab_into_stream_snaps_trace_to_bottom` — added in C4+C5
-// alongside the `cycle_tab` signature change that threads `&mut ReactTrace`.
+/// T-D4b: Cycling back into the Stream tab from elsewhere must snap the
+/// trace back to Following so the user sees the latest output — otherwise
+/// returning to Stream may leave the viewport pinned mid-history.
+#[test]
+fn cycle_tab_into_stream_snaps_trace_to_bottom() {
+    let mut pane = DetailPane::new();
+    let mut trace = seeded_compact_trace();
+
+    // Walk away from Stream (Artifacts).
+    pane.cycle_tab(true, Some(&mut trace));
+    assert_ne!(pane.current_tab, DetailTab::Stream);
+
+    // Drag the anchor off Following so the "snap back" is observable.
+    trace.scroll_up();
+    assert!(!trace.is_following());
+
+    // Cycle back around to Stream — must re-engage Following.
+    while pane.current_tab != DetailTab::Stream {
+        pane.cycle_tab(true, Some(&mut trace));
+    }
+    assert!(
+        trace.is_following(),
+        "entering the Stream tab must re-engage Following"
+    );
+}

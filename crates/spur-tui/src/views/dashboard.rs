@@ -547,14 +547,26 @@ impl DashboardView {
         // Priority 0: Tab-cycling in detail pane when a node is focused and
         // the input bar is empty. Must be checked before the editing-key block
         // so that Left/Right are not consumed by InputBar cursor movement.
+        //
+        // Thread the focused executor's trace into `cycle_tab` so entering
+        // the Stream tab snaps the trace to Following, and so leaving Stream
+        // doesn't strand the viewport mid-history on re-entry.
         if self.input_bar.is_empty() && self.focused_node.is_some() {
             match key.code {
                 KeyCode::Right => {
-                    self.detail_pane.cycle_tab(true);
+                    let trace = self
+                        .focused_node
+                        .as_ref()
+                        .and_then(|id| worker_streams.get_mut(&id.0));
+                    self.detail_pane.cycle_tab(true, trace);
                     return None;
                 }
                 KeyCode::Left => {
-                    self.detail_pane.cycle_tab(false);
+                    let trace = self
+                        .focused_node
+                        .as_ref()
+                        .and_then(|id| worker_streams.get_mut(&id.0));
+                    self.detail_pane.cycle_tab(false, trace);
                     return None;
                 }
                 _ => {}
