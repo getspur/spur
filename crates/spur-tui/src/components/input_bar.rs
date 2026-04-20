@@ -345,7 +345,12 @@ impl InputBar {
                                 self.textarea.move_cursor(CursorMove::End);
                             }
                             let _ = self.vim_complete_operator(mode);
-                            return HandleOutcome::Key(IntentEvent::DeletedChar);
+                            let intent = if op == 'y' {
+                                IntentEvent::NoOp
+                            } else {
+                                IntentEvent::DeletedChar
+                            };
+                            return HandleOutcome::Key(intent);
                         }
                     }
                 }
@@ -502,21 +507,27 @@ impl InputBar {
             // ── Scroll ──────────────────────────────────────────────
             Input { key: Key::Char('d'), ctrl: true, .. } => {
                 self.textarea.scroll(tui_textarea::Scrolling::HalfPageDown);
+                return HandleOutcome::Key(IntentEvent::NoOp);
             }
             Input { key: Key::Char('u'), ctrl: true, .. } => {
                 self.textarea.scroll(tui_textarea::Scrolling::HalfPageUp);
+                return HandleOutcome::Key(IntentEvent::NoOp);
             }
             Input { key: Key::Char('f'), ctrl: true, .. } => {
                 self.textarea.scroll(tui_textarea::Scrolling::PageDown);
+                return HandleOutcome::Key(IntentEvent::NoOp);
             }
             Input { key: Key::Char('b'), ctrl: true, .. } => {
                 self.textarea.scroll(tui_textarea::Scrolling::PageUp);
+                return HandleOutcome::Key(IntentEvent::NoOp);
             }
             Input { key: Key::Char('e'), ctrl: true, .. } => {
                 self.textarea.scroll((1, 0));
+                return HandleOutcome::Key(IntentEvent::NoOp);
             }
             Input { key: Key::Char('y'), ctrl: true, .. } => {
                 self.textarea.scroll((-1, 0));
+                return HandleOutcome::Key(IntentEvent::NoOp);
             }
 
             // ── Arrow-key visual-line nav (Vim Normal) ──────────────
