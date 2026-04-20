@@ -562,8 +562,7 @@ fn execute_epic_def() -> ToolDefinition {
             children subgraph and dispatch in dependency order. Agent routing \
             comes from the `spur:agent:<name>` label on each child issue \
             (inherited from the epic if unset, or from default_agent). Task \
-            text comes from issue.body (override via `spur:task-text:<text>` \
-            label). Rejects nested sub-epic children. External blocked_by \
+            text comes from issue.body. Rejects nested sub-epic children. External blocked_by \
             references must already be `done`. After dispatch, the plan runs \
             under the normal review engine — use get_plan_status / \
             get_task_diff / review_task. Re-calling while a plan is active \

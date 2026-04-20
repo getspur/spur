@@ -232,18 +232,12 @@ pub fn derive_epic_plan_from_issues(
 
         // 4d. Resolve task text.
         //
-        // NOTE: `spur:task-text:<text>` as a LABEL is structurally broken against
-        // br 0.1.14's label grammar `[A-Za-z0-9_:-]+`. Any realistic task text
-        // will contain forbidden chars (`.`, `=`, space, etc) and be rejected by
-        // `br label add`. This label convention should migrate off labels to the
-        // issue `description` field (tracked as v0a.2 follow-up). Kept here for
-        // backward compatibility with pre-v0a callers that never actually wrote
-        // these labels through `br`.
-        let task_text = if let Some(text) = label_value(&child.labels, "spur:task-text:") {
-            text.to_string()
-        } else {
-            child.body.clone()
-        };
+        // Task text comes from the issue body (description field). The former
+        // `spur:task-text:<text>` label override was removed because its VALUE
+        // can never round-trip through br 0.1.14's label grammar
+        // `[A-Za-z0-9_:-]+` — realistic task text contains spaces, `.`, `=`,
+        // etc. Task text belongs in the issue body, not a label.
+        let task_text = child.body.clone();
 
         // 4e. Map blocked_by: keep intra-subgraph deps; validate/warn external.
         //
@@ -2784,11 +2778,11 @@ mod tests {
         let labels = vec![
             "spur:agent:codex".to_string(),
             "priority=high".to_string(),
-            "spur:task-text:custom".to_string(),
+            "spur:plan-id:custom".to_string(),
         ];
         assert_eq!(super::label_value(&labels, "spur:agent:"), Some("codex"));
         assert_eq!(
-            super::label_value(&labels, "spur:task-text:"),
+            super::label_value(&labels, "spur:plan-id:"),
             Some("custom")
         );
         assert_eq!(super::label_value(&labels, "missing="), None);
@@ -2799,7 +2793,7 @@ mod tests {
         let labels = vec![
             "spur:agent:codex".to_string(),
             "area:auth".to_string(),
-            "spur:task-text:x".to_string(),
+            "spur:plan-id:x".to_string(),
             "bug".to_string(),
         ];
         let kept = super::strip_spur_labels(&labels);
@@ -3141,33 +3135,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_uses_spur_task_text_override() {
-        let epic = make_issue(
-            "bd-216",
-            Some("epic"),
-            vec!["spur:agent:codex".to_string()],
-            "body",
-            vec![],
-        );
-        let child = make_issue(
-            "bd-217",
-            Some("task"),
-            vec!["spur:task-text:custom task text".to_string()],
-            "issue body (should be ignored)",
-            vec![],
-        );
-        let derived = super::derive_epic_plan_from_issues(
-            &epic,
-            &[child],
-            &std::collections::HashMap::new(),
-            None,
-            &["codex"],
-        )
-        .unwrap();
-        assert_eq!(derived.plan_tasks[0].task, "custom task text");
-    }
-
-    #[test]
     fn derive_rejects_empty_agent_label() {
         // A `spur:agent:` label with empty value resolves to ""; must fail
         // the known_agents check with an actionable error.
@@ -3188,39 +3155,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("not configured"), "got: {err}");
-    }
-
-    #[test]
-    fn derive_accepts_empty_spur_task_text_override() {
-        // Document the current behavior: `spur:task-text:` (empty value)
-        // yields an empty PlanTask.task (override beats body). This is the
-        // intended contract — an empty value is still an explicit override.
-        let epic = make_issue(
-            "bd-232",
-            Some("epic"),
-            vec!["spur:agent:codex".to_string()],
-            "body",
-            vec![],
-        );
-        let child = make_issue(
-            "bd-233",
-            Some("task"),
-            vec!["spur:task-text:".to_string()],
-            "issue body (should be ignored)",
-            vec![],
-        );
-        let derived = super::derive_epic_plan_from_issues(
-            &epic,
-            &[child],
-            &std::collections::HashMap::new(),
-            None,
-            &["codex"],
-        )
-        .unwrap();
-        assert_eq!(
-            derived.plan_tasks[0].task, "",
-            "empty override should beat body"
-        );
     }
 
     #[test]
@@ -3582,5 +3516,51 @@ mod tests {
         let map: std::collections::HashMap<String, serde_json::Value> =
             fields.into_iter().collect();
         assert!(!map.contains_key("artifact"));
+    }
+
+    #[test]
+    fn derive_uses_child_body_as_task_text() {
+        // task_text always comes from child.body — no label override.
+        let epic = make_issue(
+            "bd-250",
+            Some("epic"),
+            vec!["spur:agent:codex".to_string()],
+            "epic body",
+            vec![],
+        );
+        let child_with_body = make_issue(
+            "bd-251",
+            Some("task"),
+            vec![],
+            "do the work",
+            vec![],
+        );
+        let derived = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child_with_body],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap();
+        assert_eq!(derived.plan_tasks[0].task, "do the work");
+
+        // When child.body is empty, task_text is empty — no fallback.
+        let child_empty_body = make_issue(
+            "bd-252",
+            Some("task"),
+            vec![],
+            "",
+            vec![],
+        );
+        let derived2 = super::derive_epic_plan_from_issues(
+            &epic,
+            &[child_empty_body],
+            &std::collections::HashMap::new(),
+            None,
+            &["codex"],
+        )
+        .unwrap();
+        assert_eq!(derived2.plan_tasks[0].task, "");
     }
 }
