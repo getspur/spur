@@ -68,3 +68,41 @@ fn trace_source_handles_empty_trace() {
     let src = TraceSource::from_empty();
     assert_eq!(src.collect().len(), 0);
 }
+
+#[test]
+fn session_source_sorts_by_last_opened_at_descending() {
+    let mut meta = SessionMetadata::default();
+    meta.sessions.insert(
+        "old".to_string(),
+        SessionEntry {
+            title_override: Some("old-session".to_string()),
+            last_opened_at: "2020-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        },
+    );
+    meta.sessions.insert(
+        "new".to_string(),
+        SessionEntry {
+            title_override: Some("new-session".to_string()),
+            last_opened_at: "2026-04-20T12:00:00Z".to_string(),
+            ..Default::default()
+        },
+    );
+    meta.sessions.insert(
+        "mid".to_string(),
+        SessionEntry {
+            title_override: Some("mid-session".to_string()),
+            last_opened_at: "2023-06-15T08:30:00Z".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let src = SessionSource::from_metadata(&meta);
+    let results = src.collect();
+    let labels: Vec<&str> = results.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec!["new-session", "mid-session", "old-session"],
+        "sessions should be ordered by last_opened_at descending"
+    );
+}
