@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use spur_acp::*;
 use spur_pm::{IssueFilter, IssueUpdate, PmService, PrParams};
@@ -2297,6 +2297,15 @@ impl McpCallbackServer {
     }
 
     async fn handle_delegate_async(&self, id: Value, args: Value) -> JsonRpcResponse {
+        // Phase 3 deprecation telemetry: `delegate_to_worker` now provides
+        // equivalent async semantics (auto re-prompt on completion via the
+        // continuation bridge). Phase 4 removes this handler entirely.
+        warn!(
+            tool = "delegate_async",
+            replacement = "delegate_to_worker",
+            "DEPRECATED tool invoked — use `delegate_to_worker`; \
+             Phase 3 warning, removed in Phase 4"
+        );
         let bad_params = |message| JsonRpcResponse::invalid_params(id.clone(), message);
         let agent = match args.get("agent").and_then(|v| v.as_str()) {
             Some(a) => a.to_string(),
@@ -2373,6 +2382,8 @@ impl McpCallbackServer {
     }
 
     async fn handle_wait_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
+        // Phase 3 deprecation telemetry: auto re-prompt via the continuation
+        // bridge makes this RPC unnecessary. Phase 4 removes the handler.
         let delegation_id = match args.get("delegation_id").and_then(|v| v.as_str()) {
             Some(d) => d.to_string(),
             None => {
@@ -2382,6 +2393,13 @@ impl McpCallbackServer {
                 )
             }
         };
+        warn!(
+            tool = "wait_delegation",
+            replacement = "delegate_to_worker",
+            delegation_id = %delegation_id,
+            "DEPRECATED tool invoked — use `delegate_to_worker`; \
+             Phase 3 warning, removed in Phase 4"
+        );
 
         self.evict_stale_completions().await;
 
