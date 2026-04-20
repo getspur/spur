@@ -678,6 +678,10 @@ impl Orchestrator {
         mcp_server.set_workers(workers);
         // INV-6: wire the cancellation side-channel.
         mcp_server.set_cancellation_control(self.cancellation_control.clone());
+        // Phase 1c: async-first dispatch window.
+        mcp_server.set_inline_wait(std::time::Duration::from_millis(
+            self.config.delegation.inline_wait_ms,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1838,6 +1842,10 @@ impl Orchestrator {
         mcp_server.set_workers(workers);
         // INV-6: wire the cancellation side-channel.
         mcp_server.set_cancellation_control(self.cancellation_control.clone());
+        // Phase 1c: async-first dispatch window.
+        mcp_server.set_inline_wait(std::time::Duration::from_millis(
+            self.config.delegation.inline_wait_ms,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1997,6 +2005,10 @@ impl Orchestrator {
         mcp_server.set_workers(workers);
         // INV-6: wire the cancellation side-channel.
         mcp_server.set_cancellation_control(self.cancellation_control.clone());
+        // Phase 1c: async-first dispatch window.
+        mcp_server.set_inline_wait(std::time::Duration::from_millis(
+            self.config.delegation.inline_wait_ms,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -5512,14 +5524,14 @@ mod artifact_decision_tests {
 
     #[test]
     fn success_with_persist_err_escalates_to_failed() {
-        let (status, artifact, note) = decide_artifact_handling(
-            true,
-            Some(Err("disk full".into())),
-            None,
-        );
+        let (status, artifact, note) =
+            decide_artifact_handling(true, Some(Err("disk full".into())), None);
         match status {
             DelegationStatus::Failed { error } => {
-                assert!(error.contains("artifact persistence failed"), "got: {error}");
+                assert!(
+                    error.contains("artifact persistence failed"),
+                    "got: {error}"
+                );
             }
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -5529,7 +5541,9 @@ mod artifact_decision_tests {
 
     #[test]
     fn failure_with_persist_err_preserves_original_error_and_annotates() {
-        let original = DelegationStatus::Failed { error: "compile error".into() };
+        let original = DelegationStatus::Failed {
+            error: "compile error".into(),
+        };
         let (status, artifact, note) = decide_artifact_handling(
             /* worker_success */ false,
             Some(Err("ref locked".into())),
@@ -5544,7 +5558,9 @@ mod artifact_decision_tests {
 
     #[test]
     fn failure_with_persist_ok_preserves_original_error_and_carries_artifact() {
-        let original = DelegationStatus::Failed { error: "panic".into() };
+        let original = DelegationStatus::Failed {
+            error: "panic".into(),
+        };
         let (status, artifact, note) = decide_artifact_handling(
             false,
             Some(Ok(WorkerArtifact {

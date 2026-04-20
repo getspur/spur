@@ -1,15 +1,15 @@
 //! Integration tests for async-continuation scheduling.
 //! These exercise the bridge + orchestrator with a mock brain.
 
+use spur_acp::domain::delegation::DelegationStatus;
+use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
+use spur_acp::types::SessionId;
 use spur_core::continuation_bridge::{
     new_overflow_buf, render_autonomous_continuation_turn, render_merged_turn_with_spill,
     MERGE_BUDGET_DEFAULT_BYTES,
 };
-use spur_core::scheduler::BrainScheduler;
 use spur_core::orchestrator::InteractiveInput;
-use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
-use spur_acp::domain::delegation::DelegationStatus;
-use spur_acp::types::SessionId;
+use spur_core::scheduler::BrainScheduler;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -34,7 +34,11 @@ async fn backpressure_overflow_on_full_channel() {
     let overflow = new_overflow_buf();
 
     // Fill the channel.
-    tx.try_send(InteractiveInput::Message { blocks: vec![], interrupt: false }).unwrap();
+    tx.try_send(InteractiveInput::Message {
+        blocks: vec![],
+        interrupt: false,
+    })
+    .unwrap();
 
     // Simulate bridge calls — try_send into a full channel and overflow.
     for i in 0..5 {
@@ -43,7 +47,10 @@ async fn backpressure_overflow_on_full_channel() {
             continuation: mk_cont(&format!("id-{i}")),
         };
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(input) {
-            overflow.lock().await.push_back((SessionId::new(), mk_cont(&format!("id-{i}"))));
+            overflow
+                .lock()
+                .await
+                .push_back((SessionId::new(), mk_cont(&format!("id-{i}"))));
         }
     }
 
@@ -64,27 +71,34 @@ fn session_swap_drops_all_pending_continuations() {
     assert_eq!(evicted.len(), 2);
     // Scheduler is now empty.
     let action = s.next(Instant::now());
-    assert!(matches!(action, spur_core::scheduler::ScheduledAction::Idle));
+    assert!(matches!(
+        action,
+        spur_core::scheduler::ScheduledAction::Idle
+    ));
 }
 
 #[test]
 fn merged_turn_has_user_block_at_front_and_self_describing_marker() {
     use agent_client_protocol::{ContentBlock, TextContent};
     let user = vec![ContentBlock::Text(TextContent::new("what is the plan?"))];
-    let (blocks, spilled) = render_merged_turn_with_spill(
-        &user,
-        &[mk_cont("id-1")],
-        MERGE_BUDGET_DEFAULT_BYTES,
-    );
+    let (blocks, spilled) =
+        render_merged_turn_with_spill(&user, &[mk_cont("id-1")], MERGE_BUDGET_DEFAULT_BYTES);
     assert!(spilled.is_empty());
     // User block present byte-exact at position 0.
     assert_eq!(blocks[0], user[0]);
     // Separator marker present.
-    let has_marker = blocks.iter().any(|b| matches!(b, ContentBlock::Text(t) if t.text.contains("[SPUR:background]")));
+    let has_marker = blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text(t) if t.text.contains("[SPUR:background]")));
     assert!(has_marker, "merged turn must carry self-describing marker");
     // Resource with spur:// URI present.
-    let has_resource = blocks.iter().any(|b| format!("{b:?}").contains("spur://continuation/id-1"));
-    assert!(has_resource, "merged turn must carry spur://continuation/ resource");
+    let has_resource = blocks
+        .iter()
+        .any(|b| format!("{b:?}").contains("spur://continuation/id-1"));
+    assert!(
+        has_resource,
+        "merged turn must carry spur://continuation/ resource"
+    );
 }
 
 #[test]
@@ -92,7 +106,10 @@ fn autonomous_turn_is_self_describing() {
     let blocks = render_autonomous_continuation_turn(&[mk_cont("id-42")]);
     let joined = format!("{blocks:?}");
     assert!(joined.contains("[SPUR:background]"), "must carry marker");
-    assert!(joined.contains("spur://continuation/id-42"), "must carry resource URI");
+    assert!(
+        joined.contains("spur://continuation/id-42"),
+        "must carry resource URI"
+    );
 }
 
 /// INV-ASYNC-1: "For any given delegation_id, the brain receives the result
@@ -116,10 +133,6 @@ fn autonomous_turn_is_self_describing() {
 /// Time is driven via `tokio::time::pause()` / auto-advance so the race is
 /// deterministic without wall-clock sleeps.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "RED — passes only after Phase 1c (collector skips map write when detached). \
-            Phase 1a wiring alone fails 'never both' because both the continuation \
-            callback AND completed_delegations receive the result. See INV-ASYNC-1 in \
-            docs/superpowers/specs/2026-04-20-async-first-delegate-migration-design.md"]
 async fn test_no_double_delivery_on_block_timeout() {
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::{BrainSessionId, DelegationResult};
@@ -160,11 +173,7 @@ async fn test_no_double_delivery_on_block_timeout() {
     // AFTER the inline block window. Returns the delegation_id so we can
     // observe map state by id.
     let worker_handle = tokio::spawn(async move {
-        let req = channel
-            .request_rx
-            .recv()
-            .await
-            .expect("delegation request");
+        let req = channel.request_rx.recv().await.expect("delegation request");
         let delegation_id = req.id.clone();
         tokio::time::sleep(Duration::from_secs(WORKER_DELAY_SECS)).await;
         let _ = req.respond_to.send(DelegationResult {

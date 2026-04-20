@@ -322,6 +322,26 @@ pub struct SpurConfig {
     pub pm: PmConfig,
     #[serde(default)]
     pub project: Option<ProjectConfig>,
+    /// Delegation dispatch tuning (Phase 1c async-first migration).
+    #[serde(default)]
+    pub delegation: DelegationConfig,
+}
+
+/// Runtime knobs for `delegate_to_worker` / `delegate_parallel` dispatch.
+///
+/// Default is **pure async-first** (`inline_wait_ms = 0`): every delegation
+/// falls through to the detached path and returns via the continuation
+/// bridge, never via `completed_delegations` polling. A non-zero value gives
+/// the worker a short inline window to complete before handing the receiver
+/// to the background collector.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DelegationConfig {
+    /// How long the MCP handler will wait inline for a worker to respond
+    /// before handing the oneshot receiver to the detached collector and
+    /// returning `status: "pending"` with `continuation_will_fire: true`.
+    /// Default `0` — async-first.
+    pub inline_wait_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

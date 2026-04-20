@@ -223,6 +223,11 @@ pub struct McpCallbackServer {
     /// Bundle of handles for routing detached delegation completions back
     /// into the orchestrator ingress via `report_detached_completion`.
     continuation_ctx: Arc<DetachedContinuationCtx>,
+    /// Phase 1c: how long `handle_delegate_to_worker` / `handle_delegate_parallel`
+    /// wait inline for a worker's oneshot to fire before handing the receiver
+    /// to the detached collector. Default `0` — pure async-first.
+    /// Wired from `SpurConfig.delegation.inline_wait_ms`.
+    inline_wait: std::time::Duration,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -552,6 +557,7 @@ impl McpCallbackServer {
             plan_registry: Arc::new(tokio::sync::Mutex::new(crate::plan::PlanRegistry::default())),
             cancellation_control: None,
             continuation_ctx: Arc::new(continuation_ctx),
+            inline_wait: std::time::Duration::from_millis(0),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -563,6 +569,15 @@ impl McpCallbackServer {
     /// directly rather than routing through the delegation channel.
     pub fn set_cancellation_control(&mut self, cc: CancellationControl) {
         self.cancellation_control = Some(cc);
+    }
+
+    /// Phase 1c: set how long `handle_delegate_to_worker` /
+    /// `handle_delegate_parallel` wait inline for the worker oneshot before
+    /// falling through to the detached collector. Default is `0`
+    /// (async-first); orchestrator wires this from
+    /// `SpurConfig.delegation.inline_wait_ms` at server construction.
+    pub fn set_inline_wait(&mut self, d: std::time::Duration) {
+        self.inline_wait = d;
     }
 
     /// Spawn a background task that awaits a delegation oneshot and stores
@@ -601,10 +616,35 @@ impl McpCallbackServer {
                 },
             };
             active.lock().await.remove(&delegation_id);
-            completed.lock().await.insert(
-                delegation_id.clone(),
-                (result.clone(), tokio::time::Instant::now()),
-            );
+
+            // INV-ASYNC-2 (source_kind-gated): the continuation bridge is the
+            // SOLE delivery channel for `BlockTimeout` (the new async-first
+            // path — `delegate_to_worker` auto-reprompt). Writing to the
+            // map on that path would let `check_delegation_status` redeliver
+            // what the brain already received as a continuation turn — the
+            // double-delivery failure mode closed by INV-ASYNC-1.
+            //
+            // For `AsyncRequested` (legacy `delegate_async` + `wait_delegation`
+            // flow) the map write is PRESERVED: `handle_wait_delegation`
+            // (server.rs:2282+) reads from this map to return results to
+            // callers that still use the deprecated polling API. Phase 3
+            // removes `wait_delegation`; at that point this arm can drop
+            // too. Any pre-existing double-delivery on the AsyncRequested
+            // path (bridge + wait_delegation for the same id) is unchanged
+            // from pre-Phase-1a behavior and is not introduced here.
+            //
+            // `detached = None` is also retained as a fallback for unit
+            // tests exercising the collector directly.
+            let keep_map_entry = match &detached {
+                None => true,
+                Some(h) => matches!(h.source_kind, DetachedSourceKind::AsyncRequested),
+            };
+            if keep_map_entry {
+                completed.lock().await.insert(
+                    delegation_id.clone(),
+                    (result.clone(), tokio::time::Instant::now()),
+                );
+            }
 
             if let Some(h) = detached {
                 use spur_acp::domain::{
@@ -850,37 +890,53 @@ impl McpCallbackServer {
             return JsonRpcResponse::internal_error(id, "Failed to send delegation request");
         }
 
-        // Spawn a background collector so the oneshot is never dropped by
-        // a timeout.  Then poll the completed-results map with a bounded
-        // wait that stays well under the brain's 120 s HTTP timeout.
         self.active_delegations
             .lock()
             .await
             .insert(request_id.clone());
-        // Phase 1a (INV-ASYNC-1, additive): pass a BlockTimeout continuation
-        // handle so that if the worker outlives DELEGATION_BLOCK_TIMEOUT,
-        // completion is routed through the continuation bridge instead of
-        // leaving the result to be polled out of `completed_delegations`.
-        // Map write still happens at :600 until Phase 1c refactors the
-        // collector to skip it when detached is Some.
-        Self::spawn_result_collector(
-            &self.task_tracker,
-            request_id.clone(),
-            rx,
-            Arc::clone(&self.active_delegations),
-            Arc::clone(&self.completed_delegations),
-            Some(DetachedCompletionHandle {
-                ctx: Arc::clone(&self.continuation_ctx),
-                source_kind: DetachedSourceKind::BlockTimeout,
-            }),
-        );
 
-        let deadline = tokio::time::Instant::now() + DELEGATION_BLOCK_TIMEOUT;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-            if let Some((result, _ts)) = self.completed_delegations.lock().await.remove(&request_id)
-            {
+        // Phase 1c (INV-ASYNC-1/2/3/7): biased select! over
+        //   (fast arm: &mut rx), (slow arm: sleep(inline_wait))
+        // Fast arm → return inline completion, drain active_delegations, no
+        // collector spawn, no map write.
+        // Slow arm → hand the receiver to `spawn_result_collector` with a
+        // BlockTimeout continuation handle; the bridge is the sole delivery
+        // channel (collector skips the map write when `detached` is Some).
+        //
+        // Cancel-during-handoff (Risk R2): the select! arm atomically either
+        // consumes the oneshot result (fast path) or hands off the receiver
+        // to the collector (slow path) — never both. `handle_cancel_delegation`
+        // routes through `CancellationControl`, which signals the orchestrator
+        // rather than touching our oneshot, so a cancel arriving between the
+        // inline-window tick and the collector spawn races against the
+        // orchestrator's own cancellation drain, not against this handler.
+        //
+        // INV-ASYNC-7: no mutex guards are held across any `.await` point
+        // inside the arms below — `active_delegations.lock()` is scoped to a
+        // single `.remove()` call in the fast arm.
+        let mut rx = rx;
+        let inline_wait = self.inline_wait;
+        tokio::select! {
+            biased;
+            res = &mut rx => {
+                let result = match res {
+                    Ok(r) => r,
+                    Err(_) => DelegationResult {
+                        status: DelegationStatus::Failed {
+                            error: "Orchestrator disconnected".into(),
+                        },
+                        diff: None,
+                        diff_summary: None,
+                        summary: None,
+                        estimated_cost_usd: 0.0,
+                        worker_branch: None,
+                        artifact: None,
+                    },
+                };
+                self.active_delegations
+                    .lock()
+                    .await
+                    .remove(&request_id);
                 let result_json = match serde_json::to_value(&result) {
                     Ok(v) => v,
                     Err(e) => {
@@ -890,37 +946,68 @@ impl McpCallbackServer {
                         )
                     }
                 };
-                return JsonRpcResponse::success(
+                let payload = json!({
+                    "status": "completed",
+                    "delegation_id": request_id,
+                    "result": result_json,
+                    "continuation_will_fire": false,
+                });
+                let payload_text = serde_json::to_string_pretty(&payload)
+                    .unwrap_or_else(|_| payload.to_string());
+                // Response shape (spec §8.3): stringified JSON is the source
+                // of truth; a one-line human-readable shadow is prefixed for
+                // legacy pattern-matchers.
+                let shadow = format!(
+                    "Delegation to '{agent}' completed inline (delegation_id={request_id}).",
+                );
+                JsonRpcResponse::success(
                     id,
                     json!({
                         "content": [{
                             "type": "text",
-                            "text": serde_json::to_string_pretty(&result_json)
-                                .unwrap_or_else(|_| result_json.to_string())
+                            "text": format!("{shadow}\n{payload_text}")
                         }]
                     }),
-                );
+                )
             }
-
-            if tokio::time::Instant::now() >= deadline {
+            _ = tokio::time::sleep(inline_wait) => {
                 info!(
                     agent = %agent,
                     request_id = %request_id,
-                    "Delegation exceeded block timeout, returning delegation_id for polling"
+                    inline_wait_ms = inline_wait.as_millis() as u64,
+                    "Delegation inline window expired — detaching via continuation bridge"
                 );
-                return JsonRpcResponse::success(
+                Self::spawn_result_collector(
+                    &self.task_tracker,
+                    request_id.clone(),
+                    rx,
+                    Arc::clone(&self.active_delegations),
+                    Arc::clone(&self.completed_delegations),
+                    Some(DetachedCompletionHandle {
+                        ctx: Arc::clone(&self.continuation_ctx),
+                        source_kind: DetachedSourceKind::BlockTimeout,
+                    }),
+                );
+                let payload = json!({
+                    "status": "pending",
+                    "delegation_id": request_id,
+                    "continuation_will_fire": true,
+                });
+                let payload_text = serde_json::to_string_pretty(&payload)
+                    .unwrap_or_else(|_| payload.to_string());
+                let shadow = format!(
+                    "Delegation to '{agent}' is running in the background (delegation_id={request_id}); \
+                     a continuation will fire when the worker completes.",
+                );
+                JsonRpcResponse::success(
                     id,
                     json!({
                         "content": [{
                             "type": "text",
-                            "text": format!(
-                                "Delegation to '{agent}' is still running (exceeded {timeout}s block limit). \
-                                 Call check_delegation_status with delegation_id '{request_id}' to poll for the result.",
-                                timeout = DELEGATION_BLOCK_TIMEOUT.as_secs(),
-                            )
+                            "text": format!("{shadow}\n{payload_text}")
                         }]
                     }),
-                );
+                )
             }
         }
     }
@@ -942,7 +1029,14 @@ impl McpCallbackServer {
             Err(e) => return JsonRpcResponse::invalid_params(id, e),
         };
 
-        let mut receivers = Vec::with_capacity(skeletons.len());
+        // Per-task dispatch, mirroring the single-worker handler. Each task
+        // gets its own biased select! (fast arm: `&mut rx`, slow arm:
+        // `sleep(inline_wait)`). This preserves INV-ASYNC-6 (the batch
+        // response is a `Value::Array` of length N with mixed completed /
+        // pending entries; detached tasks funnel through the continuation
+        // bridge, never through `completed_delegations`).
+        let inline_wait = self.inline_wait;
+        let mut results: Vec<Value> = Vec::with_capacity(skeletons.len());
 
         for mut skeleton in skeletons {
             let request_id = skeleton.id.clone();
@@ -961,52 +1055,62 @@ impl McpCallbackServer {
                 .lock()
                 .await
                 .insert(request_id.clone());
-            Self::spawn_result_collector(
-                &self.task_tracker,
-                request_id.clone(),
-                rx,
-                Arc::clone(&self.active_delegations),
-                Arc::clone(&self.completed_delegations),
-                // Phase 1a (INV-ASYNC-1, additive): per-task BlockTimeout
-                // continuation for the parallel path. Phase 2 owns the
-                // per-task inline window; this handle already matches that
-                // future shape.
-                Some(DetachedCompletionHandle {
-                    ctx: Arc::clone(&self.continuation_ctx),
-                    source_kind: DetachedSourceKind::BlockTimeout,
-                }),
-            );
-            receivers.push((request_id, agent));
-        }
 
-        // Poll completed-results map with a batch timeout.
-        let deadline = tokio::time::Instant::now() + DELEGATION_BLOCK_TIMEOUT;
-        let mut results = Vec::with_capacity(receivers.len());
-        let mut pending: Vec<(String, String)> = receivers;
-
-        while !pending.is_empty() && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let mut still_pending = Vec::new();
-            for (request_id, agent) in pending {
-                if let Some((result, _ts)) =
-                    self.completed_delegations.lock().await.remove(&request_id)
-                {
-                    results.push(serde_json::to_value(&result).unwrap_or(json!(null)));
-                } else {
-                    still_pending.push((request_id, agent));
+            let mut rx = rx;
+            // Cancel-during-handoff (Risk R2): see `handle_delegate_to_worker`
+            // — the select! arm atomically either consumes the result or
+            // hands off the receiver; it does not do both.
+            let entry: Value = tokio::select! {
+                biased;
+                res = &mut rx => {
+                    let result = match res {
+                        Ok(r) => r,
+                        Err(_) => DelegationResult {
+                            status: DelegationStatus::Failed {
+                                error: "Orchestrator disconnected".into(),
+                            },
+                            diff: None,
+                            diff_summary: None,
+                            summary: None,
+                            estimated_cost_usd: 0.0,
+                            worker_branch: None,
+                            artifact: None,
+                        },
+                    };
+                    self.active_delegations
+                        .lock()
+                        .await
+                        .remove(&request_id);
+                    let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
+                    json!({
+                        "status": "completed",
+                        "delegation_id": request_id,
+                        "agent": agent,
+                        "result": result_json,
+                        "continuation_will_fire": false,
+                    })
                 }
-            }
-            pending = still_pending;
-        }
-
-        // Any still-pending delegations get returned as "running".
-        for (request_id, agent) in pending {
-            results.push(json!({
-                "status": "running",
-                "delegation_id": request_id,
-                "agent": agent,
-                "message": "Use check_delegation_status to poll for the result."
-            }));
+                _ = tokio::time::sleep(inline_wait) => {
+                    Self::spawn_result_collector(
+                        &self.task_tracker,
+                        request_id.clone(),
+                        rx,
+                        Arc::clone(&self.active_delegations),
+                        Arc::clone(&self.completed_delegations),
+                        Some(DetachedCompletionHandle {
+                            ctx: Arc::clone(&self.continuation_ctx),
+                            source_kind: DetachedSourceKind::BlockTimeout,
+                        }),
+                    );
+                    json!({
+                        "status": "pending",
+                        "delegation_id": request_id,
+                        "agent": agent,
+                        "continuation_will_fire": true,
+                    })
+                }
+            };
+            results.push(entry);
         }
 
         JsonRpcResponse::success(
@@ -1014,8 +1118,8 @@ impl McpCallbackServer {
             json!({
                 "content": [{
                     "type": "text",
-                    "text": serde_json::to_string_pretty(&results)
-                        .unwrap_or_else(|_| json!(results).to_string())
+                    "text": serde_json::to_string_pretty(&Value::Array(results.clone()))
+                        .unwrap_or_else(|_| Value::Array(results).to_string())
                 }]
             }),
         )
