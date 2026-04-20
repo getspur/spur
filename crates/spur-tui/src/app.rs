@@ -375,13 +375,15 @@ impl App {
         let cmd_batch = cmd_src.collect();
         let sess_batch = sess_src.collect();
         let worker_batch = worker_src.collect();
-        let trace_source_skipped = self.session_detail.is_some();
+        // Trace source is unconditionally omitted (U3c) — log the deferral
+        // state, not session presence, so telemetry stays honest.
+        let trace_dispatch_deferred = true;
         tracing::debug!(
             target: "palette",
             commands = cmd_batch.len(),
             sessions = sess_batch.len(),
             workers = worker_batch.len(),
-            trace_source_skipped,
+            trace_dispatch_deferred,
             "open_palette: sources collected"
         );
         let batches = vec![cmd_batch, sess_batch, worker_batch];

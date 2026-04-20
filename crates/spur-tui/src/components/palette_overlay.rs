@@ -76,10 +76,18 @@ impl<'a> PaletteOverlay<'a> {
             }
         }
 
-        // Reserve ONE row for the "TRACE — coming soon" placeholder up front.
-        // Then count the non-empty kinds — only those need a header. Compute
-        // the per-kind cap from the rows that remain after subtracting the
-        // headers. The cap can go to 0; we still render headers/placeholder.
+        // Per-kind cap — auto-scales by available height. Reserve TRACE_ROW
+        // up front so the placeholder always renders at the bottom of the
+        // grouped view (it's the discoverability anchor for the deferred
+        // feature; see U3c).
+        //
+        // Spec aspirationally says "minimum 2 per kind", but at 80x24 with
+        // three populated kinds (3 headers + 6 rows + 1 trace = 10 rows)
+        // that floor would push past the typical 9-row list area and force
+        // the TRACE placeholder out. We chose TRACE visibility over min-2:
+        // at tight terminals the cap can drop to 1 (or 0) per kind, which
+        // is acceptable degradation. Headers for empty kinds are skipped
+        // entirely (see `if rows.is_empty() { return }` in render_section).
         const TRACE_ROW: u16 = 1;
         const PER_KIND_MAX: u16 = 5;
         let kinds_with_data: u16 = [
@@ -106,7 +114,11 @@ impl<'a> PaletteOverlay<'a> {
 
         macro_rules! render_section {
             ($title:expr, $rows:expr) => {
-                if !$rows.is_empty() && y < area.y + area.height {
+                if $rows.is_empty() {
+                    // nothing to do
+                } else if cap == 0 {
+                    return; // Skip the header entirely if no rows would fit.
+                } else if y < area.y + area.height {
                     // Section header
                     Paragraph::new(Line::from(Span::styled(
                         $title.to_string(),
