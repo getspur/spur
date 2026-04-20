@@ -274,6 +274,24 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Persist `output_text` as a side-channel artifact for `session_id`.
+    /// Thin wrapper over `crate::artifact::persist` that resolves the
+    /// worktree path from `self.active`, keeping the call site in the
+    /// orchestrator simple.
+    ///
+    /// Does not interact with the worker branch's tree — artifacts are
+    /// git objects under `refs/spur/artifacts/<session-id>`, orthogonal
+    /// to `worker_branch`.
+    pub async fn persist_artifact(
+        &self,
+        session_id: &SessionId,
+        output_text: &str,
+        kind: spur_acp::ArtifactKind,
+    ) -> anyhow::Result<spur_acp::WorkerArtifact> {
+        let info = self.lookup(session_id)?;
+        crate::artifact::persist(&info.path, &session_id.to_string(), output_text, kind).await
+    }
+
     /// Cherry-pick the worker's latest commit onto `target_branch`.
     pub async fn merge_worker(
         &self,
