@@ -349,7 +349,20 @@ impl BeadsAdapter {
     /// set. This ensures a clean upgrade without losing the cursor position.
     fn load_cursor(&self) -> Option<PollCursor> {
         let path = self.cursor_path.as_ref()?;
-        let contents = std::fs::read_to_string(path).ok()?;
+        // Distinguish "file does not exist yet" (fresh install) from
+        // "file exists but unreadable" (permissions, IO error): the latter
+        // is worth a warn so operators notice silent-replay risk.
+        let contents = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                tracing::warn!(
+                    ?path,
+                    "cursor file exists but unreadable ({e}); starting without cursor — next poll may replay"
+                );
+                return None;
+            }
+        };
         let trimmed = contents.trim();
 
         // Try JSON first (new format).
@@ -365,6 +378,7 @@ impl BeadsAdapter {
             });
         }
 
+        tracing::warn!(?path, "cursor file content unparseable as JSON or RFC3339; starting without cursor");
         None
     }
 
@@ -618,11 +632,19 @@ impl IssueTracker for BeadsAdapter {
         let new_cursor: PollCursor = if !kept.is_empty() {
             // New ts = max(kept.updated_at).
             let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap(); // safe: kept non-empty
+            // ids_at_boundary is bounded by the `br list --limit N` fetch cap
+            // (currently 20; see the list call above). If the cap grows or is
+            // removed, revisit this — the cursor file size scales linearly.
             let ids_at_max: HashSet<String> = kept
                 .iter()
                 .filter(|i| i.updated_at == max_ts)
                 .map(|i| i.id.clone())
                 .collect();
+            debug_assert!(
+                ids_at_max.len() <= 200,
+                "ids_at_boundary grew beyond expected fetch-cap bound: {}",
+                ids_at_max.len()
+            );
             PollCursor {
                 ts: max_ts,
                 ids_at_boundary: ids_at_max,
