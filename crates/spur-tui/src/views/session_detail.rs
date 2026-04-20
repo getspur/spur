@@ -584,15 +584,9 @@ impl SessionDetailView {
             MentionQuerySource, QueryMode, SlashQuerySource, SlashRow,
         };
 
-        // History-mode shell owns the picker; detector is inert.
-        if let Some(shell) = self.picker_shell.as_ref() {
-            if shell.query_mode() == QueryMode::OwnedByShell {
-                self.trigger_detector.reset();
-                return;
-            }
-        }
-
         // Fast path: Idle state + non-opening event → no text fetch, no alloc.
+        // Ordered first so the hottest path (Idle, no picker, typing/motion)
+        // skips the Option deref for the picker-shell check entirely.
         if self.trigger_detector.is_idle()
             && !matches!(
                 event,
@@ -602,8 +596,18 @@ impl SessionDetailView {
             return;
         }
 
+        // History-mode shell owns the picker; detector is inert.
+        if let Some(shell) = self.picker_shell.as_ref() {
+            if shell.query_mode() == QueryMode::OwnedByShell {
+                self.trigger_detector.reset();
+                return;
+            }
+        }
+
         let text = self.input_bar.text();
         let cursor = self.input_bar.cursor();
+        // Clone required: step() takes &mut self on trigger_detector while ranges
+        // borrows from input_bar — two simultaneous fields of self.
         let ranges = self.input_bar.protected_ranges().to_vec();
 
         let transition = self
