@@ -256,6 +256,7 @@ impl ReactTrace {
     }
 
     /// Current session mode id, if set.
+    #[cfg(test)]
     pub fn current_mode(&self) -> Option<&str> {
         self.current_mode.as_deref()
     }
