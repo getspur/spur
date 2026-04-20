@@ -493,3 +493,190 @@ async fn request_changes_redispatch_emits_completion_sentinel() {
          on task {task_issue_id}; got: {sentinels:?}"
     );
 }
+
+/// Approval-cascade regression: approving a task whose children are Pending
+/// triggers `dispatch_newly_ready` → `spawn_completion_future` for each newly
+/// unblocked task. When those cascade-dispatched tasks complete, the
+/// `spawn_completion_future` path must emit a Completion sentinel too.
+///
+/// Before Fix A (commit 8e759c0), spawn_completion_future dropped audit
+/// emission silently regardless of which dispatcher invoked it. This test
+/// exercises the approval-cascade dispatcher specifically, complementing
+/// `request_changes_redispatch_emits_completion_sentinel` which covers the
+/// rejection-re-dispatch dispatcher.
+#[tokio::test]
+async fn approval_cascade_dispatched_task_emits_completion_sentinel() {
+    if !br_available() {
+        eprintln!(
+            "skipping approval_cascade_dispatched_task_emits_completion_sentinel: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+
+    let tasks = vec![
+        PlanTask {
+            task_id: "a".into(),
+            agent: "codex".into(),
+            task: "First task.".into(),
+            depends_on: vec![],
+            issue_id: None,
+            context_files: vec![],
+        },
+        PlanTask {
+            task_id: "b".into(),
+            agent: "codex".into(),
+            task: "Second task, depends on a.".into(),
+            depends_on: vec!["a".into()],
+            issue_id: None,
+            context_files: vec![],
+        },
+    ];
+
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        "audit-cascade-1",
+        "Cascade Audit Epic",
+        None,
+        &tasks,
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
+
+    let task_a_id = subgraph.task_map.get("a").expect("a").clone();
+    let task_b_id = subgraph.task_map.get("b").expect("b").clone();
+
+    let a_delegation_id = "del-a-001".to_string();
+    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = Arc::new(pm);
+
+    // Stage: A is AwaitingReview (worker finished), B is still Pending blocked on A.
+    let entry_a = PlanTaskEntry {
+        spec: PlanTask {
+            task_id: "a".into(),
+            agent: "codex".into(),
+            task: "First task.".into(),
+            depends_on: vec![],
+            issue_id: Some(task_a_id.clone()),
+            context_files: vec![],
+        },
+        status: PlanTaskStatus::AwaitingReview {
+            summary: Some("a narrative".into()),
+        },
+        result: None,
+        worker_branch: Some("feat/a".into()),
+        attempt: 1,
+        history: vec![],
+        last_delegation_id: Some(a_delegation_id.clone()),
+    };
+    let entry_b = PlanTaskEntry {
+        spec: PlanTask {
+            task_id: "b".into(),
+            agent: "codex".into(),
+            task: "Second task, depends on a.".into(),
+            depends_on: vec!["a".into()],
+            issue_id: Some(task_b_id.clone()),
+            context_files: vec![],
+        },
+        status: PlanTaskStatus::Pending,
+        result: None,
+        worker_branch: None,
+        attempt: 1,
+        history: vec![],
+        last_delegation_id: None,
+    };
+    let plan_state = PlanState {
+        plan_id: "audit-cascade-1".into(),
+        tasks: vec![entry_a, entry_b],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+        epic_id: Some(subgraph.epic_id.clone()),
+    };
+    let plan_arc_state = Arc::new(Mutex::new(plan_state));
+
+    // When the cascade dispatches B, respond Success on its oneshot.
+    let (del_tx, mut del_rx) = tokio::sync::mpsc::channel::<DelegationRequest>(4);
+    let tracker = tokio_util::task::TaskTracker::new();
+
+    let worker = tokio::spawn(async move {
+        let req = del_rx
+            .recv()
+            .await
+            .expect("approval cascade must enqueue a DelegationRequest for task b");
+        let b_new_id = req.id.to_string();
+        let _ = req.respond_to.send(DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("b narrative".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("feat/b".into()),
+            artifact: None,
+        });
+        b_new_id
+    });
+
+    spur_mcp::plan::handle_review_task(
+        plan_arc_state.clone(),
+        "audit-cascade-1",
+        "a",
+        "approve",
+        None,
+        Some(pm_arc.clone()),
+        None,
+        Some(&del_tx),
+        Some(&tracker),
+    )
+    .await
+    .expect("handle_review_task approve must succeed");
+
+    let b_delegation_id = worker.await.expect("worker join");
+
+    tracker.close();
+    tracker.wait().await;
+
+    // Approval sentinel should be on task A.
+    let a_comments =
+        run_br(dir.path(), &["comments", "list", &task_a_id]).expect("br comments list a");
+    let a_sentinels = collect_sentinels(&a_comments);
+    assert!(
+        a_sentinels.iter().any(|k| matches!(
+            k,
+            AuditSentinelKind::Approval { delegation_id } if delegation_id == &a_delegation_id
+        )),
+        "Approval sentinel for a's delegation_id={a_delegation_id} must be on task {task_a_id}; got {a_sentinels:?}"
+    );
+
+    // Completion sentinel for B should be on task B — emitted via spawn_completion_future
+    // spawned from dispatch_newly_ready. This is the codex-acp REQUEST_CHANGES coverage gap.
+    let b_comments =
+        run_br(dir.path(), &["comments", "list", &task_b_id]).expect("br comments list b");
+    let b_sentinels = collect_sentinels(&b_comments);
+    assert!(
+        b_sentinels.iter().any(|k| matches!(
+            k,
+            AuditSentinelKind::Completion { delegation_id, result_summary, worker_branch }
+                if delegation_id == &b_delegation_id
+                    && result_summary.as_deref() == Some("b narrative")
+                    && worker_branch.as_deref() == Some("feat/b")
+        )),
+        "Completion sentinel for cascade-dispatched b (delegation_id={b_delegation_id}) \
+         must be on task {task_b_id}; got {b_sentinels:?}"
+    );
+
+    // Also: Dispatch sentinel for B from the cascade path.
+    assert!(
+        b_sentinels.iter().any(|k| matches!(
+            k,
+            AuditSentinelKind::Dispatch { delegation_id, .. }
+                if delegation_id == &b_delegation_id
+        )),
+        "Dispatch sentinel for cascade-dispatched b (delegation_id={b_delegation_id}) \
+         must be on task {task_b_id}; got {b_sentinels:?}"
+    );
+}
