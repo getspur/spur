@@ -35,15 +35,18 @@ pub(in crate::components::react_trace) struct CompactCacheEntry {
 }
 
 impl ReactTrace {
-    /// Build the compact display lines (one row per entry, plus optional
-    /// kind-transition separators). Returned lines have `'static` content.
-    pub(super) fn build_compact_lines(&self, width: u16) -> Vec<Line<'static>> {
-        build_compact_lines_from(&self.entries, width, None)
+    /// Build the compact display lines plus the per-entry row-start vector.
+    /// Returned lines have `'static` content.
+    pub(super) fn build_compact_lines(
+        &self,
+        width: u16,
+    ) -> (Vec<Line<'static>>, Vec<usize>) {
+        build_compact_lines_from(&self.entries, width, None, 0)
     }
 
     #[cfg(test)]
     pub fn build_compact_lines_for_tests(&self, width: u16) -> Vec<Line<'static>> {
-        self.build_compact_lines(width)
+        self.build_compact_lines(width).0
     }
 
     /// Paint the compact single-line-per-entry body into `area`.
@@ -68,29 +71,36 @@ impl ReactTrace {
         let lines = self.compact_lines_for_render(gen, width);
         self.last_total_lines = lines.len();
 
-        let scroll = match self.anchor {
-            crate::components::react_trace::types::ScrollAnchor::Following => {
-                self.last_total_lines
-                    .saturating_sub(self.last_visible_height)
-            }
-            crate::components::react_trace::types::ScrollAnchor::Row {
-                entry_idx,
-                row_within_entry,
-            } => {
-                let total = self.last_total_lines;
-                let max = total.saturating_sub(self.last_visible_height);
-                (entry_idx + row_within_entry).min(max)
-            }
-        };
+        // Resolve anchor through the unified helper so scroll math and
+        // render math share the same coordinate system. The compact cache's
+        // `entry_row_starts` provides the per-entry row layout.
+        let starts: &[usize] = self
+            .compact_cache
+            .as_ref()
+            .map(|c| c.entry_row_starts.as_slice())
+            .unwrap_or(&[]);
+        let scroll = crate::components::react_trace::render::resolve_anchor(
+            &self.anchor,
+            starts,
+            self.last_total_lines,
+            self.last_visible_height,
+        );
 
         let p = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll as u16, 0));
         frame.render_widget(p, area);
+
+        // Mark this as the surface we last painted so scroll mutators pick
+        // the right cache for anchor resolution.
+        self.last_surface = crate::components::react_trace::Surface::Compact;
     }
 
     /// Internal cache-aware line producer for `render_compact`.
     /// Returns a clone of the cached `Vec<Line>`.
+    ///
+    /// Keeps `cache.entry_row_starts` in lockstep with `cache.lines` across
+    /// all three code paths (hit / incremental / cold).
     fn compact_lines_for_render(&mut self, gen: u64, width: u16) -> Vec<Line<'static>> {
         let entry_count = self.entries.len();
         let dirty = self.dirty_from.unwrap_or(entry_count);
@@ -102,20 +112,33 @@ impl ReactTrace {
             }
         }
 
-        // Incremental rebuild.
+        // Incremental rebuild. Truncate BOTH lines and row_starts at the
+        // dirty boundary, then append the tail of both.
         if let Some(c) = self.compact_cache.as_mut() {
             if c.width == width && dirty < entry_count && dirty <= c.covered_entries {
                 let prefix_row_count = prefix_row_count_for_entries(&self.entries[..dirty]);
                 c.lines.truncate(prefix_row_count);
+                c.entry_row_starts.truncate(dirty);
                 let prev_kind_tag = if dirty > 0 {
                     Some(compact_kind_tag(&self.entries[dirty - 1].kind))
                 } else {
                     None
                 };
-                let tail = build_compact_lines_from(&self.entries[dirty..], width, prev_kind_tag);
-                c.lines.extend(tail);
+                let (tail_lines, tail_starts) = build_compact_lines_from(
+                    &self.entries[dirty..],
+                    width,
+                    prev_kind_tag,
+                    prefix_row_count,
+                );
+                c.lines.extend(tail_lines);
+                c.entry_row_starts.extend(tail_starts);
                 c.generation = gen;
                 c.covered_entries = entry_count;
+                debug_assert_eq!(
+                    c.entry_row_starts.len(),
+                    c.covered_entries,
+                    "entry_row_starts must have one entry per covered entry"
+                );
                 let lines = c.lines.clone();
                 self.dirty_from = None;
                 return lines;
@@ -123,12 +146,17 @@ impl ReactTrace {
         }
 
         // Full rebuild.
-        let lines = self.build_compact_lines(width);
+        let (lines, entry_row_starts) = self.build_compact_lines(width);
+        debug_assert_eq!(
+            entry_row_starts.len(),
+            entry_count,
+            "cold build must produce one row-start per entry"
+        );
         self.compact_cache = Some(CompactCacheEntry {
             generation: gen,
             width,
             lines: lines.clone(),
-            entry_row_starts: Vec::new(),
+            entry_row_starts,
             covered_entries: entry_count,
         });
         self.dirty_from = None;
@@ -206,24 +234,40 @@ fn prefix_row_count_for_entries(entries: &[TraceEntry]) -> usize {
 }
 
 /// Core of `build_compact_lines` and the incremental-rebuild path.
-/// `seed_prev_kind_tag` carries the kind of the entry BEFORE `entries`
-/// (for incremental mode), so the first transition separator is inserted
-/// consistently with a full rebuild.
+///
+/// Returns `(lines, entry_row_starts)` where `entry_row_starts[i]` is the
+/// row index (in the GLOBAL cache coordinate system, offset by `base_row`)
+/// at which entry `i`'s content line sits. Separator rows between
+/// kind-transitions are NOT counted into `entry_row_starts[i]` — each
+/// `starts[i]` points at the entry's content row, not its preceding
+/// separator.
+///
+/// `seed_prev_kind_tag` carries the kind of the entry BEFORE `entries` so
+/// the first transition separator (if any) is inserted consistently with a
+/// full rebuild.
+///
+/// `base_row` is added to every start value so the tail produced by the
+/// incremental-rebuild path lines up with the prefix it is appended to.
+/// Cold-build callers pass `0`.
 fn build_compact_lines_from(
     entries: &[TraceEntry],
     width: u16,
     seed_prev_kind_tag: Option<&'static str>,
-) -> Vec<Line<'static>> {
+    base_row: usize,
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let w = width as usize;
     if entries.is_empty() && seed_prev_kind_tag.is_none() {
-        return vec![Line::from(Span::styled(
+        let placeholder = vec![Line::from(Span::styled(
             "(waiting for worker output…)",
             Style::default().fg(Color::DarkGray),
         ))];
+        return (placeholder, Vec::new());
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut entry_row_starts: Vec<usize> = Vec::with_capacity(entries.len());
     let mut prev_kind_tag: Option<&'static str> = seed_prev_kind_tag;
+    let mut row: usize = base_row;
 
     for entry in entries {
         let kind_tag = compact_kind_tag(&entry.kind);
@@ -237,9 +281,13 @@ fn build_compact_lines_from(
                     sep,
                     Style::default().fg(Color::DarkGray),
                 )));
+                row += 1;
             }
         }
         prev_kind_tag = Some(kind_tag);
+
+        // Record the row of this entry's content line BEFORE pushing it.
+        entry_row_starts.push(row);
 
         let (prefix, style) = compact_prefix_style(&entry.kind);
         let ts = entry.timestamp.clone();
@@ -275,9 +323,10 @@ fn build_compact_lines_from(
             Span::raw(padding),
             Span::styled(ts_display, Style::default().fg(Color::DarkGray)),
         ]));
+        row += 1;
     }
 
-    lines
+    (lines, entry_row_starts)
 }
 
 fn truncate_to_width(s: &str, max_cols: usize) -> String {

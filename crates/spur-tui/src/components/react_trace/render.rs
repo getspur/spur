@@ -45,13 +45,10 @@ pub(in crate::components) struct VirtualRowCacheEntry {
 /// guaranteeing the result lies within the entry's row range. If the entry
 /// was evicted (entry_idx out of range), snaps to 0.
 ///
-/// `_byte_ranges` is retained for caller compatibility (`render_with_ctx`
-/// still threads it) but is not consulted by the Row arm. It can be
-/// dropped in a follow-up cleanup once callers stop passing it.
-#[cfg(feature = "markdown")]
+/// Used by all three render paths (full non-markdown, full markdown/virtual-row,
+/// compact) — signature is cache-agnostic.
 pub(crate) fn resolve_anchor(
     anchor: &crate::components::react_trace::types::ScrollAnchor,
-    _byte_ranges: &[Option<std::ops::Range<usize>>],
     entry_row_starts: &[usize],
     total_rows: usize,
     visible_height: usize,
@@ -369,6 +366,8 @@ impl ReactTrace {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
             frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
         }
+
+        self.last_surface = crate::components::react_trace::Surface::Full;
     }
 
     /// Render the trace with markdown + inline mermaid support.
@@ -485,13 +484,7 @@ impl ReactTrace {
         let (total, offset) = {
             let c = self.line_cache.as_ref().expect("cache just populated");
             let t = c.rows.len();
-            let o = resolve_anchor(
-                &self.anchor,
-                &c.byte_ranges,
-                &c.entry_row_starts,
-                t,
-                visible_height,
-            );
+            let o = resolve_anchor(&self.anchor, &c.entry_row_starts, t, visible_height);
             (t, o)
         };
 
@@ -580,6 +573,8 @@ impl ReactTrace {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
             frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
         }
+
+        self.last_surface = crate::components::react_trace::Surface::Full;
     }
 }
 
@@ -664,60 +659,60 @@ mod resolve_anchor_tests {
 
     #[test]
     fn following_resolves_to_max_offset() {
-        let ranges = ranges(&[Some(0..10), Some(0..10), Some(0..10)]);
+        let _ranges = ranges(&[Some(0..10), Some(0..10), Some(0..10)]);
         let entry_starts = vec![0, 1, 2];
-        let row = resolve_anchor(&ScrollAnchor::Following, &ranges, &entry_starts, 3, 1);
+        let row = resolve_anchor(&ScrollAnchor::Following, &entry_starts, 3, 1);
         assert_eq!(row, 2, "Following clamps to total - visible_height");
     }
 
     #[test]
     fn row_anchor_resolves_within_entry() {
-        let ranges = ranges(&[Some(0..50), Some(0..50), Some(0..30), Some(0..30)]);
+        let _ranges = ranges(&[Some(0..50), Some(0..50), Some(0..30), Some(0..30)]);
         let entry_starts = vec![0, 2];
         let anchor = ScrollAnchor::Row {
             entry_idx: 1,
             row_within_entry: 1,
         };
-        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 4, 2);
+        let row = resolve_anchor(&anchor, &entry_starts, 4, 2);
         assert_eq!(row, 3, "Row{{1,1}} resolves to entry_starts[1]+1 = 3");
     }
 
     #[test]
     fn row_anchor_clamps_to_entry_last() {
-        let ranges = ranges(&[Some(0..50), Some(0..50), Some(0..30), Some(0..30)]);
+        let _ranges = ranges(&[Some(0..50), Some(0..50), Some(0..30), Some(0..30)]);
         let entry_starts = vec![0, 2];
         // Entry 1 is 2 rows (rows 2-3); asking row_within_entry=99 must clamp.
         let anchor = ScrollAnchor::Row {
             entry_idx: 1,
             row_within_entry: 99,
         };
-        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 4, 2);
+        let row = resolve_anchor(&anchor, &entry_starts, 4, 2);
         assert_eq!(row, 3, "row_within_entry=99 clamps to entry's last row (3)");
     }
 
     #[test]
     fn row_anchor_evicted_entry_snaps_to_zero() {
-        let ranges = ranges(&[Some(0..50), Some(0..50)]);
+        let _ranges = ranges(&[Some(0..50), Some(0..50)]);
         let entry_starts = vec![0];
         let anchor = ScrollAnchor::Row {
             entry_idx: 5,
             row_within_entry: 0,
         };
-        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 2, 1);
+        let row = resolve_anchor(&anchor, &entry_starts, 2, 1);
         assert_eq!(row, 0);
     }
 
     #[test]
     fn row_anchor_zero_height_entry_stays_in_bounds() {
         // Two entries: entry 0 has 2 rows, entry 1 is zero-row (degenerate).
-        let ranges = ranges(&[Some(0..50), Some(0..50)]);
+        let _ranges = ranges(&[Some(0..50), Some(0..50)]);
         let entry_starts = vec![0, 2];
         let anchor = ScrollAnchor::Row {
             entry_idx: 1,
             row_within_entry: 5,
         };
         // total_rows = 2, entry 1 spans rows 2..2 (height 0).
-        let row = resolve_anchor(&anchor, &ranges, &entry_starts, 2, 1);
+        let row = resolve_anchor(&anchor, &entry_starts, 2, 1);
         assert!(
             row < 2,
             "result must be < total_rows even for zero-height entry; got {}",
