@@ -49,7 +49,7 @@ pub struct SessionDetailView {
     pub auth_error: Option<String>,
     /// Stateful trigger-transition detector. Replaces the former
     /// trigger state field (retired in Phase 4). History shells are
-    /// not managed through this detector; see refresh_popup.
+    /// not managed through this detector; see dispatch_intent.
     trigger_detector: crate::components::completion_trigger::TriggerDetector,
     /// Registry of `@`-mention sources (files, directories).
     mention_registry: std::rc::Rc<std::cell::RefCell<crate::mentions::MentionRegistry>>,
@@ -237,6 +237,7 @@ impl SessionDetailView {
             return;
         }
         self.input_bar.set_text(draft.to_string(), draft.len());
+        self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
         self.last_persisted_draft = draft.to_string();
     }
 
@@ -349,6 +350,7 @@ impl SessionDetailView {
 
     pub fn handle_paste(&mut self, text: &str) {
         self.input_bar.insert_paste(text);
+        self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Pasted);
     }
 
     /// Format elapsed time since view was opened.
@@ -569,19 +571,20 @@ impl SessionDetailView {
 
     // ── Completion popup wiring ─────────────────────────────────────────
 
-    fn refresh_popup(&mut self) {
-        use crate::components::completion_trigger::{TriggerKind, TriggerTransition};
+    /// Feed a classified IntentEvent into the TriggerDetector and apply the
+    /// resulting transition to `self.picker_shell`. Includes the Idle
+    /// fast-path: on `Idle` state and a non-opening event, return in O(1)
+    /// without fetching text/cursor/ranges from `input_bar`.
+    fn dispatch_intent(&mut self, event: crate::components::completion_trigger::IntentEvent) {
+        use crate::components::completion_trigger::{
+            IntentEvent, TriggerKind, TriggerTransition,
+        };
         use crate::components::picker_shell::PickerShell;
         use crate::components::query_source::{
             MentionQuerySource, QueryMode, SlashQuerySource, SlashRow,
         };
 
-        let text = self.input_bar.text();
-        let cursor = self.input_bar.cursor();
-
-        // If a history shell (OwnedByShell) is open, it steals focus from
-        // the trigger-driven state machine. Do NOT feed the detector while
-        // that's true, and ensure any previous trigger state is cleared.
+        // History-mode shell owns the picker; detector is inert.
         if let Some(shell) = self.picker_shell.as_ref() {
             if shell.query_mode() == QueryMode::OwnedByShell {
                 self.trigger_detector.reset();
@@ -589,7 +592,24 @@ impl SessionDetailView {
             }
         }
 
-        let transition = self.trigger_detector.step(&text, cursor);
+        // Fast path: Idle state + non-opening event → no text fetch, no alloc.
+        if self.trigger_detector.is_idle()
+            && !matches!(
+                event,
+                IntentEvent::TypedChar('@') | IntentEvent::TypedChar('/')
+            )
+        {
+            return;
+        }
+
+        let text = self.input_bar.text();
+        let cursor = self.input_bar.cursor();
+        let ranges = self.input_bar.protected_ranges().to_vec();
+
+        let transition = self
+            .trigger_detector
+            .step(event, &text, cursor, &ranges);
+
         match transition {
             TriggerTransition::None => {}
             TriggerTransition::Update { query } => {
@@ -630,8 +650,6 @@ impl SessionDetailView {
                 self.picker_shell = Some(shell);
             }
             TriggerTransition::Close => {
-                // Close the trigger-driven shell. The detector has already
-                // cleared its last-trigger state inside step().
                 self.picker_shell = None;
             }
         }
@@ -648,6 +666,7 @@ impl SessionDetailView {
         new_text.push_str(&current[cursor..]);
         let new_cursor = prefix_start + replacement.len();
         self.input_bar.set_text(new_text, new_cursor);
+        self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
     }
 
     /// Build (error_ids, pending_ids) sets from the mermaid registry for use
@@ -791,10 +810,12 @@ impl SessionDetailView {
         // Ctrl+P / Ctrl+N → input history navigation.
         if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.input_bar.history_prev();
+            self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
             return None;
         }
         if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.input_bar.history_next();
+            self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
             return None;
         }
 
@@ -857,13 +878,14 @@ impl SessionDetailView {
                     PickerAction::None => {}
                     PickerAction::Cancel => {
                         self.picker_shell = None;
-                        self.trigger_detector.reset();
+                        self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Dismissed);
                     }
                     PickerAction::Accept(accept) => {
                         match accept {
                             RetrievalAccept::ReplaceState(snap) => {
                                 let len = snap.text.len();
                                 self.input_bar.set_state(snap, len);
+                                self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Accepted);
                             }
                             RetrievalAccept::InsertAtom {
                                 text,
@@ -875,22 +897,23 @@ impl SessionDetailView {
                                     self.replace_trigger_token(prefix_start, "");
                                 }
                                 self.input_bar.insert_atom(text, uri, name);
+                                self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Accepted);
                             }
                             RetrievalAccept::ReplaceTriggerToken {
                                 prefix_start,
                                 replacement,
                             } => {
                                 self.replace_trigger_token(prefix_start, &replacement);
+                                self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Accepted);
                             }
                         }
                         self.picker_shell = None;
-                        self.trigger_detector.reset();
                     }
                 }
                 return None;
             }
             // else: editing key on a trigger-driven shell; fall through so
-            // input_bar receives it, then refresh_popup syncs the shell query.
+            // input_bar receives it, then dispatch_intent syncs the shell query.
         }
 
         // Ctrl+R / Alt+R → open history PickerShell. Rejected while a
@@ -923,40 +946,46 @@ impl SessionDetailView {
         ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc());
 
         if is_editing_key {
-            if self.input_bar.handle_key(key).is_some() {
-                // Enter fired. Take the capture and route through SubmitRouter.
-                if let Some((text, ranges, interrupt)) = self.input_bar.take_submit_capture() {
-                    use crate::commands::submit_router::{route, SubmitDecision};
-                    let dec = route(&text, &ranges, &self.command_registry, interrupt);
-                    return match dec {
-                        SubmitDecision::Empty => None,
-                        SubmitDecision::Send { mut blocks, interrupt } => {
-                            if self.role == "brain" {
-                                let _ = crate::mentions::hint::prepend_worker_hint(
-                                    &mut blocks,
-                                    &ranges,
-                                    &self.known_worker_names,
-                                );
+            use crate::components::completion_trigger::IntentEvent;
+            use crate::components::input_bar::HandleOutcome;
+            match self.input_bar.handle_key(key) {
+                HandleOutcome::Submit(_, _) => {
+                    // Notify detector before processing submit (the detector doesn't
+                    // care about the text; this just retires any open composition).
+                    self.dispatch_intent(IntentEvent::Submitted);
+                    if let Some((text, ranges, interrupt)) = self.input_bar.take_submit_capture() {
+                        use crate::commands::submit_router::{route, SubmitDecision};
+                        let dec = route(&text, &ranges, &self.command_registry, interrupt);
+                        return match dec {
+                            SubmitDecision::Empty => None,
+                            SubmitDecision::Send { mut blocks, interrupt } => {
+                                if self.role == "brain" {
+                                    let _ = crate::mentions::hint::prepend_worker_hint(
+                                        &mut blocks,
+                                        &ranges,
+                                        &self.known_worker_names,
+                                    );
+                                }
+                                Some(Action::SendMessage {
+                                    session: self.session_id.clone(),
+                                    blocks,
+                                    interrupt,
+                                })
                             }
-                            Some(Action::SendMessage {
+                            SubmitDecision::Local { action } => Some(action),
+                            SubmitDecision::VendorExec { method, params } => Some(Action::VendorExec {
                                 session: self.session_id.clone(),
-                                blocks,
-                                interrupt,
-                            })
-                        }
-                        SubmitDecision::Local { action } => Some(action),
-                        SubmitDecision::VendorExec { method, params } => Some(Action::VendorExec {
-                            session: self.session_id.clone(),
-                            method,
-                            params,
-                        }),
-                    };
+                                method,
+                                params,
+                            }),
+                        };
+                    }
+                    return None;
                 }
-                return None;
+                HandleOutcome::Key(intent) => {
+                    self.dispatch_intent(intent);
+                }
             }
-
-            // Key was an ordinary edit (insert/delete/arrow). Re-evaluate popup state.
-            self.refresh_popup();
 
             // If the input_bar is empty and the key was a navigation key (j/k/g/G),
             // we want scroll behavior instead. But since we already routed to
