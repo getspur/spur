@@ -56,7 +56,10 @@ fn overlay_renders_empty_state_placeholder() {
     let state = PaletteState::new();
     let rendered = render_to_string(&state, 60, 12);
     assert!(rendered.contains("Go to"));
-    assert!(rendered.contains("type to filter") || rendered.contains("no matches") || rendered.contains("No matches"));
+    assert!(
+        rendered.contains("type to filter"),
+        "empty-query empty-state should render the 'type to filter' hint"
+    );
 }
 
 #[test]

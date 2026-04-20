@@ -86,12 +86,12 @@ impl<'a> Widget for PaletteOverlay<'a> {
 
         // Results or empty-state placeholder.
         if self.state.ranked_len() == 0 {
-            let msg: String = if self.state.query().is_empty() {
-                "type to filter".to_string()
+            let msg: &str = if self.state.query().is_empty() {
+                "type to filter"
             } else if self.state.query().starts_with('/') && !self.session_active {
-                "Slash commands need an active session.".to_string()
+                "Slash commands need an active session."
             } else {
-                "No matches. Try shorter or different keywords.".to_string()
+                "No matches. Try shorter or different keywords."
             };
             Paragraph::new(Line::from(Span::styled(
                 msg,
