@@ -1,3 +1,9 @@
+// rustc resolves submodules of integration-test files relative to
+// `tests/` (not the test file's directory), so #[path] is required to
+// keep the helper co-located under tests/palette_integration/.
+#[path = "palette_integration/util.rs"]
+mod util;
+
 use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use spur_tui::test_support::new_app;
 
@@ -55,4 +61,99 @@ fn palette_session_accept_emits_resume_session_action() {
         }
         other => panic!("expected ResumeSession, got {:?}", other),
     }
+}
+
+#[test]
+fn open_palette_surfaces_session_command_registry_entries() {
+    let mut app = util::app_with_seeded_session_and_dynamic_command(
+        "codex",
+        "review",
+        "Review the current diff",
+    );
+    app.try_open_palette_for_test();
+    let state = app.palette_state_for_test();
+    let labels: Vec<&str> = state.iter_ranked().map(|r| r.label.as_str()).collect();
+    assert!(
+        labels.contains(&"review"),
+        "expected the dynamic /review command to appear in the palette; got: {labels:?}"
+    );
+}
+
+#[test]
+fn accept_spur_local_command_emits_concrete_action() {
+    // Why seed a dynamic /anything command? It exercises the Some(view)
+    // arm of result_to_action's borrow-shim. We then query /help to
+    // confirm spur-local resolution still works through the borrowed
+    // (rather than fallback) registry. The third test in this file covers
+    // the None arm explicitly.
+    // /help is a spur-local command → SubmitDecision::Local { Action::ShowHelp }.
+    // Palette should emit Action::ShowHelp on Accept.
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_tui::action::Action;
+    let mut app = util::app_with_seeded_session_and_dynamic_command(
+        "codex",
+        "anything",
+        "unused",
+    );
+    app.try_open_palette_for_test();
+    app.palette_state_for_test_mut().set_query("help");
+    app.handle_crossterm_event_for_test(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ));
+    assert!(
+        matches!(app.last_action_for_test(), Some(Action::ShowHelp)),
+        "expected Action::ShowHelp; got {:?}",
+        app.last_action_for_test()
+    );
+}
+
+#[test]
+fn accept_agent_dynamic_command_emits_send_message() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_tui::action::Action;
+    let mut app = util::app_with_seeded_session_and_dynamic_command(
+        "codex",
+        "review",
+        "Review the current diff",
+    );
+    app.try_open_palette_for_test();
+    app.palette_state_for_test_mut().set_query("review");
+    app.handle_crossterm_event_for_test(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ));
+    // CommandsConfig::default() sets dispatch = DispatchKind::PromptText,
+    // so build_entry produces a Dispatch::PromptText entry and routing
+    // always lands on SubmitDecision::Send → Action::SendMessage. A
+    // VendorExec test would need to seed a CommandsConfig with
+    // DispatchKind::VendorExec and a non-empty exec_method.
+    let action = app.last_action_for_test();
+    assert!(
+        matches!(action, Some(Action::SendMessage { .. })),
+        "expected Action::SendMessage; got {:?}",
+        action
+    );
+}
+
+#[test]
+fn accept_spur_local_command_works_without_session() {
+    // No session_detail; spur-local /help still works (it's resident in
+    // the empty CommandRegistry's SpurLocalSource fallback).
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_tui::action::Action;
+    let mut app = spur_tui::app::App::new_for_palette_test();
+    // No session_detail seeded → fallback CommandRegistry::new() with
+    // only spur-local entries.
+    app.try_open_palette_for_test();
+    app.palette_state_for_test_mut().set_query("help");
+    app.handle_crossterm_event_for_test(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ));
+    assert!(
+        matches!(app.last_action_for_test(), Some(Action::ShowHelp)),
+        "spur-local /help should work without a session; got {:?}",
+        app.last_action_for_test()
+    );
 }

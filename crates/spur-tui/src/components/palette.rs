@@ -3,6 +3,12 @@
 //! A modal overlay that fuzzy-searches across sessions, workers-in-lineage,
 //! commands, and the current-session trace. Dispatches an `Action` on Enter.
 
+/// Subtitle scores in `rerank` are weighted by this multiplier before
+/// being compared with label scores. < 1.0 biases toward label matches
+/// while still allowing strong subtitle matches to dominate weak label
+/// matches. Tune in one place.
+const SUBTITLE_WEIGHT: f32 = 0.7;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteKind {
     Command,
@@ -36,7 +42,9 @@ pub struct PaletteResult {
 ///   - **O(N) time** where N = `raw.len()`.
 ///   - **O(M · 4 bytes)** new memory per rerank, where M = matched entries.
 ///   - **Exactly 2 allocations** on the non-empty-query path: one `Pattern`
-///     parse and one scratch `Vec<(u32, u32)>` for scoring.
+///     parse and one scratch `Vec<(u32, u32)>` for scoring. `self.scratch`
+///     is reused between label and subtitle scoring (one `clear()` between)
+///     so the second Utf32Str conversion does not allocate.
 ///   - **Zero clones** of `PaletteResult` fields (label/subtitle are not
 ///     copied during rerank; we rank by index into `raw`).
 ///
@@ -105,6 +113,7 @@ impl PaletteState {
     fn rerank(&mut self) {
         use nucleo_matcher::{pattern::{CaseMatching, Normalization, Pattern}, Utf32Str};
 
+        let _rerank_start = std::time::Instant::now();
         self.order.clear();
         if self.query.is_empty() {
             // Empty-query path: identity order, no scoring, no cloning.
@@ -114,8 +123,23 @@ impl PaletteState {
             let mut tmp: Vec<(u32, u32)> = Vec::with_capacity(self.raw.len());
             for (i, entry) in self.raw.iter().enumerate() {
                 self.scratch.clear();
-                let utf = Utf32Str::new(&entry.label, &mut self.scratch);
-                if let Some(score) = pattern.score(utf, &mut self.matcher) {
+                let label_utf = Utf32Str::new(&entry.label, &mut self.scratch);
+                let label_score = pattern.score(label_utf, &mut self.matcher);
+
+                self.scratch.clear();
+                let sub_utf = Utf32Str::new(&entry.subtitle, &mut self.scratch);
+                let sub_score = pattern.score(sub_utf, &mut self.matcher);
+
+                // Weighted max: label matches are primary; subtitle counts at 0.7x.
+                // Reusing self.scratch between the two scorings keeps the rerank
+                // 2-allocation budget intact (see tests/palette_rerank_bench_smoke.rs).
+                let weighted = match (label_score, sub_score) {
+                    (Some(a), Some(b)) => Some(a.max(((b as f32) * SUBTITLE_WEIGHT) as u32)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(((b as f32) * SUBTITLE_WEIGHT) as u32),
+                    (None, None) => None,
+                };
+                if let Some(score) = weighted {
                     tmp.push((score, i as u32));
                 }
             }
@@ -123,6 +147,14 @@ impl PaletteState {
             tmp.sort_by(|a, b| b.0.cmp(&a.0));
             self.order.extend(tmp.into_iter().map(|(_, i)| i));
         }
+        tracing::debug!(
+            target: "palette",
+            query_len = self.query.len(),
+            n = self.raw.len(),
+            m = self.order.len(),
+            elapsed_us = _rerank_start.elapsed().as_micros() as u64,
+            "rerank: complete"
+        );
         // Clamp cursor to new ranked length.
         self.cursor = self.cursor.min(self.order.len().saturating_sub(1));
     }

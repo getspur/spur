@@ -99,3 +99,96 @@ fn reset_clears_query_and_raw_but_not_state_struct() {
     assert_eq!(s.ranked_len(), 0);
     assert_eq!(s.cursor(), 0);
 }
+
+#[test]
+fn subtitle_only_match_is_ranked() {
+    // Label has no match; subtitle (session id) does.
+    let mut s = PaletteState::new();
+    s.push_raw(vec![PaletteResult {
+        kind: PaletteKind::Session,
+        label: "human friendly title".into(),
+        subtitle: "session · 7f3b0c1d".into(),
+        payload: PalettePayload::Session {
+            session_id: "7f3b0c1d".into(),
+        },
+    }]);
+    s.set_query("7f3b");
+    assert_eq!(
+        s.ranked_len(),
+        1,
+        "query matching only the subtitle should still rank the row"
+    );
+    assert_eq!(s.nth_ranked(0).unwrap().label, "human friendly title");
+}
+
+#[test]
+fn label_match_beats_weaker_subtitle_match() {
+    // Two rows: first has the query in its subtitle only; second has it in the label.
+    // The label-match row should rank above the subtitle-match row given the 0.7x weight.
+    let mut s = PaletteState::new();
+    s.push_raw(vec![
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "zzz unrelated".into(),
+            subtitle: "session · alpha-match".into(),
+            payload: PalettePayload::Session {
+                session_id: "sub-id".into(),
+            },
+        },
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "alpha in label".into(),
+            subtitle: "session · unrelated".into(),
+            payload: PalettePayload::Session {
+                session_id: "lbl-id".into(),
+            },
+        },
+    ]);
+    s.set_query("alpha");
+    let labels: Vec<&str> = s.iter_ranked().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels.len(), 2);
+    assert_eq!(
+        labels[0], "alpha in label",
+        "label match should rank above subtitle-only match"
+    );
+}
+
+#[test]
+fn subtitle_weight_actually_demotes_subtitle_only_matches() {
+    // Two entries with IDENTICAL fuzzy-match material:
+    //   * Entry A: label = "alpha" (perfect short match), subtitle = "irrelevant"
+    //   * Entry B: label = "irrelevant", subtitle = "alpha" (perfect short match)
+    //
+    // nucleo gives both the same raw score against query "alpha". Without
+    // the subtitle weight, the entries would tie and `sort_by` (stable)
+    // would preserve insertion order — so the FIRST-inserted entry would
+    // rank first. We insert B first deliberately, so a weight of 1.0
+    // would put B at rank 0. Any weight < 1.0 puts A at rank 0.
+    //
+    // This test fails if SUBTITLE_WEIGHT is regressed to 1.0.
+    let mut s = PaletteState::new();
+    s.push_raw(vec![
+        // Insert subtitle-only match FIRST so insertion-order tie-break
+        // would favor it under weight=1.0.
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "irrelevant".into(),
+            subtitle: "alpha".into(),
+            payload: PalettePayload::Session { session_id: "b".into() },
+        },
+        PaletteResult {
+            kind: PaletteKind::Session,
+            label: "alpha".into(),
+            subtitle: "irrelevant".into(),
+            payload: PalettePayload::Session { session_id: "a".into() },
+        },
+    ]);
+    s.set_query("alpha");
+    assert_eq!(s.ranked_len(), 2);
+    assert_eq!(
+        s.nth_ranked(0).unwrap().label,
+        "alpha",
+        "label-only match must outrank subtitle-only match when raw scores tie; \
+         this assertion fails if SUBTITLE_WEIGHT is regressed to 1.0"
+    );
+}
