@@ -7,6 +7,7 @@
 
 pub mod audit_sentinel;
 pub mod labels;
+pub mod reconciler;
 pub mod signals;
 
 use std::collections::{HashMap, HashSet, VecDeque};
