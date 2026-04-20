@@ -635,7 +635,9 @@ impl BeadsAdvanced for BeadsAdapter {
             args.push("-t".into());
             args.push(t.clone());
         }
-        if let Some(p) = filter.priority_min {
+        // `br ready -p <n>` is a repeatable set-membership filter (0-4 or P0-P4),
+        // NOT a range: `-p 0 -p 2` returns P0 ∪ P2. Emit one `-p` per element.
+        for p in &filter.priorities {
             args.push("-p".into());
             args.push(p.to_string());
         }

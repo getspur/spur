@@ -13,14 +13,23 @@ use crate::types::IssueSummary;
 
 // ─── Filter & input types ─────────────────────────────────────────────
 
+/// Filter passed to `BeadsAdvanced::list_ready`. Mirrors the actual flag
+/// surface of `br ready` as of br 0.1.14 rather than inventing a
+/// caller-convenient shape that lies about the backend's semantics.
+///
+/// `priorities` is a **set-membership** filter matching br's empirically
+/// verified `-p, --priority <PRIORITY>  (can be repeated, 0-4 or P0-P4)`
+/// model: `br ready -p 0 -p 2` returns P0 ∪ P2. Empty vec = no priority
+/// filter. To express a contiguous range, enumerate:
+/// `priorities: vec![2, 3, 4]`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReadyFilter {
     pub assignee: Option<String>,
     pub labels_all: Vec<String>,
     pub labels_any: Vec<String>,
     pub issue_type: Option<String>,
-    pub priority_min: Option<i32>,
-    pub priority_max: Option<i32>,
+    /// Set of priorities to include (repeated `-p <n>` flags). Empty = no filter.
+    pub priorities: Vec<i32>,
     pub limit: Option<usize>,
 }
 
@@ -147,6 +156,7 @@ mod tests {
         assert!(f.assignee.is_none());
         assert!(f.labels_all.is_empty());
         assert!(f.labels_any.is_empty());
+        assert!(f.priorities.is_empty());
         assert!(f.limit.is_none());
     }
 }
