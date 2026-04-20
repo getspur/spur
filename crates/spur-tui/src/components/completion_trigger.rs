@@ -64,6 +64,51 @@ pub fn detect(text: &str, cursor: usize) -> Option<Trigger> {
     None
 }
 
+/// User-intent event fed to the trigger state machine. Classified at the
+/// dispatch site (InputBar::handle_key for key events; session_detail
+/// emits the non-key variants at their call sites). See the design spec
+/// for the full transition table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntentEvent {
+    /// User pressed a printable character key. Carries the character.
+    TypedChar(char),
+    /// User deleted characters (Backspace, Delete, Ctrl+K, Ctrl+U, Ctrl+W,
+    /// or atomic range deletion). May remove multiple bytes.
+    DeletedChar,
+    /// Pure cursor motion — arrows, Home, End, Ctrl-A/E, word motion,
+    /// vim h/j/k/l/w/b/etc., visual-line up/down, `g`/`G`, mouse click.
+    MovedCursor,
+    /// `input_bar.insert_paste(...)` ran.
+    Pasted,
+    /// `input_bar.set_text(...)` / `set_state(...)` / history-recall swap ran.
+    SetText,
+    /// Picker accepted a selection; the view is about to `insert_atom` or
+    /// `set_state`. Emitted at the accept call site.
+    Accepted,
+    /// Picker cancelled (Esc / Ctrl+C). Emitted at the cancel call site.
+    Dismissed,
+    /// Buffer submitted (Enter). Emitted alongside `HandleOutcome::Submit`.
+    Submitted,
+    /// The key event was not handled (e.g., vim intermediate pending).
+    NoOp,
+}
+
+/// Internal state of the trigger detector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TriggerState {
+    Idle,
+    Composing {
+        kind: TriggerKind,
+        prefix_start: usize,
+    },
+}
+
+impl Default for TriggerState {
+    fn default() -> Self {
+        TriggerState::Idle
+    }
+}
+
 /// Transition emitted by `TriggerDetector::step` describing what the view
 /// should do with its active `PickerShell`.
 #[derive(Debug, Clone, PartialEq, Eq)]
