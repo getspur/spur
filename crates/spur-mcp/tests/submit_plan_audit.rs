@@ -29,10 +29,10 @@ fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .expect("br invocation failed");
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         Err(format!(
             "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
             out.status
