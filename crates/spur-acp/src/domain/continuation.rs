@@ -29,13 +29,13 @@ pub enum ContinuationSource {
 /// the orchestrator ingress channel.
 #[derive(Debug, Clone)]
 pub struct ContinuationPayload {
-    pub status:        DelegationStatus,
-    pub summary:       Option<String>,
-    pub diff_summary:  Option<DiffSummary>,
+    pub status: DelegationStatus,
+    pub summary: Option<String>,
+    pub diff_summary: Option<DiffSummary>,
     pub worker_branch: Option<String>,
     /// Side-channel reference to persisted stdout; see
     /// `crate::domain::artifact::WorkerArtifact`.
-    pub artifact:      Option<crate::domain::artifact::WorkerArtifact>,
+    pub artifact: Option<crate::domain::artifact::WorkerArtifact>,
 }
 
 /// One detached delegation result awaiting brain re-entry.
@@ -44,12 +44,12 @@ pub struct BrainContinuation {
     /// Correlation key (UUID string; migrates to `DelegationId` newtype when INV-1 lands).
     pub delegation_id: String,
     /// Why this continuation fired.
-    pub source:        ContinuationSource,
+    pub source: ContinuationSource,
     /// Narrow projection of the worker outcome.
-    pub payload:       ContinuationPayload,
+    pub payload: ContinuationPayload,
     /// Monotonic creation time; not persisted across process restart.
     /// Equality on `BrainContinuation` should be done via `delegation_id`, not this field.
-    pub created_at:    Instant,
+    pub created_at: Instant,
 }
 
 #[cfg(test)]
@@ -125,5 +125,25 @@ mod tests {
             p.artifact.as_ref().unwrap().kind,
             ArtifactKind::Diagnostic
         ));
+    }
+
+    #[test]
+    fn continuation_payload_preserves_artifact_through_clone() {
+        use crate::domain::artifact::{ArtifactKind, WorkerArtifact};
+        let art = WorkerArtifact {
+            object_ref: "refs/spur/artifacts/s3".into(),
+            blob_sha: "c".repeat(40),
+            size_bytes: 12_345,
+            kind: ArtifactKind::Output,
+        };
+        let p = ContinuationPayload {
+            status: DelegationStatus::Success,
+            summary: Some("pointer".into()),
+            diff_summary: None,
+            worker_branch: None,
+            artifact: Some(art.clone()),
+        };
+        let copied = p.clone();
+        assert_eq!(copied.artifact.as_ref().unwrap().blob_sha, art.blob_sha);
     }
 }
