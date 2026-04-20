@@ -44,7 +44,9 @@ impl PmService {
         let beads_dir = repo_root.join(".beads");
 
         if beads_dir.is_dir() && beads_enabled {
-            let beads = BeadsAdapter::connect(repo_root).await?;
+            let cursor_path = beads_dir.join(".spur-poll-cursor");
+            let beads =
+                BeadsAdapter::connect_with_actor(repo_root, None, Some(cursor_path)).await?;
             let bv = match BvAdapter::connect(repo_root).await {
                 Ok(bv) => Some(bv),
                 Err(e) => {
