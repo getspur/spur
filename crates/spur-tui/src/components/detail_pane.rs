@@ -159,6 +159,21 @@ impl DetailPane {
         self.set_tab(all[next], stream_trace);
     }
 
+    /// Jump directly to a specific tab. Applies the same per-tab reset
+    /// invariants as [`DetailPane::cycle_tab`] (scroll to top, set
+    /// `is_following` per tab kind, snap Stream trace to bottom).
+    ///
+    /// Use this from outside the pane instead of writing `current_tab`
+    /// directly — the field is `pub(crate)` and only readable via
+    /// [`DetailPane::current_tab`].
+    pub fn jump_to_tab(
+        &mut self,
+        tab: DetailTab,
+        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
+    ) {
+        self.set_tab(tab, stream_trace);
+    }
+
     pub fn scroll_up(
         &mut self,
         stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
@@ -487,5 +502,59 @@ mod scroll_label_tests {
         // total=100, visible=20, offset=42 → " ▲ 42 ↑ ".
         let s = scroll_label(DetailTab::Artifacts, 100, 20, 42, false, None);
         assert_eq!(s, Cow::<'static, str>::Owned(" ▲ 42 ↑ ".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod jump_to_tab_tests {
+    use super::*;
+
+    #[test]
+    fn jump_to_review_resets_scroll_and_follow() {
+        let mut pane = DetailPane::new();
+        // Simulate user having scrolled on a prior tab.
+        pane.scroll_offset = 42;
+        pane.is_following = true;
+        pane.jump_to_tab(DetailTab::Review, None);
+        assert_eq!(pane.current_tab, DetailTab::Review);
+        assert_eq!(pane.scroll_offset, 0);
+        assert!(!pane.is_following);
+    }
+
+    #[test]
+    fn jump_to_artifacts_opens_at_top_without_following() {
+        let mut pane = DetailPane::new();
+        pane.scroll_offset = 100;
+        pane.is_following = true;
+        pane.jump_to_tab(DetailTab::Artifacts, None);
+        assert_eq!(pane.current_tab, DetailTab::Artifacts);
+        assert_eq!(pane.scroll_offset, 0);
+        assert!(!pane.is_following);
+    }
+
+    #[test]
+    fn jump_to_stream_engages_follow_and_resets_offset() {
+        let mut pane = DetailPane::new();
+        // Start on a non-Stream tab with a non-zero scroll offset.
+        pane.current_tab = DetailTab::Artifacts;
+        pane.scroll_offset = 42;
+        pane.is_following = false;
+        pane.jump_to_tab(DetailTab::Stream, None);
+        assert_eq!(pane.current_tab, DetailTab::Stream);
+        assert_eq!(pane.scroll_offset, 0);
+        assert!(pane.is_following);
+    }
+
+    #[test]
+    fn jump_is_idempotent_on_same_tab() {
+        // Jumping to the tab you are already on still resets.
+        let mut pane = DetailPane::new();
+        pane.current_tab = DetailTab::Task;
+        pane.scroll_offset = 99;
+        pane.is_following = true;
+        pane.jump_to_tab(DetailTab::Task, None);
+        assert_eq!(pane.current_tab, DetailTab::Task);
+        assert_eq!(pane.scroll_offset, 0);
+        assert!(!pane.is_following);
     }
 }
