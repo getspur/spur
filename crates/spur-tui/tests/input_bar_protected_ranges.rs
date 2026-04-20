@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use spur_tui::components::input_bar::InputBar;
+use spur_tui::components::input_bar::{HandleOutcome, InputBar};
 
 fn press(bar: &mut InputBar, code: KeyCode) {
     let _ = bar.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -132,7 +132,7 @@ fn enter_captures_text_and_ranges() {
     b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
     type_str(&mut b, "!");
     let result = b.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(result.is_some());
+    assert!(matches!(result, HandleOutcome::Submit(_, _)));
     let (text, ranges, interrupt) = b.take_submit_capture().expect("capture");
     assert_eq!(text, "hi @a.rs!");
     assert_eq!(ranges.len(), 1);
