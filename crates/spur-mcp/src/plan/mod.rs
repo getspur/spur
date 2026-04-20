@@ -555,7 +555,7 @@ fn has_cycle(tasks: &[PlanTask]) -> bool {
 /// has no `BeadsAdvanced` surface (e.g. GitHub). Every failure is advisory —
 /// logged at WARN and execution continues.
 pub async fn emit_dispatch_audit(
-    pm: Option<&Arc<dyn PmLike>>,
+    pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
     plan_id: &str,
     delegation_id: &str,
@@ -584,7 +584,7 @@ pub async fn emit_dispatch_audit(
 
 /// Emit a `[[spur-audit v1]] Completion` sentinel comment on the task issue.
 pub async fn emit_completion_audit(
-    pm: Option<&Arc<dyn PmLike>>,
+    pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
     plan_id: &str,
     delegation_id: &str,
@@ -612,9 +612,8 @@ pub async fn emit_completion_audit(
 }
 
 /// Emit a `[[spur-audit v1]] Approval` sentinel comment on the task issue.
-#[allow(dead_code)] // available for use in integration tests; handle_review_task inlines for &dyn PmLike compat
 pub(crate) async fn emit_approval_audit(
-    pm: Option<&Arc<dyn PmLike>>,
+    pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
     plan_id: &str,
     delegation_id: &str,
@@ -638,9 +637,8 @@ pub(crate) async fn emit_approval_audit(
 }
 
 /// Emit a `[[spur-audit v1]] Rejection` sentinel comment on the task issue.
-#[allow(dead_code)] // available for use in integration tests; handle_review_task inlines for &dyn PmLike compat
 pub(crate) async fn emit_rejection_audit(
-    pm: Option<&Arc<dyn PmLike>>,
+    pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
     plan_id: &str,
     delegation_id: &str,
@@ -758,7 +756,7 @@ pub async fn run_plan(
 
             // Emit Dispatch audit sentinel — outside the plan lock.
             emit_dispatch_audit(
-                pm.as_ref(),
+                pm.as_deref(),
                 &task_spec.issue_id,
                 &plan_id,
                 &delegation_id,
@@ -822,7 +820,7 @@ pub async fn run_plan(
                         drop(p);
                         if completion_success {
                             emit_completion_audit(
-                                pm_ref.as_ref(),
+                                pm_ref.as_deref(),
                                 &issue_id_for_completion,
                                 &pid,
                                 &delegation_id_for_completion,
@@ -1389,6 +1387,7 @@ pub async fn review_task(
             if let (Some(tx), Some(tracker), Some(arc)) =
                 (delegation_tx, task_tracker, plan_arc.clone())
             {
+                let mut _unused_audit_emits: Vec<PendingAuditEmit> = Vec::new();
                 dispatch_newly_ready(
                     plan_id,
                     state,
@@ -1398,6 +1397,7 @@ pub async fn review_task(
                     sink,
                     &mut warnings,
                     &mut new_dispatches,
+                    &mut _unused_audit_emits,
                 );
             }
         }
@@ -1763,6 +1763,13 @@ enum PendingAuditEmit {
         delegation_id: String,
         feedback: String,
     },
+    Dispatch {
+        issue_id: Option<String>,
+        plan_id: String,
+        delegation_id: String,
+        worker: String,
+        attempt: u32,
+    },
 }
 
 /// Everything produced by `apply_decision_and_extract` under the plan lock.
@@ -1877,6 +1884,7 @@ fn apply_decision_and_extract(
                     sink,
                     &mut warnings,
                     &mut new_dispatches,
+                    &mut audit_emits,
                 );
             }
         }
@@ -2077,8 +2085,18 @@ fn apply_decision_and_extract(
 
             new_dispatches.push((task_id.to_string(), new_attempt, delegation_id.clone()));
 
-            // Stage beads audit comment — executes outside the lock.
+            // Stage Dispatch audit sentinel for the re-dispatched attempt.
+            let agent_for_audit = entry.spec.agent.clone();
             let issue_id_for_audit = entry.spec.issue_id.clone();
+            audit_emits.push(PendingAuditEmit::Dispatch {
+                issue_id: issue_id_for_audit.clone(),
+                plan_id: plan_id.to_string(),
+                delegation_id: delegation_id.clone(),
+                worker: agent_for_audit,
+                attempt: new_attempt,
+            });
+
+            // Stage beads audit comment — executes outside the lock.
             let superseded_branch: Option<String> =
                 entry.history.last().and_then(|h| h.worker_branch.clone());
             if let Some(id) = issue_id_for_audit {
@@ -2215,47 +2233,29 @@ pub async fn handle_review_task(
         // 2b) Flush audit sentinel emissions — advisory, outside the lock.
         for emit in outcome.audit_emits {
             match emit {
-                PendingAuditEmit::Approval { ref issue_id, ref plan_id, ref delegation_id } => {
-                    if let Some(adv) = pm.advanced() {
-                        if let Some(ref iid) = *issue_id {
-                            let kind = crate::plan::audit_sentinel::AuditSentinelKind::Approval {
-                                delegation_id: delegation_id.clone(),
-                            };
-                            let body = crate::plan::audit_sentinel::encode_comment(&kind);
-                            if let Err(e) = adv.add_comment(iid, &body).await {
-                                warn!(
-                                    issue_id = %iid,
-                                    plan_id = %plan_id,
-                                    delegation_id = %delegation_id,
-                                    "Approval audit comment emission failed: {e}"
-                                );
-                            }
-                        }
-                    }
+                PendingAuditEmit::Approval { issue_id, plan_id, delegation_id } => {
+                    emit_approval_audit(Some(pm), &issue_id, &plan_id, &delegation_id).await;
                 }
-                PendingAuditEmit::Rejection {
-                    ref issue_id,
-                    ref plan_id,
-                    ref delegation_id,
-                    ref feedback,
+                PendingAuditEmit::Rejection { issue_id, plan_id, delegation_id, feedback } => {
+                    emit_rejection_audit(Some(pm), &issue_id, &plan_id, &delegation_id, &feedback)
+                        .await;
+                }
+                PendingAuditEmit::Dispatch {
+                    issue_id,
+                    plan_id,
+                    delegation_id,
+                    worker,
+                    attempt,
                 } => {
-                    if let Some(adv) = pm.advanced() {
-                        if let Some(ref iid) = *issue_id {
-                            let kind = crate::plan::audit_sentinel::AuditSentinelKind::Rejection {
-                                delegation_id: delegation_id.clone(),
-                                feedback: feedback.clone(),
-                            };
-                            let body = crate::plan::audit_sentinel::encode_comment(&kind);
-                            if let Err(e) = adv.add_comment(iid, &body).await {
-                                warn!(
-                                    issue_id = %iid,
-                                    plan_id = %plan_id,
-                                    delegation_id = %delegation_id,
-                                    "Rejection audit comment emission failed: {e}"
-                                );
-                            }
-                        }
-                    }
+                    emit_dispatch_audit(
+                        Some(pm),
+                        &issue_id,
+                        &plan_id,
+                        &delegation_id,
+                        &worker,
+                        attempt,
+                    )
+                    .await;
                 }
             }
         }
@@ -2369,6 +2369,7 @@ fn dispatch_newly_ready(
     sink: Option<&dyn crate::events::McpEventSink>,
     warnings: &mut Vec<String>,
     new_dispatches: &mut Vec<(String, u32, String)>,
+    audit_emits: &mut Vec<PendingAuditEmit>,
 ) {
     let ready_ids: Vec<String> = state
         .tasks
@@ -2408,10 +2409,10 @@ fn dispatch_newly_ready(
 
         let req = crate::tools::DelegationRequest {
             id: delegation_id.clone().into(),
-            agent,
+            agent: agent.clone(),
             task,
             delegation_plan: None,
-            issue_id,
+            issue_id: issue_id.clone(),
             context_files,
             respond_to: resp_tx,
             brain_session_id,
@@ -2435,7 +2436,15 @@ fn dispatch_newly_ready(
                     plan_arc.clone(),
                     task_tracker,
                 );
-                new_dispatches.push((task_id.clone(), 1, delegation_id));
+                new_dispatches.push((task_id.clone(), 1, delegation_id.clone()));
+                // Stage Dispatch audit sentinel — emitted outside the lock by caller.
+                audit_emits.push(PendingAuditEmit::Dispatch {
+                    issue_id,
+                    plan_id: plan_id.to_string(),
+                    delegation_id,
+                    worker: agent,
+                    attempt: 1,
+                });
             }
             Err(e) => {
                 let entry = state
@@ -2450,7 +2459,7 @@ fn dispatch_newly_ready(
             }
         }
     }
-    let _ = (plan_id, sink); // reserved for future event emission on cascade dispatch
+    let _ = sink; // reserved for future event emission on cascade dispatch
 }
 
 /// Spawn a future that awaits a DelegationResult and writes it back to PlanState.

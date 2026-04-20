@@ -17,6 +17,14 @@
 //! All four sentinels are validated by reading back `br comments list`.
 //!
 //! Requires `br` on PATH. Skipped (not failed) when `br` is unavailable.
+//!
+//! TODO(v0b): Add `run_plan_drives_dispatch_and_completion_emission` — a test
+//! that wires a real `mpsc::Sender<DelegationRequest>` + matching rx, spawns a
+//! task that echoes a canned `DelegationResult` back via the response oneshot,
+//! calls `run_plan(...)`, waits for plan completion, then asserts Dispatch +
+//! Completion sentinels appear in `br comments list`. Deferred because it
+//! requires standing up a mock orchestrator in the test process, which is more
+//! invasive than the narrow helper tests above.
 
 use std::path::Path;
 use std::process::Command;
@@ -123,7 +131,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
 
     let issue_id_opt = Some(task_issue_id.clone());
     spur_mcp::plan::emit_dispatch_audit(
-        Some(&pm_arc),
+        Some(pm_arc.as_ref()),
         &issue_id_opt,
         "audit-plan-1",
         &delegation_id,
@@ -134,7 +142,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
 
     // ── 3. Completion — on task issue ────────────────────────────────────────
     spur_mcp::plan::emit_completion_audit(
-        Some(&pm_arc),
+        Some(pm_arc.as_ref()),
         &issue_id_opt,
         "audit-plan-1",
         &delegation_id,
@@ -235,5 +243,109 @@ async fn plan_audit_coverage_all_four_sentinels() {
     assert!(
         cp < ap,
         "Completion must precede Approval (positions: {cp} vs {ap})"
+    );
+}
+
+#[tokio::test]
+async fn rejection_emits_rejection_sentinel() {
+    if !br_available() {
+        eprintln!("skipping rejection_emits_rejection_sentinel: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(
+        None,  // no github_repo
+        true,  // beads_enabled
+        false, // github_enabled
+        dir.path(),
+        None, // closed_status default
+    )
+    .await
+    .expect("PmService::try_new failed")
+    .expect("expected Some(PmService)");
+
+    let tasks = vec![PlanTask {
+        task_id: "t1".into(),
+        agent: "codex".into(),
+        task: "Do the rejection thing.".into(),
+        depends_on: vec![],
+        issue_id: None,
+        context_files: vec![],
+    }];
+
+    // Build epic subgraph — creates epic + child issue in beads.
+    let subgraph =
+        spur_mcp::build_epic_subgraph(&pm, "audit-reject-1", "Rejection Audit Epic", None, &tasks)
+            .await
+            .expect("build_epic_subgraph must succeed");
+
+    let task_issue_id = subgraph
+        .task_map
+        .get("t1")
+        .expect("t1 must be in task_map")
+        .clone();
+
+    let delegation_id = "del-reject-001".to_string();
+    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = Arc::new(pm);
+
+    // Build task entry already in AwaitingReview state (as if a worker completed).
+    let entry = PlanTaskEntry {
+        spec: PlanTask {
+            task_id: "t1".into(),
+            agent: "codex".into(),
+            task: "Do the rejection thing.".into(),
+            depends_on: vec![],
+            issue_id: Some(task_issue_id.clone()),
+            context_files: vec![],
+        },
+        status: PlanTaskStatus::AwaitingReview { summary: Some("worker done".into()) },
+        result: None,
+        worker_branch: Some("feat/worker-branch-rej".into()),
+        attempt: 1,
+        history: vec![],
+        last_delegation_id: Some(delegation_id.clone()),
+    };
+    let plan_state = PlanState {
+        plan_id: "audit-reject-1".into(),
+        tasks: vec![entry],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+        epic_id: Some(subgraph.epic_id.clone()),
+    };
+    let plan_arc_state = Arc::new(Mutex::new(plan_state));
+
+    // Call handle_review_task with decision=reject and feedback.
+    spur_mcp::plan::handle_review_task(
+        plan_arc_state,
+        "audit-reject-1",
+        "t1",
+        "reject",
+        Some("needs more tests"),
+        Some(pm_arc.as_ref()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("handle_review_task must succeed");
+
+    // Fetch comments and assert Rejection sentinel is present.
+    let task_comments = run_br(dir.path(), &["comments", "list", &task_issue_id])
+        .expect("br comments list task");
+    let task_sentinels = collect_sentinels(&task_comments);
+
+    let rejection_found = task_sentinels.iter().any(|k| {
+        matches!(
+            k,
+            AuditSentinelKind::Rejection { delegation_id: did, feedback }
+                if did == "del-reject-001" && feedback == "needs more tests"
+        )
+    });
+    assert!(
+        rejection_found,
+        "Rejection sentinel must be on task {task_issue_id} with delegation_id=del-reject-001 \
+         and feedback='needs more tests'; got: {task_sentinels:?}"
     );
 }
