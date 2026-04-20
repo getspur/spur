@@ -17,7 +17,7 @@ use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
 use crate::components::detail_pane::{DetailPane, DetailTab};
-use crate::components::input_bar::{EditMode, InputBar};
+use crate::components::input_bar::{EditMode, HandleOutcome, InputBar};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issues_panel::IssuesPanel;
 use crate::components::status_bar::{StatusBar, StatusBarProps};
@@ -780,7 +780,7 @@ impl DashboardView {
 
         if is_editing_key {
             // Check if InputBar handles it (Enter on non-empty submits)
-            if let Some((text, interrupt)) = self.input_bar.handle_key(key) {
+            if let HandleOutcome::Submit(text, interrupt) = self.input_bar.handle_key(key) {
                 let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
                     text,
                 ))];
