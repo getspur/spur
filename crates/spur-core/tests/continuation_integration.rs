@@ -94,3 +94,150 @@ fn autonomous_turn_is_self_describing() {
     assert!(joined.contains("[SPUR:background]"), "must carry marker");
     assert!(joined.contains("spur://continuation/id-42"), "must carry resource URI");
 }
+
+/// INV-ASYNC-1: "For any given delegation_id, the brain receives the result
+/// through exactly one of: (a) inline MCP response, (b) continuation turn.
+/// Never zero, never both."
+///
+/// This test exercises the race where a worker completes strictly AFTER the
+/// MCP inline block window expires. The delegation falls through to the
+/// detached path; the brain must get the `DelegationResult` via the
+/// continuation callback ONLY — not via a leftover `completed_delegations`
+/// entry that a subsequent `check_delegation_status` would redeliver.
+///
+/// Expected states across the migration:
+/// - Current main:  collector writes only the map (detached=None at server.rs:836)
+///   → continuation never fires → FAILS "never zero" assertion.
+/// - After Phase 1a (detached=Some with BlockTimeout, map write unconditional):
+///   → both map and callback fire → FAILS "never both" assertion.
+/// - After Phase 1c (collector skips map write when detached):
+///   → callback fires, map is clean → PASSES.
+///
+/// Time is driven via `tokio::time::pause()` / auto-advance so the race is
+/// deterministic without wall-clock sleeps.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[ignore = "RED — passes only after Phase 1c (collector skips map write when detached). \
+            Phase 1a wiring alone fails 'never both' because both the continuation \
+            callback AND completed_delegations receive the result. See INV-ASYNC-1 in \
+            docs/superpowers/specs/2026-04-20-async-first-delegate-migration-design.md"]
+async fn test_no_double_delivery_on_block_timeout() {
+    use spur_acp::domain::delegation::DelegationStatus;
+    use spur_acp::{BrainSessionId, DelegationResult};
+    use spur_mcp::server::DetachedContinuationCtx;
+    use spur_mcp::{McpCallbackServer, WorkerInfo};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::time::Duration;
+
+    // DELEGATION_BLOCK_TIMEOUT in spur-mcp/src/server.rs is 90s. Delay the
+    // fake worker 91s so it falls just outside the inline window — this is the
+    // block-timeout / detached branch.
+    const BLOCK_TIMEOUT_SECS: u64 = 90;
+    const WORKER_DELAY_SECS: u64 = 91;
+
+    // Tracking callback counts how many times a continuation was delivered.
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let cb = Arc::clone(&callback_count);
+    let ctx = DetachedContinuationCtx {
+        on_complete: Arc::new(move |_cont, _worker| {
+            let cb = Arc::clone(&cb);
+            Box::pin(async move {
+                cb.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    };
+
+    let brain_sid = BrainSessionId::new(SessionId::new());
+    let (mut server, mut channel) = McpCallbackServer::new(&brain_sid, None, None, ctx);
+    server.set_workers(vec![WorkerInfo {
+        name: "worker-slow".into(),
+        tier: Some("generalist".into()),
+        ..Default::default()
+    }]);
+    let server = Arc::new(server);
+
+    // Fake worker: consume the delegation request; send the oneshot reply
+    // AFTER the inline block window. Returns the delegation_id so we can
+    // observe map state by id.
+    let worker_handle = tokio::spawn(async move {
+        let req = channel
+            .request_rx
+            .recv()
+            .await
+            .expect("delegation request");
+        let delegation_id = req.id.clone();
+        tokio::time::sleep(Duration::from_secs(WORKER_DELAY_SECS)).await;
+        let _ = req.respond_to.send(DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("worker done".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        });
+        delegation_id
+    });
+
+    // Brain dispatches delegate_to_worker. Under start_paused, the handler's
+    // internal 250ms poll loop auto-advances virtual time until the 90s
+    // deadline fires.
+    let server_ref = Arc::clone(&server);
+    let mcp_resp_handle = tokio::spawn(async move {
+        server_ref
+            .__test_call_delegate_to_worker("worker-slow", "slow task")
+            .await
+    });
+
+    let mcp_resp = mcp_resp_handle.await.expect("mcp task join");
+    let delegation_id = worker_handle.await.expect("worker task join");
+
+    // Wait for the spawned collector to drain the oneshot and run its
+    // post-completion writes (map insert + optional detached callback).
+    // `shutdown()` closes the TaskTracker and awaits every spawned collector.
+    server.shutdown().await;
+
+    // Observe the three possible delivery channels:
+    //   inline_has_result: did the delegate_to_worker response carry a
+    //                      DelegationResult payload (success path)?
+    //   callback_fired:    did the detached continuation callback fire?
+    //   map_has_entry:     is the result waiting in the polled map for a
+    //                      future check_delegation_status to consume?
+    let text = mcp_resp
+        .pointer("/result/content/0/text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Inline success response from handle_delegate_to_worker serializes the
+    // DelegationResult JSON pretty. "still running" text lacks `"status"`.
+    let inline_has_result = text.contains("\"status\"") && text.contains("Success");
+    let callback_fired = callback_count.load(Ordering::SeqCst) > 0;
+    let map_has_entry = server.__test_completed_has(&delegation_id).await;
+
+    // INV-ASYNC-1 — never zero.
+    assert!(
+        callback_fired || inline_has_result,
+        "INV-ASYNC-1 'never zero': worker completed past the {BLOCK_TIMEOUT_SECS}s \
+         block window, so the brain MUST get the result via a detached \
+         continuation. Got zero deliveries \
+         (inline_has_result={inline_has_result} callback_fired={callback_fired} \
+         map_has_entry={map_has_entry}). Current main: collector writes only the \
+         map at spur-mcp/src/server.rs:600; Phase 1a wires Some(handle) at :836 \
+         to flip this green.",
+    );
+
+    // INV-ASYNC-1 — never both.
+    let inline_count = u32::from(inline_has_result);
+    let continuation_count = u32::from(callback_fired);
+    let polled_count = u32::from(map_has_entry);
+    assert_eq!(
+        inline_count + continuation_count + polled_count,
+        1,
+        "INV-ASYNC-1 'never both': expected EXACTLY one delivery path but got \
+         inline={inline_has_result} callback={callback_fired} map={map_has_entry}. \
+         A leftover `completed_delegations` entry alongside a detached \
+         continuation means a subsequent check_delegation_status would \
+         redeliver the same result — that's the double-delivery failure mode \
+         Phase 1c (skip map write when detached) closes.",
+    );
+}
