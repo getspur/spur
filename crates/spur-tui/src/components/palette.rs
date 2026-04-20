@@ -123,6 +123,13 @@ impl PaletteState {
             tmp.sort_by(|a, b| b.0.cmp(&a.0));
             self.order.extend(tmp.into_iter().map(|(_, i)| i));
         }
+        tracing::debug!(
+            target: "palette",
+            query_len = self.query.len(),
+            n = self.raw.len(),
+            m = self.order.len(),
+            "rerank: complete"
+        );
         // Clamp cursor to new ranked length.
         self.cursor = self.cursor.min(self.order.len().saturating_sub(1));
     }
