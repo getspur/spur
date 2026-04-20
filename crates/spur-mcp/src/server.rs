@@ -669,7 +669,7 @@ impl McpCallbackServer {
         self.cancellation_control = Some(cc);
     }
 
-/// Phase 1c: set how long `handle_delegate_to_worker` /
+    /// Phase 1c: set how long `handle_delegate_to_worker` /
     /// `handle_delegate_parallel` wait inline for a worker's oneshot before
     /// falling through to the detached collector. Default is `0`
     /// (async-first); orchestrator wires this from
@@ -685,7 +685,11 @@ impl McpCallbackServer {
     /// - `enable` — when true, attempt to spawn the reconciler.
     /// - `fast_forward` — optional Notify channel. When provided, the reconciler ticks
     ///   immediately when notified (e.g., after a task completes).
-    pub fn set_reconciler_enabled(&mut self, enable: bool, fast_forward: Option<Arc<tokio::sync::Notify>>) {
+    pub fn set_reconciler_enabled(
+        &mut self,
+        enable: bool,
+        fast_forward: Option<Arc<tokio::sync::Notify>>,
+    ) {
         self.reconciler_enabled = enable;
         self.reconciler_fast_forward = fast_forward;
     }
@@ -901,6 +905,7 @@ impl McpCallbackServer {
         // The reconciler is observation-only (does NOT dispatch in v0a). It observes ready
         // tasks via bv/br, logs metrics, and surfaces signals for the brain.
         // Dispatch lands in v0b.
+        let mut reconciler_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
         let reconciler_task = if self.reconciler_enabled {
             let fast_forward = self.reconciler_fast_forward.as_ref().cloned();
             if let Some(pm) = self.pm_service.as_ref() {
@@ -908,6 +913,8 @@ impl McpCallbackServer {
                 if pm.advanced().is_some() {
                     let pm = Arc::clone(pm);
                     let fast = fast_forward.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
+                    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                    reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
                     let handle = tokio::spawn(async move {
                         let reconciler = Reconciler::new(
@@ -916,9 +923,6 @@ impl McpCallbackServer {
                             fast,
                             None, // plan_id: observe all plans when None
                         );
-                        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-                        // Store cancel handle so shutdown() can signal it.
-                        std::mem::forget(cancel_tx);
                         reconciler.run(cancel_rx).await;
                     });
                     Some(handle)
@@ -938,6 +942,9 @@ impl McpCallbackServer {
         let handle = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, router).await {
                 debug!(%error, "RMCP callback server exited");
+            }
+            if let Some(tx) = reconciler_cancel_tx {
+                let _ = tx.send(());
             }
             // Wait for reconciler to finish on shutdown.
             if let Some(rh) = reconciler_task {
