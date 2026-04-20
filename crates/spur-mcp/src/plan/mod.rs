@@ -99,6 +99,12 @@ fn default_attempt() -> u32 {
     1
 }
 
+/// The attempt number for a task's first dispatch. Re-dispatches triggered
+/// by `request_changes` bump to `entry.attempt + 1` in
+/// `apply_decision_and_extract`; both initial dispatchers (`run_plan` and
+/// `dispatch_newly_ready`) emit this value for their audit sentinels.
+const FIRST_DISPATCH_ATTEMPT: u32 = 1;
+
 /// Runtime state of a submitted plan.
 #[derive(Debug)]
 pub struct PlanState {
@@ -756,7 +762,7 @@ pub async fn run_plan(
                 &plan_id,
                 &delegation_id,
                 &task_spec.agent,
-                1, // initial attempt; request_changes re-dispatch is handled in apply_decision_and_extract
+                FIRST_DISPATCH_ATTEMPT,
             )
             .await;
 
@@ -2447,7 +2453,7 @@ fn dispatch_newly_ready(
                     plan_id: plan_id.to_string(),
                     delegation_id,
                     worker: agent,
-                    attempt: 1,
+                    attempt: FIRST_DISPATCH_ATTEMPT,
                 });
             }
             Err(e) => {
