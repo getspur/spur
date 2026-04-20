@@ -14,6 +14,10 @@ pub(crate) fn resolve_closed_status(override_value: Option<String>) -> String {
     override_value.unwrap_or_else(|| "closed".to_string())
 }
 
+fn default_beads_actor() -> Option<String> {
+    Some("reconciler".to_string())
+}
+
 enum PmBackendInner {
     Beads {
         beads: BeadsAdapter,
@@ -40,13 +44,37 @@ impl PmService {
         repo_root: &Path,
         closed_status: Option<String>,
     ) -> anyhow::Result<Option<Self>> {
+        Self::try_new_with_actor(
+            github_repo,
+            beads_enabled,
+            github_enabled,
+            repo_root,
+            closed_status,
+            default_beads_actor(),
+        )
+        .await
+    }
+
+    /// Actor-aware constructor for beads-backed services.
+    ///
+    /// Existing callers should continue using [`PmService::try_new`], which
+    /// defaults to the server-level `"reconciler"` actor. Pass `None` here to
+    /// disable actor attribution for beads CLI calls.
+    pub async fn try_new_with_actor(
+        github_repo: Option<String>,
+        beads_enabled: bool,
+        github_enabled: bool,
+        repo_root: &Path,
+        closed_status: Option<String>,
+        actor: Option<String>,
+    ) -> anyhow::Result<Option<Self>> {
         let resolved_closed = resolve_closed_status(closed_status);
         let beads_dir = repo_root.join(".beads");
 
         if beads_dir.is_dir() && beads_enabled {
             let cursor_path = beads_dir.join(".spur-poll-cursor");
             let beads =
-                BeadsAdapter::connect_with_actor(repo_root, None, Some(cursor_path)).await?;
+                BeadsAdapter::connect_with_actor(repo_root, actor, Some(cursor_path)).await?;
             let bv = match BvAdapter::connect(repo_root).await {
                 Ok(bv) => Some(bv),
                 Err(e) => {
@@ -188,6 +216,11 @@ mod tests {
             super::resolve_closed_status(Some("resolved".to_string())),
             "resolved"
         );
+    }
+
+    #[test]
+    fn default_beads_actor_is_reconciler() {
+        assert_eq!(super::default_beads_actor().as_deref(), Some("reconciler"));
     }
 
     #[test]
