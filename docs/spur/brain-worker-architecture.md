@@ -958,6 +958,57 @@ Enforced by the `finalize()` helper — single call site per terminal arm.
 - `Reject { reason }` -> preserve (auto-reject)
 - `Abandon` -> preserve (headless/batch)
 
+### The artifact side-channel
+
+Worker stdout exceeding `SPUR_SUMMARY_MAX_BYTES` (default 4000) is
+persisted by the orchestrator as a git blob under
+`refs/spur/artifacts/<session-id>` before `truncate_summary` runs.
+The resulting `WorkerArtifact { object_ref, blob_sha, size_bytes, kind }`
+is surfaced on `DelegationResult.artifact`, `ContinuationPayload.artifact`,
+and the MCP `get_task_diff` / delegation response JSON.
+
+This side-channel:
+- Preserves the per-delegation context-budget invariant (`summary` is
+  still tail-weighted-truncated to the cap).
+- Keeps `worker_branch` reserved for mergeable PR state — artifact
+  blobs never appear on the worker branch tree.
+- Survives worktree destruction (blob is in the shared object database).
+- Covers research workers, mixed workers (diff + long prose), and
+  failure diagnostics with a single predicate: `output.len() > cap`.
+
+**Knobs:**
+- `SPUR_SUMMARY_MAX_BYTES` — unchanged; governs `summary` truncation AND the artifact predicate (single source of truth).
+- `SPUR_ARTIFACT_MAX_BYTES` — stored cap for the artifact blob itself (default 524288 = 512 KiB). Over-cap inputs are tail-weighted truncated with a `[... N chars omitted ...]` marker before persistence.
+- `ARTIFACT_PHYSICAL_MAX_BYTES` (constant, 5 MiB) — OOM defense: inputs above this are refused before `git hash-object` is invoked.
+
+**Failure modes:**
+- Worker succeeding + persist failure → delegation escalates to
+  `DelegationStatus::Failed { error: "artifact persistence failed: ..." }`.
+  Transport contract broken.
+- Worker failing + persist failure → original worker error preserved;
+  summary gets a `[orchestrator: artifact persistence failed: ...]`
+  tail annotation.
+
+**Known limitations:**
+- *Unicode-dense input triggers artifact earlier than ASCII of the same
+  character count.* The predicate is `output.len()` (bytes), not character
+  count. A 1000-char Chinese document (~3000 bytes) may trigger artifact
+  persistence while a 4000-char ASCII document (~4000 bytes) does not.
+  Acceptable — the `truncate_summary` cap is already byte-based, so this
+  is consistent with existing behaviour.
+
+**Follow-up (NOT yet implemented):**
+- Garbage collection of `refs/spur/artifacts/*`. Refs accumulate
+  monotonically. A reaper by age or delegation completion is tracked
+  as a follow-up.
+- Remote push of artifact refs for cross-machine async continuation.
+  Local-only in v1.
+- End-to-end integration test in `crates/spur-core/tests/` exercising
+  the full delegation → artifact → `git cat-file` retrieval flow. The
+  in-crate unit tests of `decide_artifact_handling` + `persist_artifact_blob`
+  cover the pure logic; an integration test would add confidence in
+  the wiring across crates.
+
 ### 6.3 Key Files
 
 | File | Role |
