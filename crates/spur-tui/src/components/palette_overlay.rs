@@ -27,6 +27,115 @@ impl<'a> PaletteOverlay<'a> {
         self.session_active = active;
         self
     }
+
+    fn render_flat(&self, area: Rect, buf: &mut Buffer) {
+        let items: Vec<ListItem> = self
+            .state
+            .iter_ranked()
+            .enumerate()
+            .map(|(i, r)| {
+                let selected = i == self.state.cursor();
+                let style = if selected {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                let spans = vec![
+                    Span::styled(
+                        format!("  {}  ", badge_for(&r.kind)),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(r.label.clone(), style),
+                    Span::raw("   "),
+                    Span::styled(
+                        r.subtitle.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ];
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        List::new(items).render(area, buf);
+    }
+
+    fn render_grouped(&self, area: Rect, buf: &mut Buffer) {
+        // Partition ranked results by kind, preserving order within each kind.
+        let mut commands: Vec<&crate::components::palette::PaletteResult> = Vec::new();
+        let mut sessions: Vec<&crate::components::palette::PaletteResult> = Vec::new();
+        let mut workers: Vec<&crate::components::palette::PaletteResult> = Vec::new();
+        for r in self.state.iter_ranked() {
+            match r.kind {
+                PaletteKind::Command => commands.push(r),
+                PaletteKind::Session => sessions.push(r),
+                PaletteKind::Worker => workers.push(r),
+                PaletteKind::Trace => { /* skipped upstream; placeholder rendered below */ }
+            }
+        }
+
+        // Per-kind cap: default 5, scale down to fit available height.
+        // Three section headers + a trace placeholder row + per-kind rows
+        // must fit in `area.height`. Minimum cap is 2.
+        let headers: u16 = 3 + 1; // COMMANDS, SESSIONS, WORKERS, TRACE placeholder
+        let available = area.height.saturating_sub(headers);
+        let cap = (available / 3).clamp(2, 5) as usize;
+
+        let mut y = area.y;
+
+        macro_rules! render_section {
+            ($title:expr, $rows:expr) => {
+                if y < area.y + area.height {
+                    Paragraph::new(Line::from(Span::styled(
+                        $title.to_string(),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    )))
+                    .render(
+                        Rect { x: area.x, y, width: area.width, height: 1 },
+                        buf,
+                    );
+                    y = y.saturating_add(1);
+                    for r in $rows.iter().take(cap) {
+                        if y >= area.y + area.height { break; }
+                        let spans = vec![
+                            Span::styled(
+                                format!("  {}  ", badge_for(&r.kind)),
+                                Style::default().fg(Color::Cyan),
+                            ),
+                            Span::raw(r.label.clone()),
+                            Span::raw("   "),
+                            Span::styled(
+                                r.subtitle.clone(),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ];
+                        Paragraph::new(Line::from(spans))
+                            .render(
+                                Rect { x: area.x, y, width: area.width, height: 1 },
+                                buf,
+                            );
+                        y = y.saturating_add(1);
+                    }
+                }
+            };
+        }
+
+        render_section!("COMMANDS", commands);
+        render_section!("SESSIONS", sessions);
+        render_section!("WORKERS", workers);
+
+        // Trace placeholder — honest about the deferred feature.
+        if y < area.y + area.height {
+            Paragraph::new(Line::from(Span::styled(
+                "TRACE \u{2014} coming soon",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )))
+            .render(
+                Rect { x: area.x, y, width: area.width, height: 1 },
+                buf,
+            );
+        }
+    }
 }
 
 fn badge_for(kind: &PaletteKind) -> &'static str {
@@ -98,34 +207,10 @@ impl<'a> Widget for PaletteOverlay<'a> {
                 Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
             )))
             .render(list_area, buf);
+        } else if self.state.query().is_empty() {
+            self.render_grouped(list_area, buf);
         } else {
-            let items: Vec<ListItem> = self
-                .state
-                .iter_ranked()
-                .enumerate()
-                .map(|(i, r)| {
-                    let selected = i == self.state.cursor();
-                    let style = if selected {
-                        Style::default().add_modifier(Modifier::REVERSED)
-                    } else {
-                        Style::default()
-                    };
-                    let spans = vec![
-                        Span::styled(
-                            format!("  {}  ", badge_for(&r.kind)),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::styled(r.label.clone(), style),
-                        Span::raw("   "),
-                        Span::styled(
-                            r.subtitle.clone(),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ];
-                    ListItem::new(Line::from(spans))
-                })
-                .collect();
-            List::new(items).render(list_area, buf);
+            self.render_flat(list_area, buf);
         }
 
         // Hint line.
