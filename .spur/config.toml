@@ -5,6 +5,7 @@ fallback = [
     "claude-code-acp",
     "codex-acp",
     "opencode-acp",
+    "gemini-acp",
 ]
 
 [brain.prompt]
@@ -198,12 +199,17 @@ limitations = []
 inherit_defaults = true
 
 [[agents.entries]]
-name = "gemini"
+name = "gemini-acp"
 command = "gemini"
-args = []
-transport = "cli-wrap"
+args = [
+    "--acp",
+    "-y",
+    "-m",
+    "deep-thinker"
+]
+transport = "acp"
 kind = "generic"
-role = "worker"
+role = "both"
 capabilities = []
 cost_tier = "low"
 skip_permissions = false
@@ -218,7 +224,7 @@ max_review_retries = 3
 reason = "review timeout"
 
 [agents.entries.display]
-handle = "gemini"
+handle = "gemini-acp"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
@@ -230,6 +236,7 @@ static = []
 [agents.entries.permissions]
 skip = false
 args = []
+session_mode = "full-auto"
 
 [agents.entries.delegation]
 good_for = []
