@@ -255,6 +255,19 @@ impl ReactTrace {
         self.invalidate_cache();
     }
 
+    /// Wipe all entries and scroll state. Preserves `agent_kind`,
+    /// `mermaid_enabled`, `compact` (config) — only conversation content
+    /// and derived caches are cleared. Used by `/clear` view reset.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.anchor = crate::components::react_trace::types::ScrollAnchor::default();
+        self.last_total_lines = 0;
+        self.last_render_width = None;
+        self.line_cache = None;
+        self.compact_cache = None;
+        self.invalidate_cache();
+    }
+
     /// Toggle the collapsed state for Observe (tool-result) entries.
     pub fn toggle_observe_collapsed(&mut self) -> bool {
         self.observe_collapsed = !self.observe_collapsed;
