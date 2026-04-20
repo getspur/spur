@@ -246,6 +246,7 @@ mod tests {
             payload: ContinuationPayload {
                 status: DelegationStatus::Success,
                 summary: None, diff_summary: None, worker_branch: None,
+                artifact: None,
             },
             created_at: Instant::now(),
         }
@@ -290,6 +291,7 @@ mod builder_tests {
                 summary: Some(summary.into()),
                 diff_summary: None,
                 worker_branch: None,
+                artifact: None,
             },
             created_at: Instant::now(),
         }

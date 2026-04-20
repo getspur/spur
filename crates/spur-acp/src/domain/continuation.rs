@@ -33,6 +33,9 @@ pub struct ContinuationPayload {
     pub summary:       Option<String>,
     pub diff_summary:  Option<DiffSummary>,
     pub worker_branch: Option<String>,
+    /// Side-channel reference to persisted stdout; see
+    /// `crate::domain::artifact::WorkerArtifact`.
+    pub artifact:      Option<crate::domain::artifact::WorkerArtifact>,
 }
 
 /// One detached delegation result awaiting brain re-entry.
@@ -62,6 +65,7 @@ mod tests {
             summary: Some("done".into()),
             diff_summary: None,
             worker_branch: Some("wt/abc".into()),
+            artifact: None,
         };
         assert_eq!(p.summary.as_deref(), Some("done"));
         assert!(matches!(p.status, DelegationStatus::Success));
@@ -90,10 +94,36 @@ mod tests {
                 summary: None,
                 diff_summary: None,
                 worker_branch: None,
+                artifact: None,
             },
             created_at: Instant::now(),
         };
         assert_eq!(c.delegation_id, "uuid-1");
         assert!(matches!(c.source, ContinuationSource::AsyncRequested));
+    }
+
+    #[test]
+    fn continuation_payload_carries_artifact() {
+        use crate::domain::artifact::{ArtifactKind, WorkerArtifact};
+        let art = WorkerArtifact {
+            object_ref: "refs/spur/artifacts/s2".into(),
+            blob_sha: "b".repeat(40),
+            size_bytes: 20_000,
+            kind: ArtifactKind::Diagnostic,
+        };
+        let p = ContinuationPayload {
+            status: DelegationStatus::Failed {
+                error: "boom".into(),
+            },
+            summary: Some("truncated error tail".into()),
+            diff_summary: None,
+            worker_branch: None,
+            artifact: Some(art.clone()),
+        };
+        assert_eq!(p.artifact.as_ref().unwrap().size_bytes, 20_000);
+        assert!(matches!(
+            p.artifact.as_ref().unwrap().kind,
+            ArtifactKind::Diagnostic
+        ));
     }
 }
