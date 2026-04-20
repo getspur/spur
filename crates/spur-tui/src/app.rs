@@ -18,7 +18,7 @@ use ratatui_image::picker::Picker;
 use crate::action::{Action, ViewId};
 use crate::components::help_overlay::HelpOverlay;
 use crate::components::palette::PaletteIntent;
-use crate::components::palette_sources::{CommandSource, PaletteSource, SessionSource, TraceSource, WorkerSource};
+use crate::components::palette_sources::{CommandSource, PaletteSource, SessionSource, WorkerSource};
 use crate::components::input_bar::EditMode;
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
@@ -344,6 +344,7 @@ impl App {
         if self.help_visible || self.quit_confirm_visible {
             return; // palette won't open while a higher-priority overlay is up
         }
+        tracing::debug!(target: "palette", "open_palette: start");
         self.palette_state.reset();
 
         // Load sources: Commands, Sessions, Workers, Trace.
@@ -352,14 +353,24 @@ impl App {
         let sess_src = SessionSource::from_metadata(self.metadata_store.metadata());
         let worker_src = WorkerSource::from_lineage(&self.lineage);
 
-        let mut batches = vec![
-            cmd_src.collect(),
-            sess_src.collect(),
-            worker_src.collect(),
-        ];
-        if let Some(view) = self.session_detail.as_ref() {
-            let trace_src = TraceSource::from_trace(view.react_trace());
-            batches.push(trace_src.collect());
+        let cmd_batch = cmd_src.collect();
+        let sess_batch = sess_src.collect();
+        let worker_batch = worker_src.collect();
+        let trace_skipped = self.session_detail.is_some();
+        tracing::debug!(
+            target: "palette",
+            commands = cmd_batch.len(),
+            sessions = sess_batch.len(),
+            workers = worker_batch.len(),
+            trace_count_skipped = trace_skipped,
+            "open_palette: sources collected"
+        );
+        let batches = vec![cmd_batch, sess_batch, worker_batch];
+        // Trace source is intentionally skipped until trace-dispatch lands;
+        // see docs/superpowers/specs/2026-04-20-palette-end-to-end-integration-design.md (U3c).
+        if let Some(_view) = self.session_detail.as_ref() {
+            // Trace will be re-enabled when Action::ScrollToTraceEntry is wired.
+            let _ = _view; // borrow-check silence
         }
         self.palette_state.extend_raw(batches);
 
