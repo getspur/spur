@@ -147,14 +147,26 @@ impl From<BrIssueWithCounts> for IssueSummary {
 pub struct BeadsAdapter {
     cwd: PathBuf,
     last_poll: Mutex<Option<DateTime<Utc>>>,
+    default_actor: Option<String>,
+    cursor_path: Option<PathBuf>, // used by Task 9; present now for forward compat
 }
 
 impl BeadsAdapter {
     /// Verify that the `br` binary is installed and that the `.beads/` database is readable.
     pub async fn connect(repo_root: &Path) -> anyhow::Result<Self> {
+        Self::connect_with_actor(repo_root, None, None).await
+    }
+
+    pub async fn connect_with_actor(
+        repo_root: &Path,
+        default_actor: Option<String>,
+        cursor_path: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
         let adapter = Self {
             cwd: repo_root.to_path_buf(),
             last_poll: Mutex::new(None),
+            default_actor,
+            cursor_path,
         };
 
         // Verify binary is installed by running `br version --json`
@@ -247,7 +259,7 @@ impl BeadsAdapter {
     }
 
     /// Run `br` with bounded retry: max 2 attempts, 50ms wait on retryable error.
-    async fn run_br(&self, args: Vec<String>) -> anyhow::Result<String> {
+    async fn run_br_inner(&self, args: Vec<String>) -> anyhow::Result<String> {
         tracing::debug!(?args, "running br CLI");
 
         match self.run_br_once(&args).await {
@@ -265,6 +277,26 @@ impl BeadsAdapter {
                 }
             }
         }
+    }
+
+    /// Run `br` with an optional actor override prepended as `--actor <actor>`.
+    async fn run_br_as(
+        &self,
+        args: Vec<String>,
+        actor_override: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let actor = actor_override.or(self.default_actor.as_deref());
+        let mut full = args;
+        if let Some(a) = actor {
+            full.insert(0, "--actor".into());
+            full.insert(1, a.to_string());
+        }
+        self.run_br_inner(full).await
+    }
+
+    /// Run `br` with the default actor (if any) attached.
+    async fn run_br(&self, args: Vec<String>) -> anyhow::Result<String> {
+        self.run_br_as(args, None).await
     }
 }
 
