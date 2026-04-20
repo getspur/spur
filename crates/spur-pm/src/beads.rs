@@ -440,11 +440,14 @@ impl BeadsAdapter {
             .collect();
 
         // Advance the cursor based on the kept items.
-        let new_cursor: PollCursor = if !kept.is_empty() {
+        let new_cursor: Option<PollCursor> = if !kept.is_empty() {
             if saturated {
                 // Data-loss guard: emit observed events but preserve the prior
-                // cursor (or seed fresh if none). Callers dedup on `id` when
-                // the next poll refetches this batch.
+                // cursor. On a first saturated poll we intentionally leave the
+                // cursor unset instead of seeding it to `Utc::now()`: older
+                // rows outside the truncated batch must remain eligible for
+                // future polls once the head of the backlog drains. Callers
+                // already dedup first-poll replays on `id`.
                 tracing::warn!(
                     limit,
                     kept_count = kept.len(),
@@ -452,10 +455,7 @@ impl BeadsAdapter {
                      boundary-row data loss. Consider raising POLL_FETCH_LIMIT \
                      or investigating row-update velocity."
                 );
-                prior_cursor.clone().unwrap_or(PollCursor {
-                    ts: Utc::now(),
-                    ids_at_boundary: HashSet::new(),
-                })
+                prior_cursor.clone()
             } else {
                 let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap(); // safe: kept non-empty
                 let ids_at_max: HashSet<String> = kept
@@ -463,18 +463,18 @@ impl BeadsAdapter {
                     .filter(|i| i.updated_at == max_ts)
                     .map(|i| i.id.clone())
                     .collect();
-                PollCursor {
+                Some(PollCursor {
                     ts: max_ts,
                     ids_at_boundary: ids_at_max,
-                }
+                })
             }
         } else if let Some(existing) = prior_cursor {
-            existing
+            Some(existing)
         } else {
-            PollCursor {
+            Some(PollCursor {
                 ts: Utc::now(),
                 ids_at_boundary: HashSet::new(),
-            }
+            })
         };
 
         let events: Vec<PmEvent> = kept
@@ -494,9 +494,11 @@ impl BeadsAdapter {
                 .last_poll
                 .lock()
                 .map_err(|e| anyhow::anyhow!("last_poll mutex poisoned: {e}"))?;
-            *guard = Some(new_cursor.clone());
+            *guard = new_cursor.clone();
         }
-        self.save_cursor(&new_cursor);
+        if let Some(cursor) = new_cursor.as_ref() {
+            self.save_cursor(cursor);
+        }
 
         Ok(events)
     }
