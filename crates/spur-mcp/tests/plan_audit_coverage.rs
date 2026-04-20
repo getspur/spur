@@ -363,7 +363,9 @@ async fn rejection_emits_rejection_sentinel() {
 #[tokio::test]
 async fn request_changes_redispatch_emits_completion_sentinel() {
     if !br_available() {
-        eprintln!("skipping request_changes_redispatch_emits_completion_sentinel: `br` not on PATH");
+        eprintln!(
+            "skipping request_changes_redispatch_emits_completion_sentinel: `br` not on PATH"
+        );
         return;
     }
 
@@ -384,15 +386,10 @@ async fn request_changes_redispatch_emits_completion_sentinel() {
         context_files: vec![],
     }];
 
-    let subgraph = spur_mcp::build_epic_subgraph(
-        &pm,
-        "audit-redis-1",
-        "Redispatch Audit Epic",
-        None,
-        &tasks,
-    )
-    .await
-    .expect("build_epic_subgraph must succeed");
+    let subgraph =
+        spur_mcp::build_epic_subgraph(&pm, "audit-redis-1", "Redispatch Audit Epic", None, &tasks)
+            .await
+            .expect("build_epic_subgraph must succeed");
 
     let task_issue_id = subgraph
         .task_map
@@ -540,15 +537,10 @@ async fn approval_cascade_dispatched_task_emits_completion_sentinel() {
         },
     ];
 
-    let subgraph = spur_mcp::build_epic_subgraph(
-        &pm,
-        "audit-cascade-1",
-        "Cascade Audit Epic",
-        None,
-        &tasks,
-    )
-    .await
-    .expect("build_epic_subgraph must succeed");
+    let subgraph =
+        spur_mcp::build_epic_subgraph(&pm, "audit-cascade-1", "Cascade Audit Epic", None, &tasks)
+            .await
+            .expect("build_epic_subgraph must succeed");
 
     let task_a_id = subgraph.task_map.get("a").expect("a").clone();
     let task_b_id = subgraph.task_map.get("b").expect("b").clone();
