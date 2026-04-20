@@ -419,6 +419,7 @@ impl SessionDetailView {
     }
 
     /// The ready-banner text for this view, if any.
+    #[cfg(test)]
     pub fn ready_banner_text(&self) -> Option<&str> {
         self.ready_banner.as_deref()
     }
