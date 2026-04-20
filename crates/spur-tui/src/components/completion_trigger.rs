@@ -228,7 +228,7 @@ impl TriggerDetector {
         text: &str,
         cursor: usize,
     ) -> TriggerTransition {
-        let (kind, prefix_start) = match self.state {
+        let (_kind, prefix_start) = match self.state {
             TriggerState::Composing { kind, prefix_start } => (kind, prefix_start),
             TriggerState::Idle => unreachable!("called with Idle state"),
         };
@@ -283,7 +283,6 @@ impl TriggerDetector {
         let query_start = query_region_start.min(clamped_end);
         let query = text[query_start..clamped_end].to_string();
 
-        let _ = kind; // silences unused; kind is carried in state only.
         TriggerTransition::Update { query }
     }
 }
