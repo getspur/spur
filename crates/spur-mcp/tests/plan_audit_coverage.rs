@@ -63,6 +63,11 @@ fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+fn extract_id(json: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(json).expect("br create json");
+    value["id"].as_str().expect("br create id").to_string()
+}
+
 /// Parse comments from a `br comments list` JSON output and collect only those
 /// that are valid `[[spur-audit v1]]` sentinels.
 fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
