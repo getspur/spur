@@ -70,7 +70,7 @@ impl FeatureKey {
     pub const KILL_ADVANCED_PLANNER: Self = Self("kill_advanced_planner");
     pub const ENABLE_BROWSER_TOOL: Self = Self("enable_browser_tool");
     pub const ENABLE_COMPACTION_V2: Self = Self("enable_compaction_v2");
-    pub const ENABLE_TELEMETRY: Self = Self("enable_teLEMETRY");
+    pub const ENABLE_TELEMETRY: Self = Self("enable_telemetry");
 
     pub const fn as_str(&self) -> &'static str {
         self.0
@@ -152,7 +152,7 @@ impl FeatureKey {
             Some(Self::ENABLE_BROWSER_TOOL)
         } else if bytes_eq(b, b"enable_compaction_v2") {
             Some(Self::ENABLE_COMPACTION_V2)
-        } else if bytes_eq(b, b"enable_teLEMETRY") {
+        } else if bytes_eq(b, b"enable_telemetry") {
             Some(Self::ENABLE_TELEMETRY)
         } else {
             None
@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(FeatureKey::from_known("kill_advanced_planner"), Some(FeatureKey::KILL_ADVANCED_PLANNER));
         assert_eq!(FeatureKey::from_known("enable_browser_tool"), Some(FeatureKey::ENABLE_BROWSER_TOOL));
         assert_eq!(FeatureKey::from_known("enable_compaction_v2"), Some(FeatureKey::ENABLE_COMPACTION_V2));
-        assert_eq!(FeatureKey::from_known("enable_teLEMETRY"), Some(FeatureKey::ENABLE_TELEMETRY));
+        assert_eq!(FeatureKey::from_known("enable_telemetry"), Some(FeatureKey::ENABLE_TELEMETRY));
     }
 
     #[test]
