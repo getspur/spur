@@ -64,6 +64,18 @@ pub struct FlagSpec {
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
+impl PartialEq for FlagSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.rollout_percent.map(f32::to_bits) == other.rollout_percent.map(f32::to_bits)
+            && self.tier_filter == other.tier_filter
+            && self.description == other.description
+            && self.extensions == other.extensions
+    }
+}
+
+impl Eq for FlagSpec {}
+
 impl Default for FlagSpec {
     fn default() -> Self {
         Self {
