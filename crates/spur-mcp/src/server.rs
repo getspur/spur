@@ -1409,6 +1409,27 @@ impl McpCallbackServer {
         self.auto_merge_approved_plans = enabled;
     }
 
+    /// Spawn `run_plan` for an ephemeral plan (no epic_id). Persisted plans
+    /// must use the reconciler; this helper is ephemeral-only by construction.
+    fn spawn_ephemeral_plan_runner(
+        &self,
+        state: Arc<tokio::sync::Mutex<crate::plan::PlanState>>,
+    ) {
+        let delegation_tx = self.delegation_tx.clone();
+        let plan_sink = self.event_sink.clone();
+        let plan_pm = self
+            .pm_service
+            .clone()
+            .map(|p| p as Arc<dyn crate::plan::PmLike>);
+        self.task_tracker.spawn(crate::plan::run_plan(
+            state,
+            delegation_tx,
+            plan_sink,
+            plan_pm,
+            self.reconciler_fast_forward.as_ref().cloned(),
+        ));
+    }
+
     /// Spawn a background task that awaits a delegation oneshot and stores
     /// the result in `completed_delegations` for later polling.
     ///
@@ -3106,19 +3127,7 @@ impl McpCallbackServer {
         if epic_subgraph.is_some() {
             self.fast_forward_reconciler();
         } else {
-            let delegation_tx = self.delegation_tx.clone();
-            let plan_sink = self.event_sink.clone();
-            let plan_pm = self
-                .pm_service
-                .clone()
-                .map(|p| p as Arc<dyn crate::plan::PmLike>);
-            self.task_tracker.spawn(crate::plan::run_plan(
-                state,
-                delegation_tx,
-                plan_sink,
-                plan_pm,
-                self.reconciler_fast_forward.as_ref().cloned(),
-            ));
+            self.spawn_ephemeral_plan_runner(state);
         }
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
