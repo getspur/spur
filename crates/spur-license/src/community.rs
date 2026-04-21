@@ -74,9 +74,9 @@ mod tests {
         let p = CommunityProvider::new(PolicyResolver::embedded());
         let state = p.current_state();
         assert!(matches!(state.plan, crate::Plan::Community));
-        assert!(p.has_entitlement("chat"));
-        assert!(p.has_entitlement("watch_loop"));
-        assert!(!p.has_entitlement("advanced_agents"));
+        assert!(p.has_entitlement("brain_session"));
+        assert!(p.has_entitlement("single_worker"));
+        assert!(!p.has_entitlement("parallel_workers"));
     }
 
     #[tokio::test]
