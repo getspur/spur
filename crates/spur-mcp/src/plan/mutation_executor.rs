@@ -363,16 +363,25 @@ async fn downstream_issue_ids(pm: &PmService, parent_id: &str) -> Result<Vec<Str
 }
 
 async fn list_all_issue_ids(pm: &PmService) -> Result<Vec<String>> {
-    Ok(pm
+    let issues = pm
         .list_issues(IssueFilter {
             limit: Some(ISSUE_SCAN_LIMIT),
             ..Default::default()
         })
         .await
-        .context("list issues for mutation scan")?
-        .into_iter()
-        .map(|issue| issue.id)
-        .collect())
+        .context("list issues for mutation scan")?;
+    // Saturation warning: downstream-dep and rollback scans use this list. If
+    // beads returns exactly the limit, deps on truncated issues are silently
+    // missed, which can leave orphan dependency edges or skip rollback
+    // compensations. Tracked as G5 in the spec. Pagination is the real fix.
+    if issues.len() >= ISSUE_SCAN_LIMIT {
+        tracing::warn!(
+            limit = ISSUE_SCAN_LIMIT,
+            returned = issues.len(),
+            "mutation scan saturated ISSUE_SCAN_LIMIT — dependency rewrites may be incomplete"
+        );
+    }
+    Ok(issues.into_iter().map(|issue| issue.id).collect())
 }
 
 async fn dep_cycles_with_fallback(adv: &dyn BeadsAdvanced) -> Result<Vec<DependencyCycle>> {

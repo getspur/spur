@@ -125,7 +125,7 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                 };
 
                 let signal_id = signal.signal_id();
-                if !self.seen.lock().insert(signal_id) {
+                if self.seen.lock().contains(&signal_id) {
                     continue;
                 }
 
@@ -139,13 +139,28 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                 scored_batches
                     .sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap_or(Ordering::Equal));
 
-                if let Some((_score, batch)) = scored_batches.into_iter().next() {
-                    if let Err(error) = apply_mutation(self.pm.clone(), &batch).await {
-                        tracing::warn!(
-                            issue_id = %issue.id,
-                            %signal_id,
-                            "signal watcher failed to apply mutation: {error}"
-                        );
+                // Mark `seen` only on a decisive outcome: successful apply, or no
+                // proposer candidates (re-running an empty proposer every tick is
+                // wasteful). A failed `apply_mutation` leaves `seen` untouched so
+                // the next tick retries the signal — crucial for transient PM
+                // errors, which would otherwise suppress retry for the process
+                // lifetime. Pairs with the durable `spur:signal-processed:<uuid>`
+                // label written by the executor on commit for cross-tick dedup.
+                match scored_batches.into_iter().next() {
+                    Some((_score, batch)) => match apply_mutation(self.pm.clone(), &batch).await {
+                        Ok(_) => {
+                            self.seen.lock().insert(signal_id);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                issue_id = %issue.id,
+                                %signal_id,
+                                "signal watcher failed to apply mutation; will retry next tick: {error}"
+                            );
+                        }
+                    },
+                    None => {
+                        self.seen.lock().insert(signal_id);
                     }
                 }
             }
