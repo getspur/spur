@@ -506,6 +506,22 @@ pub async fn handle_report_signal(
         ),
     };
 
+    // Emit the audit sentinel BEFORE operational writes so the decision-at-
+    // decision-time is immutably recorded. Beads has no transactions; if the
+    // task closes between our terminal check above and subsequent writes, the
+    // watcher's status-at-tick-time filter (signal_watcher.rs) still enforces
+    // I3 at consumption. Ordering here makes partial failures auditable and
+    // matches the late-path ordering (audit-before-label) for consistency.
+    adv.add_comment(
+        &args.task_id,
+        &audit_encode(&AuditSentinelKind::Signal {
+            signal_id: signal_id.clone(),
+            kind: kind_label.clone(),
+            severity,
+            reason,
+        }),
+    )
+    .await?;
     adv.add_comment(&args.task_id, &signal_encode(&args.signal))
         .await?;
     pm.update_issue(
@@ -514,16 +530,6 @@ pub async fn handle_report_signal(
             add_labels: vec![labels::signal_kind(&kind_label)],
             ..Default::default()
         },
-    )
-    .await?;
-    adv.add_comment(
-        &args.task_id,
-        &audit_encode(&AuditSentinelKind::Signal {
-            signal_id: signal_id.clone(),
-            kind: kind_label,
-            severity,
-            reason,
-        }),
     )
     .await?;
 
