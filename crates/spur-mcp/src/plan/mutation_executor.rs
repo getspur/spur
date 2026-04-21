@@ -1,19 +1,21 @@
 //! Apply a `MutationBatch` with write-ahead audit, downstream rewire, and
 //! post-mutation cycle detection.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
-use spur_pm::{BeadsAdvanced, DependencyCycle, IssueCreate, IssueFilter, IssueUpdate, PmService};
+use spur_pm::{
+    BeadsAdvanced, DependencyCycle, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmService,
+};
 
-use super::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
+use super::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind, OpDescription};
 use super::labels::{mutation_id_label, signal_processed_label, superseded_by_labels};
 use super::mutation::{DepRewirePolicy, MutationBatch, PlanMutationOp};
 
-const ISSUE_SCAN_LIMIT: usize = 10_000;
+const ISSUE_SCAN_PAGE_SIZE: usize = 500;
 
 #[derive(Debug)]
 struct SplitExecution {
@@ -21,6 +23,32 @@ struct SplitExecution {
     original_parent_status: String,
     child_ids: Vec<String>,
     removed_parent_from: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct RollbackReport {
+    succeeded: Vec<OpDescription>,
+    failed: Vec<(OpDescription, String)>,
+}
+
+impl RollbackReport {
+    fn record_success(&mut self, kind: &str, issue_id: &str, depends_on_id: Option<&str>) {
+        self.succeeded
+            .push(rollback_op(kind, issue_id, depends_on_id));
+    }
+
+    fn record_failure(
+        &mut self,
+        kind: &str,
+        issue_id: &str,
+        depends_on_id: Option<&str>,
+        error: impl ToString,
+    ) {
+        self.failed.push((
+            rollback_op(kind, issue_id, depends_on_id),
+            error.to_string(),
+        ));
+    }
 }
 
 pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result<Vec<String>> {
@@ -182,25 +210,14 @@ pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result
 
     let cycles = dep_cycles_with_fallback(adv).await?;
     if !cycles.is_empty() {
-        let rollback_status = match rollback_mutation(pm.clone(), &executed_splits).await {
-            Ok(()) => "completed".to_string(),
-            Err(err) => {
-                let status = format!("failed: {err}");
-                adv.add_comment(
-                    &batch.trigger_task_id,
-                    &audit_encode(&AuditSentinelKind::MutationInvariantViolation {
-                        mutation_id: batch.mutation_id.to_string(),
-                        violation: "cycle".into(),
-                        rollback_status: status.clone(),
-                    }),
-                )
-                .await
-                .context("emit mutation-invariant-violation after rollback failure")?;
-                anyhow::bail!(
-                    "mutation {} rolled back after cycle detection but rollback failed: {err}",
-                    batch.mutation_id
-                );
-            }
+        let rollback_report = rollback_mutation(pm.clone(), &executed_splits).await;
+        let rollback_status = if rollback_report.failed.is_empty() {
+            "completed".to_string()
+        } else {
+            format!(
+                "failed: {} rollback compensation op(s) failed",
+                rollback_report.failed.len()
+            )
         };
 
         adv.add_comment(
@@ -209,10 +226,33 @@ pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result
                 mutation_id: batch.mutation_id.to_string(),
                 violation: "cycle".into(),
                 rollback_status,
+                rollback_ops_succeeded: rollback_report.succeeded.clone(),
+                rollback_ops_failed: rollback_report.failed.clone(),
             }),
         )
         .await
         .context("emit mutation-invariant-violation")?;
+
+        if !rollback_report.failed.is_empty() {
+            let rollback_failure = rollback_report
+                .failed
+                .iter()
+                .map(|(op, err)| {
+                    let dependency = op
+                        .depends_on_id
+                        .as_deref()
+                        .map(|dep| format!(" -> {dep}"))
+                        .unwrap_or_default();
+                    format!("{} {}{}: {}", op.kind, op.issue_id, dependency, err)
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!(
+                "mutation {} rolled back after cycle detection but rollback failed: {}",
+                batch.mutation_id,
+                rollback_failure
+            );
+        }
 
         anyhow::bail!("mutation {} rolled back: cycle detected", batch.mutation_id);
     }
@@ -308,66 +348,173 @@ fn rewire_plan(
     })
 }
 
-async fn rollback_mutation(pm: Arc<PmService>, executed_splits: &[SplitExecution]) -> Result<()> {
-    let adv = pm
-        .advanced()
-        .ok_or_else(|| anyhow!("rollback requires beads backend"))?;
+async fn rollback_mutation(
+    pm: Arc<PmService>,
+    executed_splits: &[SplitExecution],
+) -> RollbackReport {
+    let mut report = RollbackReport::default();
+    let Some(adv) = pm.advanced() else {
+        if let Some(split) = executed_splits.last() {
+            report.record_failure(
+                "rollback_setup",
+                &split.parent_id,
+                None,
+                "rollback requires beads backend",
+            );
+        }
+        return report;
+    };
 
     for split in executed_splits.iter().rev() {
-        remove_dependencies_touching_children(pm.as_ref(), adv, &split.child_ids).await?;
+        match dependencies_touching_children(pm.as_ref(), &split.child_ids).await {
+            Ok(pairs) => {
+                for (issue_id, depends_on_id) in pairs {
+                    match adv.remove_dependency(&issue_id, &depends_on_id).await {
+                        Ok(()) => {
+                            report.record_success(
+                                "remove_dependency",
+                                &issue_id,
+                                Some(&depends_on_id),
+                            );
+                        }
+                        Err(error) => {
+                            report.record_failure(
+                                "remove_dependency",
+                                &issue_id,
+                                Some(&depends_on_id),
+                                format!("{error:#}"),
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                report.record_failure(
+                    "remove_dependency",
+                    &split.parent_id,
+                    None,
+                    format!("scan rollback dependencies: {error:#}"),
+                );
+            }
+        }
 
         for downstream in &split.removed_parent_from {
-            pm.add_dependency(downstream, &split.parent_id)
-                .await
-                .with_context(|| {
-                    format!(
-                        "restore original downstream dependency {downstream} -> {}",
-                        split.parent_id
-                    )
-                })?;
+            match pm.add_dependency(downstream, &split.parent_id).await {
+                Ok(()) => {
+                    report.record_success("restore_dependency", downstream, Some(&split.parent_id));
+                }
+                Err(error) => {
+                    report.record_failure(
+                        "restore_dependency",
+                        downstream,
+                        Some(&split.parent_id),
+                        format!(
+                            "restore original downstream dependency {downstream} -> {}: {error:#}",
+                            split.parent_id
+                        ),
+                    );
+                }
+            }
         }
 
         for child_id in &split.child_ids {
-            pm.update_issue(
-                child_id,
+            match pm
+                .update_issue(
+                    child_id,
+                    IssueUpdate {
+                        status: Some(pm.closed_status().to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(()) => report.record_success("close_child_issue", child_id, None),
+                Err(error) => {
+                    report.record_failure(
+                        "close_child_issue",
+                        child_id,
+                        None,
+                        format!("close rolled-back child {child_id}: {error:#}"),
+                    );
+                }
+            }
+        }
+
+        match pm
+            .update_issue(
+                &split.parent_id,
                 IssueUpdate {
-                    status: Some(pm.closed_status().to_string()),
+                    status: Some(split.original_parent_status.clone()),
                     ..Default::default()
                 },
             )
             .await
-            .with_context(|| format!("close rolled-back child {child_id}"))?;
+        {
+            Ok(()) => report.record_success("restore_parent_status", &split.parent_id, None),
+            Err(error) => {
+                report.record_failure(
+                    "restore_parent_status",
+                    &split.parent_id,
+                    None,
+                    format!("restore parent {}: {error:#}", split.parent_id),
+                );
+            }
         }
-
-        pm.update_issue(
-            &split.parent_id,
-            IssueUpdate {
-                status: Some(split.original_parent_status.clone()),
-                ..Default::default()
-            },
-        )
-        .await
-        .with_context(|| format!("restore parent {}", split.parent_id))?;
-        remove_labels_individually(
-            pm.as_ref(),
-            &split.parent_id,
-            &superseded_by_labels(&split.child_ids),
-        )
-        .await
-        .with_context(|| format!("clear superseded-by labels from {}", split.parent_id))?;
+        for label in superseded_by_labels(&split.child_ids) {
+            let child_id = label
+                .strip_prefix("spur:superseded-by:")
+                .unwrap_or_default()
+                .to_string();
+            match pm
+                .update_issue(
+                    &split.parent_id,
+                    IssueUpdate {
+                        remove_labels: vec![label],
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(()) => {
+                    report.record_success(
+                        "clear_superseded_by_label",
+                        &split.parent_id,
+                        Some(&child_id),
+                    );
+                }
+                Err(error) => {
+                    report.record_failure(
+                        "clear_superseded_by_label",
+                        &split.parent_id,
+                        Some(&child_id),
+                        format!(
+                            "clear superseded-by labels from {}: {error:#}",
+                            split.parent_id
+                        ),
+                    );
+                }
+            }
+        }
     }
 
-    Ok(())
+    report
 }
 
-async fn remove_dependencies_touching_children(
+fn rollback_op(kind: &str, issue_id: &str, depends_on_id: Option<&str>) -> OpDescription {
+    OpDescription {
+        kind: kind.to_string(),
+        issue_id: issue_id.to_string(),
+        depends_on_id: depends_on_id.map(str::to_string),
+    }
+}
+
+async fn dependencies_touching_children(
     pm: &PmService,
-    adv: &dyn BeadsAdvanced,
     child_ids: &[String],
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
     let child_set: HashSet<&str> = child_ids.iter().map(String::as_str).collect();
     let issues = list_all_issue_ids(pm).await?;
-    let mut pairs: HashSet<(String, String)> = HashSet::new();
+    let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
 
     for issue_id in issues {
         let issue = pm
@@ -381,13 +528,7 @@ async fn remove_dependencies_touching_children(
         }
     }
 
-    for (issue_id, depends_on_id) in pairs {
-        adv.remove_dependency(&issue_id, &depends_on_id)
-            .await
-            .with_context(|| format!("remove rollback dependency {issue_id} -> {depends_on_id}"))?;
-    }
-
-    Ok(())
+    Ok(pairs.into_iter().collect())
 }
 
 async fn downstream_issue_ids(pm: &PmService, parent_id: &str) -> Result<Vec<String>> {
@@ -407,26 +548,38 @@ async fn downstream_issue_ids(pm: &PmService, parent_id: &str) -> Result<Vec<Str
     Ok(downstreams)
 }
 
-async fn list_all_issue_ids(pm: &PmService) -> Result<Vec<String>> {
-    let issues = pm
-        .list_issues(IssueFilter {
-            limit: Some(ISSUE_SCAN_LIMIT),
-            ..Default::default()
-        })
-        .await
-        .context("list issues for mutation scan")?;
-    // Saturation warning: downstream-dep and rollback scans use this list. If
-    // beads returns exactly the limit, deps on truncated issues are silently
-    // missed, which can leave orphan dependency edges or skip rollback
-    // compensations. Tracked as G5 in the spec. Pagination is the real fix.
-    if issues.len() >= ISSUE_SCAN_LIMIT {
-        tracing::warn!(
-            limit = ISSUE_SCAN_LIMIT,
-            returned = issues.len(),
-            "mutation scan saturated ISSUE_SCAN_LIMIT — dependency rewrites may be incomplete"
-        );
+fn apply_issue_scan_page(
+    out: &mut Vec<String>,
+    offset: usize,
+    page: Vec<IssueSummary>,
+) -> Option<usize> {
+    let page_len = page.len();
+    out.extend(page.into_iter().map(|issue| issue.id));
+    if page_len < ISSUE_SCAN_PAGE_SIZE {
+        None
+    } else {
+        Some(offset + page_len)
     }
-    Ok(issues.into_iter().map(|issue| issue.id).collect())
+}
+
+async fn list_all_issue_ids(pm: &PmService) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let page = pm
+            .list_issues(IssueFilter {
+                limit: Some(ISSUE_SCAN_PAGE_SIZE),
+                offset: Some(offset),
+                ..Default::default()
+            })
+            .await
+            .context("list issues for mutation scan page")?;
+        match apply_issue_scan_page(&mut out, offset, page) {
+            Some(next_offset) => offset = next_offset,
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 async fn dep_cycles_with_fallback(adv: &dyn BeadsAdvanced) -> Result<Vec<DependencyCycle>> {
@@ -474,28 +627,24 @@ async fn add_labels_individually(pm: &PmService, issue_id: &str, labels: &[Strin
     Ok(())
 }
 
-async fn remove_labels_individually(
-    pm: &PmService,
-    issue_id: &str,
-    labels: &[String],
-) -> Result<()> {
-    for label in labels {
-        pm.update_issue(
-            issue_id,
-            IssueUpdate {
-                remove_labels: vec![label.clone()],
-                ..Default::default()
-            },
-        )
-        .await
-        .with_context(|| format!("remove label {label} from {issue_id}"))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spur_pm::{IssueSummary, PmSource};
+
+    fn summary(id: &str) -> IssueSummary {
+        IssueSummary {
+            id: id.to_string(),
+            source: PmSource::Beads,
+            title: format!("Issue {id}"),
+            status: "open".into(),
+            labels: Vec::new(),
+            url: format!("beads://{id}"),
+            priority: None,
+            issue_type: Some("task".into()),
+            assignee: None,
+        }
+    }
 
     #[test]
     fn barrier_rewire_replaces_parent_for_all_downstreams() {
@@ -533,5 +682,46 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn apply_issue_scan_page_advances_after_full_page() {
+        let mut out = Vec::new();
+        let page = (0..ISSUE_SCAN_PAGE_SIZE)
+            .map(|idx| summary(&format!("bd-{idx}")))
+            .collect();
+
+        let next = apply_issue_scan_page(&mut out, 0, page);
+
+        assert_eq!(out.len(), ISSUE_SCAN_PAGE_SIZE);
+        assert_eq!(next, Some(ISSUE_SCAN_PAGE_SIZE));
+    }
+
+    #[test]
+    fn apply_issue_scan_page_stops_after_tail_page() {
+        let mut out = Vec::new();
+        let full_page = (0..ISSUE_SCAN_PAGE_SIZE)
+            .map(|idx| summary(&format!("bd-{idx}")))
+            .collect();
+        let tail_page = vec![summary("bd-tail-1"), summary("bd-tail-2")];
+
+        let next = apply_issue_scan_page(&mut out, 0, full_page);
+        assert_eq!(next, Some(ISSUE_SCAN_PAGE_SIZE));
+
+        let final_next = apply_issue_scan_page(&mut out, next.unwrap(), tail_page);
+
+        assert_eq!(final_next, None);
+        assert_eq!(out.len(), ISSUE_SCAN_PAGE_SIZE + 2);
+        assert_eq!(out.last().map(|id| id.as_str()), Some("bd-tail-2"));
+    }
+
+    #[test]
+    fn apply_issue_scan_page_handles_empty_page() {
+        let mut out = Vec::new();
+
+        let next = apply_issue_scan_page(&mut out, 0, Vec::new());
+
+        assert_eq!(next, None);
+        assert!(out.is_empty());
     }
 }

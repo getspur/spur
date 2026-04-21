@@ -162,7 +162,15 @@ async fn plan_audit_coverage_all_four_sentinels() {
 
     // ── 1. PlanSubmit — on epic issue ───────────────────────────────────────
     let adv = pm.advanced().expect("beads backend must have advanced()");
-    spur_mcp::emit_plan_submit_audit(adv, "audit-plan-1", &subgraph, None, None).await;
+    spur_mcp::emit_plan_submit_audit(
+        adv,
+        "audit-plan-1",
+        &subgraph,
+        Some("spur/brain-snapshot-test"),
+        Some("0123456789abcdef0123456789abcdef01234567"),
+        None,
+    )
+    .await;
 
     // ── 2. Dispatch — on task issue ─────────────────────────────────────────
     let delegation_id = "del-audit-001".to_string();
@@ -216,6 +224,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
         tasks: vec![entry],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some(epic_issue_id.clone()),
     };
@@ -241,9 +250,19 @@ async fn plan_audit_coverage_all_four_sentinels() {
     let epic_comments =
         run_br(dir.path(), &["comments", "list", &epic_issue_id]).expect("br comments list epic");
     let epic_sentinels = collect_sentinels(&epic_comments);
-    let plan_submit_found = epic_sentinels.iter().any(
-        |k| matches!(k, AuditSentinelKind::PlanSubmit { plan_id, .. } if plan_id == "audit-plan-1"),
-    );
+    let plan_submit_found = epic_sentinels.iter().any(|k| {
+        matches!(
+            k,
+            AuditSentinelKind::PlanSubmit {
+                plan_id,
+                base_snapshot_branch: Some(base_snapshot_branch),
+                base_snapshot_oid: Some(base_snapshot_oid),
+                ..
+            } if plan_id == "audit-plan-1"
+                && base_snapshot_branch == "spur/brain-snapshot-test"
+                && base_snapshot_oid == "0123456789abcdef0123456789abcdef01234567"
+        )
+    });
     assert!(
         plan_submit_found,
         "PlanSubmit sentinel must be on epic {epic_issue_id}; got: {epic_sentinels:?}"
@@ -289,6 +308,58 @@ async fn plan_audit_coverage_all_four_sentinels() {
         cp < ap,
         "Completion must precede Approval (positions: {cp} vs {ap})"
     );
+}
+
+#[tokio::test]
+async fn epic_completion_audit_round_trips_through_collect_sentinels() {
+    if !br_available() {
+        eprintln!(
+            "skipping epic_completion_audit_round_trips_through_collect_sentinels: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+
+    let epic_id = serde_json::from_str::<serde_json::Value>(
+        &run_br(
+            dir.path(),
+            &["create", "Epic completion epic", "-t", "epic"],
+        )
+        .expect("create epic"),
+    )
+    .expect("create epic json")
+    .get("id")
+    .and_then(|value| value.as_str())
+    .expect("id field")
+    .to_string();
+
+    let adv = pm.advanced().expect("beads backend must have advanced()");
+    spur_mcp::plan::emit_epic_completion_audit(
+        adv,
+        &epic_id,
+        "audit-plan-epic",
+        spur_mcp::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,
+    )
+    .await;
+
+    let epic_comments =
+        run_br(dir.path(), &["comments", "list", &epic_id]).expect("br comments list epic");
+    let epic_sentinels = collect_sentinels(&epic_comments);
+    assert!(epic_sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::EpicCompletion {
+            outcome: spur_mcp::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,
+            plan_id,
+            epic_id: found_epic_id,
+        } if plan_id == "audit-plan-epic" && found_epic_id == &epic_id
+    )));
 }
 
 #[tokio::test]
@@ -623,6 +694,7 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
         tasks: vec![entry],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some(subgraph.epic_id.clone()),
     };
@@ -732,6 +804,7 @@ async fn request_changes_leaves_issue_open_and_not_review_ready() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some("bd-epic".into()),
     }));
@@ -819,6 +892,7 @@ async fn request_changes_does_not_emit_dispatch_audit() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some("bd-epic".into()),
     }));
@@ -910,6 +984,7 @@ async fn approve_closes_issue_and_clears_ready_for_review() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some("bd-epic".into()),
     };

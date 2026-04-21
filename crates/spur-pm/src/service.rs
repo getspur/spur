@@ -230,4 +230,15 @@ mod tests {
         }
         let _ = assert_accessor;
     }
+
+    #[test]
+    fn issue_filter_with_offset_flows_through_service_surface() {
+        fn accepts_filter(_: crate::types::IssueFilter) {}
+
+        accepts_filter(crate::types::IssueFilter {
+            offset: Some(50),
+            limit: Some(25),
+            ..Default::default()
+        });
+    }
 }

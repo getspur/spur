@@ -282,6 +282,19 @@ pub fn plan_submit_base_snapshot(audits: &[AuditSentinelKind]) -> Option<String>
     })
 }
 
+pub fn plan_submit_base_snapshot_oid(audits: &[AuditSentinelKind]) -> Option<String> {
+    audits.iter().rev().find_map(|audit| {
+        if let AuditSentinelKind::PlanSubmit {
+            base_snapshot_oid, ..
+        } = audit
+        {
+            base_snapshot_oid.clone()
+        } else {
+            None
+        }
+    })
+}
+
 pub async fn project_plan_from_beads(
     pm: &spur_pm::PmService,
     plan_id: &str,
@@ -404,6 +417,7 @@ pub async fn project_plan_from_beads(
         tasks: entries,
         brain_session_id: BrainSessionId::new(SessionId(format!("persisted-plan:{plan_id}"))),
         base_snapshot_branch: plan_submit_base_snapshot(&epic_audits),
+        base_snapshot_oid: plan_submit_base_snapshot_oid(&epic_audits),
         merge_state: crate::plan::PlanMergeState::NotStarted,
         epic_id: Some(epic.id),
     })
@@ -656,6 +670,7 @@ mod tests {
             epic_issue_id: "bd-epic".into(),
             task_ids: vec!["bd-1".into()],
             base_snapshot_branch: Some("refs/heads/main".into()),
+            base_snapshot_oid: None,
             execution_mode: Some("submit_plan".into()),
         }];
 

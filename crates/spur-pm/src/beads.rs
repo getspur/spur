@@ -182,6 +182,12 @@ impl From<BrIssueWithCounts> for IssueSummary {
     }
 }
 
+fn paginate_issue_summaries(issues: Vec<IssueSummary>, filter: &IssueFilter) -> Vec<IssueSummary> {
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    issues.into_iter().skip(offset).take(limit).collect()
+}
+
 // ─── BeadsAdapter ─────────────────────────────────────────────────────
 
 pub struct BeadsAdapter {
@@ -576,15 +582,18 @@ impl IssueTracker for BeadsAdapter {
             args.push(text.clone());
         }
 
-        let limit = filter.limit.unwrap_or(50);
+        let requested_limit = filter.limit.unwrap_or(50);
+        let offset = filter.offset.unwrap_or(0);
+        let cli_limit = requested_limit.saturating_add(offset);
         args.push("--limit".into());
-        args.push(limit.to_string());
+        args.push(cli_limit.to_string());
 
         let output = self.run_br(args).await?;
         let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output)
             .map_err(|e| anyhow::anyhow!("Failed to parse `br list` output: {e}\nRaw: {output}"))?;
 
-        Ok(issues.into_iter().map(IssueSummary::from).collect())
+        let summaries: Vec<IssueSummary> = issues.into_iter().map(IssueSummary::from).collect();
+        Ok(paginate_issue_summaries(summaries, &filter))
     }
 
     async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
@@ -888,5 +897,95 @@ impl BeadsAdvanced for BeadsAdapter {
             .into_iter()
             .map(|c| DependencyCycle { issues: c.issues })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn summary(id: &str) -> crate::types::IssueSummary {
+        crate::types::IssueSummary {
+            id: id.to_string(),
+            source: crate::types::PmSource::Beads,
+            title: format!("Issue {id}"),
+            status: "open".into(),
+            labels: Vec::new(),
+            url: format!("beads://{id}"),
+            priority: None,
+            issue_type: Some("task".into()),
+            assignee: None,
+        }
+    }
+
+    #[test]
+    fn paginate_issue_summaries_without_offset_preserves_first_page() {
+        let issues = vec![summary("bd-1"), summary("bd-2"), summary("bd-3")];
+        let page = super::paginate_issue_summaries(
+            issues,
+            &crate::types::IssueFilter {
+                limit: Some(2),
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(ids, vec!["bd-1".to_string(), "bd-2".to_string()]);
+    }
+
+    #[test]
+    fn paginate_issue_summaries_applies_offset() {
+        let issues = vec![summary("bd-1"), summary("bd-2"), summary("bd-3")];
+        let page = super::paginate_issue_summaries(
+            issues,
+            &crate::types::IssueFilter {
+                offset: Some(1),
+                limit: Some(5),
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(ids, vec!["bd-2".to_string(), "bd-3".to_string()]);
+    }
+
+    #[test]
+    fn paginate_issue_summaries_caps_length_after_offset() {
+        let issues = vec![
+            summary("bd-1"),
+            summary("bd-2"),
+            summary("bd-3"),
+            summary("bd-4"),
+        ];
+        let page = super::paginate_issue_summaries(
+            issues,
+            &crate::types::IssueFilter {
+                offset: Some(1),
+                limit: Some(2),
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(ids, vec!["bd-2".to_string(), "bd-3".to_string()]);
+    }
+
+    #[test]
+    fn paginate_issue_summaries_keeps_exact_page_length() {
+        let issues = vec![summary("bd-1"), summary("bd-2"), summary("bd-3")];
+        let page = super::paginate_issue_summaries(
+            issues,
+            &crate::types::IssueFilter {
+                limit: Some(3),
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(
+            ids,
+            vec!["bd-1".to_string(), "bd-2".to_string(), "bd-3".to_string()]
+        );
+    }
+
+    #[test]
+    fn paginate_issue_summaries_handles_empty_input() {
+        let page =
+            super::paginate_issue_summaries(Vec::new(), &crate::types::IssueFilter::default());
+        assert!(page.is_empty());
     }
 }

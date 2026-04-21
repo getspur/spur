@@ -28,10 +28,11 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use spur_acp::{BrainSessionId, SessionId};
+use spur_acp::{BrainSessionId, SessionId, SpurEvent, SpurEventBody};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::labels;
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
+use spur_mcp::McpEventSink;
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -98,9 +99,32 @@ fn label_issue(repo: &Path, issue_id: &str, label: &str) {
     run_br(repo, &["label", "add", issue_id, label]);
 }
 
+fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
+    let items: serde_json::Value =
+        serde_json::from_str(list_json).expect("br comments list must be valid JSON");
+    items
+        .as_array()
+        .expect("comments must be JSON array")
+        .iter()
+        .filter_map(|comment| comment.get("text").and_then(|text| text.as_str()))
+        .filter_map(audit_sentinel::parse_comment)
+        .filter_map(|result| result.ok())
+        .collect()
+}
+
 fn test_continuation_ctx() -> DetachedContinuationCtx {
     DetachedContinuationCtx {
         on_complete: Arc::new(|_cont, _worker| Box::pin(async {})),
+    }
+}
+
+struct CaptureSink {
+    events: std::sync::Mutex<Vec<SpurEvent>>,
+}
+
+impl McpEventSink for CaptureSink {
+    fn emit(&self, body: SpurEventBody) {
+        self.events.lock().unwrap().push(SpurEvent::now(body));
     }
 }
 
@@ -365,6 +389,216 @@ async fn observe_ready_via_br_returns_ready_tasks() {
         !ready_ids.contains(&task_b_id),
         "task B ({task_b_id}) is blocked and must not be in br fallback ready list; got: {ready_ids:?}"
     );
+}
+
+#[tokio::test]
+async fn epic_closes_when_scoped_children_terminal() {
+    if !br_available() {
+        eprintln!("skipping epic_closes_when_scoped_children_terminal: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_json = run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan terminal epic",
+            "--priority",
+            "2",
+        ],
+    );
+    let epic_id = parse_id_from_create(&epic_json);
+
+    let task_a_json = run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A terminal",
+            "--priority",
+            "2",
+        ],
+    );
+    let task_a_id = parse_id_from_create(&task_a_json);
+
+    let task_b_json = run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task B terminal",
+            "--priority",
+            "2",
+        ],
+    );
+    let task_b_id = parse_id_from_create(&task_b_json);
+
+    let plan_label = labels::plan_id("P1");
+    label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &task_a_id, &plan_label);
+    label_issue(dir.path(), &task_b_id, &plan_label);
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService) — beads dir must exist after br init");
+    let pm = Arc::new(pm);
+
+    pm.update_issue(
+        &task_a_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close task A");
+    pm.update_issue(
+        &task_b_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close task B");
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        Some("P1".into()),
+    );
+
+    reconciler
+        .tick_once()
+        .await
+        .expect("tick_once must succeed");
+
+    let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert_eq!(epic.status, pm.closed_status());
+
+    let epic_comments = run_br_json(dir.path(), &["comments", "list", &epic_id]);
+    let sentinels = collect_sentinels(&epic_comments);
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::EpicCompletion { plan_id, epic_id: found_epic_id, .. }
+            if plan_id == "P1" && found_epic_id == &epic_id
+    )));
+}
+
+#[tokio::test]
+async fn all_approved_epic_emits_plan_ready_to_merge() {
+    if !br_available() {
+        eprintln!("skipping all_approved_epic_emits_plan_ready_to_merge: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan ready epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_a_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A approved",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_b_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task B approved",
+            "--priority",
+            "2",
+        ],
+    ));
+
+    let plan_label = labels::plan_id("P1");
+    label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &task_a_id, &plan_label);
+    label_issue(dir.path(), &task_b_id, &plan_label);
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService) — beads dir must exist after br init");
+    let pm = Arc::new(pm);
+
+    for task_id in [&task_a_id, &task_b_id] {
+        pm.update_issue(
+            task_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close task");
+    }
+
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: Some(sink_ref),
+        }),
+        Some("P1".into()),
+    );
+
+    reconciler
+        .tick_once()
+        .await
+        .expect("tick_once must succeed");
+
+    let events = sink.events.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.body,
+        SpurEventBody::PlanReadyToMerge { plan_id } if plan_id == "P1"
+    )));
 }
 
 #[tokio::test]
