@@ -25,6 +25,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
+use crate::plan::audit_sentinel::AuditSentinelKind;
 use spur_pm::{IssueFilter, PmService, ReadyFilter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,29 +289,44 @@ impl Reconciler {
             return Ok(false);
         };
 
+        let closed_status = self.pm.closed_status().to_string();
         let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
         if let Some(plan_id) = self.plan_id.as_deref() {
             labels.push(crate::plan::labels::plan_id(plan_id));
         }
 
-        let epics = self
+        let mut epics = self
             .pm
             .list_issues(IssueFilter {
-                labels,
+                labels: labels.clone(),
                 issue_type: Some("epic".into()),
                 limit: Some(10_000),
                 ..Default::default()
             })
             .await?;
+        let closed_epics = self
+            .pm
+            .list_issues(IssueFilter {
+                labels,
+                status: Some(closed_status.clone()),
+                issue_type: Some("epic".into()),
+                limit: Some(10_000),
+                ..Default::default()
+            })
+            .await?;
+        let mut seen_epic_ids = epics
+            .iter()
+            .map(|summary| summary.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for summary in closed_epics {
+            if seen_epic_ids.insert(summary.id.clone()) {
+                epics.push(summary);
+            }
+        }
 
         let mut did_work = false;
-        let closed_status = self.pm.closed_status().to_string();
 
         for epic in epics {
-            if epic.status == closed_status {
-                continue;
-            }
-
             let Some(plan_id) = epic
                 .labels
                 .iter()
@@ -354,6 +370,34 @@ impl Reconciler {
                 continue;
             };
 
+            let has_epic_completion =
+                crate::plan::projector::collect_sorted_audits(adv.list_comments(&epic.id).await?)
+                    .iter()
+                    .any(|audit| {
+                        matches!(
+                            audit,
+                            AuditSentinelKind::EpicCompletion {
+                                plan_id: audit_plan_id,
+                                epic_id: audit_epic_id,
+                                ..
+                            } if audit_plan_id == plan_id && audit_epic_id == &epic.id
+                        )
+                    });
+
+            if epic.status == closed_status {
+                if !has_epic_completion {
+                    crate::plan::emit_epic_completion_audit(
+                        adv,
+                        &epic.id,
+                        plan_id,
+                        outcome.audit_outcome,
+                    )
+                    .await;
+                    did_work = true;
+                }
+                continue;
+            }
+
             let mut update = spur_pm::IssueUpdate {
                 status: Some(closed_status.clone()),
                 ..Default::default()
@@ -377,8 +421,15 @@ impl Reconciler {
             }
 
             self.pm.update_issue(&epic.id, update).await?;
-            crate::plan::emit_epic_completion_audit(adv, &epic.id, plan_id, outcome.audit_outcome)
+            if !has_epic_completion {
+                crate::plan::emit_epic_completion_audit(
+                    adv,
+                    &epic.id,
+                    plan_id,
+                    outcome.audit_outcome,
+                )
                 .await;
+            }
             if outcome.add_integration_pending {
                 if let Some(sink) = self
                     .dispatch
