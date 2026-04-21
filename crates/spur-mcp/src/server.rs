@@ -513,6 +513,38 @@ async fn read_persisted_plan_bootstrap(
         .ok_or_else(|| format!("plan '{plan_id}' has no PlanSubmit audit on epic '{epic_id}'"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PersistedTaskCompletion {
+    worker_branch: Option<String>,
+    summary: Option<String>,
+}
+
+async fn read_latest_task_completion(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+) -> Result<Option<PersistedTaskCompletion>, String> {
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| "persisted task completion recovery requires beads backend".to_string())?;
+    let comments = adv
+        .list_comments(issue_id)
+        .await
+        .map_err(|e| format!("failed to load comments for task '{issue_id}': {e}"))?;
+    let audits = crate::plan::projector::collect_sorted_audits(comments);
+
+    Ok(audits.into_iter().rev().find_map(|audit| match audit {
+        crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+            worker_branch,
+            result_summary,
+            ..
+        } => Some(PersistedTaskCompletion {
+            worker_branch,
+            summary: result_summary,
+        }),
+        _ => None,
+    }))
+}
+
 async fn apply_issue_update(
     pm: &spur_pm::PmService,
     issue_id: &str,
@@ -1059,6 +1091,15 @@ async fn run_git_capture(
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
+}
+
+async fn diff_text_from_branches(
+    repo_root: &std::path::Path,
+    base_ref: &str,
+    worker_branch: &str,
+) -> Result<String, String> {
+    let range = format!("{base_ref}..{worker_branch}");
+    run_git_capture(repo_root, None, &["diff", range.as_str()]).await
 }
 
 async fn integrate_plan_branches(
@@ -3338,42 +3379,86 @@ impl McpCallbackServer {
 
         let plan_arc = self.load_or_project_plan(&plan_id).await?;
 
-        let state = plan_arc.lock().await;
-        let entry = state
-            .tasks
-            .iter()
-            .find(|t| t.spec.task_id == task_id)
-            .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
+        let (
+            current_attempt,
+            history,
+            agent,
+            task_description,
+            issue_id,
+            status_str,
+            status_summary,
+            worker_branch,
+            result,
+            epic_id,
+            base_snapshot_branch,
+            base_snapshot_oid,
+        ) = {
+            let state = plan_arc.lock().await;
+            let entry = state
+                .tasks
+                .iter()
+                .find(|t| t.spec.task_id == task_id)
+                .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
 
-        match &entry.status {
-            crate::plan::PlanTaskStatus::Pending | crate::plan::PlanTaskStatus::Ready => {
-                return Err(format!("task '{task_id}' has not been dispatched yet"));
+            match &entry.status {
+                crate::plan::PlanTaskStatus::Pending | crate::plan::PlanTaskStatus::Ready => {
+                    return Err(format!("task '{task_id}' has not been dispatched yet"));
+                }
+                crate::plan::PlanTaskStatus::Dispatched { .. } => {
+                    return Err(format!(
+                        "task '{task_id}' is still running — diff not available yet"
+                    ));
+                }
+                _ => {}
             }
-            crate::plan::PlanTaskStatus::Dispatched { .. } => {
-                return Err(format!(
-                    "task '{task_id}' is still running — diff not available yet"
-                ));
+
+            let status_str = match &entry.status {
+                crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
+                crate::plan::PlanTaskStatus::Approved { .. } => "approved",
+                crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
+                crate::plan::PlanTaskStatus::Failed { .. } => "failed",
+                _ => "unknown",
             }
-            _ => {}
-        }
+            .to_string();
+            let status_summary = match &entry.status {
+                crate::plan::PlanTaskStatus::AwaitingReview { summary }
+                | crate::plan::PlanTaskStatus::Approved { summary } => summary.clone(),
+                _ => None,
+            };
+
+            (
+                entry.attempt,
+                entry.history.clone(),
+                entry.spec.agent.clone(),
+                entry.spec.task.clone(),
+                entry.spec.issue_id.clone(),
+                status_str,
+                status_summary,
+                entry.worker_branch.clone(),
+                entry.result.clone(),
+                state.epic_id.clone(),
+                state.base_snapshot_branch.clone(),
+                state.base_snapshot_oid.clone(),
+            )
+        };
 
         // If attempt specified and differs from current, look up historical attempt.
         if let Some(want_attempt) = attempt {
-            if want_attempt != entry.attempt {
-                let Some(rec) = entry.history.iter().find(|r| r.attempt == want_attempt) else {
+            if want_attempt != current_attempt {
+                let Some(rec) = history.iter().find(|r| r.attempt == want_attempt) else {
                     return Err(format!(
                         "task '{task_id}' has no attempt {want_attempt} (current: {}, history: {} entries)",
-                        entry.attempt,
-                        entry.history.len()
+                        current_attempt,
+                        history.len()
                     ));
                 };
                 let mut resp = serde_json::Map::new();
                 resp.insert("task_id".into(), json!(task_id));
-                resp.insert("agent".into(), json!(entry.spec.agent));
+                resp.insert("agent".into(), json!(agent));
                 resp.insert("attempt".into(), json!(want_attempt));
                 resp.insert("status".into(), json!("historical"));
-                resp.insert("task_description".into(), json!(entry.spec.task));
-                if let Some(ref id) = entry.spec.issue_id {
+                resp.insert("task_description".into(), json!(task_description));
+                if let Some(ref id) = issue_id {
                     resp.insert("issue_id".into(), json!(id));
                 }
                 if let Some(ref b) = rec.worker_branch {
@@ -3400,27 +3485,58 @@ impl McpCallbackServer {
 
         let mut resp = serde_json::Map::new();
         resp.insert("task_id".into(), json!(task_id));
-        resp.insert("agent".into(), json!(entry.spec.agent));
-        resp.insert("task_description".into(), json!(entry.spec.task));
-        if let Some(ref issue_id) = entry.spec.issue_id {
+        resp.insert("agent".into(), json!(agent));
+        resp.insert("task_description".into(), json!(task_description));
+        if let Some(ref issue_id) = issue_id {
             resp.insert("issue_id".into(), json!(issue_id));
         }
-
-        let status_str = match &entry.status {
-            crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
-            crate::plan::PlanTaskStatus::Approved { .. } => "approved",
-            crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
-            crate::plan::PlanTaskStatus::Failed { .. } => "failed",
-            _ => "unknown",
-        };
         resp.insert("status".into(), json!(status_str));
 
-        if let Some(ref branch) = entry.worker_branch {
+        if let Some(ref branch) = worker_branch {
             resp.insert("worker_branch".into(), json!(branch));
         }
-        if let Some(ref result) = entry.result {
+        if let Some(ref summary) = status_summary {
+            resp.insert("summary".into(), json!(summary));
+        }
+        if let Some(ref result) = result {
             for (k, v) in crate::plan::build_task_diff_fields(result) {
                 resp.insert(k, v);
+            }
+        } else if let (Some(pm), Some(epic_id), Some(issue_id)) =
+            (self.pm_service.as_deref(), epic_id.as_deref(), issue_id.as_deref())
+        {
+            let bootstrap = read_persisted_plan_bootstrap(pm, &plan_id, epic_id)
+                .await
+                .ok();
+            let completion = read_latest_task_completion(pm, issue_id).await?;
+            let recovered_worker_branch = completion
+                .as_ref()
+                .and_then(|record| record.worker_branch.clone())
+                .or(worker_branch);
+
+            if let Some(recovered_worker_branch) = recovered_worker_branch {
+                let base_ref = bootstrap
+                    .as_ref()
+                    .and_then(PersistedPlanBootstrap::preferred_base_ref)
+                    .map(str::to_string)
+                    .or(base_snapshot_oid)
+                    .or(base_snapshot_branch)
+                    .ok_or_else(|| {
+                        format!(
+                            "plan '{plan_id}' has no captured base snapshot; latest diff unavailable"
+                        )
+                    })?;
+                let repo_root = self.repo_root.as_deref().ok_or_else(|| {
+                    "Repository root not configured; get_task_diff cannot reconstruct persisted diffs"
+                        .to_string()
+                })?;
+                let diff = diff_text_from_branches(repo_root, &base_ref, &recovered_worker_branch)
+                    .await?;
+                resp.insert("worker_branch".into(), json!(recovered_worker_branch));
+                resp.insert("diff".into(), json!(diff));
+                if let Some(summary) = completion.and_then(|record| record.summary) {
+                    resp.insert("summary".into(), json!(summary));
+                }
             }
         }
 
@@ -3738,7 +3854,6 @@ mod merge_plan_tests {
         server: super::McpCallbackServer,
         plan_id: String,
         epic_id: String,
-        task_issue_id: String,
     }
 
     async fn setup_persisted_merge_ready_plan(
@@ -3873,7 +3988,6 @@ mod merge_plan_tests {
             server,
             plan_id: plan_id.to_string(),
             epic_id: subgraph.epic_id,
-            task_issue_id,
         }
     }
 
