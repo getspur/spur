@@ -27,6 +27,51 @@ use tokio_util::task::TaskTracker;
 
 use spur_pm::{PmService, ReadyFilter};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectedEpicCompletion {
+    audit_outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
+    add_integration_pending: bool,
+}
+
+fn classify_epic_completion(
+    children: &[spur_pm::IssueSummary],
+    closed_status: &str,
+) -> Option<ProjectedEpicCompletion> {
+    if children.is_empty() {
+        return None;
+    }
+
+    let is_terminal_status = |status: &str| {
+        status == closed_status || matches!(status, "failed" | "cancelled" | "rejected")
+    };
+
+    if children
+        .iter()
+        .any(|child| !is_terminal_status(child.status.as_str()))
+    {
+        return None;
+    }
+
+    let has_terminal_failures = children.iter().any(|child| {
+        matches!(child.status.as_str(), "failed" | "cancelled" | "rejected")
+            || child.labels.iter().any(|label| {
+                matches!(
+                    label.as_str(),
+                    "rejected" | "review-rejected" | crate::plan::labels::REVIEW_REJECTED
+                )
+            })
+    });
+
+    Some(ProjectedEpicCompletion {
+        audit_outcome: if has_terminal_failures {
+            crate::plan::audit_sentinel::EpicCompletionOutcome::TerminalWithFailures
+        } else {
+            crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved
+        },
+        add_integration_pending: !has_terminal_failures,
+    })
+}
+
 #[derive(Clone)]
 pub struct ReconcilerDispatchCtx {
     pub delegation_tx: tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>,
@@ -329,6 +374,44 @@ mod tests {
 
         let cloned = ctx.clone();
         assert_eq!(cloned.brain_session_id, ctx.brain_session_id);
+    }
+
+    fn summary(id: &str, status: &str) -> spur_pm::IssueSummary {
+        spur_pm::IssueSummary {
+            id: id.into(),
+            source: spur_pm::PmSource::Beads,
+            title: id.into(),
+            status: status.into(),
+            labels: vec![],
+            url: format!("https://example.invalid/{id}"),
+            priority: None,
+            issue_type: Some("task".into()),
+            assignee: None,
+        }
+    }
+
+    #[test]
+    fn classify_epic_completion_reports_all_approved() {
+        let children = vec![summary("bd-1", "closed"), summary("bd-2", "closed")];
+        let outcome = super::classify_epic_completion(&children, "closed").expect("terminal");
+        assert_eq!(
+            outcome.audit_outcome,
+            crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved
+        );
+        assert!(outcome.add_integration_pending);
+    }
+
+    #[test]
+    fn classify_epic_completion_reports_terminal_failures() {
+        let mut rejected = summary("bd-2", "closed");
+        rejected.labels.push("rejected".into());
+        let children = vec![summary("bd-1", "closed"), rejected];
+        let outcome = super::classify_epic_completion(&children, "closed").expect("terminal");
+        assert_eq!(
+            outcome.audit_outcome,
+            crate::plan::audit_sentinel::EpicCompletionOutcome::TerminalWithFailures
+        );
+        assert!(!outcome.add_integration_pending);
     }
 
     /// D1 fix coverage: verify that the biased select! pattern used inside
