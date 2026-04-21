@@ -1921,6 +1921,7 @@ mod invalidate_protocols_tests {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
+            flag_summary: None,
         }
     }
 
@@ -2080,6 +2081,7 @@ mod cancel_state_tests {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
+            flag_summary: None,
         }
     }
 
@@ -2514,6 +2516,7 @@ mod tests {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
+            flag_summary: None,
         };
 
         let backend = TestBackend::new(80, 24);
