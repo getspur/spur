@@ -436,18 +436,23 @@ async fn main() -> Result<()> {
                 spur_core::license_runtime::to_event_state(license.current_state());
 
             // Create PmService (optional — returns None if no backend available)
-            let pm_service = spur_pm::PmService::try_new(
-                config.pm.github.as_ref().and_then(|g| g.repo.clone()),
-                config.pm.beads.as_ref().is_none_or(|b| b.enabled),
-                config.pm.github.as_ref().is_none_or(|g| g.enabled),
-                &repo_root,
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("PM service initialization failed: {e}");
+            let pm_service = if license.feature_gate().has(spur_license::FeatureKey::PM_INTEGRATION) {
+                spur_pm::PmService::try_new(
+                    config.pm.github.as_ref().and_then(|g| g.repo.clone()),
+                    config.pm.beads.as_ref().is_none_or(|b| b.enabled),
+                    config.pm.github.as_ref().is_none_or(|g| g.enabled),
+                    &repo_root,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("PM service initialization failed: {e}");
+                    None
+                })
+            } else {
+                tracing::info!("PM integration not available on current tier");
                 None
-            });
+            };
             let pm_arc = pm_service.map(std::sync::Arc::new);
 
             let orch = Orchestrator::new(repo_root.clone(), config, Some(license.feature_gate()))?;
