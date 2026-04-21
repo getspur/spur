@@ -206,26 +206,47 @@ pub type Result<T> = std::result::Result<T, LicenseError>;
 #[derive(Clone)]
 pub struct SpurLicense {
     provider: Arc<dyn LicenseProvider>,
+    feature_gate: Arc<FeatureGate>,
 }
 
 impl SpurLicense {
     /// Construct a facade backed by an arbitrary provider. Primary use is
     /// test injection via `FakeProvider`; production paths should prefer
     /// `from_env` / `from_env_or_disabled`.
-    pub fn from_provider(provider: std::sync::Arc<dyn crate::provider::LicenseProvider>) -> Self {
-        Self { provider }
+    pub fn from_provider(
+        provider: std::sync::Arc<dyn crate::provider::LicenseProvider>,
+        feature_gate: Arc<FeatureGate>,
+    ) -> Self {
+        Self {
+            provider,
+            feature_gate,
+        }
     }
 
     pub fn from_env() -> Result<Self> {
+        let provider = Arc::new(crate::licenseseat::from_env()?);
+        let policy = crate::policy::PolicyResolver::with_default_overlay();
+        let feature_gate = Arc::new(FeatureGate::new(policy));
+        feature_gate.update_state(&provider.current_state());
         Ok(Self {
-            provider: Arc::new(crate::licenseseat::from_env()?),
+            provider,
+            feature_gate,
         })
     }
 
     pub fn from_env_or_disabled() -> Self {
+        let provider = crate::licenseseat::from_env_or_disabled();
+        let policy = crate::policy::PolicyResolver::with_default_overlay();
+        let feature_gate = Arc::new(FeatureGate::new(policy));
+        feature_gate.update_state(&provider.current_state());
         Self {
-            provider: crate::licenseseat::from_env_or_disabled(),
+            provider,
+            feature_gate,
         }
+    }
+
+    pub fn feature_gate(&self) -> Arc<FeatureGate> {
+        Arc::clone(&self.feature_gate)
     }
 
     pub fn current_state(&self) -> LicenseState {

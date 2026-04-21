@@ -9,7 +9,9 @@ use spur_license::{LicenseState, LicenseStatus, Plan, SpurLicense};
 #[tokio::test]
 async fn fake_provider_scripted_validate_transitions() {
     let fake = Arc::new(FakeProvider::new(LicenseState::active_cached()));
-    let license = SpurLicense::from_provider(fake.clone());
+    let policy = spur_license::policy::PolicyResolver::with_default_overlay();
+    let feature_gate = Arc::new(spur_license::FeatureGate::new(policy));
+    let license = SpurLicense::from_provider(fake.clone(), feature_gate);
     let mut rx = license.subscribe();
 
     // Script a validate that downgrades to Invalid.
@@ -33,7 +35,9 @@ async fn fake_provider_scripted_validate_transitions() {
 #[tokio::test]
 async fn fake_provider_simulated_network_error_preserves_active_state() {
     let fake = Arc::new(FakeProvider::new(LicenseState::active_cached()));
-    let license = SpurLicense::from_provider(fake.clone());
+    let policy = spur_license::policy::PolicyResolver::with_default_overlay();
+    let feature_gate = Arc::new(spur_license::FeatureGate::new(policy));
+    let license = SpurLicense::from_provider(fake.clone(), feature_gate);
 
     fake.push_validate_result(Err(spur_license::LicenseError::Provider(
         "network unreachable".into(),
@@ -53,6 +57,8 @@ async fn initial_active_state_carries_non_unknown_plan_when_seeded() {
     let mut seed = LicenseState::active_validated(Plan::Pro, Default::default());
     seed.status_text = "Cached Pro".into();
     let fake = Arc::new(FakeProvider::new(seed));
-    let license = SpurLicense::from_provider(fake);
+    let policy = spur_license::policy::PolicyResolver::with_default_overlay();
+    let feature_gate = Arc::new(spur_license::FeatureGate::new(policy));
+    let license = SpurLicense::from_provider(fake, feature_gate);
     assert!(matches!(license.current_state().plan, Plan::Pro));
 }
