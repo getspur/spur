@@ -24,6 +24,7 @@ use tracing::{debug, error, info};
 
 use spur_acp::*;
 use spur_pm::{pidfile::PidFileGuard, IssueFilter, IssueUpdate, PmService, PrParams};
+use spur_worktree::WorktreeManager;
 
 use crate::plan::proposers::{ScopeDriftSplitProposer, TrivialScorer};
 use crate::plan::reconciler::{Reconciler, ReconcilerConfig};
@@ -680,6 +681,140 @@ fn topological_order(tasks: &[crate::plan::PlanTask]) -> Result<Vec<usize>, Stri
     Ok(out)
 }
 
+async fn snapshot_plan_base(
+    repo_root: Option<&std::path::PathBuf>,
+) -> Result<Option<String>, String> {
+    let Some(root) = repo_root.cloned() else {
+        return Ok(None);
+    };
+    let manager = WorktreeManager::new(root);
+    manager
+        .snapshot_brain_state()
+        .await
+        .map(Some)
+        .map_err(|e| format!("failed to snapshot plan base: {e}"))
+}
+
+async fn run_git_capture(
+    repo_root: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+    args: &[&str],
+) -> Result<String, String> {
+    let work_dir = cwd.unwrap_or(repo_root);
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(work_dir)
+        .output()
+        .await
+        .map_err(|e| format!("failed to execute git {}: {e}", args.join(" ")))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(format!(
+            "git {} failed (exit {}): {}",
+            args.join(" "),
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+async fn integrate_plan_branches(
+    repo_root: &std::path::Path,
+    base_ref: &str,
+    merge_branch: &str,
+    ordered_branches: &[(String, String)],
+) -> Result<crate::plan::PlanMergeState, String> {
+    let integration_root = repo_root
+        .join(".spur/merge")
+        .join(uuid::Uuid::new_v4().to_string());
+    if let Some(parent) = integration_root.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create integration worktree parent: {e}"))?;
+    }
+    let integration_root_str = integration_root
+        .to_str()
+        .ok_or_else(|| "integration worktree path is not valid UTF-8".to_string())?;
+
+    run_git_capture(
+        repo_root,
+        None,
+        &[
+            "worktree",
+            "add",
+            integration_root_str,
+            "-b",
+            merge_branch,
+            base_ref,
+        ],
+    )
+    .await?;
+
+    let mut merged_task_ids = Vec::with_capacity(ordered_branches.len());
+    for (task_id, worker_branch) in ordered_branches {
+        if let Err(err) = run_git_capture(
+            repo_root,
+            Some(&integration_root),
+            &["cherry-pick", worker_branch.as_str()],
+        )
+        .await
+        {
+            let conflict_output = run_git_capture(
+                repo_root,
+                Some(&integration_root),
+                &["diff", "--name-only", "--diff-filter=U"],
+            )
+            .await
+            .unwrap_or_default();
+            let files: Vec<String> = conflict_output
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect();
+            let _ = run_git_capture(
+                repo_root,
+                Some(&integration_root),
+                &["cherry-pick", "--abort"],
+            )
+            .await;
+            let _ = run_git_capture(
+                repo_root,
+                None,
+                &["worktree", "remove", integration_root_str, "--force"],
+            )
+            .await;
+            info!(
+                merge_branch = %merge_branch,
+                conflict_task_id = %task_id,
+                conflict_worker_branch = %worker_branch,
+                error = %err,
+                "merge_plan detected cherry-pick conflict"
+            );
+            return Ok(crate::plan::PlanMergeState::Conflict {
+                merge_branch: merge_branch.to_string(),
+                conflict_task_id: task_id.clone(),
+                conflict_worker_branch: worker_branch.clone(),
+                merged_task_ids,
+                files,
+            });
+        }
+        merged_task_ids.push(task_id.clone());
+    }
+
+    run_git_capture(
+        repo_root,
+        None,
+        &["worktree", "remove", integration_root_str, "--force"],
+    )
+    .await?;
+
+    Ok(crate::plan::PlanMergeState::Succeeded {
+        merge_branch: merge_branch.to_string(),
+        merged_task_ids,
+    })
+}
+
 #[cfg(test)]
 mod topo_tests {
     use super::topological_order;
@@ -1016,7 +1151,24 @@ impl McpCallbackServer {
         };
         let router = Router::new().nest_service("/mcp", service);
 
-        info!(url = %url, "MCP callback server listening (streamable HTTP)");
+        // I4: acquire single-brain pidfile when beads backend is present.
+        let brain_pidfile = if has_beads_backend {
+            let repo_root = repo_root
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("repo_root not set on McpCallbackServer"))?;
+            let pid_path = repo_root.join(".beads").join(".spur-brain.pid");
+            match PidFileGuard::acquire(&pid_path) {
+                Ok(guard) => {
+                    info!(path = %pid_path.display(), "acquired brain pidfile");
+                    Some(guard)
+                }
+                Err(e) => {
+                    anyhow::bail!("another SPUR brain session already owns this .beads/: {e}");
+                }
+            }
+        } else {
+            None
+        };
 
         // v0a.3: Spawn reconciler if enabled.
         // The reconciler is observation-only (does NOT dispatch in v0a). It observes ready
@@ -1078,24 +1230,7 @@ impl McpCallbackServer {
             None
         };
 
-        // I4: acquire single-brain pidfile when beads backend is present.
-        let brain_pidfile = if has_beads_backend {
-            let repo_root = repo_root
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("repo_root not set on McpCallbackServer"))?;
-            let pid_path = repo_root.join(".beads").join(".spur-brain.pid");
-            match PidFileGuard::acquire(&pid_path) {
-                Ok(guard) => {
-                    info!("acquired brain pidfile at {:?}", pid_path);
-                    Some(guard)
-                }
-                Err(e) => {
-                    anyhow::bail!("another SPUR brain session already owns this .beads/: {e}");
-                }
-            }
-        } else {
-            None
-        };
+        info!(url = %url, "MCP callback server listening (streamable HTTP)");
 
         let handle = tokio::spawn(async move {
             // I4: keep pidfile alive for the duration of the server.
@@ -1201,6 +1336,7 @@ impl McpCallbackServer {
             "create_issue" => self.handle_create_issue(id, arguments).await,
             "add_dependency" => self.handle_add_dependency(id, arguments).await,
             "create_pr" => self.handle_create_pr(id, arguments).await,
+            "merge_plan" => self.handle_merge_plan(id, arguments).await,
             "graph_triage" => self.handle_graph_triage(id, arguments).await,
             "graph_plan" => self.handle_graph_plan(id, arguments).await,
             "graph_insights" => self.handle_graph_insights(id, arguments).await,
@@ -1959,6 +2095,130 @@ impl McpCallbackServer {
         }
     }
 
+    async fn handle_merge_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
+        };
+
+        let repo_root = match self.repo_root.as_ref() {
+            Some(root) => root.clone(),
+            None => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    "Repository root not configured; merge_plan is unavailable",
+                )
+            }
+        };
+
+        let plan_arc = {
+            let plans = self.active_plans.lock().await;
+            plans.get(&plan_id).cloned()
+        };
+        let Some(plan_arc) = plan_arc else {
+            return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"));
+        };
+
+        let (base_snapshot_branch, tasks, merge_state) = {
+            let state = plan_arc.lock().await;
+            let status = crate::plan::build_plan_status(&plan_id, &state);
+            let ready = status
+                .get("ready_to_merge")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !ready {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("plan '{plan_id}' is not fully approved yet"),
+                );
+            }
+            (
+                state.base_snapshot_branch.clone(),
+                state.tasks.clone(),
+                state.merge_state.clone(),
+            )
+        };
+
+        if !matches!(merge_state, crate::plan::PlanMergeState::NotStarted) {
+            let state = plan_arc.lock().await;
+            let status = crate::plan::build_plan_status(&plan_id, &state);
+            let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+            return JsonRpcResponse::success(
+                id,
+                json!({ "content": [{ "type": "text", "text": text }] }),
+            );
+        }
+
+        let base_snapshot_branch = match base_snapshot_branch {
+            Some(branch) => branch,
+            None => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "plan '{plan_id}' has no captured base snapshot; resubmit the plan before calling merge_plan"
+                    ),
+                )
+            }
+        };
+
+        let task_specs: Vec<crate::plan::PlanTask> =
+            tasks.iter().map(|entry| entry.spec.clone()).collect();
+        let order = match topological_order(&task_specs) {
+            Ok(order) => order,
+            Err(e) => return JsonRpcResponse::internal_error(id, e),
+        };
+
+        let mut ordered_branches = Vec::with_capacity(order.len());
+        for idx in order {
+            let entry = &tasks[idx];
+            if !matches!(entry.status, crate::plan::PlanTaskStatus::Approved { .. }) {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "plan '{plan_id}' became non-approved while merge_plan was preparing task '{}'",
+                        entry.spec.task_id
+                    ),
+                );
+            }
+            let Some(worker_branch) = entry.worker_branch.clone() else {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "approved task '{}' has no worker_branch; cannot integrate plan",
+                        entry.spec.task_id
+                    ),
+                );
+            };
+            ordered_branches.push((entry.spec.task_id.clone(), worker_branch));
+        }
+
+        let merge_branch = format!(
+            "spur/plan-merge-{}-{}",
+            plan_id,
+            uuid::Uuid::new_v4().simple()
+        );
+
+        let merge_state = match integrate_plan_branches(
+            &repo_root,
+            &base_snapshot_branch,
+            &merge_branch,
+            &ordered_branches,
+        )
+        .await
+        {
+            Ok(state) => state,
+            Err(error) => crate::plan::PlanMergeState::Failed { error },
+        };
+
+        let status = {
+            let mut state = plan_arc.lock().await;
+            state.merge_state = merge_state;
+            crate::plan::build_plan_status(&plan_id, &state)
+        };
+        let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+    }
+
     // ─── Graph analysis handlers (bv robot protocol) ───────────────
 
     /// Helper: get the bv analyzer or return an MCP error.
@@ -2182,10 +2442,16 @@ impl McpCallbackServer {
             build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
 
         let task_count = entries.len();
+        let base_snapshot_branch = match snapshot_plan_base(self.repo_root.as_ref()).await {
+            Ok(branch) => branch,
+            Err(e) => return JsonRpcResponse::internal_error(id, e),
+        };
         let state = crate::plan::PlanState {
             plan_id: plan_id.clone(),
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
+            base_snapshot_branch,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: epic_subgraph.as_ref().map(|sg| sg.epic_id.clone()),
         };
         let state = Arc::new(tokio::sync::Mutex::new(state));
@@ -2384,10 +2650,19 @@ impl McpCallbackServer {
             .collect();
 
         let task_count = entries.len();
+        let base_snapshot_branch = match snapshot_plan_base(self.repo_root.as_ref()).await {
+            Ok(branch) => branch,
+            Err(e) => {
+                self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                return JsonRpcResponse::internal_error(id, e);
+            }
+        };
         let state = crate::plan::PlanState {
             plan_id: plan_id.clone(),
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
+            base_snapshot_branch,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: None, // TODO follow-up: set to Some(epic_id_arg.clone()) so review_task can correlate
         };
         let state = Arc::new(tokio::sync::Mutex::new(state));
@@ -2784,5 +3059,209 @@ mod cancel_delegation_tests {
         // After remove, cancel returns NotFound.
         let outcome = cc.cancel("req-2").await;
         assert_eq!(outcome, CancelOutcome::NotFound);
+    }
+}
+
+#[cfg(test)]
+mod merge_plan_tests {
+    use super::{integrate_plan_branches, run_git_capture};
+    use crate::plan::PlanMergeState;
+    use tempfile::TempDir;
+
+    async fn init_repo() -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        run_git_capture(dir.path(), None, &["init", "-q"])
+            .await
+            .expect("git init");
+        run_git_capture(dir.path(), None, &["config", "user.email", "test@spur"])
+            .await
+            .expect("git config user.email");
+        run_git_capture(dir.path(), None, &["config", "user.name", "spur-test"])
+            .await
+            .expect("git config user.name");
+        dir
+    }
+
+    async fn commit_file(repo: &std::path::Path, path: &str, body: &str, message: &str) {
+        std::fs::write(repo.join(path), body).expect("write file");
+        run_git_capture(repo, None, &["add", path])
+            .await
+            .expect("git add");
+        run_git_capture(repo, None, &["commit", "-q", "-m", message])
+            .await
+            .expect("git commit");
+    }
+
+    #[tokio::test]
+    async fn integrate_plan_branches_succeeds_without_touching_active_checkout() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        run_git_capture(
+            dir.path(),
+            None,
+            &["branch", "spur/brain-snapshot-test", "HEAD"],
+        )
+        .await
+        .expect("snapshot branch");
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-a");
+        commit_file(dir.path(), "a.txt", "alpha\n", "worker a").await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot");
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-b",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-b");
+        commit_file(dir.path(), "b.txt", "beta\n", "worker b").await;
+
+        let outcome = integrate_plan_branches(
+            dir.path(),
+            "spur/brain-snapshot-test",
+            "spur/plan-merge-test",
+            &[
+                ("task-a".into(), "spur/worker-a".into()),
+                ("task-b".into(), "spur/worker-b".into()),
+            ],
+        )
+        .await
+        .expect("integration should succeed");
+
+        match outcome {
+            PlanMergeState::Succeeded {
+                merge_branch,
+                merged_task_ids,
+            } => {
+                assert_eq!(merge_branch, "spur/plan-merge-test");
+                assert_eq!(merged_task_ids, vec!["task-a", "task-b"]);
+            }
+            other => panic!("expected successful merge state, got {other:?}"),
+        }
+
+        let a_contents = run_git_capture(dir.path(), None, &["show", "spur/plan-merge-test:a.txt"])
+            .await
+            .expect("show merged a.txt");
+        let b_contents = run_git_capture(dir.path(), None, &["show", "spur/plan-merge-test:b.txt"])
+            .await
+            .expect("show merged b.txt");
+        assert_eq!(a_contents, "alpha");
+        assert_eq!(b_contents, "beta");
+    }
+
+    #[tokio::test]
+    async fn integrate_plan_branches_reports_conflict_and_keeps_partial_branch() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "shared.txt", "base\n", "seed").await;
+        run_git_capture(
+            dir.path(),
+            None,
+            &["branch", "spur/brain-snapshot-test", "HEAD"],
+        )
+        .await
+        .expect("snapshot branch");
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-a");
+        commit_file(dir.path(), "shared.txt", "worker-a\n", "worker a").await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot");
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-b",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-b");
+        commit_file(dir.path(), "shared.txt", "worker-b\n", "worker b").await;
+
+        let outcome = integrate_plan_branches(
+            dir.path(),
+            "spur/brain-snapshot-test",
+            "spur/plan-merge-conflict",
+            &[
+                ("task-a".into(), "spur/worker-a".into()),
+                ("task-b".into(), "spur/worker-b".into()),
+            ],
+        )
+        .await
+        .expect("integration should return conflict state");
+
+        match outcome {
+            PlanMergeState::Conflict {
+                merge_branch,
+                conflict_task_id,
+                conflict_worker_branch,
+                merged_task_ids,
+                files,
+            } => {
+                assert_eq!(merge_branch, "spur/plan-merge-conflict");
+                assert_eq!(conflict_task_id, "task-b");
+                assert_eq!(conflict_worker_branch, "spur/worker-b");
+                assert_eq!(merged_task_ids, vec!["task-a"]);
+                assert!(
+                    files.iter().any(|f| f == "shared.txt"),
+                    "conflict files should mention shared.txt: {files:?}"
+                );
+            }
+            other => panic!("expected conflict merge state, got {other:?}"),
+        }
+
+        let merged_contents = run_git_capture(
+            dir.path(),
+            None,
+            &["show", "spur/plan-merge-conflict:shared.txt"],
+        )
+        .await
+        .expect("show partial merge branch");
+        assert_eq!(merged_contents, "worker-a");
     }
 }

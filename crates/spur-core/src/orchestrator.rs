@@ -693,6 +693,7 @@ impl Orchestrator {
             info!("reconciler enabled (beads backend)");
         }
         mcp_server.set_reconciler_enabled(reconciler_enabled, None);
+        mcp_server.set_repo_root(self.repo_root.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1868,6 +1869,7 @@ impl Orchestrator {
             info!("reconciler enabled (beads backend)");
         }
         mcp_server.set_reconciler_enabled(reconciler_enabled, None);
+        mcp_server.set_repo_root(self.repo_root.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -2031,6 +2033,7 @@ impl Orchestrator {
         mcp_server.set_inline_wait(std::time::Duration::from_millis(
             self.config.delegation.inline_wait_ms,
         ));
+        mcp_server.set_repo_root(self.repo_root.clone());
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -3542,9 +3545,9 @@ pub async fn cleanup_cancelled_review(
 ///   - `TimedOut { fallback: Approve }` — per spec, Approve fallback
 ///     means "auto-approve — worker's diff/summary retained as if
 ///     reviewed", so the diff must be committed and the worktree
-///     removed (same lifecycle as a human Approve).
-///   - `Success`/`Modified` (approved — changes merged into the brain's
-///     tree).
+///     detached (same lifecycle as a human Approve).
+///   - `Success`/`Modified` (approved — changes committed on the
+///     worker branch and preserved for later integration/PR creation).
 ///   - `Failed`/`Conflict`/`Timeout` (no real work to inspect — worker
 ///     hung or errored, or conflict blocked the run).
 pub fn should_preserve_worktree(status: &DelegationStatus) -> bool {
@@ -3561,8 +3564,8 @@ pub fn should_preserve_worktree(status: &DelegationStatus) -> bool {
     )
 }
 
-/// Returns `true` if the worker's diff should be committed into the
-/// brain's branch based on the final `DelegationStatus`.
+/// Returns `true` if the worker's diff should be committed onto the
+/// preserved worker branch based on the final `DelegationStatus`.
 ///
 /// Commit on:
 ///   - `Success` (Approve).
@@ -3571,7 +3574,7 @@ pub fn should_preserve_worktree(status: &DelegationStatus) -> bool {
 ///     says diff is "retained as if reviewed", so it must commit).
 ///
 /// Do NOT commit on Rejected/TimedOut(Reject|Abandon) (preserve for
-/// inspection), nor on Failed/Conflict/Timeout (no clean diff to merge).
+/// inspection), nor on Failed/Conflict/Timeout (no clean diff to keep).
 pub fn should_commit_worker_diff(status: &DelegationStatus) -> bool {
     matches!(
         status,

@@ -10,6 +10,7 @@ license.workspace = true
 schemars = { workspace = true }
 spur-acp = { workspace = true }
 spur-pm = { workspace = true }
+spur-worktree = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }

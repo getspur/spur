@@ -19,6 +19,7 @@ const EXPECTED: &[&str] = &[
     "create_issue",
     "add_dependency",
     "create_pr",
+    "merge_plan",
     "graph_triage",
     "graph_plan",
     "graph_insights",

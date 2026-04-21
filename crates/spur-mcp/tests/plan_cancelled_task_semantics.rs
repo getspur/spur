@@ -25,6 +25,8 @@ async fn test_non_cascade_on_dep() {
     let state = PlanState {
         plan_id: "p1".into(),
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
+        base_snapshot_branch: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: None,
         tasks: vec![
             PlanTaskEntry {
@@ -112,6 +114,8 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
     let state = PlanState {
         plan_id: "p1".into(),
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
+        base_snapshot_branch: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: None,
         tasks: vec![
             PlanTaskEntry {
@@ -219,6 +223,8 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
     let state = PlanState {
         plan_id: "p2".into(),
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
+        base_snapshot_branch: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: None,
         tasks: vec![
             PlanTaskEntry {

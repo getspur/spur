@@ -117,6 +117,29 @@ pub struct PlanTaskEntry {
     pub last_delegation_id: Option<String>,
 }
 
+/// Result of attempting to integrate a fully approved plan onto a dedicated
+/// plan branch.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PlanMergeState {
+    #[default]
+    NotStarted,
+    Succeeded {
+        merge_branch: String,
+        merged_task_ids: Vec<String>,
+    },
+    Conflict {
+        merge_branch: String,
+        conflict_task_id: String,
+        conflict_worker_branch: String,
+        merged_task_ids: Vec<String>,
+        files: Vec<String>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
 #[allow(dead_code)] // used via #[serde(default = "default_attempt")] — rustc doesn't track serde attrs
 fn default_attempt() -> u32 {
     1
@@ -134,6 +157,13 @@ pub struct PlanState {
     pub plan_id: String,
     pub tasks: Vec<PlanTaskEntry>,
     pub brain_session_id: BrainSessionId,
+    /// Shared plan base captured at submission time. `merge_plan` builds the
+    /// dedicated integration branch from this ref so merge results are
+    /// reproducible and detached from later brain edits.
+    pub base_snapshot_branch: Option<String>,
+    /// Latest integration attempt state. Reset to `NotStarted` whenever the
+    /// plan changes through review decisions.
+    pub merge_state: PlanMergeState,
     /// beads epic ID when the plan was submitted with `persist_as_epic=true`.
     /// None for ephemeral plans. Currently informational only — auto-close of
     /// persist-created child issues from review_task(approve) is a planned
@@ -1227,18 +1257,71 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         })
         .collect();
 
+    let merge_json = match &state.merge_state {
+        PlanMergeState::NotStarted => serde_json::json!({
+            "status": "not_started",
+            "base_snapshot_branch": state.base_snapshot_branch,
+        }),
+        PlanMergeState::Succeeded {
+            merge_branch,
+            merged_task_ids,
+        } => serde_json::json!({
+            "status": "succeeded",
+            "base_snapshot_branch": state.base_snapshot_branch,
+            "merge_branch": merge_branch,
+            "merged_task_ids": merged_task_ids,
+        }),
+        PlanMergeState::Conflict {
+            merge_branch,
+            conflict_task_id,
+            conflict_worker_branch,
+            merged_task_ids,
+            files,
+        } => serde_json::json!({
+            "status": "conflict",
+            "base_snapshot_branch": state.base_snapshot_branch,
+            "merge_branch": merge_branch,
+            "conflict_task_id": conflict_task_id,
+            "conflict_worker_branch": conflict_worker_branch,
+            "merged_task_ids": merged_task_ids,
+            "files": files,
+        }),
+        PlanMergeState::Failed { error } => serde_json::json!({
+            "status": "failed",
+            "base_snapshot_branch": state.base_snapshot_branch,
+            "error": error,
+        }),
+    };
+
     let next_action = match overall {
-        "running" => "Workers still running. Poll get_plan_status to monitor.",
+        "running" => "Workers still running. Poll get_plan_status to monitor.".to_string(),
         "awaiting_review" => {
             "Use get_task_diff to review each awaiting task, then review_task to approve or reject."
+                .to_string()
         }
-        "approved" => {
-            "All tasks approved. Use create_pr with a worker_branch to create a pull request."
-        }
-        "has_failures" => "Some tasks failed. Use get_task_diff to inspect failures.",
-        "has_rejections" => "Some tasks rejected. Revise the plan or re-submit.",
-        "failed" => "All tasks failed. Use get_task_diff to inspect errors.",
-        _ => "",
+        "approved" => match &state.merge_state {
+            PlanMergeState::NotStarted => {
+                "All tasks approved. Use merge_plan to create a dedicated integration branch."
+                    .to_string()
+            }
+            PlanMergeState::Succeeded { merge_branch, .. } => format!(
+                "Plan merged to '{}'. Use create_pr with that branch to create a pull request.",
+                merge_branch
+            ),
+            PlanMergeState::Conflict {
+                merge_branch,
+                conflict_task_id,
+                ..
+            } => format!(
+                "merge_plan hit a conflict on task '{}' while building '{}'. Resolve the integration branch manually or revise and rerun.",
+                conflict_task_id, merge_branch
+            ),
+            PlanMergeState::Failed { error } => format!("merge_plan failed: {error}"),
+        },
+        "has_failures" => "Some tasks failed. Use get_task_diff to inspect failures.".to_string(),
+        "has_rejections" => "Some tasks rejected. Revise the plan or re-submit.".to_string(),
+        "failed" => "All tasks failed. Use get_task_diff to inspect errors.".to_string(),
+        _ => String::new(),
     };
 
     serde_json::json!({
@@ -1260,6 +1343,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         "all_workers_done": all_workers_done,
         "ready_to_merge": ready_to_merge,
         "next_action": next_action,
+        "merge": merge_json,
         "tasks": tasks_json,
     })
 }
@@ -1884,6 +1968,7 @@ fn apply_decision_and_extract(
 
     match decision {
         "approve" => {
+            state.merge_state = PlanMergeState::NotStarted;
             let entry = state
                 .tasks
                 .iter_mut()
@@ -1938,6 +2023,7 @@ fn apply_decision_and_extract(
             }
         }
         "reject" => {
+            state.merge_state = PlanMergeState::NotStarted;
             let entry = state
                 .tasks
                 .iter_mut()
@@ -1976,6 +2062,7 @@ fn apply_decision_and_extract(
             mark_descendants_failed(task_id, state, &mut warnings);
         }
         "request_changes" => {
+            state.merge_state = PlanMergeState::NotStarted;
             let fb = feedback.ok_or_else(|| "request_changes requires feedback".to_string())?;
 
             {
@@ -3355,6 +3442,8 @@ mod tests {
                 })
                 .collect(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
+            base_snapshot_branch: None,
+            merge_state: super::PlanMergeState::NotStarted,
             epic_id: None,
         };
         let mut warnings = Vec::new();
@@ -3478,6 +3567,8 @@ mod tests {
             plan_id: "p1".into(),
             tasks: vec![entry],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("test-brain".into())),
+            base_snapshot_branch: None,
+            merge_state: PlanMergeState::NotStarted,
             epic_id: None,
         };
 
@@ -3669,5 +3760,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(derived2.plan_tasks[0].task, "");
+    }
+
+    #[test]
+    fn build_plan_status_points_to_merge_plan_before_integration() {
+        let state = super::PlanState {
+            plan_id: "p-merge".into(),
+            tasks: vec![super::PlanTaskEntry {
+                spec: super::PlanTask {
+                    task_id: "a".into(),
+                    agent: "codex".into(),
+                    task: "ship it".into(),
+                    depends_on: vec![],
+                    issue_id: None,
+                    context_files: vec![],
+                },
+                status: super::PlanTaskStatus::Approved { summary: None },
+                result: None,
+                worker_branch: Some("spur/worker-a".into()),
+                attempt: 1,
+                history: vec![],
+                last_delegation_id: None,
+            }],
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
+            merge_state: super::PlanMergeState::NotStarted,
+            epic_id: None,
+        };
+
+        let status = super::build_plan_status("p-merge", &state);
+        assert_eq!(status["status"], "approved");
+        assert_eq!(status["ready_to_merge"], true);
+        assert!(status["next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("merge_plan"));
+        assert_eq!(status["merge"]["status"], "not_started");
+    }
+
+    #[test]
+    fn build_plan_status_points_to_create_pr_after_merge_success() {
+        let state = super::PlanState {
+            plan_id: "p-merged".into(),
+            tasks: vec![super::PlanTaskEntry {
+                spec: super::PlanTask {
+                    task_id: "a".into(),
+                    agent: "codex".into(),
+                    task: "ship it".into(),
+                    depends_on: vec![],
+                    issue_id: None,
+                    context_files: vec![],
+                },
+                status: super::PlanTaskStatus::Approved { summary: None },
+                result: None,
+                worker_branch: Some("spur/worker-a".into()),
+                attempt: 1,
+                history: vec![],
+                last_delegation_id: None,
+            }],
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
+            merge_state: super::PlanMergeState::Succeeded {
+                merge_branch: "spur/plan-merge-1".into(),
+                merged_task_ids: vec!["a".into()],
+            },
+            epic_id: None,
+        };
+
+        let status = super::build_plan_status("p-merged", &state);
+        assert_eq!(status["merge"]["status"], "succeeded");
+        assert!(status["next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("create_pr"));
+        assert_eq!(status["merge"]["merge_branch"], "spur/plan-merge-1");
     }
 }
