@@ -555,6 +555,33 @@ pub fn review_task_def() -> ToolDefinition {
     }
 }
 
+fn report_signal_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "report_signal".into(),
+        description: "Worker-facing. Record a typed WorkerSignal on a task. \
+            Brain-side watcher will inspect and may mutate the plan."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["task_id", "signal"],
+            "properties": {
+                "task_id": { "type": "string" },
+                "signal": {
+                    "type": "object",
+                    "required": ["kind", "signal_id", "severity", "reason"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["scope_drift"] },
+                        "signal_id": { "type": "string", "format": "uuid" },
+                        "severity": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "reason": { "type": "string" },
+                        "estimated_subtasks": { "type": ["integer", "null"], "minimum": 1 }
+                    }
+                }
+            }
+        }),
+    }
+}
+
 fn execute_epic_def() -> ToolDefinition {
     ToolDefinition {
         name: "execute_epic".into(),
@@ -610,6 +637,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         get_plan_status_def(),
         get_task_diff_def(),
         review_task_def(),
+        report_signal_def(),
     ]
 }
 
