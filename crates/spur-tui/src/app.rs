@@ -2091,6 +2091,7 @@ impl App {
                 &self.lineage,
                 self.license_badge.as_ref(),
                 &mut self.worker_streams,
+                self.flag_summary,
             ),
             ViewId::SessionDetail(_) => {
                 if let Some(ref mut detail) = self.session_detail {
