@@ -439,6 +439,94 @@ pub async fn emit_plan_submit_audit(
     }
 }
 
+/// Worker-facing handler for the `report_signal` MCP tool.
+#[doc(hidden)]
+pub async fn handle_report_signal(
+    pm: Arc<PmService>,
+    args: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    use crate::plan::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
+    use crate::plan::labels;
+    use crate::plan::signals::{encode_comment as signal_encode, WorkerSignal};
+
+    #[derive(serde::Deserialize)]
+    struct Args {
+        task_id: String,
+        signal: WorkerSignal,
+    }
+
+    let args: Args = serde_json::from_value(args)?;
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| anyhow::anyhow!("report_signal requires beads backend"))?;
+    let issue = pm.get_issue(&args.task_id).await?;
+    let signal_id = args.signal.signal_id().to_string();
+
+    if matches!(
+        issue.status.as_str(),
+        "approved" | "failed" | "cancelled" | "superseded"
+    ) {
+        adv.add_comment(
+            &args.task_id,
+            &audit_encode(&AuditSentinelKind::LateSignal {
+                signal_id: signal_id.clone(),
+                terminal_status: issue.status.clone(),
+            }),
+        )
+        .await?;
+        pm.update_issue(
+            &args.task_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![labels::SIGNAL_LATE_ARRIVAL.to_string()],
+                ..Default::default()
+            },
+        )
+        .await?;
+        return Ok(json!({
+            "recorded": true,
+            "signal_id": signal_id,
+            "late": true,
+        }));
+    }
+
+    let (severity, reason, kind_label) = match &args.signal {
+        WorkerSignal::ScopeDrift {
+            severity, reason, ..
+        } => (
+            *severity,
+            reason.clone(),
+            args.signal.kind_label().to_string(),
+        ),
+    };
+
+    adv.add_comment(&args.task_id, &signal_encode(&args.signal))
+        .await?;
+    pm.update_issue(
+        &args.task_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::signal_kind(&kind_label)],
+            ..Default::default()
+        },
+    )
+    .await?;
+    adv.add_comment(
+        &args.task_id,
+        &audit_encode(&AuditSentinelKind::Signal {
+            signal_id: signal_id.clone(),
+            kind: kind_label,
+            severity,
+            reason,
+        }),
+    )
+    .await?;
+
+    Ok(json!({
+        "recorded": true,
+        "signal_id": signal_id,
+        "late": false,
+    }))
+}
+
 /// Pure helper: compute the IssueCreate values that build_epic_subgraph
 /// would dispatch to PmService. Returns the epic's IssueCreate plus a
 /// Vec of (task_id, IssueCreate) for each child in topological order.
@@ -1053,6 +1141,29 @@ impl McpCallbackServer {
             "get_issue" => self.handle_get_issue(id, arguments).await,
             "list_issues" => self.handle_list_issues(id, arguments).await,
             "update_issue" => self.handle_update_issue(id, arguments).await,
+            "report_signal" => {
+                let pm = match self.pm_service.clone() {
+                    Some(pm) => pm,
+                    None => {
+                        return JsonRpcResponse::internal_error(id, "No issue tracker configured");
+                    }
+                };
+
+                match handle_report_signal(pm, arguments).await {
+                    Ok(result) => {
+                        let text = serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|_| result.to_string());
+                        JsonRpcResponse::success(
+                            id,
+                            json!({ "content": [{ "type": "text", "text": text }] }),
+                        )
+                    }
+                    Err(error) => JsonRpcResponse::internal_error(
+                        id,
+                        format!("report_signal failed: {error}"),
+                    ),
+                }
+            }
             "create_issue" => self.handle_create_issue(id, arguments).await,
             "add_dependency" => self.handle_add_dependency(id, arguments).await,
             "create_pr" => self.handle_create_pr(id, arguments).await,
