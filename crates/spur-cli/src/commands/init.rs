@@ -51,8 +51,7 @@ pub async fn run(repo_root: PathBuf, force: bool) -> Result<()> {
     let mut orch = Orchestrator::new(repo_root.clone(), SpurConfig::default())?;
     let found_names = orch.init_agents().await?;
     let seed = spur_acp::config::load_seed_template();
-    // Sort registered agents by seed order so brain selection is deterministic
-    // (seed order after Task 1: claude-code, kiro, claude-code-acp, codex, gemini).
+    // Sort registered agents by seed order so brain selection is deterministic.
     let seed_order: Vec<&str> = seed.entries.iter().map(|e| e.name.as_str()).collect();
     let mut registered: Vec<spur_acp::config::AgentConfig> =
         orch.registry.list().into_iter().cloned().collect();
@@ -123,8 +122,7 @@ pub async fn run(repo_root: PathBuf, force: bool) -> Result<()> {
     }
 
     // ── Adaptive brain selection. ──
-    // Prefer first registered brain-capable agent (seed order after
-    // Task 1's reorder = claude-code, kiro, claude-code-acp, codex, gemini).
+    // Prefer first registered brain-capable agent in seed order.
     // If nothing is brain-capable, fall back to registered[0] with a note.
     let brain_name = registered
         .iter()
