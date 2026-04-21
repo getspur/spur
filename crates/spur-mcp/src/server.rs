@@ -25,7 +25,9 @@ use tracing::{debug, error, info};
 use spur_acp::*;
 use spur_pm::{pidfile::PidFileGuard, IssueFilter, IssueUpdate, PmService, PrParams};
 
+use crate::plan::proposers::{ScopeDriftSplitProposer, TrivialScorer};
 use crate::plan::reconciler::{Reconciler, ReconcilerConfig};
+use crate::plan::signal_watcher::SignalWatcher;
 use crate::tools::{self, DelegationChannel, DelegationRequest};
 
 /// How long completed delegation results are retained before lazy eviction.
@@ -1050,6 +1052,28 @@ impl McpCallbackServer {
             None
         };
 
+        let mut signal_watcher_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
+        let signal_watcher_task = if let Some(pm) = self.pm_service.as_ref() {
+            if pm.advanced().is_some() {
+                let pm = Arc::clone(pm);
+                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                signal_watcher_cancel_tx = Some(cancel_tx);
+                info!("spawning brain-side signal watcher (beads backend detected)");
+                let handle = tokio::spawn(async move {
+                    let watcher =
+                        SignalWatcher::new(pm, ScopeDriftSplitProposer::default(), TrivialScorer);
+                    watcher.run(cancel_rx).await;
+                });
+                Some(handle)
+            } else {
+                tracing::debug!("signal watcher disabled: PM has no beads advanced() backend");
+                None
+            }
+        } else {
+            tracing::debug!("signal watcher disabled: no PM service");
+            None
+        };
+
         // I4: acquire single-brain pidfile when beads backend is present.
         let brain_pidfile = if has_beads_backend {
             let repo_root = repo_root
@@ -1078,9 +1102,15 @@ impl McpCallbackServer {
             if let Some(tx) = reconciler_cancel_tx {
                 let _ = tx.send(());
             }
+            if let Some(tx) = signal_watcher_cancel_tx {
+                let _ = tx.send(());
+            }
             // Wait for reconciler to finish on shutdown.
             if let Some(rh) = reconciler_task {
                 let _ = rh.await;
+            }
+            if let Some(sh) = signal_watcher_task {
+                let _ = sh.await;
             }
         });
 
