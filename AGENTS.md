@@ -101,7 +101,13 @@ SPUR emits audit breadcrumbs as sentinel comments on beads issues. This replaces
 | `signal:<kind>` | Signal present | worker via MCP tool |
 | `signal:<kind>:<bucket>` | Signal severity bucket | worker via MCP tool |
 | `signal:late-arrival` | Signal after terminal | brain signal handler |
-| `mutation-id:<uuid>` | Mutation batch ID | brain mutation executor |
-| `ready-for-review` | Explicit review-ready | reconciler on completion |
+| `spur:mutation-id:<compact-uuid>` | Mutation batch children | brain mutation executor (create path) |
+| `spur:superseded-by:<child-id>` | Parent task split marker (one per child) | brain mutation executor |
+| `spur:signal-processed:<compact-uuid>` | Signal consumed marker | brain mutation executor (label-add path) |
+| `ready-for-review` | Explicit review-ready | reconciler on completion (**not yet wired — see spec §Known Correctness Gaps**) |
 
-All labels must use br-legal characters: `[A-Za-z0-9_:-]+`.
+All labels must use br-legal characters: `[A-Za-z0-9_:-]+`. `br create --label`
+enforces a 50-character cap; `br label add` does not. Constructors used at
+create time (`mutation_id_label`) use the compact (hyphen-free) UUID suffix
+to stay under the cap. See `crates/spur-mcp/src/plan/labels.rs` for the
+authoritative list.

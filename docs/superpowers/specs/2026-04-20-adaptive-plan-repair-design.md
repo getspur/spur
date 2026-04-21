@@ -1,6 +1,6 @@
 # Adaptive Plan Repair — Design
 
-**Status:** design (rev 2, 2026-04-21)
+**Status:** design (rev 3, 2026-04-21)
 **Date:** 2026-04-20
 **Revised:** 2026-04-21
 
@@ -33,6 +33,28 @@ The design proposed fixes F1 (cursor race) and A4 (actor threading). These are i
 **(e) Reconciler spawn at server startup**
 
 The design proposed G1 (reconciler task spawned on MCP server start). v0a.3 ships this: `Reconciler::run` is spawned via `tokio::spawn` when the server starts, gated by a `mcp.reconciler.enabled` config flag (default: true for beads backends, false for github).
+
+### v0b Reconciliations (2026-04-21)
+
+**(f) Beads compresses SPUR's PlanTaskStatus vocabulary.**
+
+The design's state-machine sketch (§PlanTaskStatus state machine) treats SPUR's nine variants as if beads round-trips them. Beads does not: it persists a compressed vocabulary (`{open, closed, blocked}`). SPUR terminals (`Approved`, `Failed`, `Cancelled`, `Superseded`) all project to `closed` on write; the inverse projection is lossy. Two latent bugs shipped in early v0b because predicates matched on SPUR-vocab strings against beads-persisted status, which beads never emits — all such matches were dead code. Fixed in `fix(spur-mcp): align signal terminal-gate + watcher filter with beads vocabulary` (`e69052e`). The authoritative read is `PmService::closed_status()`; finer distinctions come from labels (`spur:superseded-by:<child>`) and audit sentinels. This is formalized as **I5** below.
+
+**(g) Label-length cap is asymmetric.**
+
+`br 0.1.14` enforces a 50-character label-length cap at `br create --label`, but NOT at `br label add`. Constructors whose output feeds `IssueCreate.labels` must use the compact (hyphen-free) UUID suffix (32 chars) to stay under the cap: `spur:mutation-id:<compact>` = 41 chars, safe. Constructors used only via `IssueUpdate.add_labels` (`signal_processed_label` = 54 chars) are not constrained. Pinned by `tests/labels_br_round_trip.rs::br_create_enforces_50_char_cap_but_label_add_does_not`.
+
+**(h) Audit sentinel variants for mutation lifecycle.**
+
+v0b ships `AuditSentinelKind` variants for the full mutation lifecycle: `Signal`, `MutationPlan`, `MutationCommit`, `MutationInvariantViolation`, `LateSignal`. All variants are `#[non_exhaustive]` (forward-compat). See `crates/spur-mcp/src/plan/audit_sentinel.rs`.
+
+**(i) PlanTaskStatus gained `Superseded`.**
+
+`PlanTaskStatus::Superseded { mutation_id, by }` is the in-memory representation of a task replaced by a mutation batch. Cascaded through approve, counter, and JSON serialization match arms (see `crates/spur-mcp/src/plan/mod.rs`). Folds into `Cancelled` for outcome counting (no productive outcome). Persisted to beads as `closed` + `spur:superseded-by:<child>` labels (one per child — beads labels are a set, not a CSV).
+
+**(j) Labels consolidated on shared constructors.**
+
+Early v0b introduced executor-private `persisted_mutation_label` / `persisted_signal_processed_label` helpers duplicated across three test files. Consolidated in `refactor(spur-mcp): unify mutation/signal-processed labels via shared constructors`. Canonical form is `spur:mutation-id:<compact-uuid>` / `spur:signal-processed:<compact-uuid>`; the pre-`spur:` form (`mutation-id:<uuid>`) was never written in practice and has been removed. `superseded-by` is emitted one label per child (not CSV), consistent with beads' set-valued label semantics.
 
 ---
 
@@ -391,20 +413,32 @@ A signal arriving on a task whose status is a terminal (`Approved`, `Failed`, `C
 **I4 — Single brain session per `.beads/`.**
 At most one brain session holds the pidfile `.beads/.spur-brain.pid` at any time. Any brain startup MUST acquire the pidfile or refuse to start. Enforcement: unit test with a stale pidfile (process absent) — startup should take the pidfile. Second unit test with a live pidfile (process present) — startup should refuse with a specific error.
 
+**I5 — Vocabulary compression (beads status is lossy).**
+Beads persists a compressed status vocabulary — `{open, closed, blocked}` — into which SPUR's nine-state `PlanTaskStatus` projects on write. `Approved`, `Failed`, `Cancelled`, and `Superseded` all project to `closed`; the inverse mapping is NOT recoverable from `issue.status` alone. Any predicate that classifies task lifecycle state MUST read beads status via `PmService::closed_status()` and recover finer distinctions from labels (`spur:superseded-by:<child>`, `spur:signal-processed:<mutation_id>`, `signal:late-arrival`) and audit sentinels (`[[spur-audit v1]]` JSON bodies). Predicates that match on SPUR-`PlanTaskStatus` string variants (`"awaiting_review"`, `"approved"`, `"failed"`, `"cancelled"`, `"superseded"`) against beads-persisted status are dead code and MUST be removed; beads never emits those strings. Enforcement: integration tests `tests/report_signal_tool.rs` and `tests/signal_late_arrival.rs` use `br close` (the production terminal-transition path) and assert against `pm.closed_status()`, not SPUR-vocab literals.
+
 ---
 
 ## Information Flow
 
 This is the highest-leverage surface in the design (per iceberg Level 6 analysis). Every future analysis tool — MCTS replanner, dashboards, post-mortem tooling — depends on these schemas. They are versioned and must be forward-compatible.
 
+### Vocabulary compression: SPUR has 9 states; beads has 3
+
+Before anything else, recognize that **beads persists a compressed status vocabulary** — `{open, closed, blocked}` — while SPUR's `PlanTaskStatus` has nine variants (`Pending`, `Dispatched`, `AwaitingReview`, `Reviewing`, `Approved`, `Rejected`, `Failed`, `Cancelled`, `Superseded`). The projection is lossy: `br show` never returns `"awaiting_review"` or `"approved"`; it returns `"open"` or `"closed"`. Bridge via labels + audit sentinels, not status strings. See **I5** above.
+
+Concretely:
+- **Status column** (authoritative for terminal/non-terminal check): `PmService::closed_status()` returns the beads value that means "no further work." Compare against this — never against SPUR-vocab strings.
+- **Finer distinctions** (approved vs. failed vs. superseded): recovered from labels (`spur:superseded-by:<child>`, `spur:signal-processed:<mutation_id>`, `signal:late-arrival`) and audit sentinels (`[[spur-audit v1]]` JSON bodies: `MutationCommit`, `MutationInvariantViolation`, `LateSignal`, `Signal`, `MutationPlan`).
+- **In-memory PlanTaskStatus**: reconstructed from beads status + labels + sentinels when the brain materializes `PlanState`. The nine-variant enum is a brain-side concept; beads never sees it as a string.
+
 ### Operational reads vs. analytical reads
 
 beads offers two orthogonal read paths. Naming them separately prevents confusion:
 
 - **Operational reads** (authoritative for dispatch, mutation, and invariant decisions): the state store — `br list`, `br show`, `br ready`, `br dep tree`. This is what the reconciler projects into the `PlanState` materialized view. Any operational decision must read this path.
-- **Analytical reads** (authoritative for causal history and reward attribution): the event log — `br audit log`. MCTS replanner, dashboards, post-mortems consume this. Analytical reads MUST NOT drive operational behavior.
+- **Analytical reads** (authoritative for causal history and reward attribution): the event log — `[[spur-audit v1]]` sentinel comments, parsed via `crates/spur-mcp/src/plan/audit_sentinel.rs`. MCTS replanner, dashboards, post-mortems consume this. Analytical reads MUST NOT drive operational behavior.
 
-When the two disagree — e.g., `br audit log` shows a `mutation-commit` but `br list` shows the parent still `awaiting_review` — the **state store wins**; the reconciler converges it on the next tick. This is the Datomic / Kafka-materialized-view pattern: dual representation, one authority per purpose.
+When the two disagree — e.g., an audit sentinel shows a `mutation-commit` but `br list` shows the parent still open — the **state store wins**; the reconciler converges it on the next tick. This is the Datomic / Kafka-materialized-view pattern: dual representation, one authority per purpose.
 
 ### Audit entry schema (v0a, via `br audit record`)
 
@@ -460,17 +494,29 @@ Adding a new signal kind is a non-breaking additive change; `WorkerSignal` enum 
 
 ### Label vocabulary
 
-| Label | Purpose | Set by |
-|---|---|---|
-| `plan-epic:<id>` | marks epic issues | brain at plan submit |
-| `plan-task:<id>` | marks child tasks of a plan | brain at plan submit |
-| `delegation-id:<id>` | links a task to its ACP delegation | reconciler on dispatch |
-| `signal:<kind>` | signal present (fast filter) | `report_signal` |
-| `signal:<kind>:<bucket>` | severity bucket (optional) | `report_signal` |
-| `signal:late-arrival` | signal arrived after terminal | brain signal handler |
-| `mutation-id:<uuid>` | created as part of a mutation batch | brain mutation executor |
-| `superseded-by:<csv-ids>` | list of child task IDs that supersede this task | brain on mutation commit |
-| `ready-for-review` | explicit review-ready marker (redundant with `awaiting_review` status but queryable via label-any) | reconciler on completion |
+Canonical forms, as shipped. Constructors in `crates/spur-mcp/src/plan/labels.rs`
+are the single source of truth — callers MUST NOT format these by hand.
+
+| Label | Purpose | Set by | Path |
+|---|---|---|---|
+| `spur:plan-id:<id>` | plan scope marker | brain at plan submit | create |
+| `spur:plan-task-id:<id>` | task scope marker | brain at plan submit | create |
+| `spur:plan-complete` | epic fully persisted (all children + deps created) | server on epic creation | label-add |
+| `spur:agent:<name>` | worker agent assignment | brain at plan submit | create |
+| `spur:source-issue:<id>` | source issue reference | server at plan submit | create |
+| `delegation-id:<id>` | ACP delegation link | reconciler on dispatch | label-add |
+| `signal:<kind>` | signal present (fast filter) | `report_signal` | label-add |
+| `signal:<kind>:<bucket>` | severity bucket (optional) | `report_signal` | label-add |
+| `signal:late-arrival` | signal arrived after terminal (see I3/I5) | brain signal handler | label-add |
+| `spur:mutation-id:<compact-uuid>` | created as part of a mutation batch | brain mutation executor | **create** (compact required — 41 chars, under 50-char cap) |
+| `spur:superseded-by:<child-id>` | parent task split marker — one label per child (beads labels are a set) | brain on mutation commit | label-add |
+| `spur:signal-processed:<compact-uuid>` | proposer consumed this task's signal | brain mutation executor | label-add (54 chars — label-add-only; would exceed `br create` cap) |
+| `ready-for-review` | explicit review-ready marker | **NOT YET WIRED** — defined as a constant, no writers (see §Known Correctness Gaps G1) | label-add (future) |
+
+**Length-cap note (br 0.1.14):** `br create --label` enforces a 50-character
+cap; `br label add` does not. The `create` / `label-add` column above
+documents the path each label uses. Changing a constructor from label-add to
+create-path requires verifying the output stays ≤50 chars.
 
 ---
 
@@ -825,6 +871,26 @@ The five mental models in §Mental Models are the ultimate leverage points — r
 - **Q2.** Does `br agents --update` accept an idempotent "upsert if changed" flag? If not, v0a installer must diff before writing. Verify against `br` version installed on user systems.
 - **Q3.** Signal retention policy: how long do `signal:*` labels persist on a task after mutation? Proposal: keep for audit; add `signal:processed:<mutation_id>` after proposer consumes, so historical filtering remains possible without reprocessing.
 - **Q4.** Reconciler ownership: single reconciler instance per MCP server, or per-plan scoped? v0 assumes single instance filtering by `plan-task:*` label. Multi-plan concurrency is future work.
+
+---
+
+## Known Correctness Gaps (as of v0b ship)
+
+These are live behavioral gaps in shipped v0b code, surfaced by the staff
+review around commit `0823a42`. They are distinct from Future Work (which
+enumerates orthogonal extensions). Fixing them is v0c scope.
+
+**G1 — SignalWatcher lacks a "worker finished" marker.**
+`SignalWatcher::tick_once` filters `issue.status != pm.closed_status()` + requires a `signal:*` label + requires no `spur:signal-processed:*` label. There is no durable backend marker distinguishing a task that has been *dispatched* (worker running) from one that has *finished and is awaiting review*. The `labels::READY_FOR_REVIEW` constant exists (`crates/spur-mcp/src/plan/labels.rs:48`) but **has zero writers today**. Consequence: signals on mid-dispatch tasks are processed by the watcher, producing a mutation while the worker is still generating output on the parent task (violates MM4: brain and worker never concurrently mutate the same task). Fix direction: either (a) reconciler writes `ready-for-review` on worker completion and watcher filters `labels.contains(READY_FOR_REVIEW)`, or (b) watcher reads task dispatch state via a separate mechanism (e.g., delegation-id label presence + in-memory dispatch set).
+
+**G2 — Rejected tasks remain eligible for signal processing.**
+A task the brain has decided to reject (SPUR-vocab `Rejected`) still projects to beads `open` status as long as the reconciler hasn't closed it. Under the current watcher filter, a signal on a rejected task would be proposed and applied, bypassing the brain's rejection decision. Same root cause as G1 (no durable "do not reprocess" marker). Fix direction: write a `spur:rejected` label (or equivalent) on rejection, and extend the watcher filter to skip it.
+
+**G3 — Multi-signal-per-tick: watcher checks `spur:signal-processed:*` only once per issue.**
+In `signal_watcher.rs::tick_once`, the `spur:signal-processed:*` filter at the top of the issue loop runs once *before* the inner comments loop. If an issue has N valid signal comments, the first one triggers an `apply_mutation` that writes `spur:signal-processed:<M1>`, but the remaining N-1 comments are still processed in the same tick — producing N mutations back-to-back on the same (now-closed-after-first-split) parent. The in-memory `seen: HashSet<Uuid>` dedupe is per-signal-id, not per-task, and does not stop this. Fix direction: break the inner loop after a successful `apply_mutation`, OR re-check the label set between comments, OR switch from issue-labeled to comment-marker-based processed detection.
+
+**G4 — Cross-restart retry loop after rollback.**
+On `apply_mutation` failure (e.g., cycle detected → rollback), the `MutationInvariantViolation` audit sentinel is written but the triggering signal comment is NOT marked processed (there's no mutation-id to key the label against — the mutation never committed). On next brain restart, the watcher sees the signal-bearing task, the signal is in-memory-unseen, and a fresh proposer invocation fires — reproducing the same cycle if the proposer is deterministic for that state. Fix direction: write a signal-scoped marker (e.g., `spur:signal-tried:<signal_id>`) on rollback, and extend the watcher to skip signals already attempted + failed.
 
 ---
 
