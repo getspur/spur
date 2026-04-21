@@ -5,14 +5,23 @@ use std::collections::HashSet;
 fn known_features_exist() {
     assert_eq!(FeatureKey::BRAIN_SESSION.as_str(), "brain_session");
     assert_eq!(FeatureKey::PARALLEL_WORKERS.as_str(), "parallel_workers");
-    assert_eq!(FeatureKey::KILL_ADVANCED_PLANNER.as_str(), "kill_advanced_planner");
+    assert_eq!(
+        FeatureKey::KILL_ADVANCED_PLANNER.as_str(),
+        "kill_advanced_planner"
+    );
 }
 
 #[test]
 fn from_known_parses_all_keys() {
     // Spot-check a few from each tier
-    assert_eq!(FeatureKey::from_known("brain_session"), Some(FeatureKey::BRAIN_SESSION));
-    assert_eq!(FeatureKey::from_known("auto_review_policies"), Some(FeatureKey::AUTO_REVIEW_POLICIES));
+    assert_eq!(
+        FeatureKey::from_known("brain_session"),
+        Some(FeatureKey::BRAIN_SESSION)
+    );
+    assert_eq!(
+        FeatureKey::from_known("auto_review_policies"),
+        Some(FeatureKey::AUTO_REVIEW_POLICIES)
+    );
     assert_eq!(FeatureKey::from_known("rbac"), Some(FeatureKey::RBAC));
     assert_eq!(
         FeatureKey::from_known("dedicated_support"),

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use ahash::AHashSet;
 use chrono::{DateTime, Utc};
 
-use crate::policy::FlagSpec;
 use crate::policy::FeatureKey;
+use crate::policy::FlagSpec;
 use crate::quota::{QuotaKey, QuotaValue};
 use crate::tier::Tier;
 use crate::Plan;
