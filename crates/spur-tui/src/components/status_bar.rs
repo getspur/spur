@@ -121,71 +121,30 @@ impl StatusBar {
             Style::default().fg(Color::DarkGray)
         };
 
-        let mut right_spans: Vec<Span> = Vec::new();
-        if props.issue_count > 0 {
-            right_spans.push(Span::styled(
-                format!("{} issues", props.issue_count),
-                Style::default().fg(Color::Cyan),
-            ));
-            right_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
-        }
-        if let Some((total, critical, _warning)) = props.alert_summary {
-            if total > 0 {
-                let style = if critical > 0 {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Yellow)
-                };
-                right_spans.push(Span::styled(format!("{total} alerts"), style));
-                right_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
-            }
-        }
-        if let Some(badge) = props.license_badge {
-            right_spans.push(Span::styled(format!("{} ", badge.label), badge.style()));
-            right_spans.push(Span::styled("· ", Style::default().fg(Color::DarkGray)));
-        }
-        if let Some((active, total)) = props.flag_summary {
-            let flag_style = if active == total {
-                Style::default().fg(Color::Green)
-            } else if active == 0 {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Yellow)
-            };
-            right_spans.push(Span::styled(format!("F:{active}/{total}"), flag_style));
-            right_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
-        }
-        right_spans.extend([
-            Span::styled(
-                format!("{} running", props.running),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{} review", props.pending_review), review_style),
-            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("${:.2}", props.total_cost),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(
-                format!(" · {} ", props.elapsed),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(mode_text, Style::default().fg(Color::Magenta)),
-            Span::styled(usage_text, Style::default().fg(Color::LightBlue)),
-            Span::styled("[Ctrl+K: go] ", Style::default().fg(Color::DarkGray)),
-            Span::styled("?: help", Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(
-                "spur",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
+        // Try full metrics first; fall back to compact if they crowd out hints.
+        let full_spans = Self::metric_spans(
+            &props,
+            mode_text.clone(),
+            usage_text.clone(),
+            review_style,
+            false,
+        );
+        let full_line = Line::from(full_spans);
+        let full_width = full_line.width() as u16;
 
-        let right = Line::from(right_spans);
-        let right_width = right.width() as u16;
+        let compact_spans = Self::metric_spans(&props, mode_text, usage_text, review_style, true);
+        let compact_line = Line::from(compact_spans);
+        let compact_width = compact_line.width() as u16;
+
+        let hints_reserve = 45u16;
+        let (right, right_width) = if full_width + hints_reserve > area.width
+            && compact_width + hints_reserve <= area.width
+        {
+            (compact_line, compact_width)
+        } else {
+            (full_line, full_width)
+        };
+
         let hints_line = Line::from(Span::styled(
             hints,
             Style::default()
@@ -200,6 +159,126 @@ impl StatusBar {
 
         frame.render_widget(Paragraph::new(hints_line), hints_area);
         frame.render_widget(Paragraph::new(right).right_aligned(), right_area);
+    }
+
+    /// Build the right-hand metric spans. When `compact` is true, use
+    /// abbreviated symbols and drop low-priority items so the status bar
+    /// stays readable on narrow terminals.
+    fn metric_spans(
+        props: &StatusBarProps<'_>,
+        mode_text: String,
+        usage_text: String,
+        review_style: Style,
+        compact: bool,
+    ) -> Vec<Span<'static>> {
+        let sep = if compact { " " } else { " · " };
+        let mut spans: Vec<Span> = Vec::new();
+
+        if props.issue_count > 0 {
+            spans.push(Span::styled(
+                if compact {
+                    format!("{}i", props.issue_count)
+                } else {
+                    format!("{} issues", props.issue_count)
+                },
+                Style::default().fg(Color::Cyan),
+            ));
+            spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        }
+        if let Some((total, critical, _warning)) = props.alert_summary {
+            if total > 0 {
+                let style = if critical > 0 {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+                spans.push(Span::styled(
+                    if compact {
+                        format!("!{total}")
+                    } else {
+                        format!("{total} alerts")
+                    },
+                    style,
+                ));
+                spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+            }
+        }
+        if let Some(badge) = props.license_badge {
+            spans.push(Span::styled(format!("{} ", badge.label), badge.style()));
+            if !compact {
+                spans.push(Span::styled("· ", Style::default().fg(Color::DarkGray)));
+            }
+        }
+        if let Some((active, total)) = props.flag_summary {
+            let flag_style = if active == total {
+                Style::default().fg(Color::Green)
+            } else if active == 0 {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            spans.push(Span::styled(
+                if compact {
+                    format!("F:{active}/{total}")
+                } else {
+                    format!("flags {active}/{total}")
+                },
+                flag_style,
+            ));
+            spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        }
+
+        spans.push(Span::styled(
+            if compact {
+                format!("▶{}", props.running)
+            } else {
+                format!("{} running", props.running)
+            },
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            if compact {
+                format!("R{}", props.pending_review)
+            } else {
+                format!("{} review", props.pending_review)
+            },
+            review_style,
+        ));
+        spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            format!("${:.2}", props.total_cost),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            format!("{} ", props.elapsed),
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(mode_text, Style::default().fg(Color::Magenta)));
+        spans.push(Span::styled(
+            usage_text,
+            Style::default().fg(Color::LightBlue),
+        ));
+
+        if !compact {
+            spans.push(Span::styled(
+                "[Ctrl+K: go] ",
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::styled(
+                "?: help",
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            "spur",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans
     }
 }
 

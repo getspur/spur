@@ -2015,7 +2015,7 @@ impl App {
                             | LifecycleState::Resuming
                     )
                 });
-                if has_active || flushed_batch {
+                if has_active || flushed_batch || self.dashboard.input_bar_has_active_animation() {
                     self.dirty = true;
                 }
             }

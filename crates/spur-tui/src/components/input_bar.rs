@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
 use crate::components::completion_trigger::IntentEvent;
+use crate::components::spinner;
 use crate::input_history::{InputHistoryEntry, InputStateSnapshot, HISTORY_CAP};
 
 /// A protected byte range inside the text representing an atomic token
@@ -42,6 +43,35 @@ pub enum VimMode {
     Operator(char),
 }
 
+/// Activity state driving spinner animation in the status label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivityKind {
+    /// No animation; status is static.
+    #[default]
+    Idle,
+    /// Brain is computing (Braille spinner).
+    Thinking,
+    /// Response tokens are streaming (pulse spinner).
+    Streaming,
+    /// Session is connecting (dot crawl).
+    Connecting,
+    /// An in-flight turn is being cancelled.
+    Cancelling,
+}
+
+impl ActivityKind {
+    /// True when this activity should animate on each tick.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            ActivityKind::Thinking
+                | ActivityKind::Streaming
+                | ActivityKind::Connecting
+                | ActivityKind::Cancelling
+        )
+    }
+}
+
 /// The result of `InputBar::handle_key`. The `Submit` variant preserves
 /// today's submit tuple; the `Key` variant carries the classified
 /// `IntentEvent` for the TriggerDetector.
@@ -69,6 +99,10 @@ pub struct InputBar {
     line_cache: Vec<usize>,
     /// Status label shown before the prompt.
     status: Option<String>,
+    /// Current activity kind; drives spinner frame selection.
+    activity: ActivityKind,
+    /// Advances on each frame when [`ActivityKind::is_active`].
+    tick_counter: std::cell::Cell<u32>,
     /// Capture of the most recent Enter-submit: `(text, ranges, interrupt)`.
     submit_capture: Option<(String, Vec<ProtectedRange>, bool)>,
     /// Submitted input history, oldest first. Capped at [`HISTORY_CAP`].
@@ -100,6 +134,8 @@ impl InputBar {
             protected_ranges: Vec::new(),
             line_cache: vec![0],
             status: None,
+            activity: ActivityKind::Idle,
+            tick_counter: std::cell::Cell::new(0),
             submit_capture: None,
             history: Vec::new(),
             history_cursor: None,
@@ -1171,7 +1207,31 @@ impl InputBar {
         self.protected_ranges.clear();
         self.last_inner_width.set(last_w);
         self.goal_vcol = None;
+        self.activity = ActivityKind::Idle;
         self.set_mode(mode);
+    }
+
+    /// Build the block title from the current mode string, replacing any
+    /// `{spinner}` sentinel with the animated frame appropriate to
+    /// [`Self::activity`].
+    fn build_title(&self, mode_str: &str) -> String {
+        let base = self.status.as_deref().unwrap_or("");
+        if !base.contains("{spinner}") || !self.activity.is_active() {
+            if base.is_empty() {
+                return mode_str.to_string();
+            }
+            return format!("{} {}", base, mode_str);
+        }
+        let frame = match self.activity {
+            ActivityKind::Thinking | ActivityKind::Cancelling => {
+                spinner::frame(spinner::BRAILLE, self.tick_counter.get())
+            }
+            ActivityKind::Streaming => spinner::frame(spinner::PULSE, self.tick_counter.get()),
+            ActivityKind::Connecting => spinner::frame(spinner::DOTS, self.tick_counter.get()),
+            ActivityKind::Idle => "",
+        };
+        let animated = base.replace("{spinner}", frame);
+        format!("{} {}", animated, mode_str)
     }
 
     /// Sorted, non-overlapping protected ranges.
@@ -1212,14 +1272,29 @@ impl InputBar {
         self.textarea.max_histories()
     }
 
-    /// Set the status label.
-    pub fn set_status(&mut self, status: Option<String>) {
+    /// Set the status label and activity kind.
+    pub fn set_status(&mut self, status: Option<String>, activity: ActivityKind) {
         self.status = status;
+        self.activity = activity;
     }
 
     /// Whether a status label is set.
     pub fn has_status(&self) -> bool {
         self.status.is_some()
+    }
+
+    /// Advance the animation counter when the current activity is active.
+    /// Called from the view's `tick()` loop.
+    pub fn tick(&self) {
+        if self.activity.is_active() {
+            self.tick_counter
+                .set(self.tick_counter.get().wrapping_add(1));
+        }
+    }
+
+    /// True when the status label is in an animated activity state.
+    pub fn has_active_animation(&self) -> bool {
+        self.activity.is_active()
     }
 
     /// Replace the in-memory history with persisted entries (e.g. loaded
@@ -1315,11 +1390,7 @@ impl InputBar {
             EditMode::Vim(VimMode::Operator(_)) => " VIM·OP ",
         };
 
-        let title = if let Some(ref status) = self.status {
-            format!("{} {}", status, mode_str)
-        } else {
-            mode_str.to_string()
-        };
+        let title = self.build_title(mode_str);
 
         let border_color = match self.mode {
             EditMode::Vim(VimMode::Normal) => Color::Yellow,
@@ -1465,11 +1536,7 @@ impl InputBar {
             EditMode::Vim(VimMode::Visual) => " VIM·VISUAL ",
             EditMode::Vim(VimMode::Operator(_)) => " VIM·OP ",
         };
-        let title = if let Some(ref status) = self.status {
-            format!("{} {}", status, mode_str)
-        } else {
-            mode_str.to_string()
-        };
+        let title = self.build_title(mode_str);
         let border_color = Color::DarkGray;
         let block = Block::default()
             .borders(Borders::ALL)
