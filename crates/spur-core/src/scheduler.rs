@@ -31,7 +31,7 @@ pub enum ScheduledAction {
 pub struct BrainScheduler {
     /// FIFO queue of user-originated inputs (from the TUI). Always drains
     /// before continuations (INV-C4 human-priority).
-    pending_user:          VecDeque<InteractiveInput>,
+    pending_user: VecDeque<InteractiveInput>,
     /// FIFO queue of detached worker outcomes awaiting a safe scheduling
     /// window. Populated via `push_continuation`; drained in coalesced
     /// batches by `next()` (Task 4).
@@ -41,23 +41,23 @@ pub struct BrainScheduler {
     /// delegations will accumulate entries. Bound is a future concern
     /// (e.g. LRU cap at 2048) if observed; N for a typical session is
     /// small.
-    delivered_ids:         HashSet<DelegationId>,
+    delivered_ids: HashSet<DelegationId>,
     /// Active brain session guard for G2 session-swap eviction. `None`
     /// before the first brain spawns. Uses `SessionId` to match the
     /// orchestrator's `brain.acp_session_id` idiom; will migrate to
     /// `BrainSessionId` as part of the broader INV-2 orchestrator
     /// migration (not this spec).
-    active_session:        Option<SessionId>,
+    active_session: Option<SessionId>,
     /// INV-C6: at most one `session/prompt` in flight per brain session.
     /// When `true`, `next()` (Task 4) returns `ScheduledAction::Idle`.
-    turn_in_flight:        bool,
+    turn_in_flight: bool,
     /// G5 post-cancel grace: autonomous continuation turns are suppressed
     /// until this instant elapses. A user prompt arriving during grace
     /// clears the window (user intent trumps grace).
-    cancel_grace_until:    Option<Instant>,
+    cancel_grace_until: Option<Instant>,
     /// G5: post-cancel grace window duration. Default `CANCEL_GRACE_DEFAULT`
     /// (750 ms), overridable at construction time via `SPUR_CANCEL_GRACE_MS`.
-    cancel_grace_window:   Duration,
+    cancel_grace_window: Duration,
 }
 
 impl BrainScheduler {
@@ -94,7 +94,11 @@ impl BrainScheduler {
             );
             return;
         }
-        if self.pending_continuations.iter().any(|q| q.delegation_id == c.delegation_id) {
+        if self
+            .pending_continuations
+            .iter()
+            .any(|q| q.delegation_id == c.delegation_id)
+        {
             tracing::debug!(
                 continuation_probe = true,
                 site = "B_push_continuation",
@@ -200,7 +204,10 @@ impl BrainScheduler {
                 continuations = continuations.len(),
                 "scheduler.next -> MergedPrompt (user + N continuations)"
             );
-            return ScheduledAction::MergedPrompt { user, continuations };
+            return ScheduledAction::MergedPrompt {
+                user,
+                continuations,
+            };
         }
 
         // No user queued: can we fire an autonomous continuation?
@@ -261,9 +268,13 @@ impl BrainScheduler {
     }
 
     #[cfg(test)]
-    pub(crate) fn pending_user_len(&self) -> usize { self.pending_user.len() }
+    pub(crate) fn pending_user_len(&self) -> usize {
+        self.pending_user.len()
+    }
     #[cfg(test)]
-    pub(crate) fn pending_continuation_len(&self) -> usize { self.pending_continuations.len() }
+    pub(crate) fn pending_continuation_len(&self) -> usize {
+        self.pending_continuations.len()
+    }
 }
 
 /// RAII guard: sets `turn_in_flight = true` on `arm`, clears on `Drop`.
@@ -295,8 +306,8 @@ impl Drop for TurnGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
     use spur_acp::domain::delegation::DelegationStatus;
+    use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
     use spur_acp::types::SessionId;
     use std::time::Instant;
 
@@ -306,7 +317,9 @@ mod tests {
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
                 status: DelegationStatus::Success,
-                summary: None, diff_summary: None, worker_branch: None,
+                summary: None,
+                diff_summary: None,
+                worker_branch: None,
                 artifact: None,
             },
             created_at: Instant::now(),
@@ -324,7 +337,7 @@ mod tests {
     fn push_continuation_dedups_by_delegation_id() {
         let mut s = BrainScheduler::new(Some(SessionId::new()));
         s.push_continuation(mk_cont("id-1"));
-        s.push_continuation(mk_cont("id-1"));           // duplicate — no-op
+        s.push_continuation(mk_cont("id-1")); // duplicate — no-op
         assert_eq!(s.pending_continuation_len(), 1);
         s.push_continuation(mk_cont("id-2"));
         assert_eq!(s.pending_continuation_len(), 2);
@@ -339,14 +352,23 @@ mod tests {
     #[test]
     fn next_returns_user_prompt_when_user_queued_and_idle() {
         let mut s = BrainScheduler::new(Some(SessionId::new()));
-        s.push_user(InteractiveInput::Message { blocks: vec![], interrupt: false });
-        assert!(matches!(s.next(Instant::now()), ScheduledAction::UserPrompt(_)));
+        s.push_user(InteractiveInput::Message {
+            blocks: vec![],
+            interrupt: false,
+        });
+        assert!(matches!(
+            s.next(Instant::now()),
+            ScheduledAction::UserPrompt(_)
+        ));
     }
 
     #[test]
     fn next_returns_idle_while_turn_in_flight_even_if_user_queued() {
         let mut s = BrainScheduler::new(Some(SessionId::new()));
-        s.push_user(InteractiveInput::Message { blocks: vec![], interrupt: false });
+        s.push_user(InteractiveInput::Message {
+            blocks: vec![],
+            interrupt: false,
+        });
         s.note_turn_started();
         assert!(matches!(s.next(Instant::now()), ScheduledAction::Idle));
     }
@@ -365,7 +387,10 @@ mod tests {
     fn next_user_beats_continuation_when_both_queued() {
         let mut s = BrainScheduler::new(Some(SessionId::new()));
         s.push_continuation(mk_cont("id-1"));
-        s.push_user(InteractiveInput::Message { blocks: vec![], interrupt: false });
+        s.push_user(InteractiveInput::Message {
+            blocks: vec![],
+            interrupt: false,
+        });
         match s.next(Instant::now()) {
             ScheduledAction::MergedPrompt { continuations, .. } => {
                 assert_eq!(continuations.len(), 1);
@@ -381,7 +406,10 @@ mod tests {
         s.push_continuation(mk_cont("id-1"));
         s.note_cancel_resolved(now);
         // Inside the grace window: Idle.
-        assert!(matches!(s.next(now + std::time::Duration::from_millis(100)), ScheduledAction::Idle));
+        assert!(matches!(
+            s.next(now + std::time::Duration::from_millis(100)),
+            ScheduledAction::Idle
+        ));
         // After grace: fires.
         assert!(matches!(
             s.next(now + std::time::Duration::from_millis(2000)),
@@ -411,12 +439,18 @@ mod tests {
         let mut s = BrainScheduler::new(Some(SessionId::new()));
 
         s.push_continuation(mk_cont("id-1"));
-        s.note_turn_started();              // in-flight
-        s.note_cancel_resolved(now);        // grace armed
-        s.push_user(InteractiveInput::Message { blocks: vec![], interrupt: false });
+        s.note_turn_started(); // in-flight
+        s.note_cancel_resolved(now); // grace armed
+        s.push_user(InteractiveInput::Message {
+            blocks: vec![],
+            interrupt: false,
+        });
 
         // In-flight => Idle, but grace is cleared as a side effect.
-        assert!(matches!(s.next(now + std::time::Duration::from_millis(100)), ScheduledAction::Idle));
+        assert!(matches!(
+            s.next(now + std::time::Duration::from_millis(100)),
+            ScheduledAction::Idle
+        ));
 
         s.note_turn_finished();
 

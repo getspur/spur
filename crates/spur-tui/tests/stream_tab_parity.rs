@@ -2,17 +2,17 @@
 //! ReactTrace) surfaces fidelity the old DetailPane::render_stream
 //! path dropped — specifically tool-call lifecycle.
 
-use agent_client_protocol::{ToolCallUpdateFields, ToolCall as AcpToolCall, ToolCallUpdate as AcpToolCallUpdate};
-use spur_acp::{
-    ContentBlock, ContentChunk, SessionUpdate, TextContent,
+use agent_client_protocol::{
+    ToolCall as AcpToolCall, ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields,
 };
+use spur_acp::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
 use spur_tui::components::react_trace::{ActStatus, TraceKind};
 use spur_tui::worker_streams::WorkerStreams;
 
 fn msg(text: &str) -> SessionUpdate {
-    SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-        TextContent::new(text),
-    )))
+    SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+        text,
+    ))))
 }
 
 #[test]
@@ -23,9 +23,9 @@ fn new_path_covers_old_kinds_and_adds_lifecycle() {
     ws.route(
         exec,
         "claude",
-        &SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
-            TextContent::new("thinking"),
-        ))),
+        &SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            "thinking",
+        )))),
     );
 
     // ToolCall creation using the canonical pattern from

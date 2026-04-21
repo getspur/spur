@@ -543,7 +543,10 @@ fn with_kind_compact_sets_compact_flag() {
     use spur_acp::AgentKind;
 
     let t = ReactTrace::with_kind_compact(AgentKind::Generic);
-    assert!(t.is_compact(), "with_kind_compact should set compact = true");
+    assert!(
+        t.is_compact(),
+        "with_kind_compact should set compact = true"
+    );
 
     let full = ReactTrace::with_kind(AgentKind::Generic);
     assert!(!full.is_compact(), "with_kind should leave compact = false");
@@ -1260,7 +1263,6 @@ fn sim_mermaid_state_mismatch_in_shift() {
 /// consecutive page_ups produce the same anchor.
 #[test]
 fn sim_page_up_walks_within_long_message() {
-    
     let mut trace = ReactTrace::new_for_tests();
 
     let mut payload = String::new();
@@ -1303,7 +1305,6 @@ fn sim_page_up_walks_within_long_message() {
 /// entry 3's content after the new chunks land.
 #[test]
 fn sim_anchor_preserved_across_appends_to_later_entries() {
-    
     let mut trace = ReactTrace::new_for_tests();
 
     // Five entries from different agents (so each pushes a new entry).
@@ -1530,18 +1531,10 @@ fn phase3_edge_mermaid_pending_to_ready_stable() {
     };
     let _ = &ranges_p;
     let _ = &ranges_r;
-    let row_p = crate::components::react_trace::render::resolve_anchor(
-        &anchor,
-        &starts_p,
-        rows_p.len(),
-        5,
-    );
-    let row_r = crate::components::react_trace::render::resolve_anchor(
-        &anchor,
-        &starts_r,
-        rows_r.len(),
-        5,
-    );
+    let row_p =
+        crate::components::react_trace::render::resolve_anchor(&anchor, &starts_p, rows_p.len(), 5);
+    let row_r =
+        crate::components::react_trace::render::resolve_anchor(&anchor, &starts_r, rows_r.len(), 5);
     assert!(
         row_p < rows_p.len(),
         "Pending: in-bounds row {} of {}",
@@ -1943,9 +1936,17 @@ fn compact_render_produces_single_line_per_entry() {
     t.append_user_message("hi", "12:02".into());
 
     let lines = t.build_compact_lines_for_tests(40);
-    assert!(lines.len() >= 3 && lines.len() <= 5, "expected 3-5 lines, got {}", lines.len());
+    assert!(
+        lines.len() >= 3 && lines.len() <= 5,
+        "expected 3-5 lines, got {}",
+        lines.len()
+    );
     for l in &lines {
-        let cols: usize = l.spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
+        let cols: usize = l
+            .spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
         assert!(cols <= 40, "compact line exceeds width: {} cols", cols);
     }
 }
@@ -1962,7 +1963,10 @@ fn compact_render_truncates_long_text_with_ellipsis() {
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
         .collect();
-    assert!(rendered.contains('…'), "long text should be truncated with '…'");
+    assert!(
+        rendered.contains('…'),
+        "long text should be truncated with '…'"
+    );
 }
 
 #[test]
@@ -2014,7 +2018,8 @@ fn render_compact_does_not_panic_and_updates_dimensions() {
     let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
     t.append_message("hello", "bot", "12:00".into());
     let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
-    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10)))
+        .unwrap();
 
     assert_eq!(t.last_render_width, Some(40));
     assert_eq!(t.last_visible_height, 10);
@@ -2030,9 +2035,11 @@ fn render_compact_cache_hits_when_generation_stable() {
     let mut t = ReactTrace::with_kind_compact(AgentKind::Generic);
     t.append_message("a", "bot", "12:00".into());
     let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
-    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10)))
+        .unwrap();
     let gen_after_first = t.generation_for_tests();
-    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10)))
+        .unwrap();
     assert_eq!(t.generation_for_tests(), gen_after_first);
     assert!(t.dirty_from_for_tests().is_none());
 }
@@ -2050,13 +2057,20 @@ fn render_compact_incremental_rebuild_on_new_entry() {
         t.append_message(&format!("msg-{}", i), "bot", "12:00".into());
     }
     let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
-    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10)))
+        .unwrap();
     let lines_before = t.last_total_lines;
     t.append_user_message("hi-new", "12:01".into());
-    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10))).unwrap();
+    term.draw(|f| t.render_compact(f, Rect::new(0, 0, 40, 10)))
+        .unwrap();
     // After adding one new entry, total_lines should grow by at least 1
     // (plus possibly a separator line for the kind transition).
-    assert!(t.last_total_lines > lines_before, "expected at least {} lines, got {}", lines_before + 1, t.last_total_lines);
+    assert!(
+        t.last_total_lines > lines_before,
+        "expected at least {} lines, got {}",
+        lines_before + 1,
+        t.last_total_lines
+    );
 }
 
 #[test]
@@ -2238,7 +2252,11 @@ fn compact_entry_row_starts_are_monotonic_and_start_at_zero() {
     let starts = t
         .compact_entry_row_starts_for_tests()
         .expect("compact cache should be populated");
-    assert_eq!(starts.len(), 6, "starts should have one entry per trace entry");
+    assert_eq!(
+        starts.len(),
+        6,
+        "starts should have one entry per trace entry"
+    );
     assert_eq!(starts[0], 0, "first entry must start at row 0");
     for pair in starts.windows(2) {
         assert!(
@@ -2339,8 +2357,14 @@ fn compact_cache_survives_width_change() {
         trace.last_visible_height,
     );
 
-    assert!(matches!(anchor, crate::components::react_trace::types::ScrollAnchor::Row { .. }));
-    assert_eq!(resolved, trace.last_total_lines - trace.last_visible_height - 1);
+    assert!(matches!(
+        anchor,
+        crate::components::react_trace::types::ScrollAnchor::Row { .. }
+    ));
+    assert_eq!(
+        resolved,
+        trace.last_total_lines - trace.last_visible_height - 1
+    );
     assert!(resolved > 0, "width-change scroll must not snap to row 0");
 }
 
@@ -2389,7 +2413,10 @@ fn mixed_full_then_compact_on_same_trace_uses_compact_layout() {
         .0
         .len();
     let compact_total = trace.build_compact_lines_for_tests(20).len();
-    assert!(full_total > compact_total, "precondition: full layout must differ");
+    assert!(
+        full_total > compact_total,
+        "precondition: full layout must differ"
+    );
 
     let registry = HashMap::new();
     let ctx = crate::components::react_trace::RenderContext {
@@ -2411,7 +2438,10 @@ fn mixed_full_then_compact_on_same_trace_uses_compact_layout() {
         trace.last_visible_height,
     );
 
-    assert_eq!(resolved, trace.last_total_lines - trace.last_visible_height - 1);
+    assert_eq!(
+        resolved,
+        trace.last_total_lines - trace.last_visible_height - 1
+    );
 }
 
 #[test]
@@ -2421,9 +2451,16 @@ fn compact_scroll_survives_entry_eviction() {
 
     let mut trace = ReactTrace::with_kind_compact(AgentKind::Generic);
     for i in 0..=(crate::components::MAX_LOG_ENTRIES) {
-        trace.append_message(&format!("entry-{}", i), &format!("bot-{}", i), "12:00".into());
+        trace.append_message(
+            &format!("entry-{}", i),
+            &format!("bot-{}", i),
+            "12:00".into(),
+        );
     }
-    assert_eq!(trace.entries_for_tests().len(), crate::components::MAX_LOG_ENTRIES);
+    assert_eq!(
+        trace.entries_for_tests().len(),
+        crate::components::MAX_LOG_ENTRIES
+    );
 
     let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
     term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 6)))
@@ -2439,6 +2476,9 @@ fn compact_scroll_survives_entry_eviction() {
         trace.last_visible_height,
     );
 
-    assert!(matches!(anchor, crate::components::react_trace::types::ScrollAnchor::Row { .. }));
+    assert!(matches!(
+        anchor,
+        crate::components::react_trace::types::ScrollAnchor::Row { .. }
+    ));
     assert!(resolved < trace.last_total_lines);
 }

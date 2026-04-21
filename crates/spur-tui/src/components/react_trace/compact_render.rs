@@ -43,10 +43,7 @@ pub(in crate::components::react_trace) struct CompactCacheEntry {
 impl ReactTrace {
     /// Build the compact display lines plus the per-entry row-start vector.
     /// Returned lines have `'static` content.
-    pub(super) fn build_compact_lines(
-        &self,
-        width: u16,
-    ) -> (Vec<Line<'static>>, Vec<usize>) {
+    pub(super) fn build_compact_lines(&self, width: u16) -> (Vec<Line<'static>>, Vec<usize>) {
         build_compact_lines_from(&self.entries, width, None, 0)
     }
 
@@ -199,20 +196,29 @@ fn compact_prefix_style(k: &TraceKind) -> (&'static str, Style) {
                 ActStatus::Completed(_) => Color::Green,
                 ActStatus::Failed(_) => Color::Red,
             };
-            ("  ▶ ", Style::default().fg(color).add_modifier(Modifier::BOLD))
+            (
+                "  ▶ ",
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )
         }
         TraceKind::Observe { .. } => ("  ◂ ", Style::default().fg(Color::DarkGray)),
         TraceKind::Delegate { .. } => (
             "  ⇲ ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         TraceKind::UserMessage => (
             "  > ",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         TraceKind::Permission { .. } => (
             "  ? ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
     }
 }

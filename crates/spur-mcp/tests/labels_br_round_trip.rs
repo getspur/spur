@@ -70,7 +70,9 @@ fn every_label_constructor_is_accepted_by_br() {
         labels::signal_kind_bucket("scope-drift", "high"),
         labels::mutation_id_label(&uuid::Uuid::nil()),
         labels::signal_processed_label(&uuid::Uuid::nil()),
-        labels::superseded_by_labels(&["bd-1".into()]).pop().unwrap(),
+        labels::superseded_by_labels(&["bd-1".into()])
+            .pop()
+            .unwrap(),
         labels::SIGNAL_LATE_ARRIVAL.to_string(),
         labels::READY_FOR_REVIEW.to_string(),
     ];
@@ -183,9 +185,8 @@ fn br_create_enforces_50_char_cap_but_label_add_does_not() {
     let id = extract_id(&run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap());
     for len in [51usize, 64, 128, 256] {
         let label = "x".repeat(len);
-        run_br(dir.path(), &["label", "add", &id, "-l", &label]).unwrap_or_else(|e| {
-            panic!("br label add unexpectedly rejected {len}-char label: {e}")
-        });
+        run_br(dir.path(), &["label", "add", &id, "-l", &label])
+            .unwrap_or_else(|e| panic!("br label add unexpectedly rejected {len}-char label: {e}"));
     }
 }
 

@@ -636,7 +636,9 @@ fn two_clear_cycles_leave_one_running_root() {
         .root_ids()
         .iter()
         .filter(|id| {
-            l.node(id).map(|n| n.phase).unwrap_or(LifecycleState::Spawning)
+            l.node(id)
+                .map(|n| n.phase)
+                .unwrap_or(LifecycleState::Spawning)
                 != LifecycleState::Cancelled
         })
         .collect();

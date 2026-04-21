@@ -72,7 +72,11 @@ fn fresh_install_creates_all_expected_files() {
     ] {
         let root = tmp.path().join(d);
         assert!(root.is_dir(), "expected dir {}", root.display());
-        assert!(count_files_under(&root) > 0, "expected files under {}", root.display());
+        assert!(
+            count_files_under(&root) > 0,
+            "expected files under {}",
+            root.display()
+        );
     }
 }
 
@@ -185,9 +189,7 @@ fn cross_version_upgrade_updates_unedited_files() {
     std::fs::create_dir_all(&override_dir).unwrap();
     std::fs::write(
         override_dir.join("SKILL.md"),
-        format!(
-            "---\nname: {id}\ndescription: new\n---\nNEW VERSION BODY\n"
-        ),
+        format!("---\nname: {id}\ndescription: new\n---\nNEW VERSION BODY\n"),
     )
     .unwrap();
 

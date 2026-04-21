@@ -7,7 +7,12 @@ fn render_status(width: u16) -> String {
     let mut term = Terminal::new(backend).unwrap();
     let view = ViewId::Dashboard;
     term.draw(|f| {
-        let area = Rect { x: 0, y: 0, width, height: 1 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 1,
+        };
         let props = StatusBarProps {
             view: &view,
             running: 0,
@@ -23,14 +28,20 @@ fn render_status(width: u16) -> String {
             license_badge: None,
         };
         StatusBar::render(f, area, props);
-    }).unwrap();
+    })
+    .unwrap();
     let buf = term.backend().buffer().clone();
-    (0..buf.area.width).map(|x| buf[(x, 0)].symbol().to_string()).collect::<String>()
+    (0..buf.area.width)
+        .map(|x| buf[(x, 0)].symbol().to_string())
+        .collect::<String>()
 }
 
 #[test]
 fn status_bar_shows_ctrl_k_go_badge() {
     let line = render_status(120);
-    assert!(line.contains("Ctrl+K"), "status bar missing Ctrl+K badge: {line}");
+    assert!(
+        line.contains("Ctrl+K"),
+        "status bar missing Ctrl+K badge: {line}"
+    );
     assert!(line.contains("go"), "badge missing 'go' label: {line}");
 }

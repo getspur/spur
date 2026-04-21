@@ -1,8 +1,8 @@
 //! Bridge from MCP detached completion → orchestrator ingress.
 //! Enforces INV-C3 (UI event BEFORE model-visible continuation).
 
-use spur_acp::domain::BrainContinuation;
 use spur_acp::domain::events::SpurEventBody;
+use spur_acp::domain::BrainContinuation;
 use spur_acp::types::SessionId;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -103,8 +103,7 @@ impl ContinuationEventSink for crate::event_funnel::FunnelHandle {
 // ── Prompt builders ──────────────────────────────────────────────────────────
 
 use agent_client_protocol::{
-    ContentBlock, EmbeddedResource, EmbeddedResourceResource,
-    TextContent, TextResourceContents,
+    ContentBlock, EmbeddedResource, EmbeddedResourceResource, TextContent, TextResourceContents,
 };
 
 pub const MERGE_BUDGET_DEFAULT_BYTES: usize = 4096;
@@ -128,7 +127,8 @@ fn continuation_resource_block(c: &BrainContinuation) -> ContentBlock {
         "summary": c.payload.summary,
         "diff_summary": c.payload.diff_summary,
         "worker_branch": c.payload.worker_branch,
-    }).to_string();
+    })
+    .to_string();
 
     ContentBlock::Resource(EmbeddedResource::new(
         EmbeddedResourceResource::TextResourceContents(
@@ -194,7 +194,11 @@ pub fn render_merged_turn_with_spill(
         }
         let block = continuation_resource_block(c);
         let cost = block_byte_cost(&block);
-        let with_sep_if_first = if !separator_accounted { separator_cost } else { 0 };
+        let with_sep_if_first = if !separator_accounted {
+            separator_cost
+        } else {
+            0
+        };
         if injected_bytes + cost + with_sep_if_first > budget_bytes {
             spilled.push(c.clone());
         } else {
@@ -235,8 +239,8 @@ fn block_byte_cost(b: &ContentBlock) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spur_acp::domain::{ContinuationPayload, ContinuationSource};
     use spur_acp::domain::delegation::DelegationStatus;
+    use spur_acp::domain::{ContinuationPayload, ContinuationSource};
     use std::time::Instant;
 
     fn mk_cont(id: &str) -> BrainContinuation {
@@ -245,7 +249,9 @@ mod tests {
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
                 status: DelegationStatus::Success,
-                summary: None, diff_summary: None, worker_branch: None,
+                summary: None,
+                diff_summary: None,
+                worker_branch: None,
                 artifact: None,
             },
             created_at: Instant::now(),
@@ -255,14 +261,19 @@ mod tests {
     #[tokio::test]
     async fn overflow_buf_stores_on_try_send_full() {
         let buf = new_overflow_buf();
-        let (_tx, _rx) = mpsc::channel::<InteractiveInput>(1);   // tiny cap
-        // Fill the channel.
-        _tx.try_send(InteractiveInput::Message { blocks: vec![], interrupt: false }).unwrap();
+        let (_tx, _rx) = mpsc::channel::<InteractiveInput>(1); // tiny cap
+                                                               // Fill the channel.
+        _tx.try_send(InteractiveInput::Message {
+            blocks: vec![],
+            interrupt: false,
+        })
+        .unwrap();
 
         let sid = SessionId::new();
         let c = mk_cont("id-overflow-1");
         let input = InteractiveInput::SystemContinuation {
-            session: sid.clone(), continuation: c.clone()
+            session: sid.clone(),
+            continuation: c.clone(),
         };
         match _tx.try_send(input) {
             Err(TrySendError::Full(_)) => {
@@ -280,8 +291,8 @@ mod builder_tests {
     use agent_client_protocol::ContentBlock;
 
     fn mk_cont(id: &str, summary: &str) -> BrainContinuation {
-        use spur_acp::domain::{ContinuationPayload, ContinuationSource};
         use spur_acp::domain::delegation::DelegationStatus;
+        use spur_acp::domain::{ContinuationPayload, ContinuationSource};
         use std::time::Instant;
         BrainContinuation {
             delegation_id: id.into(),
@@ -323,7 +334,10 @@ mod builder_tests {
             "hello world",
         ))];
         let merged = render_merged_turn(&user_blocks, &[mk_cont("id-1", "done")]);
-        assert_eq!(merged[0], user_blocks[0], "user block must be first, byte-exact");
+        assert_eq!(
+            merged[0], user_blocks[0],
+            "user block must be first, byte-exact"
+        );
         // Block 1: separator text marker.
         match &merged[1] {
             ContentBlock::Text(t) => {
@@ -351,7 +365,9 @@ mod builder_tests {
 
     #[test]
     fn merged_turn_spill_is_oldest_first_strict() {
-        let user_blocks = vec![ContentBlock::Text(agent_client_protocol::TextContent::new("hi"))];
+        let user_blocks = vec![ContentBlock::Text(agent_client_protocol::TextContent::new(
+            "hi",
+        ))];
         // Continuation order: tiny, huge, tiny. With strict oldest-first,
         // once the huge one overflows, the following tiny must ALSO spill —
         // no gap-fill delivery out of order.

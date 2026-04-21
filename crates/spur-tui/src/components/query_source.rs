@@ -127,7 +127,8 @@ impl HistoryQuerySource {
     /// `parse_count` is incremented exactly once per distinct query string
     /// in the run of refreshes.
     fn ensure_pattern(&mut self, query: &str) -> &Pattern {
-        let needs_refresh = !matches!(&self.cached_pattern, Some((cached_q, _)) if cached_q == query);
+        let needs_refresh =
+            !matches!(&self.cached_pattern, Some((cached_q, _)) if cached_q == query);
         if needs_refresh {
             self.parse_count += 1;
             let pat = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
@@ -221,7 +222,8 @@ impl QuerySource for HistoryQuerySource {
                 .enumerate()
                 .filter_map(|(i, h)| {
                     buf.clear();
-                    let score = pattern.score(Utf32Str::new(&h.snapshot.text, &mut buf), matcher)?;
+                    let score =
+                        pattern.score(Utf32Str::new(&h.snapshot.text, &mut buf), matcher)?;
                     Some((score, i))
                 })
                 .collect();
@@ -386,10 +388,8 @@ impl QuerySource for SlashQuerySource {
                 .iter()
                 .filter_map(|r| {
                     buf.clear();
-                    let score = pattern.score(
-                        Utf32Str::new(&r.canonical, &mut buf),
-                        &mut self.matcher,
-                    )?;
+                    let score =
+                        pattern.score(Utf32Str::new(&r.canonical, &mut buf), &mut self.matcher)?;
                     Some((score, r.clone()))
                 })
                 .collect();

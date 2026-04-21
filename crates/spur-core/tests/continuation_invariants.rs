@@ -121,7 +121,10 @@ async fn invc3_delegation_completed_precedes_prompt_dispatched_in_seq_order() {
         ScheduledAction::ContinuationPrompt(batch) => batch.len(),
         other => panic!("expected ContinuationPrompt, got {other:?}"),
     };
-    assert_eq!(dispatched_count, 1, "exactly one continuation should dispatch");
+    assert_eq!(
+        dispatched_count, 1,
+        "exactly one continuation should dispatch"
+    );
 
     // Step 5: D-site emit — orchestrator publishes PromptDispatched
     //         immediately before `connection.prompt`. Model-visible side
@@ -134,7 +137,11 @@ async fn invc3_delegation_completed_precedes_prompt_dispatched_in_seq_order() {
 
     // ── Assert ────────────────────────────────────────────────────────
     let events = drain_n(&mut bcast_rx, 2, Duration::from_millis(500)).await;
-    assert_eq!(events.len(), 2, "expected two events on broadcast, got {events:?}");
+    assert_eq!(
+        events.len(),
+        2,
+        "expected two events on broadcast, got {events:?}"
+    );
 
     let completed_seq = events
         .iter()
@@ -157,4 +164,3 @@ async fn invc3_delegation_completed_precedes_prompt_dispatched_in_seq_order() {
          must precede PromptDispatched (seq={dispatched_seq})"
     );
 }
-

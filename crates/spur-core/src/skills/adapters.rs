@@ -41,9 +41,7 @@ impl Adapter {
     /// Render a single skill into this adapter's target path.
     pub fn render(&self, skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
         match self {
-            Adapter::SpurHermetic => {
-                render_agentskills(skill, &repo_root.join(".spur/skills"), "")
-            }
+            Adapter::SpurHermetic => render_agentskills(skill, &repo_root.join(".spur/skills"), ""),
             Adapter::ClaudeCode => {
                 render_agentskills(skill, &repo_root.join(".claude/skills"), "spurpower-")
             }
@@ -64,11 +62,7 @@ impl Adapter {
 
 // --- render helpers land in tasks 7-10 ---
 
-fn render_agentskills(
-    skill: &SkillPayload,
-    target_root: &Path,
-    name_prefix: &str,
-) -> RenderedFile {
+fn render_agentskills(skill: &SkillPayload, target_root: &Path, name_prefix: &str) -> RenderedFile {
     use crate::skills::installer::{sha256_hex, Marker};
     let id = format!("{name_prefix}{}", skill.id);
     let path = target_root.join(&id).join("SKILL.md");
@@ -263,11 +257,17 @@ mod tests {
         let root = std::path::PathBuf::from("/tmp/repo");
         let expected_prefixes = [
             (Adapter::SpurHermetic, "/tmp/repo/.spur/skills/tdd/"),
-            (Adapter::ClaudeCode, "/tmp/repo/.claude/skills/spurpower-tdd/"),
+            (
+                Adapter::ClaudeCode,
+                "/tmp/repo/.claude/skills/spurpower-tdd/",
+            ),
             (Adapter::Codex, "/tmp/repo/.codex/skills/spurpower-tdd/"),
             (Adapter::Gemini, "/tmp/repo/.gemini/skills/spurpower-tdd/"),
             (Adapter::Kiro, "/tmp/repo/.kiro/skills/spurpower-tdd/"),
-            (Adapter::OpenCode, "/tmp/repo/.opencode/skills/spurpower-tdd/"),
+            (
+                Adapter::OpenCode,
+                "/tmp/repo/.opencode/skills/spurpower-tdd/",
+            ),
             (Adapter::Cursor, "/tmp/repo/.cursor/rules/"),
         ];
         for (a, prefix) in expected_prefixes {

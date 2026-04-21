@@ -1,8 +1,8 @@
 //! Skills installer: renders bundled+override skills into per-adapter
 //! agent dirs, protects user hand-edits via an in-file marker + sha256.
 
-use crate::skills::adapters::{render_kiro_steering_pointer, Adapter};
 use crate::skills::adapters::RenderedFile;
+use crate::skills::adapters::{render_kiro_steering_pointer, Adapter};
 use crate::skills::list_active_skills;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -31,10 +31,8 @@ static MARKER_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 fn marker_regex() -> &'static regex::Regex {
     MARKER_RE.get_or_init(|| {
-        regex::Regex::new(
-            r"^<!-- SPUR-MANAGED v=(\d+) skill=(\S+) sha256=([0-9a-f]{64}) -->$",
-        )
-        .expect("static regex")
+        regex::Regex::new(r"^<!-- SPUR-MANAGED v=(\d+) skill=(\S+) sha256=([0-9a-f]{64}) -->$")
+            .expect("static regex")
     })
 }
 
@@ -101,7 +99,11 @@ impl std::fmt::Display for Summary {
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
     #[error("I/O error on {path}: {source}")]
-    Io { path: PathBuf, #[source] source: std::io::Error },
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("invalid skill id `{id}`: {reason}")]
     InvalidSkillId { id: String, reason: String },
@@ -126,8 +128,9 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), InstallError
         })?;
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|source| {
-        InstallError::Io { path: parent.to_path_buf(), source }
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|source| InstallError::Io {
+        path: parent.to_path_buf(),
+        source,
     })?;
     use std::io::Write as _;
     tmp.write_all(bytes).map_err(|source| InstallError::Io {
@@ -280,8 +283,7 @@ mod tests {
             skill_id: skill_id.to_string(),
             sha256: sha256_hex(body.as_bytes()),
         };
-        format!("---\nfoo: bar\n---\n{m}{body}", m = marker.render())
-            .into_bytes()
+        format!("---\nfoo: bar\n---\n{m}{body}", m = marker.render()).into_bytes()
     }
 
     #[test]
@@ -301,9 +303,8 @@ mod tests {
     fn parse_marker_rejects_garbage() {
         assert!(parse_marker("not a marker").is_none());
         assert!(parse_marker("<!-- SPUR-MANAGED v=1 skill=x -->").is_none()); // no sha
-        assert!(parse_marker(
-            "<!-- SPUR-MANAGED v=1 skill=x sha256=ZZZ -->"
-        ).is_none()); // bad hex
+        assert!(parse_marker("<!-- SPUR-MANAGED v=1 skill=x sha256=ZZZ -->").is_none());
+        // bad hex
     }
 
     #[test]
@@ -321,7 +322,9 @@ mod tests {
     fn sha256_hex_format() {
         let h = sha256_hex(b"hello");
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]
@@ -335,8 +338,10 @@ mod tests {
     fn summary_display_reports_skips() {
         let mut s = Summary::default();
         s.written.push(std::path::PathBuf::from("/x/a"));
-        s.skipped.push((std::path::PathBuf::from("/x/b"), SkipReason::UserEdited));
-        s.skipped.push((std::path::PathBuf::from("/x/c"), SkipReason::NoMarker));
+        s.skipped
+            .push((std::path::PathBuf::from("/x/b"), SkipReason::UserEdited));
+        s.skipped
+            .push((std::path::PathBuf::from("/x/c"), SkipReason::NoMarker));
         let rendered = format!("{s}");
         assert!(rendered.contains("wrote 1"));
         assert!(rendered.contains("skipped 2"));
@@ -402,10 +407,7 @@ mod tests {
         let target = dir.path().join("x.md");
         std::fs::write(&target, "totally user's file").unwrap();
         let rf = rf_with(target, b"spur version".to_vec());
-        assert_eq!(
-            decide(&rf).unwrap(),
-            Decision::Skip(SkipReason::NoMarker),
-        );
+        assert_eq!(decide(&rf).unwrap(), Decision::Skip(SkipReason::NoMarker),);
     }
 
     #[test]
@@ -421,10 +423,7 @@ mod tests {
         let on_disk = format!("---\nfm: x\n---\n{m}edited body", m = marker.render());
         std::fs::write(&target, &on_disk).unwrap();
         let rf = rf_with(target, b"anything".to_vec());
-        assert_eq!(
-            decide(&rf).unwrap(),
-            Decision::Skip(SkipReason::UserEdited),
-        );
+        assert_eq!(decide(&rf).unwrap(), Decision::Skip(SkipReason::UserEdited),);
     }
 
     #[test]
@@ -453,7 +452,10 @@ mod tests {
         ] {
             let p = dir.path().join(expected);
             assert!(p.exists(), "missing {expected}");
-            assert!(summary.written.contains(&p), "not in summary.written: {expected}");
+            assert!(
+                summary.written.contains(&p),
+                "not in summary.written: {expected}"
+            );
         }
     }
 }

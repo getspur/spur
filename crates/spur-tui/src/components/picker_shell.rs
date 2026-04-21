@@ -155,7 +155,10 @@ impl PickerShell {
             return;
         }
         let len = self.rows.len();
-        let i = self.list_state.selected().map_or(0, |i| (i + len - 1) % len);
+        let i = self
+            .list_state
+            .selected()
+            .map_or(0, |i| (i + len - 1) % len);
         self.list_state.select(Some(i));
     }
 
@@ -193,11 +196,8 @@ impl PickerShell {
             Some(p) => self.rows.iter().position(|r| r.primary == p).or(Some(0)),
             None => (!self.rows.is_empty()).then_some(0),
         };
-        self.list_state.select(if self.rows.is_empty() {
-            None
-        } else {
-            new_idx
-        });
+        self.list_state
+            .select(if self.rows.is_empty() { None } else { new_idx });
     }
 
     /// For mention/slash (`QueryMode::ReadFromInputBar`). Called by the
@@ -291,7 +291,9 @@ impl PickerShell {
                     if r.atoms.is_empty() {
                         spans.push(Span::styled(
                             r.primary.clone(),
-                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
                         ));
                     } else {
                         let mut cursor = 0usize;
@@ -409,9 +411,9 @@ mod tests {
         let mut shell = PickerShell::open(Box::new(src));
         shell.handle_key(key(KeyCode::Down)); // select row 1
         shell.handle_key(key(KeyCode::Char('a'))); // filter — all three still match "a"
-        // Row 1 used to be "apple juice"; after fuzzy scoring it may still
-        // be present. The contract is: if the previously-selected row's
-        // primary text is still in the new row list, selection tracks it.
+                                                   // Row 1 used to be "apple juice"; after fuzzy scoring it may still
+                                                   // be present. The contract is: if the previously-selected row's
+                                                   // primary text is still in the new row list, selection tracks it.
         let rows = shell.row_primaries();
         let idx = rows.iter().position(|p| p == "apple juice");
         assert_eq!(shell.selected_index(), idx);

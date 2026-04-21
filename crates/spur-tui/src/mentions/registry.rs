@@ -145,7 +145,8 @@ impl MentionRegistry {
                     // Ceiling division so small scores still receive at least
                     // a +1 boost; otherwise floor truncation made the +25%
                     // a no-op for raw scores < 4.
-                    raw.saturating_mul(WORKER_SCORE_NUM).div_ceil(WORKER_SCORE_DEN)
+                    raw.saturating_mul(WORKER_SCORE_NUM)
+                        .div_ceil(WORKER_SCORE_DEN)
                 } else {
                     raw
                 };

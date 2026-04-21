@@ -31,7 +31,9 @@ impl<'a> PaletteSource for CommandSource<'a> {
                 kind: PaletteKind::Command,
                 label: e.name.clone(),
                 subtitle: format!("cmd · {}", e.description),
-                payload: PalettePayload::Command { name: e.name.clone() },
+                payload: PalettePayload::Command {
+                    name: e.name.clone(),
+                },
             })
             .collect()
     }
@@ -61,10 +63,7 @@ impl SessionSource {
             .sessions
             .iter()
             .map(|(id, entry)| {
-                let label = entry
-                    .title_override
-                    .clone()
-                    .unwrap_or_else(|| id.clone());
+                let label = entry.title_override.clone().unwrap_or_else(|| id.clone());
                 (id.clone(), label, entry.last_opened_at.clone())
             })
             .collect();
@@ -87,7 +86,9 @@ impl PaletteSource for SessionSource {
                 kind: PaletteKind::Session,
                 label: label.clone(),
                 subtitle: format!("session · {}", id),
-                payload: PalettePayload::Session { session_id: id.clone() },
+                payload: PalettePayload::Session {
+                    session_id: id.clone(),
+                },
             })
             .collect()
     }
@@ -119,7 +120,9 @@ impl TraceSource {
 
     /// Empty-trace constructor for smoke tests without a full view.
     pub fn from_empty() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 }
 
@@ -171,7 +174,11 @@ impl WorkerSource {
             .nodes()
             .filter_map(|n| {
                 let sid = n.current_attempt().map(|a| a.session_id.clone())?;
-                Some((sid, n.agent.clone(), format!("{:?}", n.phase).to_lowercase()))
+                Some((
+                    sid,
+                    n.agent.clone(),
+                    format!("{:?}", n.phase).to_lowercase(),
+                ))
             })
             .collect();
         Self { entries }
@@ -186,7 +193,9 @@ impl PaletteSource for WorkerSource {
                 kind: PaletteKind::Worker,
                 label: agent.clone(),
                 subtitle: format!("worker · {}", phase),
-                payload: PalettePayload::Worker { session_id: sid.clone() },
+                payload: PalettePayload::Worker {
+                    session_id: sid.clone(),
+                },
             })
             .collect()
     }

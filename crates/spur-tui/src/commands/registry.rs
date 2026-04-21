@@ -313,7 +313,10 @@ mod tests {
             .iter()
             .find(|e| matches!(&e.source, CommandSource::Agent { handle } if handle == "codex"))
             .unwrap();
-        assert_eq!(registry.canonical_typed_form(codex_compact), "/codex:compact");
+        assert_eq!(
+            registry.canonical_typed_form(codex_compact),
+            "/codex:compact"
+        );
     }
 
     #[test]
@@ -336,10 +339,7 @@ mod tests {
         registry.set_agent_commands("kiro", vec![agent_clear]);
 
         let list = registry.list();
-        let clear_entries: Vec<_> = list
-            .iter()
-            .filter(|e| e.name == "clear")
-            .collect();
+        let clear_entries: Vec<_> = list.iter().filter(|e| e.name == "clear").collect();
         assert_eq!(
             clear_entries.len(),
             1,

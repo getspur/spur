@@ -112,9 +112,8 @@ fn strip_frontmatter_owned(s: &str) -> String {
 static SKILL_ID_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 fn skill_id_regex() -> &'static regex::Regex {
-    SKILL_ID_RE.get_or_init(|| {
-        regex::Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").expect("static regex")
-    })
+    SKILL_ID_RE
+        .get_or_init(|| regex::Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").expect("static regex"))
 }
 
 /// Error returned when a skill directory name violates the naming rules.
@@ -131,7 +130,10 @@ pub struct InvalidSkillId {
 /// `spurpower-` 10-char prefix we add in adapter output.
 pub fn validate_id(id: &str) -> Result<(), InvalidSkillId> {
     if id.is_empty() {
-        return Err(InvalidSkillId { id: id.to_string(), reason: "empty" });
+        return Err(InvalidSkillId {
+            id: id.to_string(),
+            reason: "empty",
+        });
     }
     if id.len() > 54 {
         return Err(InvalidSkillId {

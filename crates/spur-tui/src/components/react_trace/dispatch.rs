@@ -87,8 +87,7 @@ pub fn dispatch_session_update<F: Fn() -> String>(
             let fallback_text = extract_tool_call_text(&tc.content)
                 .or_else(|| tc.raw_input.as_ref().map(format_tool_args))
                 .unwrap_or_default();
-            let status =
-                map_initial_status(tc.status, tc.raw_output.as_ref(), ctx.agent_kind);
+            let status = map_initial_status(tc.status, tc.raw_output.as_ref(), ctx.agent_kind);
             trace.push(TraceEntry {
                 kind: TraceKind::Act {
                     tool,

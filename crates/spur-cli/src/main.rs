@@ -489,7 +489,10 @@ async fn main() -> Result<()> {
             orch.set_continuation_tx(user_tx.clone(), overflow_continuations.clone());
 
             let mut orch_handle = tokio::spawn(async move {
-                if let Err(e) = orch.run_interactive(user_rx, brain, Some(perm_tx), overflow_continuations).await {
+                if let Err(e) = orch
+                    .run_interactive(user_rx, brain, Some(perm_tx), overflow_continuations)
+                    .await
+                {
                     tracing::error!(error = %e, "Interactive session error");
                 }
             });

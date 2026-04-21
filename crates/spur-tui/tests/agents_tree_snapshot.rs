@@ -43,11 +43,13 @@ fn recursive_tree_renders_depth_two() {
     // Depth indentation: sub-executor line should start with more whitespace than worker line.
     let worker_indent = lines
         .iter()
-        .find(|l| l.contains("worker")).map(|l| l.len() - l.trim_start().len())
+        .find(|l| l.contains("worker"))
+        .map(|l| l.len() - l.trim_start().len())
         .unwrap_or(0);
     let sub_indent = lines
         .iter()
-        .find(|l| l.contains("sub")).map(|l| l.len() - l.trim_start().len())
+        .find(|l| l.contains("sub"))
+        .map(|l| l.len() - l.trim_start().len())
         .unwrap_or(0);
     assert!(
         sub_indent > worker_indent,
