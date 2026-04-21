@@ -656,6 +656,7 @@ mod tests {
             epic_issue_id: "bd-epic".into(),
             task_ids: vec!["bd-1".into()],
             base_snapshot_branch: Some("refs/heads/main".into()),
+            base_snapshot_oid: None,
             execution_mode: Some("submit_plan".into()),
         }];
 

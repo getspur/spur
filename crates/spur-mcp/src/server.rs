@@ -958,16 +958,29 @@ fn topological_order(tasks: &[crate::plan::PlanTask]) -> Result<Vec<usize>, Stri
 
 async fn snapshot_plan_base(
     repo_root: Option<&std::path::PathBuf>,
-) -> Result<Option<String>, String> {
+) -> Result<PlanBaseSnapshot, String> {
     let Some(root) = repo_root.cloned() else {
-        return Ok(None);
+        return Ok(PlanBaseSnapshot::default());
     };
     let manager = WorktreeManager::new(root);
-    manager
+    let branch = manager
         .snapshot_brain_state()
         .await
-        .map(Some)
-        .map_err(|e| format!("failed to snapshot plan base: {e}"))
+        .map_err(|e| format!("failed to snapshot plan base: {e}"))?;
+    let oid = Some(
+        run_git_capture(&manager.repo_root, None, &["rev-parse", "--verify", branch.as_str()])
+            .await?,
+    );
+    Ok(PlanBaseSnapshot {
+        branch: Some(branch),
+        oid,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct PlanBaseSnapshot {
+    branch: Option<String>,
+    oid: Option<String>,
 }
 
 async fn run_git_capture(
@@ -2768,15 +2781,15 @@ impl McpCallbackServer {
             build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
 
         let task_count = entries.len();
-        let base_snapshot_branch = match snapshot_plan_base(self.repo_root.as_ref()).await {
-            Ok(branch) => branch,
+        let base_snapshot = match snapshot_plan_base(self.repo_root.as_ref()).await {
+            Ok(snapshot) => snapshot,
             Err(e) => return JsonRpcResponse::internal_error(id, e),
         };
         let state = crate::plan::PlanState {
             plan_id: plan_id.clone(),
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
-            base_snapshot_branch,
+            base_snapshot_branch: base_snapshot.branch,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: epic_subgraph.as_ref().map(|sg| sg.epic_id.clone()),
         };
@@ -2994,8 +3007,8 @@ impl McpCallbackServer {
             .collect();
 
         let task_count = entries.len();
-        let base_snapshot_branch = match snapshot_plan_base(self.repo_root.as_ref()).await {
-            Ok(branch) => branch,
+        let base_snapshot = match snapshot_plan_base(self.repo_root.as_ref()).await {
+            Ok(snapshot) => snapshot,
             Err(e) => {
                 self.plan_registry.lock().await.by_epic.remove(&epic_id);
                 return JsonRpcResponse::internal_error(id, e);
@@ -3005,7 +3018,7 @@ impl McpCallbackServer {
             plan_id: plan_id.clone(),
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
-            base_snapshot_branch,
+            base_snapshot_branch: base_snapshot.branch,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some(epic_id.clone()),
         };
@@ -3555,7 +3568,7 @@ mod cancel_delegation_tests {
 
 #[cfg(test)]
 mod merge_plan_tests {
-    use super::{integrate_plan_branches, run_git_capture};
+    use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base};
     use crate::plan::PlanMergeState;
     use tempfile::TempDir;
 
@@ -3581,6 +3594,31 @@ mod merge_plan_tests {
         run_git_capture(repo, None, &["commit", "-q", "-m", message])
             .await
             .expect("git commit");
+    }
+
+    #[tokio::test]
+    async fn snapshot_plan_base_captures_oid() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+
+        let repo_root = dir.path().to_path_buf();
+        let snapshot = snapshot_plan_base(Some(&repo_root))
+            .await
+            .expect("snapshot_plan_base");
+
+        let expected_oid = run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "rev-parse",
+                "--verify",
+                snapshot.branch.as_deref().expect("snapshot branch"),
+            ],
+        )
+        .await
+        .expect("rev-parse snapshot branch");
+
+        assert_eq!(snapshot.oid.as_deref(), Some(expected_oid.as_str()));
     }
 
     #[tokio::test]
