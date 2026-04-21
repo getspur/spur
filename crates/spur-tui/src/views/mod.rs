@@ -84,6 +84,7 @@ pub struct ViewContext<'a> {
     pub lineage: &'a spur_core::lineage::projection::ExecutorLineage,
     pub brain_status: &'a crate::app::BrainStatus,
     pub license_badge: Option<&'a LicenseBadge>,
+    pub flag_summary: Option<(usize, usize)>,
 }
 
 /// Test-only default context backed by empty lineage and idle status.
@@ -99,6 +100,7 @@ impl ViewContext<'_> {
             lineage,
             brain_status: &TEST_BRAIN_STATUS,
             license_badge: None,
+            flag_summary: None,
         }
     }
 }

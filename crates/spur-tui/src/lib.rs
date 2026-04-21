@@ -32,6 +32,7 @@ pub mod test_support {
             lineage,
             brain_status: &IDLE,
             license_badge: None,
+            flag_summary: None,
         }
     }
 

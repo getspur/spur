@@ -1091,6 +1091,7 @@ mod current_session_shortcut_tests {
             lineage: &LINEAGE,
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
+            flag_summary: None,
         }
     }
 
