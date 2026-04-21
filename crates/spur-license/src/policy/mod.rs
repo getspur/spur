@@ -297,19 +297,19 @@ mod tests {
     fn embedded_resolver_returns_community_features() {
         let r = PolicyResolver::embedded();
         let community = r.tier_features("community");
-        assert!(community.contains("chat"));
-        assert!(community.contains("code_edit"));
-        assert!(community.contains("watch_loop"));
-        assert!(!community.contains("advanced_agents"));
+        assert!(community.contains("brain_session"));
+        assert!(community.contains("single_worker"));
+        assert!(community.contains("mcp_standard_tools"));
+        assert!(!community.contains("parallel_workers"));
     }
 
     #[test]
     fn embedded_resolver_returns_pro_features_superset() {
         let r = PolicyResolver::embedded();
         let pro = r.tier_features("pro");
-        assert!(pro.contains("chat"));
-        assert!(pro.contains("advanced_agents"));
-        assert!(pro.contains("cloud_sync"));
+        assert!(pro.contains("brain_session"));
+        assert!(pro.contains("parallel_workers"));
+        assert!(pro.contains("auto_review_policies"));
     }
 
     #[test]
@@ -330,7 +330,7 @@ mod tests {
     fn overlay_supersedes_when_newer_and_signed() {
         let result =
             PolicyResolver::with_overlay_path(std::path::Path::new("/nonexistent/overlay.json"));
-        assert!(result.tier_features("community").contains("chat"));
+        assert!(result.tier_features("community").contains("brain_session"));
     }
 
     #[test]
@@ -342,6 +342,6 @@ mod tests {
         )
         .unwrap();
         let r = PolicyResolver::with_overlay_path(tmp.path());
-        assert!(r.tier_features("community").contains("chat"));
+        assert!(r.tier_features("community").contains("brain_session"));
     }
 }

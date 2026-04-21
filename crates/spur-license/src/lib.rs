@@ -1,4 +1,5 @@
 mod community;
+mod gate;
 mod licenseseat;
 mod quota;
 mod snapshot;
@@ -7,6 +8,7 @@ pub mod policy;
 pub mod provider;
 
 pub use community::CommunityProvider;
+pub use gate::FeatureGate;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -21,6 +23,7 @@ pub use crate::licenseseat::{
     classify_binding_mode, classify_subject, from_env, from_env_or_disabled,
 };
 pub use crate::provider::{LicenseProvider, RefreshPolicy};
+pub use crate::policy::FeatureKey;
 pub use crate::quota::{QuotaKey, QuotaValue};
 pub use crate::snapshot::EntitlementSnapshot;
 pub use crate::tier::Tier;
