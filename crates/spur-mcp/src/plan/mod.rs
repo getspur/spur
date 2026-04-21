@@ -2588,6 +2588,7 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spur_acp::SessionId;
 
     fn task(id: &str, deps: &[&str]) -> PlanTask {
         PlanTask {
@@ -2744,6 +2745,67 @@ mod tests {
     #[test]
     fn max_attempts_is_three() {
         assert_eq!(super::MAX_ATTEMPTS, 3);
+    }
+
+    // ─── run_plan ephemeral-only contract ────────────────────────────────
+
+    fn build_run_plan_fixture(
+        epic_id: Option<String>,
+    ) -> (
+        Arc<Mutex<PlanState>>,
+        mpsc::Sender<DelegationRequest>,
+        mpsc::Receiver<DelegationRequest>,
+    ) {
+        let state = PlanState {
+            plan_id: "p1".into(),
+            tasks: vec![PlanTaskEntry {
+                spec: PlanTask {
+                    task_id: "t1".into(),
+                    agent: "a".into(),
+                    task: "T".into(),
+                    depends_on: vec![],
+                    issue_id: None,
+                    context_files: vec![],
+                },
+                status: PlanTaskStatus::Pending,
+                result: None,
+                worker_branch: None,
+                attempt: 1,
+                history: vec![],
+                last_delegation_id: None,
+            }],
+            brain_session_id: BrainSessionId::new(SessionId("b".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id,
+        };
+        let (tx, rx) = mpsc::channel(8);
+        (Arc::new(Mutex::new(state)), tx, rx)
+    }
+
+    #[tokio::test]
+    async fn run_plan_with_epic_id_does_not_dispatch() {
+        let (plan, tx, mut rx) = build_run_plan_fixture(Some("bd-epic".into()));
+        tokio::spawn(async move { run_plan(plan, tx, None, None, None).await });
+        let recv = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            rx.recv(),
+        )
+        .await;
+        assert!(recv.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_plan_without_epic_id_still_dispatches() {
+        let (plan, tx, mut rx) = build_run_plan_fixture(None);
+        tokio::spawn(async move { run_plan(plan, tx, None, None, None).await });
+        let recv = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            rx.recv(),
+        )
+        .await;
+        assert!(recv.is_ok());
     }
 
     #[test]
