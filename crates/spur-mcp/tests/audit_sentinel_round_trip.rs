@@ -56,7 +56,8 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             plan_id: "P1".into(),
             epic_issue_id: id.clone(),
             task_ids: vec!["bd-a".into(), "bd-b".into()],
-            base_snapshot_branch: None,
+            base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
             execution_mode: None,
         },
         AuditSentinelKind::EpicCompletion {

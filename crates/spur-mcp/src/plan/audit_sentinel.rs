@@ -39,6 +39,8 @@ pub enum AuditSentinelKind {
         #[serde(default)]
         base_snapshot_branch: Option<String>,
         #[serde(default)]
+        base_snapshot_oid: Option<String>,
+        #[serde(default)]
         execution_mode: Option<String>,
     },
     TaskSpec {
@@ -183,6 +185,7 @@ mod tests {
             epic_issue_id: "bd-1".into(),
             task_ids: vec!["bd-2".into(), "bd-3".into()],
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             execution_mode: None,
         }
     }
