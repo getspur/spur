@@ -25,7 +25,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
-use spur_pm::{PmService, ReadyFilter};
+use spur_pm::{IssueFilter, PmService, ReadyFilter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProjectedEpicCompletion {
@@ -165,16 +165,17 @@ impl Reconciler {
     }
 
     pub async fn tick_once(&self) -> anyhow::Result<bool> {
+        let mut did_work = self.reconcile_terminal_epics().await?;
+
         let Some(dispatch) = &self.dispatch else {
             let ready_ids = self.observe_ready().await?;
             for id in &ready_ids {
                 tracing::debug!(%id, "reconciler observed ready task");
             }
-            return Ok(!ready_ids.is_empty());
+            return Ok(did_work || !ready_ids.is_empty());
         };
 
         let ready = self.observe_ready_summaries().await?;
-        let mut did_work = false;
 
         for summary in ready {
             let Some(plan_id) = summary
@@ -276,6 +277,108 @@ impl Reconciler {
                 }
             });
 
+            did_work = true;
+        }
+
+        Ok(did_work)
+    }
+
+    async fn reconcile_terminal_epics(&self) -> anyhow::Result<bool> {
+        let Some(adv) = self.pm.advanced() else {
+            return Ok(false);
+        };
+
+        let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
+        if let Some(plan_id) = self.plan_id.as_deref() {
+            labels.push(crate::plan::labels::plan_id(plan_id));
+        }
+
+        let epics = self
+            .pm
+            .list_issues(IssueFilter {
+                labels,
+                issue_type: Some("epic".into()),
+                limit: Some(10_000),
+                ..Default::default()
+            })
+            .await?;
+
+        let mut did_work = false;
+        let closed_status = self.pm.closed_status().to_string();
+
+        for epic in epics {
+            if epic.status == closed_status {
+                continue;
+            }
+
+            let Some(plan_id) = epic
+                .labels
+                .iter()
+                .find_map(|label| crate::plan::labels::parse_plan_id(label))
+            else {
+                continue;
+            };
+
+            let mut children = self
+                .pm
+                .list_issues(IssueFilter {
+                    labels: vec![crate::plan::labels::plan_id(plan_id)],
+                    limit: Some(10_000),
+                    ..Default::default()
+                })
+                .await?;
+            let closed_children = self
+                .pm
+                .list_issues(IssueFilter {
+                    labels: vec![crate::plan::labels::plan_id(plan_id)],
+                    status: Some(closed_status.clone()),
+                    limit: Some(10_000),
+                    ..Default::default()
+                })
+                .await?;
+            let mut seen_ids = children
+                .iter()
+                .map(|summary| summary.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            for summary in closed_children {
+                if seen_ids.insert(summary.id.clone()) {
+                    children.push(summary);
+                }
+            }
+            let children = children
+                .into_iter()
+                .filter(|summary| summary.id != epic.id)
+                .collect::<Vec<_>>();
+
+            let Some(outcome) = classify_epic_completion(&children, &closed_status) else {
+                continue;
+            };
+
+            let mut update = spur_pm::IssueUpdate {
+                status: Some(closed_status.clone()),
+                ..Default::default()
+            };
+            if outcome.add_integration_pending {
+                if !epic
+                    .labels
+                    .contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+                {
+                    update
+                        .add_labels
+                        .push(crate::plan::labels::INTEGRATION_PENDING.to_string());
+                }
+            } else if epic
+                .labels
+                .contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+            {
+                update
+                    .remove_labels
+                    .push(crate::plan::labels::INTEGRATION_PENDING.to_string());
+            }
+
+            self.pm.update_issue(&epic.id, update).await?;
+            crate::plan::emit_epic_completion_audit(adv, &epic.id, plan_id, outcome.audit_outcome)
+                .await;
             did_work = true;
         }
 
