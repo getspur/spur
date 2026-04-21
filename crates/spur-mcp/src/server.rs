@@ -3704,6 +3704,163 @@ mod merge_plan_tests {
         )
     }
 
+    struct PersistedMergeFixture {
+        _dir: TempDir,
+        pm: Arc<spur_pm::PmService>,
+        server: super::McpCallbackServer,
+        plan_id: String,
+        epic_id: String,
+    }
+
+    async fn setup_persisted_merge_ready_plan(
+        plan_id: &str,
+        clear_cache: bool,
+    ) -> PersistedMergeFixture {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let pm = init_beads_pm(dir.path()).await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["branch", "spur/brain-snapshot-test", "HEAD"],
+        )
+        .await
+        .expect("snapshot branch");
+        let base_snapshot_oid = run_git_capture(
+            dir.path(),
+            None,
+            &["rev-parse", "--verify", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("snapshot oid");
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot branch");
+
+        let tasks = vec![PlanTask {
+            task_id: "task-a".into(),
+            agent: "codex".into(),
+            task: "Integrate worker branch".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        let subgraph = crate::build_epic_subgraph(pm.as_ref(), plan_id, "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+        let adv = pm.advanced().expect("advanced beads backend");
+        crate::emit_plan_submit_audit(
+            adv,
+            plan_id,
+            &subgraph,
+            Some("spur/brain-snapshot-test"),
+            Some(base_snapshot_oid.as_str()),
+            Some("submit_plan"),
+        )
+        .await;
+
+        let task_issue_id = subgraph
+            .task_map
+            .get("task-a")
+            .cloned()
+            .expect("task issue id");
+        adv.add_comment(
+            &task_issue_id,
+            &encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-1".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-a".into()),
+                result_summary: Some("worker branch ready".into()),
+            }),
+        )
+        .await
+        .expect("completion audit");
+        adv.add_comment(
+            &task_issue_id,
+            &encode_comment(&AuditSentinelKind::Approval {
+                delegation_id: "del-1".into(),
+            }),
+        )
+        .await
+        .expect("approval audit");
+        pm.update_issue(
+            &task_issue_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close task issue");
+
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (mut server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            Some(Arc::clone(&pm)),
+            None,
+            continuation_ctx,
+        );
+        server.set_repo_root(dir.path().to_path_buf());
+
+        let projected = crate::plan::projector::project_plan_from_beads(pm.as_ref(), plan_id)
+            .await
+            .expect("project persisted plan");
+        assert_eq!(
+            crate::plan::build_plan_status(plan_id, &projected)["ready_to_merge"],
+            Value::Bool(true)
+        );
+        server.install_projected_plan(projected).await;
+        if clear_cache {
+            server.active_plans.lock().await.remove(plan_id);
+        }
+
+        PersistedMergeFixture {
+            _dir: dir,
+            pm,
+            server,
+            plan_id: plan_id.to_string(),
+            epic_id: subgraph.epic_id,
+        }
+    }
+
+    fn decode_merge_status(response: super::JsonRpcResponse) -> Value {
+        assert!(
+            response.error.is_none(),
+            "merge_plan should succeed: {:?}",
+            response.error
+        );
+
+        let result = response.result.expect("merge_plan result");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("merge_plan text response");
+        serde_json::from_str(text).expect("merge_plan status JSON")
+    }
+
     #[tokio::test]
     async fn snapshot_plan_base_captures_oid() {
         let dir = init_repo().await;
@@ -3904,149 +4061,48 @@ mod merge_plan_tests {
 
     #[tokio::test]
     async fn merge_plan_rehydrates_when_cache_missing() {
-        let dir = init_repo().await;
-        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
-        let pm = init_beads_pm(dir.path()).await;
+        let fixture = setup_persisted_merge_ready_plan("plan-merge-recover", true).await;
 
-        run_git_capture(
-            dir.path(),
-            None,
-            &["branch", "spur/brain-snapshot-test", "HEAD"],
-        )
-        .await
-        .expect("snapshot branch");
-        let base_snapshot_oid = run_git_capture(
-            dir.path(),
-            None,
-            &["rev-parse", "--verify", "spur/brain-snapshot-test"],
-        )
-        .await
-        .expect("snapshot oid");
-
-        run_git_capture(
-            dir.path(),
-            None,
-            &[
-                "checkout",
-                "-q",
-                "-b",
-                "spur/worker-a",
-                "spur/brain-snapshot-test",
-            ],
-        )
-        .await
-        .expect("checkout worker branch");
-        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
-        run_git_capture(
-            dir.path(),
-            None,
-            &["checkout", "-q", "spur/brain-snapshot-test"],
-        )
-        .await
-        .expect("checkout snapshot branch");
-
-        let tasks = vec![PlanTask {
-            task_id: "task-a".into(),
-            agent: "codex".into(),
-            task: "Integrate worker branch".into(),
-            depends_on: Vec::new(),
-            issue_id: None,
-            context_files: Vec::new(),
-        }];
-        let subgraph =
-            crate::build_epic_subgraph(pm.as_ref(), "plan-merge-recover", "Epic", None, &tasks)
-                .await
-                .expect("build epic subgraph");
-        let adv = pm.advanced().expect("advanced beads backend");
-        crate::emit_plan_submit_audit(
-            adv,
-            "plan-merge-recover",
-            &subgraph,
-            Some("spur/brain-snapshot-test"),
-            Some(base_snapshot_oid.as_str()),
-            Some("submit_plan"),
-        )
-        .await;
-
-        let task_issue_id = subgraph
-            .task_map
-            .get("task-a")
-            .cloned()
-            .expect("task issue id");
-        adv.add_comment(
-            &task_issue_id,
-            &encode_comment(&AuditSentinelKind::Completion {
-                delegation_id: "del-1".into(),
-                completion_state: CompletionState::AwaitingReview,
-                superseded: false,
-                worker_branch: Some("spur/worker-a".into()),
-                result_summary: Some("worker branch ready".into()),
-            }),
-        )
-        .await
-        .expect("completion audit");
-        adv.add_comment(
-            &task_issue_id,
-            &encode_comment(&AuditSentinelKind::Approval {
-                delegation_id: "del-1".into(),
-            }),
-        )
-        .await
-        .expect("approval audit");
-        pm.update_issue(
-            &task_issue_id,
-            spur_pm::IssueUpdate {
-                status: Some(pm.closed_status().to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("close task issue");
-
-        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
-        let continuation_ctx = super::DetachedContinuationCtx {
-            on_complete: Arc::new(|_, _| Box::pin(async {})),
-        };
-        let (mut server, _channel) = super::McpCallbackServer::new(
-            &session_id,
-            Some(Arc::clone(&pm)),
-            None,
-            continuation_ctx,
-        );
-        server.set_repo_root(dir.path().to_path_buf());
-
-        let projected =
-            crate::plan::projector::project_plan_from_beads(pm.as_ref(), "plan-merge-recover")
-                .await
-                .expect("project persisted plan");
-        assert_eq!(
-            crate::plan::build_plan_status("plan-merge-recover", &projected)["ready_to_merge"],
-            Value::Bool(true)
-        );
-        server.install_projected_plan(projected).await;
-        server
-            .active_plans
-            .lock()
-            .await
-            .remove("plan-merge-recover");
-
-        let response = server
-            .handle_merge_plan(Value::Null, json!({ "plan_id": "plan-merge-recover" }))
+        let response = fixture
+            .server
+            .handle_merge_plan(Value::Null, json!({ "plan_id": fixture.plan_id }))
             .await;
-        assert!(
-            response.error.is_none(),
-            "merge_plan should rehydrate from durable state: {:?}",
-            response.error
-        );
-
-        let result = response.result.expect("merge_plan result");
-        let text = result["content"][0]["text"]
-            .as_str()
-            .expect("merge_plan text response");
-        let status: serde_json::Value = serde_json::from_str(text).expect("merge_plan status JSON");
+        let status = decode_merge_status(response);
         assert_eq!(status["merge"]["status"], "succeeded");
         assert_eq!(status["ready_to_merge"], true);
         assert_eq!(status["merge"]["merged_task_ids"], json!(["task-a"]));
+    }
+
+    #[tokio::test]
+    async fn merge_plan_clears_integration_pending_on_success() {
+        let fixture = setup_persisted_merge_ready_plan("plan-merge-clear-label", true).await;
+        fixture
+            .pm
+            .update_issue(
+                &fixture.epic_id,
+                spur_pm::IssueUpdate {
+                    add_labels: vec![crate::plan::labels::INTEGRATION_PENDING.to_string()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("add integration-pending label");
+
+        let response = fixture
+            .server
+            .handle_merge_plan(Value::Null, json!({ "plan_id": fixture.plan_id }))
+            .await;
+        let status = decode_merge_status(response);
+        assert_eq!(status["merge"]["status"], "succeeded");
+
+        let epic = fixture.pm.get_issue(&fixture.epic_id).await.expect("get epic");
+        assert!(
+            !epic.labels
+                .iter()
+                .any(|label| label == crate::plan::labels::INTEGRATION_PENDING),
+            "merge_plan should clear integration-pending: {:?}",
+            epic.labels
+        );
     }
 }
 
