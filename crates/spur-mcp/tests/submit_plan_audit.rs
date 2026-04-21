@@ -173,7 +173,7 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
         "P2",
         &subgraph,
         Some("refs/heads/main"),
-        None,
+        Some("0123456789abcdef0123456789abcdef01234567"),
         Some("execute_epic"),
     )
     .await;
@@ -195,10 +195,12 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
         AuditSentinelKind::PlanSubmit {
             plan_id,
             base_snapshot_branch: Some(base_snapshot_branch),
+            base_snapshot_oid: Some(base_snapshot_oid),
             execution_mode: Some(execution_mode),
             ..
         } if plan_id == "P2"
             && base_snapshot_branch == "refs/heads/main"
+            && base_snapshot_oid == "0123456789abcdef0123456789abcdef01234567"
             && execution_mode == "execute_epic"
     )));
 }

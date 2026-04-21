@@ -137,7 +137,15 @@ async fn plan_audit_coverage_all_four_sentinels() {
 
     // ── 1. PlanSubmit — on epic issue ───────────────────────────────────────
     let adv = pm.advanced().expect("beads backend must have advanced()");
-    spur_mcp::emit_plan_submit_audit(adv, "audit-plan-1", &subgraph, None, None, None).await;
+    spur_mcp::emit_plan_submit_audit(
+        adv,
+        "audit-plan-1",
+        &subgraph,
+        Some("spur/brain-snapshot-test"),
+        Some("0123456789abcdef0123456789abcdef01234567"),
+        None,
+    )
+    .await;
 
     // ── 2. Dispatch — on task issue ─────────────────────────────────────────
     let delegation_id = "del-audit-001".to_string();
@@ -218,7 +226,17 @@ async fn plan_audit_coverage_all_four_sentinels() {
         run_br(dir.path(), &["comments", "list", &epic_issue_id]).expect("br comments list epic");
     let epic_sentinels = collect_sentinels(&epic_comments);
     let plan_submit_found = epic_sentinels.iter().any(
-        |k| matches!(k, AuditSentinelKind::PlanSubmit { plan_id, .. } if plan_id == "audit-plan-1"),
+        |k| matches!(
+            k,
+            AuditSentinelKind::PlanSubmit {
+                plan_id,
+                base_snapshot_branch: Some(base_snapshot_branch),
+                base_snapshot_oid: Some(base_snapshot_oid),
+                ..
+            } if plan_id == "audit-plan-1"
+                && base_snapshot_branch == "spur/brain-snapshot-test"
+                && base_snapshot_oid == "0123456789abcdef0123456789abcdef01234567"
+        ),
     );
     assert!(
         plan_submit_found,
