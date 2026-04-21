@@ -202,7 +202,7 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
 
     let (dtx, _drx) = mpsc::channel(8);
 
-    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None).await;
+    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None, None).await;
 
     let events = sink.events.lock().unwrap();
     let saw_completed = events.iter().any(|e| {
@@ -370,7 +370,7 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
     let (dtx, _drx) = mpsc::channel(8);
     let plan_arc = Arc::new(Mutex::new(state));
 
-    run_plan(Arc::clone(&plan_arc), dtx, Some(sink_ref), None).await;
+    run_plan(Arc::clone(&plan_arc), dtx, Some(sink_ref), None, None).await;
 
     let st = plan_arc.lock().await;
     assert!(

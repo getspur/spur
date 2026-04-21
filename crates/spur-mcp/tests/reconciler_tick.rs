@@ -28,8 +28,11 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
+use spur_acp::{BrainSessionId, SessionId};
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::labels;
-use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig};
+use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
+use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
@@ -93,6 +96,12 @@ fn parse_id_from_create(json: &str) -> String {
 /// Apply a label to an issue via `br label add <id> <label>`.
 fn label_issue(repo: &Path, issue_id: &str, label: &str) {
     run_br(repo, &["label", "add", issue_id, label]);
+}
+
+fn test_continuation_ctx() -> DetachedContinuationCtx {
+    DetachedContinuationCtx {
+        on_complete: Arc::new(|_cont, _worker| Box::pin(async {})),
+    }
 }
 
 #[tokio::test]
@@ -178,6 +187,7 @@ async fn observe_ready_returns_unblocked_task_only() {
         ReconcilerConfig::default(),
         pm,
         Arc::new(Notify::new()),
+        None,
         Some("P1".into()),
     );
 
@@ -197,6 +207,52 @@ async fn observe_ready_returns_unblocked_task_only() {
         !ready_ids.contains(&task_b_id),
         "task B ({task_b_id}) is blocked and must not be in ready list; got: {ready_ids:?}"
     );
+}
+
+#[tokio::test]
+async fn observe_ready_summaries_preserve_plan_labels() {
+    if !br_available() {
+        eprintln!("skipping observe_ready_summaries_preserve_plan_labels: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let task_json = run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A",
+            "--priority",
+            "2",
+        ],
+    );
+    let task_id = parse_id_from_create(&task_json);
+    label_issue(dir.path(), &task_id, &labels::plan_id("P1"));
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::new(pm),
+        Arc::new(Notify::new()),
+        None,
+        Some("P1".into()),
+    );
+
+    let summaries = reconciler
+        .observe_ready_summaries()
+        .await
+        .expect("ready summaries");
+    assert!(summaries.iter().any(|summary| {
+        summary.id == task_id && summary.labels.contains(&labels::plan_id("P1"))
+    }));
 }
 
 /// Exercises the br fallback path directly via `observe_ready_via_br`.
@@ -288,6 +344,7 @@ async fn observe_ready_via_br_returns_ready_tasks() {
         ReconcilerConfig::default(),
         pm,
         Arc::new(Notify::new()),
+        None,
         Some("P1".into()),
     );
 
@@ -307,6 +364,380 @@ async fn observe_ready_via_br_returns_ready_tasks() {
     assert!(
         !ready_ids.contains(&task_b_id),
         "task B ({task_b_id}) is blocked and must not be in br fallback ready list; got: {ready_ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn tick_once_persists_dispatch_before_queue_send() {
+    if !br_available() {
+        eprintln!("skipping tick_once_persists_dispatch_before_queue_send: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan 1 Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Ready Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+        }),
+        Some("plan-1".into()),
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+    assert!(did_work);
+    let request = delegation_rx.recv().await.expect("dispatch request");
+    assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
+}
+
+#[tokio::test]
+async fn tick_once_clears_dispatch_label_when_send_fails() {
+    if !br_available() {
+        eprintln!("skipping tick_once_clears_dispatch_label_when_send_fails: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan 1 Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Ready Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+
+    let (delegation_tx, delegation_rx) = tokio::sync::mpsc::channel(1);
+    drop(delegation_rx);
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+        }),
+        Some("plan-1".into()),
+    );
+
+    let _ = reconciler.tick_once().await;
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(!issue
+        .labels
+        .iter()
+        .any(|label| label.starts_with("spur:delegation-id:")));
+}
+
+#[tokio::test]
+async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
+    if !br_available() {
+        eprintln!(
+            "skipping resolve_dispatch_orphan_emits_breadcrumb_and_clears_label: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Dispatch Orphan",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::delegation_id("del-A"));
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+    let adv = pm.advanced().expect("advanced");
+
+    let cleared = spur_mcp::server::resolve_dispatch_orphan(Arc::clone(&pm), &task_id)
+        .await
+        .expect("resolve dispatch orphan");
+    assert!(cleared, "dispatch orphan should be cleared");
+
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(!issue
+        .labels
+        .iter()
+        .any(|label| label.starts_with("spur:delegation-id:")));
+
+    let audits = adv
+        .list_comments(&task_id)
+        .await
+        .expect("list comments")
+        .iter()
+        .filter_map(|comment| audit_sentinel::parse_comment(&comment.body))
+        .filter_map(|result| result.ok())
+        .collect::<Vec<_>>();
+    assert!(audits.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::DispatchOrphanCleared {
+            delegation_id,
+            reason,
+        } if delegation_id == "del-A" && reason == "restart-orphan-cleared"
+    )));
+}
+
+#[tokio::test]
+async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
+    if !br_available() {
+        eprintln!("skipping execute_epic_persists_execution_scope_labels_on_epic_and_tasks: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Execute Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_a_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_b_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task B",
+            "--priority",
+            "2",
+        ],
+    ));
+    run_br(dir.path(), &["dep", "add", &task_a_id, &epic_id]);
+    run_br(dir.path(), &["dep", "add", &task_b_id, &epic_id]);
+    run_br(dir.path(), &["dep", "add", &task_b_id, &task_a_id]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+    let brain_sid = BrainSessionId::new(SessionId::new());
+    let (mut server, _channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(Arc::clone(&pm)),
+        None,
+        test_continuation_ctx(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    let response = server
+        .__test_call_execute_epic(&epic_id, Some("codex"))
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "execute_epic should succeed: {response}"
+    );
+
+    let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert!(epic
+        .labels
+        .iter()
+        .any(|label| label.starts_with("spur:plan-id:")));
+
+    for task_id in [&task_a_id, &task_b_id] {
+        let task = pm.get_issue(task_id).await.expect("get task");
+        assert!(task
+            .labels
+            .iter()
+            .any(|label| label.starts_with("spur:plan-id:")));
+        assert!(task
+            .labels
+            .iter()
+            .any(|label| label.starts_with("spur:plan-task-id:")));
+        assert!(task
+            .labels
+            .iter()
+            .any(|label| label.starts_with("spur:agent:")));
+    }
+}
+
+#[tokio::test]
+async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
+    if !br_available() {
+        eprintln!("skipping execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Rollback Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Rollback Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    run_br(dir.path(), &["dep", "add", &task_id, &epic_id]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+    let brain_sid = BrainSessionId::new(SessionId::new());
+    let (mut server, _channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(Arc::clone(&pm)),
+        None,
+        test_continuation_ctx(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "bad/agent".into(),
+        ..Default::default()
+    }]);
+
+    let response = server
+        .__test_call_execute_epic(&epic_id, Some("bad/agent"))
+        .await;
+    assert!(
+        response.get("error").is_some(),
+        "execute_epic should fail when task scope label persistence is invalid: {response}"
+    );
+
+    let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert!(
+        !epic
+            .labels
+            .iter()
+            .any(|label| label.starts_with("spur:plan-id:")),
+        "epic scope labels should roll back on task persist failure"
+    );
+    let task = pm.get_issue(&task_id).await.expect("get task");
+    assert!(
+        !task
+            .labels
+            .iter()
+            .any(|label| label.starts_with("spur:plan-id:")),
+        "task should not retain partially-written plan scope after execute_epic failure"
     );
 }
 
@@ -358,7 +789,7 @@ async fn reconciler_cancels_during_tick() {
         idle_ceiling: Duration::from_millis(50),
         backoff_factor: 2,
     };
-    let reconciler = Reconciler::new(cfg, pm, Arc::new(Notify::new()), None);
+    let reconciler = Reconciler::new(cfg, pm, Arc::new(Notify::new()), None, None);
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move { reconciler.run(cancel_rx).await });

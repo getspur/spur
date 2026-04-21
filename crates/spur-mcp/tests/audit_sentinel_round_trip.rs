@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
 use tempfile::TempDir;
 
 fn br_available() -> bool {
@@ -56,14 +56,22 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             plan_id: "P1".into(),
             epic_issue_id: id.clone(),
             task_ids: vec!["bd-a".into(), "bd-b".into()],
+            base_snapshot_branch: None,
+            execution_mode: None,
         },
         AuditSentinelKind::Dispatch {
             delegation_id: "del-1".into(),
             worker: "codex".into(),
             attempt: 1,
         },
+        AuditSentinelKind::DispatchOrphanCleared {
+            delegation_id: "del-1".into(),
+            reason: "restart-orphan-cleared".into(),
+        },
         AuditSentinelKind::Completion {
             delegation_id: "del-1".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
             worker_branch: Some("feat/x".into()),
             result_summary: Some("worker narrative: three refactors".into()),
         },

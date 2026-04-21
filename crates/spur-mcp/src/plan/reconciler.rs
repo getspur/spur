@@ -1,8 +1,9 @@
 //! Level-triggered reconciler for beads-backed plans.
 //!
 //! Ticks on an adaptive cadence: fast when there is activity, backing off
-//! toward an idle ceiling when there is not. In v0a.2 the reconciler only
-//! observes/parity-checks beads state; it does NOT dispatch ACP work.
+//! toward an idle ceiling when there is not. When constructed with a
+//! `ReconcilerDispatchCtx`, the reconciler persists dispatch intent and
+//! enqueues ACP work for ready persisted tasks.
 //!
 //! Primary engine: `bv --robot-triage` via BvAdapter (see plan
 //! addendum II in docs/superpowers/plans/2026-04-20-adaptive-plan-repair-v0a.md
@@ -14,15 +15,25 @@
 //!
 //! # Spawn wiring
 //!
-//! TODO(v0b): wire `Reconciler::run` into `server.rs` startup. In v0a.2 the
-//! reconciler is created and tested in isolation only — no server integration.
+//! In v0c the reconciler is wired into `server.rs` startup with a live
+//! `ReconcilerDispatchCtx`, so persisted plans are reclaimed and dispatched by
+//! the same loop that owns completion writeback.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Notify;
+use tokio_util::task::TaskTracker;
 
 use spur_pm::{PmService, ReadyFilter};
+
+#[derive(Clone)]
+pub struct ReconcilerDispatchCtx {
+    pub delegation_tx: tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>,
+    pub task_tracker: TaskTracker,
+    pub brain_session_id: spur_acp::BrainSessionId,
+    pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+}
 
 pub struct ReconcilerConfig {
     pub base_interval: Duration,
@@ -44,6 +55,7 @@ pub struct Reconciler {
     config: ReconcilerConfig,
     pm: Arc<PmService>,
     fast_forward: Arc<Notify>,
+    dispatch: Option<ReconcilerDispatchCtx>,
     plan_id: Option<String>,
 }
 
@@ -52,12 +64,14 @@ impl Reconciler {
         config: ReconcilerConfig,
         pm: Arc<PmService>,
         fast_forward: Arc<Notify>,
+        dispatch: Option<ReconcilerDispatchCtx>,
         plan_id: Option<String>,
     ) -> Self {
         Self {
             config,
             pm,
             fast_forward,
+            dispatch,
             plan_id,
         }
     }
@@ -78,9 +92,8 @@ impl Reconciler {
                 _ = tokio::time::sleep(interval) => {}
             }
             // Race tick_once against cancel so shutdown cannot hang behind
-            // stuck PM I/O (bv.triage / br ready). Aborting a tick's partial
-            // I/O is acceptable: the reconciler is observation-only in v0a.2
-            // and performs no state mutation to roll back.
+            // stuck PM I/O (bv.triage / br ready). Partial persisted writes are
+            // level-triggered and compensated on the next tick / restart.
             let did_work = tokio::select! {
                 biased;
                 _ = &mut cancel => {
@@ -106,41 +119,171 @@ impl Reconciler {
         }
     }
 
-    async fn tick_once(&self) -> anyhow::Result<bool> {
-        let ready_ids = self.observe_ready().await?;
-        for id in &ready_ids {
-            tracing::debug!(%id, "reconciler observed ready task");
+    pub async fn tick_once(&self) -> anyhow::Result<bool> {
+        let Some(dispatch) = &self.dispatch else {
+            let ready_ids = self.observe_ready().await?;
+            for id in &ready_ids {
+                tracing::debug!(%id, "reconciler observed ready task");
+            }
+            return Ok(!ready_ids.is_empty());
+        };
+
+        let ready = self.observe_ready_summaries().await?;
+        let mut did_work = false;
+
+        for summary in ready {
+            let Some(plan_id) = summary
+                .labels
+                .iter()
+                .find_map(|label| crate::plan::labels::parse_plan_id(label))
+            else {
+                continue;
+            };
+
+            let projected =
+                crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id).await?;
+            let Some(task) = projected
+                .tasks
+                .iter()
+                .find(|task| task.spec.issue_id.as_deref() == Some(summary.id.as_str()))
+            else {
+                continue;
+            };
+            if !matches!(task.status, crate::plan::PlanTaskStatus::Ready) {
+                continue;
+            }
+
+            let delegation_id = uuid::Uuid::new_v4().to_string();
+            crate::plan::persist_dispatch_intent(
+                self.pm.as_ref(),
+                &summary.id,
+                plan_id,
+                &delegation_id,
+                &task.spec.agent,
+                task.attempt,
+            )
+            .await?;
+
+            let (respond_to, rx) = tokio::sync::oneshot::channel();
+            let request = crate::tools::DelegationRequest {
+                id: delegation_id.clone().into(),
+                agent: task.spec.agent.clone(),
+                task: task.spec.task.clone(),
+                context_files: task.spec.context_files.clone(),
+                respond_to,
+                brain_session_id: dispatch.brain_session_id.clone(),
+                delegation_plan: None,
+                issue_id: task.spec.issue_id.clone(),
+            };
+
+            if let Err(error) = dispatch.delegation_tx.send(request).await {
+                crate::plan::clear_dispatch_intent(self.pm.as_ref(), &summary.id, &delegation_id)
+                    .await?;
+                let mut update = crate::plan::dispatch_send_failure_update(&delegation_id);
+                update.remove_labels.clear();
+                self.pm.update_issue(&summary.id, update).await?;
+                tracing::warn!(
+                    issue_id = %summary.id,
+                    %delegation_id,
+                    "reconciler send failed: {error}"
+                );
+                continue;
+            }
+
+            let pm = Arc::clone(&self.pm);
+            let plan_id = plan_id.to_string();
+            let task_id = task.spec.task_id.clone();
+            let issue_id = summary.id.clone();
+            let delegation_id_for_completion = delegation_id.clone();
+            let fast_forward = Arc::clone(&self.fast_forward);
+            dispatch.task_tracker.spawn(async move {
+                let Ok(result) = rx.await else {
+                    tracing::warn!(
+                        %plan_id,
+                        %task_id,
+                        %issue_id,
+                        %delegation_id_for_completion,
+                        "reconciler completion receiver dropped before result persisted"
+                    );
+                    return;
+                };
+
+                let completion_state = crate::plan::completion_state_from_status(&result.status);
+                if let Err(error) = crate::plan::persist_completion_result_and_notify(
+                    pm.as_ref(),
+                    &issue_id,
+                    &plan_id,
+                    &delegation_id_for_completion,
+                    completion_state,
+                    result.worker_branch.as_deref(),
+                    result.summary.as_deref(),
+                    &Some(Arc::clone(&fast_forward)),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        %plan_id,
+                        %task_id,
+                        %issue_id,
+                        %delegation_id_for_completion,
+                        "reconciler completion persistence failed: {error}"
+                    );
+                }
+            });
+
+            did_work = true;
         }
-        Ok(!ready_ids.is_empty())
+
+        Ok(did_work)
+    }
+
+    pub async fn observe_ready_summaries(&self) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        let label_filter = self.plan_id.as_deref().map(crate::plan::labels::plan_id);
+        let Some(adv) = self.pm.advanced() else {
+            anyhow::bail!("reconciler: no advanced (beads) backend available");
+        };
+
+        let mut labels = Vec::new();
+        if let Some(plan_id_label) = label_filter {
+            labels.push(plan_id_label);
+        }
+
+        let summaries = adv
+            .list_ready(ReadyFilter {
+                labels_all: labels,
+                limit: Some(50),
+                ..Default::default()
+            })
+            .await?;
+
+        let mut hydrated = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            let issue = self.pm.get_issue(&summary.id).await?;
+            hydrated.push(spur_pm::IssueSummary {
+                id: issue.id.clone(),
+                source: issue.source,
+                title: issue.title,
+                status: issue.status,
+                labels: issue.labels,
+                url: issue.url,
+                priority: issue.priority,
+                issue_type: issue.issue_type,
+                assignee: issue.assignee,
+            });
+        }
+
+        Ok(hydrated)
     }
 
     /// Returns the IDs of ready tasks under the configured plan filter,
-    /// using bv primary + br fallback.
+    /// preserving the labels from the beads ready summaries.
     pub async fn observe_ready(&self) -> anyhow::Result<Vec<String>> {
-        let label_filter = self.plan_id.as_deref().map(crate::plan::labels::plan_id);
-
-        // Primary: bv triage. Use `quick_ref.top_picks` — bv's curated list of
-        // actionable (unblocked) issues — rather than the broader
-        // `recommendations` list which includes blocked issues as well.
-        if let Some(bv) = self.pm.analyzer() {
-            match bv.triage(label_filter.as_deref()).await {
-                Ok(report) => {
-                    return Ok(report
-                        .triage
-                        .quick_ref
-                        .top_picks
-                        .into_iter()
-                        .map(|p| p.id)
-                        .collect());
-                }
-                Err(e) => {
-                    tracing::warn!("bv triage failed, falling back to br ready: {e}");
-                }
-            }
-        }
-
-        // Fallback: br ready via observe_ready_via_br.
-        self.observe_ready_via_br().await
+        Ok(self
+            .observe_ready_summaries()
+            .await?
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect())
     }
 
     /// Fallback ready-task query using `br ready` (BeadsAdvanced) directly.
@@ -161,33 +304,32 @@ impl Reconciler {
     /// applied; all unblocked tasks are returned. Partial-plan protection is
     /// entirely absent in this mode — document as v0a.2 limitation.
     pub async fn observe_ready_via_br(&self) -> anyhow::Result<Vec<String>> {
-        let label_filter = self.plan_id.as_deref().map(crate::plan::labels::plan_id);
-
-        let Some(adv) = self.pm.advanced() else {
-            anyhow::bail!("reconciler: no advanced (beads) backend available");
-        };
-        // Fallback is degraded-mode observation. The PLAN_COMPLETE gate is
-        // enforced in the bv primary path; here we rely on the caller's plan_id
-        // scoping. Partial plans may leak through during fallback — acceptable
-        // tradeoff for v0a.2 since fallback only triggers on bv failures (rare).
-        let mut labels = Vec::new();
-        if let Some(pid_label) = label_filter {
-            labels.push(pid_label);
-        }
-        let summaries = adv
-            .list_ready(ReadyFilter {
-                labels_all: labels,
-                limit: Some(50),
-                ..Default::default()
-            })
-            .await?;
-        Ok(summaries.into_iter().map(|s| s.id).collect())
+        Ok(self
+            .observe_ready_summaries()
+            .await?
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconciler_dispatch_ctx_can_be_cloned_for_server_startup() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::tools::DelegationRequest>(1);
+        let ctx = super::ReconcilerDispatchCtx {
+            delegation_tx: tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+        };
+
+        let cloned = ctx.clone();
+        assert_eq!(cloned.brain_session_id, ctx.brain_session_id);
+    }
 
     /// D1 fix coverage: verify that the biased select! pattern used inside
     /// `Reconciler::run` to race `tick_once` against `cancel` actually

@@ -75,6 +75,7 @@ fn every_label_constructor_is_accepted_by_br() {
             .unwrap(),
         labels::SIGNAL_LATE_ARRIVAL.to_string(),
         labels::READY_FOR_REVIEW.to_string(),
+        labels::REVIEW_REJECTED.to_string(),
     ];
 
     for label in &constructed {
