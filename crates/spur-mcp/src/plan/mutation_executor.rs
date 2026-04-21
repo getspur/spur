@@ -8,24 +8,12 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
 use spur_pm::{BeadsAdvanced, DependencyCycle, IssueCreate, IssueFilter, IssueUpdate, PmService};
-use uuid::Uuid;
 
 use super::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
-use super::labels::superseded_by_labels;
+use super::labels::{mutation_id_label, signal_processed_label, superseded_by_labels};
 use super::mutation::{DepRewirePolicy, MutationBatch, PlanMutationOp};
 
 const ISSUE_SCAN_LIMIT: usize = 10_000;
-
-// `br` rejects labels longer than 50 characters. The public label helpers use
-// hyphenated UUIDs, which overflow that limit for these prefixes, so mutation
-// executor uses the compact UUID representation for backend persistence.
-fn persisted_mutation_label(mutation_id: &Uuid) -> String {
-    format!("spur:mutation-id:{}", mutation_id.simple())
-}
-
-fn persisted_signal_processed_label(mutation_id: &Uuid) -> String {
-    format!("spur:signal-processed:{}", mutation_id.simple())
-}
 
 #[derive(Debug)]
 struct SplitExecution {
@@ -78,7 +66,7 @@ pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result
                             parent: None,
                             assignee: draft.assignee.clone(),
                             priority: draft.priority,
-                            labels: vec![persisted_mutation_label(&batch.mutation_id)],
+                            labels: vec![mutation_id_label(&batch.mutation_id)],
                             ..Default::default()
                         })
                         .await
@@ -197,7 +185,7 @@ pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result
     pm.update_issue(
         &batch.trigger_task_id,
         IssueUpdate {
-            add_labels: vec![persisted_signal_processed_label(&batch.mutation_id)],
+            add_labels: vec![signal_processed_label(&batch.mutation_id)],
             ..Default::default()
         },
     )

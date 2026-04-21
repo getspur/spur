@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
+use spur_mcp::plan::labels::mutation_id_label;
 use spur_mcp::plan::mutation::{DepRewirePolicy, MutationBatch, PlanMutationOp, TaskDraft};
 use spur_mcp::plan::mutation_executor::apply_mutation;
 use tempfile::TempDir;
@@ -131,10 +132,6 @@ fn mutation_batch(
     .expect("MutationBatch JSON must deserialize")
 }
 
-fn persisted_mutation_label(mutation_id: &Uuid) -> String {
-    format!("spur:mutation-id:{}", mutation_id.simple())
-}
-
 fn issue_ids_for_label(repo: &Path, label: &str) -> Result<Vec<String>, String> {
     let rows = run_sql_json(
         repo,
@@ -159,7 +156,7 @@ fn issue_ids_for_label(repo: &Path, label: &str) -> Result<Vec<String>, String> 
 }
 
 async fn inject_cycle_when_children_exist(repo: PathBuf, mutation_id: Uuid) -> Result<(), String> {
-    let label = persisted_mutation_label(&mutation_id);
+    let label = mutation_id_label(&mutation_id);
     for _ in 0..2_000 {
         let mut ids = issue_ids_for_label(&repo, &label)?;
         if ids.len() >= 2 {
@@ -275,7 +272,7 @@ async fn cycle_detection_emits_violation_and_rolls_back() {
         "MutationCommit must not be emitted on rolled-back mutation: err={err:#} sentinels={sentinels:?}"
     );
 
-    let child_ids = issue_ids_for_label(dir.path(), &persisted_mutation_label(&batch.mutation_id))
+    let child_ids = issue_ids_for_label(dir.path(), &mutation_id_label(&batch.mutation_id))
         .expect("query rollback children by label");
     assert_eq!(
         child_ids.len(),

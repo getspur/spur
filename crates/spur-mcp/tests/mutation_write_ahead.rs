@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
+use spur_mcp::plan::labels::signal_processed_label;
 use spur_mcp::plan::mutation::{DepRewirePolicy, MutationBatch, PlanMutationOp, TaskDraft};
 use spur_mcp::plan::mutation_executor::apply_mutation;
 use tempfile::TempDir;
@@ -74,10 +75,6 @@ fn mutation_batch(
         "ops": ops
     }))
     .expect("MutationBatch JSON must deserialize")
-}
-
-fn persisted_signal_processed_label(mutation_id: &Uuid) -> String {
-    format!("spur:signal-processed:{}", mutation_id.simple())
 }
 
 #[tokio::test]
@@ -157,7 +154,7 @@ async fn write_ahead_comment_persists_when_rewire_validation_fails() {
     );
 
     let parent_issue = pm.get_issue(&parent).await.expect("load parent");
-    let processed_label = persisted_signal_processed_label(&batch.mutation_id);
+    let processed_label = signal_processed_label(&batch.mutation_id);
     assert!(
         !parent_issue
             .labels
