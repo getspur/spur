@@ -465,6 +465,80 @@ pub(crate) fn is_connection_death(err: &anyhow::Error) -> bool {
     msg.contains("ACP thread died") || msg.contains("server shut down unexpectedly")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeadsStartupWarning {
+    BrNotInstalled,
+    BackendUnavailable,
+}
+
+fn startup_beads_warning(
+    config: &SpurConfig,
+    feature_gate: Option<&spur_license::FeatureGate>,
+    has_beads_dir: bool,
+    pm_service_available: bool,
+    br_binary_available: bool,
+) -> Option<BeadsStartupWarning> {
+    if !(has_beads_dir
+        && !pm_service_available
+        && config.pm.beads.as_ref().is_none_or(|beads| beads.enabled)
+        && feature_gate.is_some_and(|gate| gate.has(spur_license::FeatureKey::PM_INTEGRATION)))
+    {
+        return None;
+    }
+
+    Some(if br_binary_available {
+        BeadsStartupWarning::BackendUnavailable
+    } else {
+        BeadsStartupWarning::BrNotInstalled
+    })
+}
+
+fn render_beads_startup_warning(warning: BeadsStartupWarning) -> &'static str {
+    match warning {
+        BeadsStartupWarning::BrNotInstalled => {
+            "br (beads) not installed — issue tracking disabled. Install: cargo install --git https://github.com/Dicklesworthstone/beads_rust.git"
+        }
+        BeadsStartupWarning::BackendUnavailable => {
+            "beads PM backend failed to initialize — issue tracking disabled. `br` appears installed; check logs for the underlying startup error."
+        }
+    }
+}
+
+fn binary_on_path(binary: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    #[cfg(windows)]
+    let path_exts: Vec<String> = std::env::var_os("PATHEXT")
+        .map(|exts| {
+            exts.to_string_lossy()
+                .split(';')
+                .filter(|ext| !ext.is_empty())
+                .map(|ext| ext.to_string())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![".EXE".into(), ".CMD".into(), ".BAT".into(), ".COM".into()]);
+
+    std::env::split_paths(&path_var).any(|dir| {
+        if dir.join(binary).is_file() {
+            return true;
+        }
+
+        #[cfg(windows)]
+        {
+            path_exts
+                .iter()
+                .any(|ext| dir.join(format!("{binary}{ext}")).is_file())
+        }
+
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    })
+}
+
 // ─── Free function: log-cap enforcer ──────────────────────────────────────────
 
 fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
@@ -937,12 +1011,16 @@ impl Orchestrator {
         }
 
         // Startup guidance: surface actionable install hints for missing PM tools.
-        if self.pm_service.is_none() && self.repo_root.join(".beads").is_dir() {
+        if let Some(warning) = startup_beads_warning(
+            &self.config,
+            self.feature_gate.as_deref(),
+            self.repo_root.join(".beads").is_dir(),
+            self.pm_service.is_some(),
+            binary_on_path("br"),
+        ) {
             self.funnel.emit(SpurEventBody::IssueCommandError {
                 operation: "startup".into(),
-                error: "br (beads) not installed — issue tracking disabled. \
-                        Install: cargo install --git https://github.com/Dicklesworthstone/beads_rust.git"
-                    .into(),
+                error: render_beads_startup_warning(warning).into(),
             });
         } else if let Some(pm) = &self.pm_service {
             if pm.analyzer().is_none() {
@@ -5790,5 +5868,107 @@ mod artifact_decision_tests {
         // call -> no annotation -> no escalation. This is asserted by
         // the absence of the call site at the appropriate branch.
         // See `run_one_worker_attempt` for the guard.
+    }
+}
+
+#[cfg(test)]
+mod beads_startup_warning_tests {
+    use super::{render_beads_startup_warning, startup_beads_warning, BeadsStartupWarning};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use spur_acp::config::{BeadsPmConfig, SpurConfig};
+    use spur_license::policy::PolicyResolver;
+    use spur_license::{FeatureGate, LicenseState, Plan};
+
+    fn community_gate() -> Arc<FeatureGate> {
+        Arc::new(FeatureGate::new(PolicyResolver::embedded()))
+    }
+
+    fn entitled_gate() -> Arc<FeatureGate> {
+        let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
+        let mut features = BTreeSet::new();
+        features.insert("pm_integration".to_string());
+        gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
+        gate
+    }
+
+    #[test]
+    fn beads_startup_warning_community_tier_suppresses_false_install_hint() {
+        let config = SpurConfig::default();
+        let gate = community_gate();
+
+        assert_eq!(
+            startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn beads_startup_warning_entitled_tier_with_missing_br_emits_install_hint() {
+        let config = SpurConfig::default();
+        let gate = entitled_gate();
+
+        assert_eq!(
+            startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
+            Some(BeadsStartupWarning::BrNotInstalled)
+        );
+        assert!(
+            render_beads_startup_warning(BeadsStartupWarning::BrNotInstalled)
+                .contains("br (beads) not installed"),
+        );
+    }
+
+    #[test]
+    fn beads_startup_warning_entitled_tier_with_present_br_uses_generic_backend_copy() {
+        let config = SpurConfig::default();
+        let gate = entitled_gate();
+
+        assert_eq!(
+            startup_beads_warning(&config, Some(gate.as_ref()), true, false, true),
+            Some(BeadsStartupWarning::BackendUnavailable)
+        );
+        let warning = render_beads_startup_warning(BeadsStartupWarning::BackendUnavailable);
+        assert!(
+            !warning.contains("not installed"),
+            "generic warning must not claim br is missing: {warning}",
+        );
+        assert!(warning.contains("failed to initialize"), "got: {warning}");
+    }
+
+    #[test]
+    fn beads_startup_warning_disabled_beads_config_suppresses_warning() {
+        let mut config = SpurConfig::default();
+        config.pm.beads = Some(BeadsPmConfig {
+            enabled: false,
+            auto_sync: false,
+        });
+        let gate = entitled_gate();
+
+        assert_eq!(
+            startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn beads_startup_warning_missing_feature_gate_suppresses_warning() {
+        let config = SpurConfig::default();
+
+        assert_eq!(
+            startup_beads_warning(&config, None, true, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn beads_startup_warning_existing_pm_service_suppresses_warning() {
+        let config = SpurConfig::default();
+        let gate = entitled_gate();
+
+        assert_eq!(
+            startup_beads_warning(&config, Some(gate.as_ref()), true, true, false),
+            None
+        );
     }
 }
