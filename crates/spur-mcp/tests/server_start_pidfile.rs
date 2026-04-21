@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
@@ -78,4 +79,60 @@ async fn beads_backed_start_requires_repo_root_before_listener_boot() {
         msg.contains("repo_root not set on McpCallbackServer"),
         "unexpected error: {msg}"
     );
+}
+
+#[tokio::test]
+async fn dropping_server_handle_releases_pidfile_for_next_start() {
+    if !br_available() {
+        eprintln!(
+            "skipping dropping_server_handle_releases_pidfile_for_next_start: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = beads_pm(dir.path()).await;
+    let brain_sid = BrainSessionId::new(SessionId::new());
+
+    let (mut server, _channel) =
+        McpCallbackServer::new(&brain_sid, Some(pm.clone()), None, test_continuation_ctx());
+    server.set_repo_root(dir.path().to_path_buf());
+    server.set_reconciler_enabled(true, None);
+
+    let (_url, handle) = Arc::new(server)
+        .start()
+        .await
+        .expect("initial start should succeed");
+
+    // Regression: dropping the start() handle must not detach a live server
+    // that keeps holding `.beads/.spur-brain.pid`.
+    drop(handle);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let (mut next_server, _channel) =
+            McpCallbackServer::new(&brain_sid, Some(pm.clone()), None, test_continuation_ctx());
+        next_server.set_repo_root(dir.path().to_path_buf());
+        next_server.set_reconciler_enabled(true, None);
+
+        match Arc::new(next_server).start().await {
+            Ok((_url, next_handle)) => {
+                drop(next_handle);
+                return;
+            }
+            Err(error)
+                if format!("{error:#}")
+                    .contains("another SPUR brain session already owns this .beads/")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!(
+                "dropping the server handle must release the pidfile for the next start: {error:#}"
+            ),
+        }
+    }
 }

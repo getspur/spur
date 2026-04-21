@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio::task::{JoinHandle, JoinSet};
-use tokio_util::task::TaskTracker;
+use tokio::task::JoinSet;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info};
 
 use spur_acp::*;
@@ -1133,7 +1133,7 @@ impl McpCallbackServer {
     ///
     /// Returns the MCP endpoint URL (e.g. `http://127.0.0.1:12345/mcp`) and
     /// a `JoinHandle`.
-    pub async fn start(self: Arc<Self>) -> Result<(String, JoinHandle<()>)> {
+    pub async fn start(self: Arc<Self>) -> Result<(String, AbortOnDropHandle<()>)> {
         // Extract data needed for pidfile acquisition before moving self into the async block.
         let repo_root = self.repo_root.clone();
         let has_beads_backend = self
@@ -1193,7 +1193,7 @@ impl McpCallbackServer {
                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                     reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
-                    let handle = tokio::spawn(async move {
+                    let handle = AbortOnDropHandle::new(tokio::spawn(async move {
                         let reconciler = Reconciler::new(
                             ReconcilerConfig::default(),
                             pm,
@@ -1201,7 +1201,7 @@ impl McpCallbackServer {
                             None, // plan_id: observe all plans when None
                         );
                         reconciler.run(cancel_rx).await;
-                    });
+                    }));
                     Some(handle)
                 } else {
                     tracing::debug!("reconciler disabled: PM has no beads advanced() backend");
@@ -1223,11 +1223,11 @@ impl McpCallbackServer {
                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                 signal_watcher_cancel_tx = Some(cancel_tx);
                 info!("spawning brain-side signal watcher (beads backend detected)");
-                let handle = tokio::spawn(async move {
+                let handle = AbortOnDropHandle::new(tokio::spawn(async move {
                     let watcher =
                         SignalWatcher::new(pm, ScopeDriftSplitProposer::default(), TrivialScorer);
                     watcher.run(cancel_rx).await;
-                });
+                }));
                 Some(handle)
             } else {
                 tracing::debug!("signal watcher disabled: PM has no beads advanced() backend");
@@ -1240,7 +1240,7 @@ impl McpCallbackServer {
 
         info!(url = %url, "MCP callback server listening (streamable HTTP)");
 
-        let handle = tokio::spawn(async move {
+        let handle = AbortOnDropHandle::new(tokio::spawn(async move {
             // I4: keep pidfile alive for the duration of the server.
             let _brain_pidfile = brain_pidfile;
             if let Err(error) = axum::serve(listener, router).await {
@@ -1259,7 +1259,7 @@ impl McpCallbackServer {
             if let Some(sh) = signal_watcher_task {
                 let _ = sh.await;
             }
-        });
+        }));
 
         Ok((url, handle))
     }

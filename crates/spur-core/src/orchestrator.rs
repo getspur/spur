@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, warn};
 
 use spur_acp::config::SpurConfig;
@@ -119,7 +120,7 @@ pub struct BrainSession {
     /// listener. Must be aborted on session retire — otherwise the
     /// listener keeps its port open and the task + TcpListener are
     /// leaked for the lifetime of the process.
-    pub mcp_handle: JoinHandle<()>,
+    pub mcp_handle: AbortOnDropHandle<()>,
     /// Task that drains the connection's session-notification broadcast
     /// and republishes each item onto the `SpurEvent` bus. `None` for
     /// transports that return `None` from `subscribe_session_notifications`
@@ -132,6 +133,31 @@ pub struct BrainSession {
     /// `retire_active_brain` to record session duration in the cost
     /// ledger on close-out.
     pub started_at: std::time::Instant,
+}
+
+async fn abort_mcp_handle(handle: AbortOnDropHandle<()>) {
+    handle.abort();
+    let _ = handle.await;
+}
+
+async fn cleanup_mcp_on_err<T, F>(
+    mcp_handle: AbortOnDropHandle<()>,
+    fut: F,
+) -> Result<(T, AbortOnDropHandle<()>)>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    match fut.await {
+        Ok(value) => Ok((value, mcp_handle)),
+        Err(error) => {
+            abort_mcp_handle(mcp_handle).await;
+            Err(error)
+        }
+    }
+}
+
+fn format_error_chain(error: &anyhow::Error) -> String {
+    format!("{error:#}")
 }
 
 /// A user input message from the TUI.
@@ -718,91 +744,104 @@ impl Orchestrator {
             );
         }
 
-        // 6. Spawn brain agent via AgentConnection.
-        let mut connection = self.create_connection(&brain_config, None);
+        let ((mut connection, delegation_handle, success, pr_url), mcp_handle): (
+            (
+                Box<dyn spur_acp::AgentConnection>,
+                JoinHandle<()>,
+                bool,
+                Option<String>,
+            ),
+            AbortOnDropHandle<()>,
+        ) = cleanup_mcp_on_err(mcp_handle, async {
+            // 6. Spawn brain agent via AgentConnection.
+            let mut connection = self.create_connection(&brain_config, None);
 
-        let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
-        let _capabilities = connection
-            .initialize(init_request)
+            let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+            let _capabilities = connection
+                .initialize(init_request)
+                .await
+                .context("Failed to initialize brain agent")?;
+
+            debug!(
+                brain = %brain_name,
+                "Brain agent initialized"
+            );
+
+            // MCP callback server is now HTTP — pass URL directly.
+            let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
+
+            let session_response = crate::skip_perm::new_session_with_bypass(
+                &mut *connection,
+                &brain_config,
+                self.repo_root.clone(),
+                mcp_servers,
+            )
             .await
-            .context("Failed to initialize brain agent")?;
+            .context("Failed to create brain session")?;
 
-        debug!(
-            brain = %brain_name,
-            "Brain agent initialized"
-        );
+            // 7. Send prompt and stream events.
+            let prompt_request = PromptRequest::new(
+                session_response.session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new(prompt_text.clone()))],
+            );
 
-        // MCP callback server is now HTTP — pass URL directly.
-        let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
+            // 8. Process brain output + delegation callbacks concurrently.
+            let pr_url: Option<String> = None;
+            let success = true;
 
-        let session_response = crate::skip_perm::new_session_with_bypass(
-            &mut *connection,
-            &brain_config,
-            self.repo_root.clone(),
-            mcp_servers,
-        )
-        .await
-        .context("Failed to create brain session")?;
+            // Spawn delegation handler BEFORE prompt so delegation requests
+            // that arrive during the prompt turn are not queued indefinitely.
+            let max_concurrent = self.config.worktree.max_concurrent;
+            let delegation_handle = tokio::spawn(Self::handle_delegations(
+                delegation_channel,
+                self.repo_root.clone(),
+                self.config.agents.entries.clone(),
+                max_concurrent,
+                self.funnel.clone(),
+                self.review_sink.clone(),
+                self.pm_service.clone(),
+                self.cancellation_control.clone(),
+            ));
 
-        // 7. Send prompt and stream events.
-        let prompt_request = PromptRequest::new(
-            session_response.session_id.clone(),
-            vec![ContentBlock::Text(TextContent::new(prompt_text.clone()))],
-        );
-
-        // 8. Process brain output + delegation callbacks concurrently.
-        let pr_url: Option<String> = None;
-        let success = true;
-
-        // Spawn delegation handler BEFORE prompt so delegation requests
-        // that arrive during the prompt turn are not queued indefinitely.
-        let max_concurrent = self.config.worktree.max_concurrent;
-        let delegation_handle = tokio::spawn(Self::handle_delegations(
-            delegation_channel,
-            self.repo_root.clone(),
-            self.config.agents.entries.clone(),
-            max_concurrent,
-            self.funnel.clone(),
-            self.review_sink.clone(),
-            self.pm_service.clone(),
-            self.cancellation_control.clone(),
-        ));
-
-        // Stream brain output. For native (ACP-transport) agents prompt()
-        // returns an empty stream; notifications arrive via the
-        // connection-scoped broadcast instead. drive_prompt_notifications
-        // handles both paths transparently.
-        let funnel_for_notif = self.funnel.clone();
-        let session_id_for_notif = session_id.clone();
-        crate::notification_drain::drive_prompt_notifications(
-            &mut *connection,
-            prompt_request,
-            |notification| {
-                match &notification.update {
-                    SessionUpdate::AgentThoughtChunk(chunk)
-                    | SessionUpdate::AgentMessageChunk(chunk) => {
-                        if let ContentBlock::Text(tc) = &chunk.content {
-                            print!("{}", tc.text);
+            // Stream brain output. For native (ACP-transport) agents prompt()
+            // returns an empty stream; notifications arrive via the
+            // connection-scoped broadcast instead. drive_prompt_notifications
+            // handles both paths transparently.
+            let funnel_for_notif = self.funnel.clone();
+            let session_id_for_notif = session_id.clone();
+            crate::notification_drain::drive_prompt_notifications(
+                &mut *connection,
+                prompt_request,
+                |notification| {
+                    match &notification.update {
+                        SessionUpdate::AgentThoughtChunk(chunk)
+                        | SessionUpdate::AgentMessageChunk(chunk) => {
+                            if let ContentBlock::Text(tc) = &chunk.content {
+                                print!("{}", tc.text);
+                            }
                         }
+                        SessionUpdate::ToolCall(tc) => {
+                            debug!(tool = %tc.title, "Brain calling tool");
+                        }
+                        _ => {}
                     }
-                    SessionUpdate::ToolCall(tc) => {
-                        debug!(tool = %tc.title, "Brain calling tool");
-                    }
-                    _ => {}
-                }
-                funnel_for_notif.emit(SpurEventBody::AgentNotification {
-                    session: session_id_for_notif.clone(),
-                    notification: Box::new(notification),
-                });
-            },
-        )
-        .await
-        .context("Failed to send prompt to brain")?;
+                    funnel_for_notif.emit(SpurEventBody::AgentNotification {
+                        session: session_id_for_notif.clone(),
+                        notification: Box::new(notification),
+                    });
+                },
+            )
+            .await
+            .context("Failed to send prompt to brain")?;
+
+            Ok((connection, delegation_handle, success, pr_url))
+        })
+        .await?;
 
         // 9. Clean up.
         let _ = connection.shutdown().await;
         delegation_handle.abort();
-        mcp_handle.abort();
+        abort_mcp_handle(mcp_handle).await;
 
         let duration = start.elapsed();
 
@@ -925,14 +964,15 @@ impl Orchestrator {
                                 }));
                             }
                             Err(e) => {
+                                let error_message = format_error_chain(&e);
                                 error!(
-                                    error = %e,
+                                    error = %error_message,
                                     brain = %target_brain,
                                     "Failed to warm-connect brain"
                                 );
                                 self.emit(SpurEvent::now(SpurEventBody::BrainConnectFailed {
                                     brain: target_brain,
-                                    reason: e.to_string(),
+                                    reason: error_message,
                                 }));
                                 if Self::is_auth_required_error(&e) {
                                     self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
@@ -1055,10 +1095,11 @@ impl Orchestrator {
                                 {
                                     Ok(pair) => pair,
                                     Err(e) => {
-                                        error!(error = %e, "Failed to connect brain for resume");
+                                        let error_message = format_error_chain(&e);
+                                        error!(error = %error_message, "Failed to connect brain for resume");
                                         self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                             session: SessionId::new(),
-                                            message: e.to_string(),
+                                            message: error_message,
                                         }));
                                         continue;
                                     }
@@ -1119,10 +1160,11 @@ impl Orchestrator {
                                 }));
                             }
                             Err(e) => {
-                                error!(error = %e, "Failed to load brain session");
+                                let error_message = format_error_chain(&e);
+                                error!(error = %error_message, "Failed to load brain session");
                                 self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                     session: SessionId::new(),
-                                    message: e.to_string(),
+                                    message: error_message,
                                 }));
                             }
                         }
@@ -1387,7 +1429,8 @@ impl Orchestrator {
                         brain = Some(b);
                     }
                     Err(e) => {
-                        error!(error = %e, "Failed to spawn brain");
+                        let error_message = format_error_chain(&e);
+                        error!(error = %error_message, "Failed to spawn brain");
                         if Self::is_auth_required_error(&e) {
                             self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
                                 session: SessionId(String::new()),
@@ -1396,7 +1439,7 @@ impl Orchestrator {
                         } else {
                             self.emit(SpurEvent::now(SpurEventBody::BrainError {
                                 session: SessionId::new(),
-                                message: e.to_string(),
+                                message: error_message,
                             }));
                         }
                         continue;
@@ -1439,7 +1482,8 @@ impl Orchestrator {
             let mut stream = match b.connection.prompt(prompt_request).await {
                 Ok(s) => s,
                 Err(e) => {
-                    error!(error = %e, "Brain prompt failed");
+                    let error_message = format_error_chain(&e);
+                    error!(error = %error_message, "Brain prompt failed");
                     if Self::is_auth_required_error(&e) {
                         self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
                             session: spur_sid_for_log,
@@ -1450,7 +1494,7 @@ impl Orchestrator {
                         if let Some(h) = dead.notification_pump_handle.take() {
                             h.abort();
                         }
-                        dead.mcp_handle.abort();
+                        abort_mcp_handle(dead.mcp_handle).await;
                         let _ = dead.connection.shutdown().await;
                         continue;
                     }
@@ -1475,14 +1519,14 @@ impl Orchestrator {
                     }
                     self.emit(SpurEvent::now(SpurEventBody::BrainError {
                         session: spur_sid_for_log,
-                        message: e.to_string(),
+                        message: error_message,
                     }));
                     let mut dead = brain.take().expect("brain.as_mut() just held it");
                     dead.delegation_handle.abort();
                     if let Some(h) = dead.notification_pump_handle.take() {
                         h.abort();
                     }
-                    dead.mcp_handle.abort();
+                    abort_mcp_handle(dead.mcp_handle).await;
                     let _ = dead.connection.shutdown().await;
                     continue;
                 }
@@ -1613,7 +1657,7 @@ impl Orchestrator {
             if let Some(h) = b.notification_pump_handle.take() {
                 h.abort();
             }
-            b.mcp_handle.abort();
+            abort_mcp_handle(b.mcp_handle).await;
             let _ = b.connection.shutdown().await;
         }
         // Drop any pre-connected but unused connection.
@@ -1822,7 +1866,7 @@ impl Orchestrator {
 
         // 4. Abort remaining handles and stash connection for reuse.
         b.delegation_handle.abort();
-        b.mcp_handle.abort();
+        abort_mcp_handle(b.mcp_handle).await;
         *agent_connection = Some((b.connection, b.brain_name));
     }
 
@@ -1938,31 +1982,43 @@ impl Orchestrator {
             );
         }
 
-        let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
+        let ((brain_cfg, presub_notif_rx, session_response), mcp_handle): (
+            (
+                spur_acp::config::AgentConfig,
+                Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
+                agent_client_protocol::NewSessionResponse,
+            ),
+            AbortOnDropHandle<()>,
+        ) = cleanup_mcp_on_err(mcp_handle, async {
+            let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
 
-        let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "brain agent '{}' not in registry during create_brain_session",
-                brain_name
+            let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "brain agent '{}' not in registry during create_brain_session",
+                    brain_name
+                )
+            })?;
+
+            // Pre-subscribe BEFORE new_session so notifications the agent emits
+            // during session setup (e.g. claude-code-acp's initial
+            // `available_commands_update`) land on a live receiver. Broadcast
+            // `send()` returns `Err(SendError)` only when every receiver has
+            // been dropped; holding `presub_notif_rx` here keeps sends
+            // succeeding until we hand the receiver to the pump below.
+            let presub_notif_rx = connection.subscribe_session_notifications();
+
+            let session_response = crate::skip_perm::new_session_with_bypass(
+                &mut *connection,
+                &brain_cfg,
+                self.repo_root.clone(),
+                mcp_servers,
             )
-        })?;
+            .await
+            .context("Failed to create brain session")?;
 
-        // Pre-subscribe BEFORE new_session so notifications the agent emits
-        // during session setup (e.g. claude-code-acp's initial
-        // `available_commands_update`) land on a live receiver. Broadcast
-        // `send()` returns `Err(SendError)` only when every receiver has
-        // been dropped; holding `presub_notif_rx` here keeps sends
-        // succeeding until we hand the receiver to the pump below.
-        let presub_notif_rx = connection.subscribe_session_notifications();
-
-        let session_response = crate::skip_perm::new_session_with_bypass(
-            &mut *connection,
-            &brain_cfg,
-            self.repo_root.clone(),
-            mcp_servers,
-        )
-        .await
-        .context("Failed to create brain session")?;
+            Ok((brain_cfg, presub_notif_rx, session_response))
+        })
+        .await?;
 
         // Spawn delegation handler.
         let max_concurrent = self.config.worktree.max_concurrent;
@@ -2104,84 +2160,121 @@ impl Orchestrator {
             }
         }
 
-        let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
-
-        let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "brain agent '{}' not in registry during load_brain_session",
-                brain_name
-            )
-        })?;
-
-        // Pre-subscribe BEFORE load_session so the entire history replay
-        // (published via the broadcast during load_session for native
-        // transports) lands on a live receiver. Holding `presub_notif_rx`
-        // here keeps broadcast sends succeeding until we hand the receiver
-        // to the pump below.
-        let presub_notif_rx = connection.subscribe_session_notifications();
-
-        // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
-        // fall back to new_session so we have a working session for subsequent prompts.
-        // The historical conversation is displayed from the disk fallback in either case.
-        let (final_acp_session_id, history_stream, resumed, load_outcome) = if force_new_session {
-            // Escalated reconnect: don't even try session/load — just spawn fresh.
-            let session_response = crate::skip_perm::new_session_with_bypass(
-                &mut *connection,
-                &brain_cfg,
-                self.repo_root.clone(),
-                mcp_servers.clone(),
-            )
-            .await
-            .context("Failed to create fresh session during escalated reconnect")?;
+        let (
             (
-                session_response.session_id.to_string(),
-                None,
-                false,
-                spur_acp::LoadOutcome::FellBackToNew {
-                    reason: "escalated to fresh session after repeated failures".into(),
-                },
-            )
-        } else {
-            match crate::skip_perm::load_session_with_bypass(
-                &mut *connection,
-                &brain_cfg,
-                acp_session_id.clone(),
-                self.repo_root.clone(),
-                mcp_servers.clone(),
-            )
-            .await
-            {
-                Ok(stream) => {
-                    debug!(brain = %brain_name, "load_session succeeded");
-                    (
-                        acp_session_id,
-                        Some(stream),
-                        true,
-                        spur_acp::LoadOutcome::Restored,
-                    )
-                }
-                Err(e) => {
-                    warn!(brain = %brain_name, error = %e, "load_session failed, falling back to new_session");
-                    let fallback_reason = e.to_string();
+                brain_cfg,
+                presub_notif_rx,
+                final_acp_session_id,
+                history_stream,
+                resumed,
+                load_outcome,
+            ),
+            mcp_handle,
+        ): (
+            (
+                spur_acp::config::AgentConfig,
+                Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
+                String,
+                Option<
+                    std::pin::Pin<
+                        Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>,
+                    >,
+                >,
+                bool,
+                spur_acp::LoadOutcome,
+            ),
+            AbortOnDropHandle<()>,
+        ) = cleanup_mcp_on_err(mcp_handle, async {
+            let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
+
+            let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "brain agent '{}' not in registry during load_brain_session",
+                    brain_name
+                )
+            })?;
+
+            // Pre-subscribe BEFORE load_session so the entire history replay
+            // (published via the broadcast during load_session for native
+            // transports) lands on a live receiver. Holding `presub_notif_rx`
+            // here keeps broadcast sends succeeding until we hand the receiver
+            // to the pump below.
+            let presub_notif_rx = connection.subscribe_session_notifications();
+
+            // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
+            // fall back to new_session so we have a working session for subsequent prompts.
+            // The historical conversation is displayed from the disk fallback in either case.
+            let (final_acp_session_id, history_stream, resumed, load_outcome) =
+                if force_new_session {
+                    // Escalated reconnect: don't even try session/load — just spawn fresh.
                     let session_response = crate::skip_perm::new_session_with_bypass(
                         &mut *connection,
                         &brain_cfg,
                         self.repo_root.clone(),
-                        mcp_servers,
+                        mcp_servers.clone(),
                     )
                     .await
-                    .context("Failed to create fallback session after load_session failure")?;
+                    .context("Failed to create fresh session during escalated reconnect")?;
                     (
                         session_response.session_id.to_string(),
                         None,
                         false,
                         spur_acp::LoadOutcome::FellBackToNew {
-                            reason: fallback_reason,
+                            reason: "escalated to fresh session after repeated failures".into(),
                         },
                     )
-                }
-            }
-        };
+                } else {
+                    match crate::skip_perm::load_session_with_bypass(
+                        &mut *connection,
+                        &brain_cfg,
+                        acp_session_id.clone(),
+                        self.repo_root.clone(),
+                        mcp_servers.clone(),
+                    )
+                    .await
+                    {
+                        Ok(stream) => {
+                            debug!(brain = %brain_name, "load_session succeeded");
+                            (
+                                acp_session_id,
+                                Some(stream),
+                                true,
+                                spur_acp::LoadOutcome::Restored,
+                            )
+                        }
+                        Err(e) => {
+                            warn!(brain = %brain_name, error = %e, "load_session failed, falling back to new_session");
+                            let fallback_reason = e.to_string();
+                            let session_response = crate::skip_perm::new_session_with_bypass(
+                                &mut *connection,
+                                &brain_cfg,
+                                self.repo_root.clone(),
+                                mcp_servers,
+                            )
+                            .await
+                            .context("Failed to create fallback session after load_session failure")?;
+                            (
+                                session_response.session_id.to_string(),
+                                None,
+                                false,
+                                spur_acp::LoadOutcome::FellBackToNew {
+                                    reason: fallback_reason,
+                                },
+                            )
+                        }
+                    }
+                };
+
+            Ok((
+                brain_cfg,
+                presub_notif_rx,
+                final_acp_session_id,
+                history_stream,
+                resumed,
+                load_outcome,
+            ))
+        })
+        .await?;
 
         // Spawn delegation handler.
         let max_concurrent = self.config.worktree.max_concurrent;
@@ -2285,7 +2378,7 @@ impl Orchestrator {
         if let Some(h) = dead_brain.notification_pump_handle {
             h.abort();
         }
-        dead_brain.mcp_handle.abort();
+        abort_mcp_handle(dead_brain.mcp_handle).await;
         drop(dead_brain.connection);
 
         // Fresh connection + reattach.
@@ -2390,10 +2483,11 @@ impl Orchestrator {
                 Some(new_brain)
             }
             Err(e) => {
+                let error_message = format_error_chain(&e);
                 self.emit(SpurEvent::now(SpurEventBody::BrainReconnectFailed {
                     session: spur_session_id,
                     brain_name,
-                    reason: e.to_string(),
+                    reason: error_message,
                 }));
                 None
             }

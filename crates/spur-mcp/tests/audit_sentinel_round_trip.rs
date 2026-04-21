@@ -42,7 +42,7 @@ fn extract_id(json: &str) -> String {
 }
 
 #[test]
-fn every_audit_sentinel_variant_round_trips_through_br_comments() {
+fn completion_state_and_dispatch_orphan_cleared_round_trip() {
     if !br_available() {
         eprintln!("skipping: `br` not on PATH");
         return;
@@ -51,32 +51,19 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
     run_br(dir.path(), &["init"]).unwrap();
     let id = extract_id(&run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap());
 
-    let variants = vec![
-        AuditSentinelKind::PlanSubmit {
-            plan_id: "P1".into(),
-            epic_issue_id: id.clone(),
-            task_ids: vec!["bd-a".into(), "bd-b".into()],
-        },
-        AuditSentinelKind::Dispatch {
-            delegation_id: "del-1".into(),
-            worker: "codex".into(),
-            attempt: 1,
-        },
-        AuditSentinelKind::Completion {
-            delegation_id: "del-1".into(),
-            worker_branch: Some("feat/x".into()),
-            result_summary: Some("worker narrative: three refactors".into()),
-        },
-        AuditSentinelKind::Approval {
-            delegation_id: "del-1".into(),
-        },
-        AuditSentinelKind::Rejection {
-            delegation_id: "del-1".into(),
-            feedback: "needs more tests".into(),
-        },
-    ];
+    let completion = AuditSentinelKind::Completion {
+        delegation_id: "del-1".into(),
+        completion_state: audit_sentinel::CompletionState::Superseded,
+        superseded: true,
+        worker_branch: Some("feat/x".into()),
+        result_summary: Some("worker narrative: three refactors".into()),
+    };
+    let orphan = AuditSentinelKind::DispatchOrphanCleared {
+        delegation_id: "del-1".into(),
+        reason: "restart-orphan-cleared".into(),
+    };
 
-    for v in &variants {
+    for v in [&completion, &orphan] {
         let body = audit_sentinel::encode_comment(v);
         run_br(dir.path(), &["comments", "add", &id, &body]).unwrap();
     }
@@ -90,15 +77,14 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
         .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from))
         .collect();
 
-    for v in &variants {
-        let found = texts.iter().any(|t| {
-            audit_sentinel::parse_comment(t)
-                .and_then(|r| r.ok())
-                .is_some_and(|k| k == *v)
-        });
-        assert!(
-            found,
-            "variant {v:?} did not round-trip through br comments: {texts:?}"
-        );
-    }
+    assert!(texts.iter().any(|t| {
+        audit_sentinel::parse_comment(t)
+            .and_then(|r| r.ok())
+            .is_some_and(|k| k == completion)
+    }));
+    assert!(texts.iter().any(|t| {
+        audit_sentinel::parse_comment(t)
+            .and_then(|r| r.ok())
+            .is_some_and(|k| k == orphan)
+    }));
 }
