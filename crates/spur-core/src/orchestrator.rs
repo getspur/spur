@@ -756,6 +756,9 @@ impl Orchestrator {
         }
         mcp_server.set_reconciler_enabled(reconciler_enabled, None);
         mcp_server.set_repo_root(self.repo_root.clone());
+        mcp_server.set_auto_merge_approved_plans(
+            self.config.spur.auto_merge_approved_plans,
+        );
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server

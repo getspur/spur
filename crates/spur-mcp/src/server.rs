@@ -251,6 +251,8 @@ pub struct McpCallbackServer {
     /// The guard is moved into the spawned task and kept alive there.
     #[allow(dead_code)]
     brain_pidfile: Option<spur_pm::pidfile::PidFileGuard>,
+    /// v0e: opt-in auto-merge/PR on durable epic completion.
+    auto_merge_approved_plans: bool,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -1354,6 +1356,7 @@ impl McpCallbackServer {
             reconciler_fast_forward: None,
             repo_root: None,
             brain_pidfile: None,
+            auto_merge_approved_plans: false,
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -1399,6 +1402,11 @@ impl McpCallbackServer {
     /// Set the repository root path. Required for pidfile acquisition.
     pub fn set_repo_root(&mut self, root: std::path::PathBuf) {
         self.repo_root = Some(root);
+    }
+
+    /// v0e: opt-in auto-merge/PR on durable epic completion.
+    pub fn set_auto_merge_approved_plans(&mut self, enabled: bool) {
+        self.auto_merge_approved_plans = enabled;
     }
 
     /// Spawn a background task that awaits a delegation oneshot and stores
