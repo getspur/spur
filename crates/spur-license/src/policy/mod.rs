@@ -6,9 +6,11 @@
 //! resolver section below.
 
 pub mod feature_key;
+pub mod flags;
 pub mod trust;
 
 pub use feature_key::FeatureKey;
+pub use flags::{FlagEvaluator, FlagExplanation, FlagReason};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

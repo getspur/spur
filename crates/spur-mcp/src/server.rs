@@ -429,6 +429,8 @@ pub async fn emit_plan_submit_audit(
         plan_id: plan_id.to_string(),
         epic_issue_id: sg.epic_id.clone(),
         task_ids: sg.task_map.values().cloned().collect(),
+        base_snapshot_branch: None,
+        execution_mode: None,
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
