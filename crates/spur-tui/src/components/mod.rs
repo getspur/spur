@@ -26,6 +26,7 @@ pub mod react_trace;
 pub mod resume_banner;
 pub mod review_card;
 pub mod session_preview;
+pub mod spinner;
 pub mod status_bar;
 pub(crate) mod trace_format;
 pub mod workers_panel;
@@ -35,8 +36,9 @@ use std::time::Instant;
 
 // ─── Shared constants ───────────────────────────────────────────────
 
-/// Braille spinner frames for animating active agents.
-pub const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+// Re-export for backward compatibility with existing consumers.
+// Prefer `spinner::BRAILLE` for new code.
+pub use spinner::BRAILLE as SPINNER_FRAMES;
 
 // ─── Shared utility functions ───────────────────────────────────────
 

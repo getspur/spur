@@ -22,9 +22,8 @@ use super::trace_format::{
     observe_verb, outcome_glyph,
 };
 use super::MAX_LOG_ENTRIES;
-
-/// Spinner frames for delegation animation.
-pub(super) const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+#[cfg(test)]
+use crate::components::spinner;
 
 /// Which render surface most recently painted this trace. Used by scroll
 /// mutators (`shift_anchor_by`) to pick the correct cache for anchor
@@ -1964,7 +1963,7 @@ mod tests {
             lines.contains("✓"),
             "expected success glyph in collapsed render, got:\n{lines}"
         );
-        for frame in SPINNER_FRAMES {
+        for frame in spinner::BRAILLE {
             assert!(
                 !lines.contains(frame),
                 "completed Act must not render a spinner frame ({frame}) in:\n{lines}"
@@ -1996,7 +1995,7 @@ mod tests {
         // render_to_strings emits the Unicode ellipsis placeholder for the
         // plain-text path's spinner slot (not a real animated frame).
         assert!(
-            joined.contains("\u{2026}") || SPINNER_FRAMES.iter().any(|f| joined.contains(f)),
+            joined.contains("\u{2026}") || spinner::BRAILLE.iter().any(|f| joined.contains(f)),
             "pending Act must render a spinner placeholder, got:\n{joined}"
         );
     }
