@@ -150,9 +150,10 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
     assert!(required.contains(&"tasks"));
 }
 
-/// INV-7: verify that `run_plan` emits `PlanCompleted` and `PlanReadyToMerge`
-/// when all tasks are already in a terminal Approved state on entry (so the
-/// executor loop exits immediately without dispatching).
+/// INV-7: verify that `run_plan` emits `PlanCompleted` when all tasks are
+/// already in a terminal Approved state on entry (so the executor loop exits
+/// immediately without dispatching), but leaves `PlanReadyToMerge` to the
+/// durable reconciler projection path.
 #[tokio::test]
 async fn run_plan_emits_plan_completed_on_terminal_state() {
     use spur_acp::{SpurEvent, SpurEventBody};
@@ -224,8 +225,8 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
         events.iter().map(|e| &e.body).collect::<Vec<_>>()
     );
     assert!(
-        saw_ready,
-        "PlanReadyToMerge must be emitted (all Approved); got: {:?}",
+        !saw_ready,
+        "PlanReadyToMerge must be emitted only from durable reconciliation; got: {:?}",
         events.iter().map(|e| &e.body).collect::<Vec<_>>()
     );
 }
