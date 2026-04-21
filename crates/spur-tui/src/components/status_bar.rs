@@ -82,6 +82,8 @@ pub struct StatusBarProps<'a> {
     pub alert_summary: Option<(usize, usize, usize)>,
     /// Compact license snapshot rendered as a pill, if licensing is active.
     pub license_badge: Option<&'a LicenseBadge>,
+    /// Compact flag snapshot: (active_count, total_count). None if unavailable.
+    pub flag_summary: Option<(usize, usize)>,
 }
 
 impl StatusBar {

@@ -352,6 +352,7 @@ impl DashboardView {
         lineage: &ExecutorLineage,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         worker_streams: &mut crate::worker_streams::WorkerStreams,
+        flag_summary: Option<(usize, usize)>,
     ) {
         let node_count = lineage.nodes().count();
 
@@ -435,6 +436,7 @@ impl DashboardView {
                     issue_count: self.tracked_issues.len(),
                     alert_summary: self.alert_summary,
                     license_badge,
+                    flag_summary,
                 },
             );
             return;
@@ -535,6 +537,7 @@ impl DashboardView {
                 issue_count: self.tracked_issues.len(),
                 alert_summary: self.alert_summary,
                 license_badge,
+                flag_summary,
             },
         );
     }
@@ -1618,7 +1621,7 @@ impl View for DashboardView {
         // directly so it can pass worker_streams. This fallback exists only to
         // satisfy the View trait (e.g., in tests that don't need stream traces).
         let mut empty_ws = crate::worker_streams::WorkerStreams::new();
-        self.render_with_lineage(frame, area, ctx.lineage, ctx.license_badge, &mut empty_ws);
+        self.render_with_lineage(frame, area, ctx.lineage, ctx.license_badge, &mut empty_ws, ctx.flag_summary);
     }
 }
 

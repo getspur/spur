@@ -372,6 +372,7 @@ impl SessionPickerView {
         frame: &mut Frame,
         area: Rect,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+        flag_summary: Option<(usize, usize)>,
     ) {
         let lines = vec![
             Line::from(Span::styled(
@@ -419,6 +420,7 @@ impl SessionPickerView {
                 issue_count: 0,
                 alert_summary: None,
                 license_badge,
+                flag_summary,
             },
         );
         render_footer_hint(frame, chunks[2]);
@@ -433,6 +435,7 @@ impl SessionPickerView {
         frame: &mut Frame,
         area: Rect,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+        flag_summary: Option<(usize, usize)>,
         agent: &str,
         sessions: &[SessionInfo],
         cursor: usize,
@@ -720,6 +723,7 @@ impl SessionPickerView {
                     issue_count: 0,
                     alert_summary: None,
                     license_badge,
+                    flag_summary,
                 },
             );
         }
@@ -732,6 +736,7 @@ impl SessionPickerView {
         area: Rect,
         message: &str,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+        flag_summary: Option<(usize, usize)>,
     ) {
         let lines = vec![
             Line::from(Span::styled(
@@ -780,6 +785,7 @@ impl SessionPickerView {
                 issue_count: 0,
                 alert_summary: None,
                 license_badge,
+                flag_summary,
             },
         );
         render_footer_hint(frame, chunks[2]);
@@ -1047,7 +1053,7 @@ impl View for SessionPickerView {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         match &self.state {
-            PickerState::Loading => self.render_loading(frame, area, ctx.license_badge),
+            PickerState::Loading => self.render_loading(frame, area, ctx.license_badge, ctx.flag_summary),
             PickerState::Populated {
                 agent,
                 sessions,
@@ -1059,6 +1065,7 @@ impl View for SessionPickerView {
                 frame,
                 area,
                 ctx.license_badge,
+                ctx.flag_summary,
                 agent,
                 sessions,
                 *cursor,
@@ -1067,7 +1074,7 @@ impl View for SessionPickerView {
                 filter,
             ),
             PickerState::Error { message } => {
-                self.render_error(frame, area, message, ctx.license_badge)
+                self.render_error(frame, area, message, ctx.license_badge, ctx.flag_summary)
             }
         }
     }
