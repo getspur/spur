@@ -48,7 +48,7 @@ pub async fn run(repo_root: PathBuf, force: bool) -> Result<()> {
 
     // ── Scan PATH. ──
     println!("[spur] Scanning agents on $PATH...");
-    let mut orch = Orchestrator::new(repo_root.clone(), SpurConfig::default())?;
+    let mut orch = Orchestrator::new(repo_root.clone(), SpurConfig::default(), None)?;
     let found_names = orch.init_agents().await?;
     let seed = spur_acp::config::load_seed_template();
     // Sort registered agents by seed order so brain selection is deterministic
