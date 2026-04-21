@@ -94,6 +94,8 @@ pub enum UserInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrainStatus {
     Idle,
+    Connecting,
+    Connected,
     Thinking,
     Streaming,
     Ready,
@@ -929,6 +931,18 @@ impl App {
 
         // Track brain status transitions
         match &event.body {
+            SpurEventBody::BrainConnectStarted { brain } => {
+                self.brain_status = BrainStatus::Connecting;
+                self.brain_name = Some(brain.clone());
+            }
+            SpurEventBody::BrainConnected { brain } => {
+                self.brain_status = BrainStatus::Connected;
+                self.brain_name = Some(brain.clone());
+            }
+            SpurEventBody::BrainConnectFailed { brain, reason } => {
+                self.brain_status = BrainStatus::Error(reason.clone());
+                self.brain_name = Some(brain.clone());
+            }
             SpurEventBody::BrainSpawned { agent, session } => {
                 self.brain_status = BrainStatus::Thinking;
                 self.brain_name = Some(agent.clone());
@@ -1224,7 +1238,10 @@ impl App {
                 // Transition to Thinking when sending a message
                 if matches!(
                     self.brain_status,
-                    BrainStatus::Ready | BrainStatus::Idle | BrainStatus::Error(_)
+                    BrainStatus::Ready
+                        | BrainStatus::Idle
+                        | BrainStatus::Connected
+                        | BrainStatus::Error(_)
                 ) {
                     self.brain_status = BrainStatus::Thinking;
                 }
@@ -1322,7 +1339,10 @@ impl App {
                 // the prompt atomically.
                 if matches!(
                     self.brain_status,
-                    BrainStatus::Ready | BrainStatus::Idle | BrainStatus::Error(_)
+                    BrainStatus::Ready
+                        | BrainStatus::Idle
+                        | BrainStatus::Connected
+                        | BrainStatus::Error(_)
                 ) {
                     self.brain_status = BrainStatus::Thinking;
                 }
@@ -1903,8 +1923,14 @@ impl App {
 
     /// Push current brain status to both views' InputBars.
     fn sync_brain_status(&mut self) {
+        let session_attached = self
+            .session_detail
+            .as_ref()
+            .is_some_and(|detail| !detail.is_cleared());
         let status_str = match &self.brain_status {
             BrainStatus::Idle => "idle",
+            BrainStatus::Connecting => "connecting",
+            BrainStatus::Connected => "connected",
             BrainStatus::Thinking => "thinking",
             BrainStatus::Streaming => "streaming",
             BrainStatus::Ready => "ready",
@@ -1912,7 +1938,7 @@ impl App {
         };
 
         self.dashboard
-            .set_brain_status(self.brain_name.as_deref(), status_str);
+            .set_brain_status(self.brain_name.as_deref(), status_str, session_attached);
 
         if let Some(ref mut detail) = self.session_detail {
             detail.set_brain_status(status_str);
@@ -2655,6 +2681,38 @@ mod brain_retired_tests {
         let detail = app.session_detail.as_ref().unwrap();
         assert!(!detail.stream_in_flight);
         assert!(detail.is_cleared());
+    }
+
+    #[test]
+    fn connected_dashboard_first_submit_still_spawns_new_session() {
+        let (mut app, mut rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainConnected {
+            brain: "kiro".into(),
+        }));
+
+        assert_eq!(app.brain_status, BrainStatus::Connected);
+
+        app.handle_crossterm_event_for_test(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('h'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        app.handle_crossterm_event_for_test(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('i'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        app.handle_crossterm_event_for_test(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        match rx.try_recv() {
+            Ok(UserInput::NewSessionWithMessage { blocks, interrupt }) => {
+                assert_eq!(blocks.len(), 1, "expected single text block");
+                assert!(!interrupt, "plain Enter must not set interrupt");
+            }
+            Ok(_) => panic!("expected NewSessionWithMessage"),
+            Err(err) => panic!("expected queued user input, got {err:?}"),
+        }
     }
 
     #[test]

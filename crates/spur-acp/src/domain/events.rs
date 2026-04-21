@@ -255,6 +255,25 @@ pub enum BrainRetireReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum SpurEventBody {
+    /// The orchestrator has started a connect-only brain prewarm.
+    ///
+    /// No ACP session exists yet; this only covers `initialize()` and the
+    /// transport/process setup needed to make the first prompt faster.
+    BrainConnectStarted {
+        brain: String,
+    },
+    /// Connect-only brain prewarm completed successfully.
+    ///
+    /// No ACP session exists yet. The next prompt may reuse the warmed
+    /// connection and call `new_session()` lazily.
+    BrainConnected {
+        brain: String,
+    },
+    /// Connect-only brain prewarm failed before any ACP session was created.
+    BrainConnectFailed {
+        brain: String,
+        reason: String,
+    },
     BrainSpawned {
         agent: String,
         session: SessionId,
@@ -655,6 +674,20 @@ pub struct HistoryEntry {
 mod reconnect_event_tests {
     use super::*;
     use crate::SessionId;
+
+    #[test]
+    fn brain_connect_events_construct() {
+        let _ = SpurEventBody::BrainConnectStarted {
+            brain: "kiro".into(),
+        };
+        let _ = SpurEventBody::BrainConnected {
+            brain: "kiro".into(),
+        };
+        let _ = SpurEventBody::BrainConnectFailed {
+            brain: "kiro".into(),
+            reason: "initialize failed".into(),
+        };
+    }
 
     #[test]
     fn load_outcome_variants_construct() {

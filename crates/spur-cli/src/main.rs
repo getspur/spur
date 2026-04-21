@@ -500,6 +500,7 @@ async fn main() -> Result<()> {
             // TUI → spur-cli translation task: routes review decisions to dispatch_tx,
             // everything else to user_tx.
             let (tui_tx, mut tui_rx) = tokio::sync::mpsc::channel::<spur_tui::UserInput>(32);
+            let user_tx_for_tui = user_tx.clone();
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
                     let converted = match input {
@@ -556,7 +557,7 @@ async fn main() -> Result<()> {
                             tracing::warn!(error = %e, "review decision dropped — dispatcher channel closed");
                         }
                     } else {
-                        if let Err(e) = user_tx.send(converted).await {
+                        if let Err(e) = user_tx_for_tui.send(converted).await {
                             tracing::warn!(error = %e, "user input dropped — orchestrator channel closed");
                         }
                     }
@@ -601,6 +602,11 @@ async fn main() -> Result<()> {
                     let _ = resume_tx
                         .send(spur_tui::UserInput::ResumeSession { session_id: acp_id })
                         .await;
+                });
+            } else if !force_picker {
+                let warm_tx = user_tx.clone();
+                tokio::spawn(async move {
+                    let _ = warm_tx.send(spur_core::InteractiveInput::WarmConnect).await;
                 });
             }
 
