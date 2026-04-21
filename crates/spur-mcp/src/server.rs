@@ -2414,6 +2414,7 @@ impl McpCallbackServer {
                     .unwrap_or(20)
                     .min(100) as usize,
             ),
+            offset: None,
             labels,
             since: None,
         };

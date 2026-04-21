@@ -7,13 +7,15 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
-use spur_pm::{BeadsAdvanced, DependencyCycle, IssueCreate, IssueFilter, IssueUpdate, PmService};
+use spur_pm::{
+    BeadsAdvanced, DependencyCycle, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmService,
+};
 
 use super::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
 use super::labels::{mutation_id_label, signal_processed_label, superseded_by_labels};
 use super::mutation::{DepRewirePolicy, MutationBatch, PlanMutationOp};
 
-const ISSUE_SCAN_LIMIT: usize = 10_000;
+const ISSUE_SCAN_PAGE_SIZE: usize = 500;
 
 #[derive(Debug)]
 struct SplitExecution {
@@ -407,26 +409,38 @@ async fn downstream_issue_ids(pm: &PmService, parent_id: &str) -> Result<Vec<Str
     Ok(downstreams)
 }
 
-async fn list_all_issue_ids(pm: &PmService) -> Result<Vec<String>> {
-    let issues = pm
-        .list_issues(IssueFilter {
-            limit: Some(ISSUE_SCAN_LIMIT),
-            ..Default::default()
-        })
-        .await
-        .context("list issues for mutation scan")?;
-    // Saturation warning: downstream-dep and rollback scans use this list. If
-    // beads returns exactly the limit, deps on truncated issues are silently
-    // missed, which can leave orphan dependency edges or skip rollback
-    // compensations. Tracked as G5 in the spec. Pagination is the real fix.
-    if issues.len() >= ISSUE_SCAN_LIMIT {
-        tracing::warn!(
-            limit = ISSUE_SCAN_LIMIT,
-            returned = issues.len(),
-            "mutation scan saturated ISSUE_SCAN_LIMIT — dependency rewrites may be incomplete"
-        );
+fn apply_issue_scan_page(
+    out: &mut Vec<String>,
+    offset: usize,
+    page: Vec<IssueSummary>,
+) -> Option<usize> {
+    let page_len = page.len();
+    out.extend(page.into_iter().map(|issue| issue.id));
+    if page_len < ISSUE_SCAN_PAGE_SIZE {
+        None
+    } else {
+        Some(offset + page_len)
     }
-    Ok(issues.into_iter().map(|issue| issue.id).collect())
+}
+
+async fn list_all_issue_ids(pm: &PmService) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let page = pm
+            .list_issues(IssueFilter {
+                limit: Some(ISSUE_SCAN_PAGE_SIZE),
+                offset: Some(offset),
+                ..Default::default()
+            })
+            .await
+            .context("list issues for mutation scan page")?;
+        match apply_issue_scan_page(&mut out, offset, page) {
+            Some(next_offset) => offset = next_offset,
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 async fn dep_cycles_with_fallback(adv: &dyn BeadsAdvanced) -> Result<Vec<DependencyCycle>> {
@@ -496,6 +510,21 @@ async fn remove_labels_individually(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spur_pm::{IssueSummary, PmSource};
+
+    fn summary(id: &str) -> IssueSummary {
+        IssueSummary {
+            id: id.to_string(),
+            source: PmSource::Beads,
+            title: format!("Issue {id}"),
+            status: "open".into(),
+            labels: Vec::new(),
+            url: format!("beads://{id}"),
+            priority: None,
+            issue_type: Some("task".into()),
+            assignee: None,
+        }
+    }
 
     #[test]
     fn barrier_rewire_replaces_parent_for_all_downstreams() {
@@ -533,5 +562,18 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn apply_issue_scan_page_advances_after_full_page() {
+        let mut out = Vec::new();
+        let page = (0..ISSUE_SCAN_PAGE_SIZE)
+            .map(|idx| summary(&format!("bd-{idx}")))
+            .collect();
+
+        let next = apply_issue_scan_page(&mut out, 0, page);
+
+        assert_eq!(out.len(), ISSUE_SCAN_PAGE_SIZE);
+        assert_eq!(next, Some(ISSUE_SCAN_PAGE_SIZE));
     }
 }
