@@ -95,7 +95,7 @@ flowchart LR
     D[DelegationRequest]
     W[Worker]
     LP[lifecycle projector]
-    AM[auto-merge hook\n(config=true)]
+    AM["auto-merge hook<br/>(config=true)"]
     MP[merge_plan]
     PR[create_pr]
   end

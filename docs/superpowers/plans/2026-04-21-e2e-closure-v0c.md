@@ -68,6 +68,75 @@ flowchart LR
 - Authority rule: for persisted plans, beads status + labels are operational truth; audit and signal comments are analytical truth used to classify and explain that state.
 - Acceptance mapping is fixed: Tasks 47-56 are T-v0c-1 through T-v0c-10, one acceptance test per task with no bundling.
 
+## 3-Part Follow-Up Breakdown
+
+This plan is easier to execute if it is treated as three follow-up parts instead of twelve equally weighted phases. The split below preserves the existing dependency order and keeps each checkpoint tied to one first-principles question.
+
+### Part 1 — Establish Persisted Operational Truth
+
+**Covers:** Phases 1-4, Tasks 1-16.
+
+**First-principles question:** Can the system reconstruct plan state from beads alone before it tries to act on that state?
+
+**Why this comes first:** If persisted state cannot be projected deterministically, every later runtime change is still anchored to RAM state and the authority flip is fake.
+
+**Includes:**
+- `projector.rs` scaffold and registration.
+- Label and audit schema expansion into the `spur:` namespace.
+- Fast-forward primitive needed to wake persisted writers and the reconciler.
+- Full `project_plan_from_beads()` reconstruction path.
+- Durable dispatch markers and dispatch cleanup helpers.
+
+**Ground check:**
+- `crates/spur-mcp/src/plan/projector.rs` does not exist yet.
+- `crates/spur-mcp/src/plan/labels.rs` still emits legacy `delegation-id:` and bare review labels.
+- `crates/spur-mcp/src/server.rs` does not yet expose `notify_fast_forward()` or `fast_forward_reconciler()`.
+
+**Part 1 is done when:** a persisted plan can be rebuilt from beads-only state, dispatch intent is written durably, and all state naming needed by later phases is stable.
+
+### Part 2 — Flip Live Execution to Persisted Authority
+
+**Covers:** Phases 5-8, Tasks 17-35.
+
+**First-principles question:** Does every live workflow persist intent or outcome before any in-memory actor treats the work as real?
+
+**Why this comes second:** Once projection exists, the reconciler, completion bridge, review path, and watcher must stop manufacturing authority from process memory and become persisted-state consumers and writers.
+
+**Includes:**
+- Reconciler conversion from observe-only to persisted dispatch authority.
+- Completion writeback for success, failure, cancellation, and superseded late arrivals.
+- Review-path conversion so approve/reject/request-changes are persist-only decisions.
+- Signal watcher rewrite to read projected state and process at most one decision per task per tick.
+
+**Ground check:**
+- `crates/spur-mcp/src/plan/signal_watcher.rs` still calls `stub_plan_state()`.
+- `crates/spur-mcp/src/plan/mod.rs` does not yet define `persist_dispatch_intent`, `clear_dispatch_intent`, or `persist_completion_result`.
+- No persisted review-ready gate is enforced yet in the watcher path.
+
+**Part 2 is done when:** the reconciler is the only persisted dispatcher, completion/review outcomes are durably written first, and watcher decisions are derived from projected plan state rather than stubs or cache assumptions.
+
+### Part 3 — Recover on Restart and Prove the Closure End to End
+
+**Covers:** Phases 9-12, Tasks 36-56.
+
+**First-principles question:** If the process dies mid-plan, can a fresh process reclaim persisted truth, compensate orphans, and continue without hidden RAM history?
+
+**Why this comes last:** Restart recovery and acceptance coverage only mean something after the write model and live authority flip are already in place.
+
+**Includes:**
+- Startup discovery of persisted plan IDs.
+- Mutation-orphan and dispatch-orphan recovery.
+- `active_plans` rehydration as a projection cache, not an authority source.
+- `execute_epic` normalization and richer `PlanSubmit` audit payloads.
+- Final T-v0c-1 through T-v0c-10 acceptance coverage.
+
+**Ground check:**
+- `crates/spur-mcp/src/server.rs` does not yet define `recover_persisted_plans`, `reclaim_persisted_plans_on_startup`, or `install_projected_plan`.
+- `crates/spur-mcp/tests/persisted_authority_flip.rs` does not exist yet.
+- Restart reclaim and deploy-time continuation are still unimplemented in the current codebase baseline.
+
+**Part 3 is done when:** startup reclaim can rebuild and continue persisted execution, orphan state is compensated before normal ticking begins, and acceptance tests T-v0c-1 through T-v0c-10 pass without bundling.
+
 ## Phase 1 — Scaffold (Tasks 1-3)
 
 ## Task 1: Create `projector.rs` and register the new module
