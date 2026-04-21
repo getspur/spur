@@ -12,12 +12,12 @@ use spur_acp::domain::events::{SpurEvent, SpurEventBody};
 use spur_acp::LicenseStatusEvent;
 use spur_core::event_funnel::spawn_funnel;
 use spur_core::license_runtime::spawn_license_runtime;
+use spur_license::policy::PolicyResolver;
 use spur_license::test_support::FakeProvider;
+use spur_license::FeatureGate;
 use spur_license::{
     LicenseError, LicenseEventKind, LicenseState, LicenseStatus, Plan, SpurLicense,
 };
-use spur_license::policy::PolicyResolver;
-use spur_license::FeatureGate;
 
 fn test_feature_gate() -> Arc<FeatureGate> {
     Arc::new(FeatureGate::new(PolicyResolver::embedded()))

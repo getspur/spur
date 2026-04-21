@@ -23,7 +23,10 @@ async fn funnel_plus_sink_round_trip() {
     let (bcast_tx, mut bcast_rx) = broadcast::channel(256);
     let seq = Arc::new(AtomicU64::new(0));
     let funnel = spawn_funnel(bcast_tx.clone(), seq);
-    spawn_sink(bcast_tx.subscribe(), spur_core::event_sink::DEFAULT_MAX_BYTES);
+    spawn_sink(
+        bcast_tx.subscribe(),
+        spur_core::event_sink::DEFAULT_MAX_BYTES,
+    );
 
     for i in 0..10 {
         funnel.emit(SpurEventBody::TurnComplete {
