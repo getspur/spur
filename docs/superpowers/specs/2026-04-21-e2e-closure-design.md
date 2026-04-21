@@ -2,7 +2,7 @@
 - Goal: close the persisted-plan loop from plan ingress through dispatch, worker completion, review, mutation, epic completion, and restart recovery.
 - Status: draft
 - Authored-by: codex-acp
-- Spec-version: 0
+- Spec-version: 1
 - Date: 2026-04-21
 - Related:
   - rev 4 adaptive plan repair design: `docs/superpowers/specs/2026-04-20-adaptive-plan-repair-design.md` at commit `5026896`
@@ -10,6 +10,15 @@
 - Scope: design only; no Rust changes in this document
 
 ---
+
+## Revision history
+
+### Revision 1 — 2026-04-21
+- Defines the reconciler fast-forward primitive, including coalescing semantics and bounded-latency guarantees.
+- Adds reject-terminal compatibility rules: explicit downstream blast radius, `spur:review-rejected`, and query migration guidance.
+- Closes the dispatch orphan double-write race with `DispatchOrphanCleared` plus superseded completion handling.
+- Adds deploy-time startup reclaim for persisted plans already in flight under the old `run_plan` path.
+- Adopts the v0c label-prefix migration, projection-cost budget, `spur:integration-pending`, continuation-latency bounds, and deterministic sentinel ordering.
 
 ## Problem Statement
 
@@ -266,12 +275,12 @@ flowchart LR
     O --> W
     W -->|completion result| O
     O -->|completion callback| M
-    M -->|completion state + ready-for-review| P
+    M -->|completion state + spur:ready-for-review| P
     M -->|completion audit| A
     B -->|review_task / get_task_diff| G
     G -->|review decision persisted| P
     G -->|approval/rejection audit| A
-    G -->|fast-forward| R
+    G -->|fast-forward primitive| R
     W -->|report_signal| M
     M -->|signal label + sentinel| P
     M -->|signal audit| A
@@ -293,6 +302,29 @@ flowchart LR
 | `spur-acp` | Continues to define lifecycle events and continuations. Events become projections of durable persisted-plan state, not the authority itself. | `crates/spur-acp/src/domain/events.rs:574-624`, `crates/spur-acp/src/domain/continuation.rs:11-23`. |
 | `spur-core` | Continues to own worker sessions and the orchestrator request path. No durable plan semantics move here. | `crates/spur-core/src/orchestrator.rs` remains the worker transport owner. |
 
+### Fast-forward primitive
+The phrase “fast-forward the reconciler” is used throughout this spec.
+For v0c it means one concrete thing:
+wake the reconciler loop through the existing `Arc<tokio::sync::Notify>` channel already wired into `McpCallbackServer::set_reconciler_enabled(...)` and consumed by `Reconciler::run` (`crates/spur-mcp/src/server.rs:931-939`, `crates/spur-mcp/src/plan/reconciler.rs:43-78`).
+Operationally:
+- writers call the primitive only after they have durably persisted the state transition whose downstream consequences should be observed immediately
+- the primitive is urgency-only; it is not an acknowledgement channel and callers do not wait for a “reconcile complete” response
+- the expected writers are persisted-plan submit/execute bootstrap, worker completion writeback, review writeback, orphan cleanup, and any future lifecycle helper that wants lower-than-interval latency
+- the primitive is coalescing, not queue-shaped: multiple fast-forwards between reconcile passes collapse to one extra reconcile pass
+- `Notify` already behaves like a capacity-1 wakeup permit; if a future implementation swaps to a bounded `mpsc::Sender<Tick>` with capacity 1, it MUST preserve the same semantics
+- under that equivalent cap-1 channel model, a full channel is handled by dropping the extra wakeup rather than blocking; the periodic reconciler interval still catches the missed edge on the next base tick
+
+That “drop and let the interval catch it” rule is the bounded-latency guarantee.
+Fast-forward improves latency.
+It does not change correctness.
+If wakeups coalesce or are dropped under equivalent cap-1 backpressure, the next interval tick still reconciles the durable state.
+Therefore review-to-dispatch latency is bounded by `min(fast_forward_delivery, reconciler_interval)`.
+Continuation latency adds projection cost on top; see §Projection cost and §Relationship to ACP events and continuations.
+Two negative rules follow from that:
+- no caller may assume one fast-forward equals one reconcile pass
+- no caller may rely on wakeup count for correctness, fairness, or accounting
+- the durable graph remains the only source of truth when wakeups are lost, merged, or delayed
+
 ### Persisted-plan runtime model
 For persisted plans, the projected task phase is derived from durable fields only.
 The projection rule is:
@@ -307,10 +339,10 @@ The operational phase mapping is:
 |---|---|---|
 | `status == closed` and `spur:superseded-by:*` present | `Superseded` | Mutation lineage already uses labels for replacement children. Current writer: `crates/spur-mcp/src/plan/mutation_executor.rs:115-126`. |
 | `status == closed` and latest terminal review breadcrumb is approval | `Approved` | Approval remains a review terminal. Current audit kind exists at `crates/spur-mcp/src/plan/audit_sentinel.rs:36-42`. |
-| `status == closed` and latest terminal review breadcrumb is rejection | `Rejected` | Persisted reject becomes truly terminal under this design. Current code writes reject as `"open"`; that changes. Current anchor: `crates/spur-mcp/src/plan/mod.rs:2047-2058`. |
+| `status == closed` and latest terminal review breadcrumb is rejection | `Rejected` | Persisted reject becomes truly terminal under this design. The compatibility label `spur:review-rejected` is additive query surface only; it is not the authority. Current code writes reject as `"open"`; that changes. Current anchor: `crates/spur-mcp/src/plan/mod.rs:2047-2058`. |
 | `status == closed` and latest completion outcome is failed/cancelled | `Failed` or `Cancelled` | Worker-owned terminal outcomes must be reflected durably. Current code only stores them in RAM. Current anchor: `crates/spur-mcp/src/plan/mod.rs:852-877`, `crates/spur-mcp/src/plan/mod.rs:2675-2704`. |
-| `status == open` and `ready-for-review` present | `AwaitingReview` | This is the durable handoff from worker to brain. Current label constant exists but has no writers today: `crates/spur-mcp/src/plan/labels.rs:57`, repo search only finds the definition. |
-| `status == open` and `delegation-id:*` present and no `ready-for-review` | `Dispatched` | This is the durable worker-owned interval. Current label constructor exists but has no writers today: `crates/spur-mcp/src/plan/labels.rs:44-46`, repo search only finds the constructor. |
+| `status == open` and `spur:ready-for-review` present | `AwaitingReview` | This is the durable handoff from worker to brain. Current helper exists only as the unprefixed `ready-for-review` constant and still has no writers today: `crates/spur-mcp/src/plan/labels.rs:57`, repo search only finds the definition. |
+| `status == open` and `spur:delegation-id:*` present and no `spur:ready-for-review` | `Dispatched` | This is the durable worker-owned interval. Current helper exists only as the unprefixed `delegation-id:<id>` constructor and still has no writers today: `crates/spur-mcp/src/plan/labels.rs:44-46`, repo search only finds the constructor. |
 | `status == open`, no dispatch/review marker, deps satisfied | `Ready` | Ready is derived from the beads graph, not from RAM task status. Current ready query already exists in reconciler: `crates/spur-mcp/src/plan/reconciler.rs:119-185`. |
 | `status == open`, no dispatch/review marker, deps unsatisfied | `Pending` | Same beads-graph derivation. |
 
@@ -329,6 +361,7 @@ The projector for persisted plans reads:
 - child comments that parse as `[[spur-audit v1]]`
 - child comments that parse as `[[spur-signal v1]]`
 - epic comments that parse as `[[spur-audit v1]]`
+Within one task, sentinels are ordered by `(created_at, id)` ascending, matching the existing watcher convention in `crates/spur-mcp/src/plan/signal_watcher.rs:106-111`.
 It does not need:
 - the old in-memory `run_plan` task list
 - the reconciler's prior observation output
@@ -339,6 +372,26 @@ Projection outputs:
 - `worker_branch` and summary metadata reconstructed from completion breadcrumbs
 - epic linkage
 - base snapshot ref reconstructed from plan bootstrap audit
+
+### Projection cost
+Projection is not free.
+For v0c, the cost model is intentionally simple and explicit:
+- per reconcile/status tick: one epic read + `N` child reads + `N*M` comment reads, where `N` is task count and `M` is comments per task, plus audit/signal parse work on the returned comment bodies
+- for `N = 100` and `M = 5`, that is roughly 600 PM calls per tick before parse cost
+- the accepted v0c budget is `O(n*comments)` per tick for a single-tenant brain, with sub-second projection for plans up to 500 tasks
+
+This is acceptable for the authority flip because the current PM and watcher surfaces already read issue and comment state directly (`crates/spur-pm/src/service.rs:120-207`, `crates/spur-mcp/src/plan/signal_watcher.rs:106-111`, `crates/spur-mcp/src/server.rs:2762-2787`).
+It is not something callers should pretend is free.
+A `get_plan_status(plan_id)` call on a 500-task persisted plan should expect hundreds of milliseconds, not microseconds.
+The intended mitigation for v0c is reuse, not premature cleverness:
+- reconciler, watcher, and tool surfaces share one projector contract
+- the cache may amortize repeated reads within a short interval
+- but cache hits are optimization only, never correctness requirements
+
+Deferred to v0d:
+- incremental projection keyed by last-modified stamps, or
+- a beads change-feed / watch surface that lets the projector avoid full comment rescans on every tick
+
 ### Ingress normalization
 #### `submit_plan(persist_as_epic=true)`
 This path already creates a self-describing task graph.
@@ -383,7 +436,7 @@ otherwise fall back to `br ready`.
 3. For each ready task,
 allocate a new `delegation_id`.
 4. Persist dispatch intent on the task:
-- add `delegation-id:<id>` - remove `ready-for-review` if present - emit `Dispatch` audit sentinel
+- add `spur:delegation-id:<id>` - remove `spur:ready-for-review` if present - emit `Dispatch` audit sentinel
 5. Send `DelegationRequest` through the existing orchestrator channel.
 6. If the send fails immediately:
 - clear the dispatch label - leave the task open - record a warning and a compensating audit breadcrumb
@@ -398,48 +451,81 @@ The worker completion bridge stays on the current orchestrator machinery.
 That is a good boundary.
 The change is what happens after the result comes back.
 For persisted plans, the completion writeback path must durably encode the result into beads, not only into RAM.
+Before any operational mutation, the completion bridge must first check whether restart recovery already retired that exact `delegation_id`; see §Restart recovery → Dispatch orphan rule.
+If a matching `DispatchOrphanCleared { delegation_id }` breadcrumb exists, the completion is treated as superseded:
+- emit `Completion { completion_state = superseded, delegation_id }`
+- do not mutate issue status
+- do not mutate `spur:delegation-id:*` / `spur:ready-for-review`
+- return
+
 The success path becomes:
 1. emit a `Completion` audit sentinel that carries:
 - `delegation_id` - `completion_state = awaiting_review` - `worker_branch` - `result_summary` - optional artifact pointer if present
-2. remove `delegation-id:<id>`
-3. add `ready-for-review`
+2. remove `spur:delegation-id:<id>`
+3. add `spur:ready-for-review`
 4. leave the task issue `open`
-5. fast-forward the reconciler
+5. invoke the fast-forward primitive (see §Fast-forward primitive)
 The failure/cancel path becomes:
 1. emit a `Completion` audit sentinel with
 `completion_state = failed` or `cancelled`
-2. remove `delegation-id:<id>`
+2. remove `spur:delegation-id:<id>`
 3. set issue status to `closed`
-4. do not add `ready-for-review`
-5. fast-forward the reconciler so downstream failures/cascades and epic completion are observed
+4. do not add `spur:ready-for-review`
+5. invoke the fast-forward primitive so downstream failures/cascades and epic completion are observed (see §Fast-forward primitive)
 This is stricter than the current code, which only emits `Completion` on success and otherwise stores failure/cancel purely in RAM (`crates/spur-mcp/src/plan/mod.rs:841-893`, `crates/spur-mcp/src/plan/mod.rs:2675-2728`).
 ### Review path
 For persisted plans, `review_task` changes from:
 - “mutate RAM and maybe dispatch”
 to:
-- “persist review decision and wake the reconciler”
+- “persist review decision and invoke the fast-forward primitive (see §Fast-forward primitive)”
 That means:
 - `approve`
   - close the task issue
-  - remove `ready-for-review`
+  - remove `spur:ready-for-review`
   - emit `Approval`
   - do not dispatch dependents directly
-  - fast-forward the reconciler
+  - invoke the fast-forward primitive (see §Fast-forward primitive)
 - `reject`
   - close the task issue
-  - remove `ready-for-review`
+  - remove `spur:ready-for-review`
+  - add `spur:review-rejected`
   - emit `Rejection`
   - do not dispatch anything directly
-  - fast-forward the reconciler
+  - invoke the fast-forward primitive (see §Fast-forward primitive)
 - `request_changes`
   - keep the task issue `open`
-  - remove `ready-for-review`
+  - remove `spur:ready-for-review`
   - append the feedback comment
   - do not send a new `DelegationRequest` here
-  - fast-forward the reconciler so it re-queues the task from beads state
+  - invoke the fast-forward primitive so it re-queues the task from beads state (see §Fast-forward primitive)
 This is a deliberate semantic change for reject.
 Current code writes reject as `"open"` (`crates/spur-mcp/src/plan/mod.rs:2047-2058`), which is exactly why rejected tasks remain operationally eligible for the watcher.
 Under beads-as-truth, a terminal reject cannot stay open without poisoning every downstream operational read.
+### Compatibility: reject terminal semantics
+The reject-as-closed change is still the right authority decision.
+It also has a compatibility blast radius, because several current readers use `status=open` as the non-terminal bucket:
+- the signal watcher skips only the backend’s closed status today (`crates/spur-mcp/src/plan/signal_watcher.rs:76-87`)
+- brain-side PM poll/update flows still pull the open set through `PmService::poll()` and beads `br list -s open` (`crates/spur-pm/src/service.rs:171-175`, `crates/spur-pm/src/beads.rs:396-410`)
+- dashboard and issue-detail surfaces render issue status directly and therefore expose the same compressed open/closed distinction (`crates/spur-tui/src/views/dashboard.rs:631-648`, `crates/spur-tui/src/components/issues_panel.rs:78-84`, `crates/spur-tui/src/components/issue_detail_pane.rs:223-229`)
+- `get_plan_status` becomes another affected surface once persisted plans rehydrate from beads on cache miss under this design (`crates/spur-mcp/src/server.rs:2762-2787`)
+
+The compatibility shim is:
+- reject writes `closed`
+- reject also adds `spur:review-rejected`
+- the projector still classifies `Rejected` from closed status plus the `Rejection` audit breadcrumb; the label exists so rejected tasks remain queryable after they stop appearing in `br ready` and `status=open` result sets
+
+Concretely, the migration looks like this:
+- old query shape: “show me open rejected work” via `status=open`
+- new query shape: `status=closed` plus `spur:review-rejected`, or just the label where the surface already implies terminality
+- old dashboard assumption: “closed means done/merged/non-actionable”
+- new dashboard assumption: “closed” still needs label disambiguation for `Rejected`, `Failed`, `Cancelled`, and `Approved`
+
+That is the real blast radius.
+Reject-as-closed is the correct authority model, but only if downstream readers stop overloading the compressed status column.
+
+Migration note:
+any existing query, report, or dashboard that implicitly treated `status=open` as “includes rejected work” must switch to label-based filtering.
+The stable query shape is `status=closed` plus `spur:review-rejected`, or `spur:review-rejected` alone if terminal status is already implied by the surface.
 ### Signal watcher path
 The signal watcher becomes a consumer of the same projection the reconciler uses.
 The filtering rule for persisted plans becomes:
@@ -447,7 +533,7 @@ The filtering rule for persisted plans becomes:
 - task is `open`
 - task has at least one `signal:*` label
 - task has no `spur:signal-processed:*` label for the signal being handled
-- task has `ready-for-review`
+- task has `spur:ready-for-review`
 That last bullet is the key behavioral fix.
 It means:
 - no mid-dispatch mutation while a worker still owns the task
@@ -456,7 +542,7 @@ It means:
 This directly closes the current G1/G2 shape called out in rev 4, using the existing `READY_FOR_REVIEW` constant as an actual operational marker instead of a dead constant.
 Current anchors:
 - watcher current filters: `crates/spur-mcp/src/plan/signal_watcher.rs:76-104`
-- `READY_FOR_REVIEW` constant with no writers: `crates/spur-mcp/src/plan/labels.rs:57`
+- `READY_FOR_REVIEW` constant with no writers yet, still unprefixed in current code: `crates/spur-mcp/src/plan/labels.rs:57`
 The watcher’s projection input becomes the full projected plan.
 The `MutationProposer` and `MutationScorer` seam does not change.
 What changes is the quality of the `PlanState` fed into that seam.
@@ -504,11 +590,22 @@ Current anchor for the write-ahead part:
 This is new.
 Rule:
 - If a task is `open`,
-carries `delegation-id:<id>`, and lacks both `ready-for-review` and a terminal completion breadcrumb for that delegation, then the dispatch is orphaned after restart.
+carries `spur:delegation-id:<id>`, and lacks both `spur:ready-for-review` and a terminal completion breadcrumb for that delegation, then the dispatch is orphaned after restart.
 Disposition:
-- clear the `delegation-id` label
+- emit `DispatchOrphanCleared { delegation_id, reason }` on the task
+- clear the `spur:delegation-id` label
 - leave the task `open`
 - let the reconciler re-dispatch if the task is still ready
+The `reason` field is intentionally plain:
+- `"restart-orphan-cleared"` for the normal startup path
+- future values may explain more specialized recovery flows, but v0c does not need a taxonomy beyond human-readable intent
+
+Late completion rule:
+- the worker completion bridge MUST check for a matching `DispatchOrphanCleared { delegation_id }` breadcrumb before applying any label or status change
+- if found, it treats the completion as superseded and emits `Completion { completion_state = superseded, delegation_id }`
+- it does not mutate operational state for that stale worker result
+- the check keys on `delegation_id`, not just task id, so a later legitimate dispatch on the same task is not accidentally suppressed
+
 This is intentionally conservative.
 SPUR does not attempt durable worker-session resumption in this spec.
 That would require ACP-level durable worker ownership, which current orchestrator plumbing does not provide.
@@ -524,12 +621,16 @@ Those are projections.
 The durable rule is:
 1. Project all child states in `spur:plan-id:<id>` scope.
 2. If every child is terminal:
-- close the epic - emit an epic completion audit breadcrumb - if all children are approved, also emit/retain the ACP `PlanReadyToMerge` continuation path
+- close the epic
+- if the terminal outcome is “all approved, ready to merge” and merge has not happened yet, add `spur:integration-pending`
+- emit an epic completion audit breadcrumb
+- if all children are approved, also emit/retain the ACP `PlanReadyToMerge` continuation path
 3. If any child remains non-terminal:
 - epic stays open
 Why close the epic before merge/PR?
 Because this epic represents operational plan execution.
 Merge and PR creation are downstream integration actions, not worker-loop liveness.
+To keep that distinction visible to dashboards and other external observers, `spur:integration-pending` stays on the closed epic until `merge_plan` succeeds and removes it (`crates/spur-mcp/src/server.rs:2068-2220`).
 That said, the epic completion breadcrumb must carry enough summary to make that distinction explicit:
 - all approved / ready to merge
 - terminal with failures/rejections
@@ -566,6 +667,8 @@ Specifically:
 (`crates/spur-acp/src/domain/continuation.rs:19-23`)
 What changes is the producer.
 For persisted plans, those events are emitted from projected durable state transitions, not from the exit condition of an in-memory executor loop.
+For persisted plans, continuation event latency is bounded by `min(fast_forward_delivery, reconciler_interval) + projection_cost`.
+Callers that need tighter bounds must invoke the fast-forward primitive from the writeback path rather than waiting for the base interval (see §Fast-forward primitive and §Projection cost).
 
 ---
 
@@ -587,13 +690,13 @@ That matches the rev 4 “Stance C” discipline.
 | `submit_plan(persist_as_epic=true)` | Creates the epic/child graph, emits `PlanSubmit` on the epic, inserts a RAM `PlanState`, and spawns `run_plan` immediately (`crates/spur-mcp/src/server.rs:2408-2484`). | Creates the epic/child graph, stamps all execution labels, emits plan bootstrap audit including merge-base metadata, warms projection cache, and nudges the reconciler. No persisted `run_plan` spawn. |
 | `execute_epic(epic_id, default_agent)` | Derives tasks from beads, inserts RAM state, and spawns `run_plan`. Does not persist `epic_id` into `PlanState` and does not normalize missing labels (`crates/spur-mcp/src/server.rs:2624-2729`). | Normalizes child execution labels/agents, persists the execution `plan_id`, emits plan bootstrap audit, warms cache, and nudges the reconciler. No persisted `run_plan` spawn. |
 | `Reconciler::tick_once` | Reads ready IDs and logs them only (`crates/spur-mcp/src/plan/reconciler.rs:109-114`). | Reads ready IDs, projects plan scope, writes durable dispatch intent, sends `DelegationRequest`, compensates immediate send failures, and performs epic completion checks. |
-| `review_task(plan_id, task_id, decision)` | Mutates in-memory state, writes beads update outside lock, and may dispatch immediately on approve/request-changes (`crates/spur-mcp/src/plan/mod.rs:1918-2455`). | Persists review decision into beads and audit, never dispatches persisted tasks directly, and fast-forwards the reconciler. Reject becomes `closed`, not `open`. |
-| Worker completion writeback | Stores success/failure in RAM and emits `Completion` audit only on success (`crates/spur-mcp/src/plan/mod.rs:841-893`, `crates/spur-mcp/src/plan/mod.rs:2675-2728`). | Persists terminal worker result into beads for every terminal outcome, uses `delegation-id` / `ready-for-review` labels as the operational phase handoff, and emits completion audit for all outcomes. |
-| `report_signal(task_id, signal)` | Writes audit-first, then signal sentinel comment, then `signal:<kind>` label (`crates/spur-mcp/src/server.rs:509-534`). | Keeps the same write order, but the resulting signal becomes eligible only when the task also carries `ready-for-review`. |
+| `review_task(plan_id, task_id, decision)` | Mutates in-memory state, writes beads update outside lock, and may dispatch immediately on approve/request-changes (`crates/spur-mcp/src/plan/mod.rs:1918-2455`). | Persists review decision into beads and audit, never dispatches persisted tasks directly, invokes the fast-forward primitive (see §Fast-forward primitive), and writes `spur:review-rejected` on reject as a compatibility shim. Reject becomes `closed`, not `open`. |
+| Worker completion writeback | Stores success/failure in RAM and emits `Completion` audit only on success (`crates/spur-mcp/src/plan/mod.rs:841-893`, `crates/spur-mcp/src/plan/mod.rs:2675-2728`). | Persists terminal worker result into beads for every terminal outcome, uses `spur:delegation-id` / `spur:ready-for-review` labels as the operational phase handoff, performs the superseded-completion check against `DispatchOrphanCleared`, and emits completion audit for all outcomes. |
+| `report_signal(task_id, signal)` | Writes audit-first, then signal sentinel comment, then `signal:<kind>` label (`crates/spur-mcp/src/server.rs:509-534`). | Keeps the same write order, but the resulting signal becomes eligible only when the task also carries `spur:ready-for-review`. |
 | `SignalWatcher::tick_once` | Scans every issue, filters by `signal:*` and absence of `spur:signal-processed:*`, then scores against `stub_plan_state()` (`crates/spur-mcp/src/plan/signal_watcher.rs:70-173`). | Projects the real persisted plan, filters to review-ready tasks only, handles one durable signal decision per task per tick, and respects restart-recovered orphan state before proposing. |
 | `get_plan_status(plan_id)` | Reads only from `active_plans`; cache miss means “unknown plan” (`crates/spur-mcp/src/server.rs:2772-2799`). | On persisted-plan cache miss, rehydrates from beads/audit and then serves status from the projection. Ephemeral behavior stays unchanged. |
 | `get_task_diff(plan_id, task_id)` | Reads only from `active_plans`; current-attempt diff comes from cached `DelegationResult`; historical attempts rely on summary/branch only (`crates/spur-mcp/src/server.rs:2801-2895`). | On persisted-plan cache miss, reconstructs review data from projected worker branch plus persisted base ref. Historical attempts may continue to expose summary/branch without full diff text. |
-| `merge_plan(plan_id)` | Requires cached `base_snapshot_branch`, cached approvals, and cached `worker_branch` values (`crates/spur-mcp/src/server.rs:2130-2214`). | Rehydrates persisted plans from beads/audit on cache miss. Merge base becomes a persisted bootstrap field. |
+| `merge_plan(plan_id)` | Requires cached `base_snapshot_branch`, cached approvals, and cached `worker_branch` values (`crates/spur-mcp/src/server.rs:2130-2214`). | Rehydrates persisted plans from beads/audit on cache miss. Merge base becomes a persisted bootstrap field, and successful merge removes `spur:integration-pending` from the epic. |
 | `create_pr(...)` | Manual tool only (`crates/spur-mcp/src/server.rs:2068-2102`). | Remains manual through v0d. Auto-hooking, if shipped, is opt-in and later. |
 
 ### Label vocabulary
@@ -604,6 +707,17 @@ That matters because label grammar and length behavior are asymmetric:
 Current anchor:
 - `crates/spur-mcp/src/plan/labels.rs:7-23`
 That asymmetry remains in force under this design.
+
+#### Label prefix migration
+`delegation-id:<id>` and `ready-for-review` are the current helper shapes in code.
+Both are collision-prone because they do not carry the `spur:` namespace, and both still have zero writers beyond the helper/constant definitions (`crates/spur-mcp/src/plan/labels.rs:44-46`, `crates/spur-mcp/src/plan/labels.rs:57`).
+That means v0c can still rename them cheaply, before they become part of durable operational history or external queries.
+The v0c vocabulary is therefore:
+- `spur:delegation-id:<id>`
+- `spur:ready-for-review`
+
+Keeping the old unprefixed names would only push the migration cost into a later release after dashboards, scripts, and historical comments depend on them.
+
 The contract table is:
 
 | Label | Current state | Proposed writer | Operational meaning under beads-as-truth | Create-path safety |
@@ -613,8 +727,10 @@ The contract table is:
 | `spur:agent:<name>` | Written for `submit_plan`; only read for `execute_epic` (`crates/spur-mcp/src/server.rs:572-579`, `crates/spur-mcp/src/plan/mod.rs:265-291`). | `submit_plan`, `execute_epic` normalization | Durable worker routing for restart-safe dispatch. | Safe at create time. |
 | `spur:source-issue:<id>` | Written for persisted child tasks created from pre-existing issues (`crates/spur-mcp/src/server.rs:577-579`). | `submit_plan` only | Provenance link back to the source issue. | Safe at create time. |
 | `spur:plan-complete` | Written on the epic after all child issues/deps are created (`crates/spur-mcp/src/server.rs:396-414`, `crates/spur-mcp/src/plan/labels.rs:58-63`). | `submit_plan` | Graph-persistence completeness marker. Still an epic-only label. | Added after create. |
-| `delegation-id:<id>` | Constructor exists, but the repo currently has no writer beyond the helper definition (`crates/spur-mcp/src/plan/labels.rs:44-46`; repo search only finds the helper). | `Reconciler` dispatch; completion writeback removes it | Durable worker-ownership marker for an in-flight task attempt. | Added after create. |
-| `ready-for-review` | Constant exists, but the repo currently has no writer beyond the constant definition (`crates/spur-mcp/src/plan/labels.rs:57`; repo search only finds the definition). | Completion writeback adds; review path removes | Durable handoff from worker ownership to brain review ownership. | Added after create. |
+| `spur:delegation-id:<id>` | Current helper exists only as unprefixed `delegation-id:<id>`, and the repo still has no writer beyond that helper definition (`crates/spur-mcp/src/plan/labels.rs:44-46`; repo search only finds the helper). | `Reconciler` dispatch; completion writeback removes it | Durable worker-ownership marker for an in-flight task attempt. | Added after create. |
+| `spur:ready-for-review` | Current helper exists only as unprefixed `ready-for-review`, and the repo still has no writer beyond that constant definition (`crates/spur-mcp/src/plan/labels.rs:57`; repo search only finds the definition). | Completion writeback adds; review path removes it | Durable handoff from worker ownership to brain review ownership. | Added after create. |
+| `spur:review-rejected` | New in v0c. No current writer. | Review reject path | Compatibility/query shim so terminally rejected tasks remain discoverable after reject stops writing `open`. Not a dispatch or readiness marker. | Added after create. |
+| `spur:integration-pending` | New in v0c. No current writer. | Epic auto-close path adds; `merge_plan` removes on success | Epic execution is operationally terminal, but integration/merge is still pending. | Added after create. |
 | `signal:<kind>` | Written by `report_signal` (`crates/spur-mcp/src/server.rs:527-534`). | Worker-facing signal path | Fast operational filter for watcher eligibility. | Added after create. |
 | `signal:<kind>:<bucket>` | Helper exists but current `report_signal` only writes the non-bucketed kind label (`crates/spur-mcp/src/plan/labels.rs:48-54`, `crates/spur-mcp/src/server.rs:527-534`). | Optional worker-facing signal path | Optional severity bucketing for analytics/filtering. | Added after create. |
 | `signal:late-arrival` | Written by late-path `report_signal` when the task is already closed (`crates/spur-mcp/src/server.rs:475-491`, `crates/spur-mcp/src/plan/labels.rs:56`). | `report_signal` | Durable record that a signal arrived after terminal closure. | Added after create. |
@@ -624,9 +740,9 @@ The contract table is:
 
 #### Label-specific rules
 Rule L1:
-`delegation-id:<id>` and `ready-for-review` are mutually exclusive on the same task.
+`spur:delegation-id:<id>` and `spur:ready-for-review` are mutually exclusive on the same task.
 Rule L2:
-`ready-for-review` only appears on an `open` task.
+`spur:ready-for-review` only appears on an `open` task.
 Rule L3:
 `spur:plan-id:<id>` is unique per active execution epoch on a task.
 For `execute_epic`, older execution labels must be replaced, not accumulated.
@@ -635,7 +751,12 @@ Rule L4:
 They are never sufficient on their own to make a signal operationally eligible.
 Rule L5:
 No operational code path may infer “worker currently running” from RAM alone for a persisted plan.
-It must consult `delegation-id:<id>`.
+It must consult `spur:delegation-id:<id>`.
+Rule L6:
+`spur:review-rejected` is a compatibility/query label only.
+It appears only on a `closed` task and must never make a task operationally eligible again.
+Rule L7:
+`spur:integration-pending` appears only on a closed epic and is cleared by successful `merge_plan`.
 ### Audit sentinel contracts
 The existing sentinel envelope remains:
 
@@ -651,8 +772,9 @@ The table below describes the method-surface contract, not the Rust enum definit
 | Sentinel kind | Current writer and payload | Proposed persisted-plan role | Proposed delta |
 |---|---|---|---|
 | `PlanSubmit` | Written on the epic by `emit_plan_submit_audit`, payload `{ plan_id, epic_issue_id, task_ids }` (`crates/spur-mcp/src/server.rs:423-440`, `crates/spur-mcp/src/plan/audit_sentinel.rs:19-23`). | Plan bootstrap marker for each persisted execution epoch. Used for restart discovery and cache rehydration. | Extend payload with persisted merge-base metadata and execution mode details needed for restart-safe merge/review. |
-| `Dispatch` | Written as an advisory task comment with `{ delegation_id, worker, attempt }` (`crates/spur-mcp/src/plan/mod.rs:607-639`). | Durable dispatch breadcrumb paired with `delegation-id:<id>`. Projection uses it for attempt counts and history. | No shape change required for v0c; add compensating breadcrumb only if immediate send fails. |
-| `Completion` | Currently success-only, payload `{ delegation_id, worker_branch, result_summary }` (`crates/spur-mcp/src/plan/mod.rs:642-669`, `crates/spur-mcp/src/plan/audit_sentinel.rs:29-35`). | Durable worker-finished breadcrumb for every terminal worker result. | Extend payload with `completion_state = awaiting_review | failed | cancelled` and optional artifact reference. |
+| `Dispatch` | Written as an advisory task comment with `{ delegation_id, worker, attempt }` (`crates/spur-mcp/src/plan/mod.rs:607-639`). | Durable dispatch breadcrumb paired with `spur:delegation-id:<id>`. Projection uses it for attempt counts and history. | No shape change required for v0c; add compensating breadcrumb only if immediate send fails. |
+| `DispatchOrphanCleared` | No current writer. New in v0c. | Restart breadcrumb that retires a cleared `delegation_id` so late completions cannot overwrite the new execution epoch. | New payload `{ delegation_id, reason }`. Written when restart recovery clears orphaned dispatch intent. |
+| `Completion` | Currently success-only, payload `{ delegation_id, worker_branch, result_summary }` (`crates/spur-mcp/src/plan/mod.rs:642-669`, `crates/spur-mcp/src/plan/audit_sentinel.rs:29-35`). | Durable worker-finished breadcrumb for every terminal worker result, including stale completions that were superseded by restart recovery. | Extend payload with `completion_state = awaiting_review | failed | cancelled | superseded` and optional artifact reference. |
 | `Approval` | Written on approve with `{ delegation_id }` (`crates/spur-mcp/src/plan/mod.rs:672-697`). | Review terminal breadcrumb for approved work. | Keep. |
 | `Rejection` | Written on reject with `{ delegation_id, feedback }` (`crates/spur-mcp/src/plan/mod.rs:699-725`). | Review terminal breadcrumb for rejected work. | Keep; reject now pairs with closing the issue. |
 | `Signal` | Written by `report_signal`, payload `{ signal_id, signal_kind, severity, reason }` (`crates/spur-mcp/src/server.rs:515-523`, `crates/spur-mcp/src/plan/audit_sentinel.rs:43-49`). | Historical record of worker-emitted signal independent of mutation outcome. | Keep. |
@@ -722,7 +844,7 @@ Each phase leaves the system in a testable state.
 | Gap from rev 4 | Phase | Why |
 |---|---|---|
 | G1 `READY_FOR_REVIEW` missing writer | v0c | Required to make signal mutation respect worker/brain ownership boundaries. |
-| G2 rejected tasks stay signal-eligible | v0c | Fixed by making reject terminal in beads and by watcher gating on `ready-for-review`. |
+| G2 rejected tasks stay signal-eligible | v0c | Fixed by making reject terminal in beads and by watcher gating on `spur:ready-for-review`. |
 | G3 multi-signal-per-tick over-processing | v0c | Needs to change with the watcher rewrite because the watcher is already moving to plan projection. |
 | G4 cross-restart retry loop after failed apply | v0c | Restart semantics must be defined at the same time as beads-as-truth recovery. |
 | G7 mutation orphan resolution | v0c | Core authority flip is incomplete without restart orphan rules. |
@@ -738,17 +860,19 @@ Make beads authoritative for persisted-plan execution.
 2. Reconciler-owned persisted dispatch
 - no persisted `run_plan` dispatch - no persisted `dispatch_newly_ready` from `review_task`
 3. Durable dispatch/review markers
-- `delegation-id:<id>` writer - `ready-for-review` writer/remover
+- `spur:delegation-id:<id>` writer - `spur:ready-for-review` writer/remover
 4. Persisted completion writeback
-- success, failure, and cancel all become durable task state transitions
+- success, failure, cancel, and superseded late completions all become durable task outcomes
 5. Review path conversion
-- approve/reject/request_changes persist state only - reject becomes terminal in beads
+- approve/reject/request_changes persist state only - reject becomes terminal in beads with `spur:review-rejected` compatibility labeling
 6. Signal watcher projection rewrite
-- replace `stub_plan_state()` - require `ready-for-review` - one durable signal decision per task per tick
+- replace `stub_plan_state()` - require `spur:ready-for-review` - one durable signal decision per task per tick
 7. Restart recovery
-- rehydrate active persisted plans from beads - resolve mutation orphans - resolve dispatch orphans
+- rehydrate active persisted plans from beads - resolve mutation orphans - resolve dispatch orphans - suppress stale completions via `DispatchOrphanCleared`
 8. `execute_epic` normalization
 - persist resolved agents - persist execution `plan_id` - stop dropping `epic_id`
+9. Deploy-time reclaim pass
+- on every startup, reclaim any open persisted plan epic already carrying `spur:plan-id:*`, even if `active_plans` is empty
 #### Out of scope for v0c
 - pagination hardening for 10k+ issue scans
 - richer rollback compensation payloads
@@ -759,7 +883,7 @@ After v0c, the following flow must work end-to-end:
 1. call `submit_plan(persist_as_epic=true)` or `execute_epic`
 2. let reconciler dispatch ready tasks
 3. let a worker finish successfully
-4. see the task become `ready-for-review` in beads
+4. see the task become `spur:ready-for-review` in beads
 5. emit a worker signal
 6. see the signal watcher project the real plan and mutate only if the task is review-ready
 7. call `review_task(approve|reject|request_changes)`
@@ -768,14 +892,40 @@ After v0c, the following flow must work end-to-end:
 10. observe the plan continue from beads state without relying on the old `active_plans`
 #### Acceptance tests
 - T-v0c-1 persisted `submit_plan` does not spawn persisted direct dispatch
-- T-v0c-2 reconciler dispatch writes `delegation-id` and `Dispatch`
-- T-v0c-3 completion success writes `ready-for-review` and `Completion`
-- T-v0c-4 reject closes the task and does not remain watcher-eligible
+- T-v0c-2 reconciler dispatch writes `spur:delegation-id` and `Dispatch`
+- T-v0c-3 completion success writes `spur:ready-for-review` and `Completion`
+- T-v0c-4 reject closes the task, writes `spur:review-rejected`, and does not remain watcher-eligible
 - T-v0c-5 request-changes leaves task open and reconciler redispatches it
 - T-v0c-6 signal watcher uses projected plan state, not stub state
 - T-v0c-7 restart rehydrates a persisted plan from beads on cache miss
-- T-v0c-8 orphaned `delegation-id` is re-queued on restart
+- T-v0c-8 orphaned `spur:delegation-id` is re-queued on restart, and late completion becomes `superseded`
 - T-v0c-9 orphaned `MutationPlan` is completed or compensated before new signals run
+- T-v0c-10 deploy mid-plan with an in-flight persisted plan; the new process reclaims the plan and continues dispatch without operator intervention
+
+#### Deploy-time migration
+Problem:
+pre-deploy persisted plans were spawned through `run_plan` into `active_plans`, so a deploy/restart under v0c can inherit beads state for a plan that the new process never inserted into RAM (`crates/spur-mcp/src/server.rs:218-226`, `crates/spur-mcp/src/server.rs:2408-2484`, `crates/spur-mcp/src/plan/mod.rs:730-909`).
+Without an explicit reclaim step, the reconciler would own dispatch after restart but would have no cached knowledge of those already-running persisted plans.
+
+v0c therefore ships a one-shot reclaim pass on every startup:
+- scan beads for every open epic carrying `spur:plan-id:*`
+- project the plan from beads plus audit regardless of `active_plans` state
+- if the cache entry is absent, rehydrate it before the reconciler loop begins
+- if the cache entry already exists, replace it with the freshly projected state rather than trying to merge RAM with beads
+
+Operationally the reclaim pass runs before persisted-plan dispatch starts accepting work from the new process:
+1. enumerate open persisted epics
+2. project each plan
+3. resolve mutation orphans
+4. resolve dispatch orphans
+5. install the cache entry
+6. start normal reconciler/watcher ticking
+
+Deploy ordering can be rolling.
+The reclaim pass handles any in-flight persisted plan whose original process died mid-execution.
+That is the same mechanism as restart recovery, just run unconditionally on every startup instead of only after a detected crash (`crates/spur-mcp/src/server.rs:1181-1205`).
+The important property is idempotence:
+running reclaim twice is harmless because beads stays authoritative and `active_plans` is only projection.
 ### v0d — Closure hardening
 #### Goal
 Finish the hard edges the authority flip exposes.
@@ -874,11 +1024,11 @@ Under beads-as-truth, I3 gets a stronger ownership rule:
 For persisted plans, signals may only drive mutation while the task is brain-owned.
 Operationally, brain-owned means:
 - task is `open`
-- task carries `ready-for-review`
-- task does not carry `delegation-id:<id>`
+- task carries `spur:ready-for-review`
+- task does not carry `spur:delegation-id:<id>`
 Worker-owned means:
-- task carries `delegation-id:<id>`
-- task does not carry `ready-for-review`
+- task carries `spur:delegation-id:<id>`
+- task does not carry `spur:ready-for-review`
 Closed tasks remain late-signal territory and are still gated by `PmService::closed_status()`.
 Delta from rev 4:
 - I3 is no longer just “closed tasks cannot mutate”
@@ -1044,12 +1194,13 @@ not the final Git integration state
 (`crates/spur-acp/src/domain/events.rs:619-624`)
 Mitigation:
 - make the epic completion comment explicit about the outcome
+- add `spur:integration-pending` until `merge_plan` clears it
 - retain manual merge/PR through v0d
 ### R8. The projector must be fail-closed on ambiguous state
 This is an implementation risk.
 If the projector sees:
 - closed task with no recognizable terminal breadcrumb
-- both `delegation-id:*` and `ready-for-review`
+- both `spur:delegation-id:*` and `spur:ready-for-review`
 - multiple active `spur:plan-id:*` labels
 then the safe behavior is:
 - mark the task non-dispatchable
