@@ -2633,10 +2633,38 @@ impl McpCallbackServer {
             Ok(state) => state,
             Err(error) => crate::plan::PlanMergeState::Failed { error },
         };
+        let merged_successfully =
+            matches!(merge_state, crate::plan::PlanMergeState::Succeeded { .. });
 
-        let status = {
+        {
             let mut state = plan_arc.lock().await;
             state.merge_state = merge_state;
+        }
+
+        if merged_successfully {
+            if let (Some(pm), Some(epic_id)) = (self.pm_service.as_ref(), epic_id.as_deref()) {
+                if let Err(error) = apply_issue_update(
+                    pm,
+                    epic_id,
+                    spur_pm::IssueUpdate {
+                        remove_labels: vec![crate::plan::labels::INTEGRATION_PENDING.to_string()],
+                        ..Default::default()
+                    },
+                )
+                .await
+                {
+                    return JsonRpcResponse::internal_error(
+                        id,
+                        format!(
+                            "failed to clear integration-pending on epic '{epic_id}': {error}"
+                        ),
+                    );
+                }
+            }
+        }
+
+        let status = {
+            let state = plan_arc.lock().await;
             crate::plan::build_plan_status(&plan_id, &state)
         };
         let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
