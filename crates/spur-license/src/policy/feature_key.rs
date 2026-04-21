@@ -217,46 +217,151 @@ mod tests {
     #[test]
     fn from_known_hits_all_36_keys() {
         // Community (11)
-        assert_eq!(FeatureKey::from_known("brain_session"), Some(FeatureKey::BRAIN_SESSION));
-        assert_eq!(FeatureKey::from_known("single_worker"), Some(FeatureKey::SINGLE_WORKER));
-        assert_eq!(FeatureKey::from_known("worktree_isolation"), Some(FeatureKey::WORKTREE_ISOLATION));
-        assert_eq!(FeatureKey::from_known("manual_review"), Some(FeatureKey::MANUAL_REVIEW));
-        assert_eq!(FeatureKey::from_known("event_persistence"), Some(FeatureKey::EVENT_PERSISTENCE));
-        assert_eq!(FeatureKey::from_known("basic_lineage"), Some(FeatureKey::BASIC_LINEAGE));
-        assert_eq!(FeatureKey::from_known("tui_dashboard"), Some(FeatureKey::TUI_DASHBOARD));
-        assert_eq!(FeatureKey::from_known("basic_cost_display"), Some(FeatureKey::BASIC_COST_DISPLAY));
-        assert_eq!(FeatureKey::from_known("basic_notifications"), Some(FeatureKey::BASIC_NOTIFICATIONS));
-        assert_eq!(FeatureKey::from_known("local_config"), Some(FeatureKey::LOCAL_CONFIG));
-        assert_eq!(FeatureKey::from_known("mcp_standard_tools"), Some(FeatureKey::MCP_STANDARD_TOOLS));
+        assert_eq!(
+            FeatureKey::from_known("brain_session"),
+            Some(FeatureKey::BRAIN_SESSION)
+        );
+        assert_eq!(
+            FeatureKey::from_known("single_worker"),
+            Some(FeatureKey::SINGLE_WORKER)
+        );
+        assert_eq!(
+            FeatureKey::from_known("worktree_isolation"),
+            Some(FeatureKey::WORKTREE_ISOLATION)
+        );
+        assert_eq!(
+            FeatureKey::from_known("manual_review"),
+            Some(FeatureKey::MANUAL_REVIEW)
+        );
+        assert_eq!(
+            FeatureKey::from_known("event_persistence"),
+            Some(FeatureKey::EVENT_PERSISTENCE)
+        );
+        assert_eq!(
+            FeatureKey::from_known("basic_lineage"),
+            Some(FeatureKey::BASIC_LINEAGE)
+        );
+        assert_eq!(
+            FeatureKey::from_known("tui_dashboard"),
+            Some(FeatureKey::TUI_DASHBOARD)
+        );
+        assert_eq!(
+            FeatureKey::from_known("basic_cost_display"),
+            Some(FeatureKey::BASIC_COST_DISPLAY)
+        );
+        assert_eq!(
+            FeatureKey::from_known("basic_notifications"),
+            Some(FeatureKey::BASIC_NOTIFICATIONS)
+        );
+        assert_eq!(
+            FeatureKey::from_known("local_config"),
+            Some(FeatureKey::LOCAL_CONFIG)
+        );
+        assert_eq!(
+            FeatureKey::from_known("mcp_standard_tools"),
+            Some(FeatureKey::MCP_STANDARD_TOOLS)
+        );
         // Pro (8)
-        assert_eq!(FeatureKey::from_known("parallel_workers"), Some(FeatureKey::PARALLEL_WORKERS));
-        assert_eq!(FeatureKey::from_known("auto_review_policies"), Some(FeatureKey::AUTO_REVIEW_POLICIES));
-        assert_eq!(FeatureKey::from_known("session_resume"), Some(FeatureKey::SESSION_RESUME));
-        assert_eq!(FeatureKey::from_known("advanced_cost_analytics"), Some(FeatureKey::ADVANCED_COST_ANALYTICS));
-        assert_eq!(FeatureKey::from_known("custom_worktree_policies"), Some(FeatureKey::CUSTOM_WORKTREE_POLICIES));
-        assert_eq!(FeatureKey::from_known("custom_notifications"), Some(FeatureKey::CUSTOM_NOTIFICATIONS));
-        assert_eq!(FeatureKey::from_known("extended_retention"), Some(FeatureKey::EXTENDED_RETENTION));
-        assert_eq!(FeatureKey::from_known("tui_session_detail"), Some(FeatureKey::TUI_SESSION_DETAIL));
+        assert_eq!(
+            FeatureKey::from_known("parallel_workers"),
+            Some(FeatureKey::PARALLEL_WORKERS)
+        );
+        assert_eq!(
+            FeatureKey::from_known("auto_review_policies"),
+            Some(FeatureKey::AUTO_REVIEW_POLICIES)
+        );
+        assert_eq!(
+            FeatureKey::from_known("session_resume"),
+            Some(FeatureKey::SESSION_RESUME)
+        );
+        assert_eq!(
+            FeatureKey::from_known("advanced_cost_analytics"),
+            Some(FeatureKey::ADVANCED_COST_ANALYTICS)
+        );
+        assert_eq!(
+            FeatureKey::from_known("custom_worktree_policies"),
+            Some(FeatureKey::CUSTOM_WORKTREE_POLICIES)
+        );
+        assert_eq!(
+            FeatureKey::from_known("custom_notifications"),
+            Some(FeatureKey::CUSTOM_NOTIFICATIONS)
+        );
+        assert_eq!(
+            FeatureKey::from_known("extended_retention"),
+            Some(FeatureKey::EXTENDED_RETENTION)
+        );
+        assert_eq!(
+            FeatureKey::from_known("tui_session_detail"),
+            Some(FeatureKey::TUI_SESSION_DETAIL)
+        );
         // Team (7)
-        assert_eq!(FeatureKey::from_known("pm_integration"), Some(FeatureKey::PM_INTEGRATION));
-        assert_eq!(FeatureKey::from_known("shared_lineage"), Some(FeatureKey::SHARED_LINEAGE));
-        assert_eq!(FeatureKey::from_known("team_cost_dashboard"), Some(FeatureKey::TEAM_COST_DASHBOARD));
-        assert_eq!(FeatureKey::from_known("centralized_config"), Some(FeatureKey::CENTRALIZED_CONFIG));
+        assert_eq!(
+            FeatureKey::from_known("pm_integration"),
+            Some(FeatureKey::PM_INTEGRATION)
+        );
+        assert_eq!(
+            FeatureKey::from_known("shared_lineage"),
+            Some(FeatureKey::SHARED_LINEAGE)
+        );
+        assert_eq!(
+            FeatureKey::from_known("team_cost_dashboard"),
+            Some(FeatureKey::TEAM_COST_DASHBOARD)
+        );
+        assert_eq!(
+            FeatureKey::from_known("centralized_config"),
+            Some(FeatureKey::CENTRALIZED_CONFIG)
+        );
         assert_eq!(FeatureKey::from_known("rbac"), Some(FeatureKey::RBAC));
-        assert_eq!(FeatureKey::from_known("shared_review_queue"), Some(FeatureKey::SHARED_REVIEW_QUEUE));
-        assert_eq!(FeatureKey::from_known("pm_webhooks"), Some(FeatureKey::PM_WEBHOOKS));
+        assert_eq!(
+            FeatureKey::from_known("shared_review_queue"),
+            Some(FeatureKey::SHARED_REVIEW_QUEUE)
+        );
+        assert_eq!(
+            FeatureKey::from_known("pm_webhooks"),
+            Some(FeatureKey::PM_WEBHOOKS)
+        );
         // Enterprise (6)
-        assert_eq!(FeatureKey::from_known("sso_saml"), Some(FeatureKey::SSO_SAML));
-        assert_eq!(FeatureKey::from_known("audit_logs"), Some(FeatureKey::AUDIT_LOGS));
-        assert_eq!(FeatureKey::from_known("custom_policies"), Some(FeatureKey::CUSTOM_POLICIES));
-        assert_eq!(FeatureKey::from_known("custom_mcp_tools"), Some(FeatureKey::CUSTOM_MCP_TOOLS));
-        assert_eq!(FeatureKey::from_known("dedicated_support"), Some(FeatureKey::DEDICATED_SUPPORT));
-        assert_eq!(FeatureKey::from_known("sla_guarantee"), Some(FeatureKey::SLA_GUARANTEE));
+        assert_eq!(
+            FeatureKey::from_known("sso_saml"),
+            Some(FeatureKey::SSO_SAML)
+        );
+        assert_eq!(
+            FeatureKey::from_known("audit_logs"),
+            Some(FeatureKey::AUDIT_LOGS)
+        );
+        assert_eq!(
+            FeatureKey::from_known("custom_policies"),
+            Some(FeatureKey::CUSTOM_POLICIES)
+        );
+        assert_eq!(
+            FeatureKey::from_known("custom_mcp_tools"),
+            Some(FeatureKey::CUSTOM_MCP_TOOLS)
+        );
+        assert_eq!(
+            FeatureKey::from_known("dedicated_support"),
+            Some(FeatureKey::DEDICATED_SUPPORT)
+        );
+        assert_eq!(
+            FeatureKey::from_known("sla_guarantee"),
+            Some(FeatureKey::SLA_GUARANTEE)
+        );
         // G2 flags (4)
-        assert_eq!(FeatureKey::from_known("kill_advanced_planner"), Some(FeatureKey::KILL_ADVANCED_PLANNER));
-        assert_eq!(FeatureKey::from_known("enable_browser_tool"), Some(FeatureKey::ENABLE_BROWSER_TOOL));
-        assert_eq!(FeatureKey::from_known("enable_compaction_v2"), Some(FeatureKey::ENABLE_COMPACTION_V2));
-        assert_eq!(FeatureKey::from_known("enable_telemetry"), Some(FeatureKey::ENABLE_TELEMETRY));
+        assert_eq!(
+            FeatureKey::from_known("kill_advanced_planner"),
+            Some(FeatureKey::KILL_ADVANCED_PLANNER)
+        );
+        assert_eq!(
+            FeatureKey::from_known("enable_browser_tool"),
+            Some(FeatureKey::ENABLE_BROWSER_TOOL)
+        );
+        assert_eq!(
+            FeatureKey::from_known("enable_compaction_v2"),
+            Some(FeatureKey::ENABLE_COMPACTION_V2)
+        );
+        assert_eq!(
+            FeatureKey::from_known("enable_telemetry"),
+            Some(FeatureKey::ENABLE_TELEMETRY)
+        );
     }
 
     #[test]

@@ -54,8 +54,14 @@ mod tests {
 
     #[test]
     fn quota_key_as_str_roundtrips() {
-        assert_eq!(QuotaKey::MaxConcurrentWorkers.as_str(), "max_concurrent_workers");
-        assert_eq!(QuotaKey::EventRetentionBytes.as_str(), "event_retention_bytes");
+        assert_eq!(
+            QuotaKey::MaxConcurrentWorkers.as_str(),
+            "max_concurrent_workers"
+        );
+        assert_eq!(
+            QuotaKey::EventRetentionBytes.as_str(),
+            "event_retention_bytes"
+        );
         assert_eq!(QuotaKey::MaxTeamMembers.as_str(), "max_team_members");
         assert_eq!(QuotaKey::MinSeats.as_str(), "min_seats");
     }

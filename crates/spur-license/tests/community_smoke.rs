@@ -1,4 +1,4 @@
-use spur_license::{SpurLicense, FeatureKey, QuotaKey, QuotaValue, Tier};
+use spur_license::{FeatureKey, QuotaKey, QuotaValue, SpurLicense, Tier};
 
 #[test]
 fn community_default_has_expected_features() {
