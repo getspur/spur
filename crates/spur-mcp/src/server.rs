@@ -545,6 +545,81 @@ async fn read_latest_task_completion(
     }))
 }
 
+async fn reconstruct_historical_attempts(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+    current_attempt: u32,
+) -> Result<Vec<crate::plan::AttemptRecord>, String> {
+    #[derive(Debug, Default)]
+    struct AttemptAccumulator {
+        attempt: u32,
+        worker_branch: Option<String>,
+        summary: Option<String>,
+        feedback: String,
+    }
+
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| "persisted attempt recovery requires beads backend".to_string())?;
+    let comments = adv
+        .list_comments(issue_id)
+        .await
+        .map_err(|e| format!("failed to load comments for task '{issue_id}': {e}"))?;
+    let audits = crate::plan::projector::collect_sorted_audits(comments);
+
+    let mut attempts_by_delegation: std::collections::HashMap<String, AttemptAccumulator> =
+        std::collections::HashMap::new();
+    for audit in audits {
+        match audit {
+            crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                delegation_id,
+                attempt,
+                ..
+            } if attempt < current_attempt => {
+                attempts_by_delegation
+                    .entry(delegation_id)
+                    .or_insert_with(|| AttemptAccumulator {
+                        attempt,
+                        ..Default::default()
+                    });
+            }
+            crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                delegation_id,
+                worker_branch,
+                result_summary,
+                ..
+            } => {
+                if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
+                    record.worker_branch = worker_branch;
+                    record.summary = result_summary;
+                }
+            }
+            crate::plan::audit_sentinel::AuditSentinelKind::Rejection {
+                delegation_id,
+                feedback,
+            } => {
+                if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
+                    record.feedback = feedback;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut history: Vec<crate::plan::AttemptRecord> = attempts_by_delegation
+        .into_values()
+        .map(|record| crate::plan::AttemptRecord {
+            attempt: record.attempt,
+            worker_branch: record.worker_branch,
+            diff_summary: None,
+            summary: record.summary,
+            feedback: record.feedback,
+        })
+        .collect();
+    history.sort_by_key(|record| record.attempt);
+    Ok(history)
+}
+
 async fn apply_issue_update(
     pm: &spur_pm::PmService,
     issue_id: &str,
@@ -2696,9 +2771,7 @@ impl McpCallbackServer {
                 {
                     return JsonRpcResponse::internal_error(
                         id,
-                        format!(
-                            "failed to clear integration-pending on epic '{epic_id}': {error}"
-                        ),
+                        format!("failed to clear integration-pending on epic '{epic_id}': {error}"),
                     );
                 }
             }
@@ -3445,11 +3518,25 @@ impl McpCallbackServer {
         // If attempt specified and differs from current, look up historical attempt.
         if let Some(want_attempt) = attempt {
             if want_attempt != current_attempt {
-                let Some(rec) = history.iter().find(|r| r.attempt == want_attempt) else {
+                let historical_attempts = if history.is_empty() {
+                    if let (Some(pm), Some(issue_id)) =
+                        (self.pm_service.as_deref(), issue_id.as_deref())
+                    {
+                        reconstruct_historical_attempts(pm, issue_id, current_attempt).await?
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    history.clone()
+                };
+                let Some(rec) = historical_attempts
+                    .iter()
+                    .find(|r| r.attempt == want_attempt)
+                else {
                     return Err(format!(
                         "task '{task_id}' has no attempt {want_attempt} (current: {}, history: {} entries)",
                         current_attempt,
-                        history.len()
+                        historical_attempts.len()
                     ));
                 };
                 let mut resp = serde_json::Map::new();
@@ -3502,9 +3589,11 @@ impl McpCallbackServer {
             for (k, v) in crate::plan::build_task_diff_fields(result) {
                 resp.insert(k, v);
             }
-        } else if let (Some(pm), Some(epic_id), Some(issue_id)) =
-            (self.pm_service.as_deref(), epic_id.as_deref(), issue_id.as_deref())
-        {
+        } else if let (Some(pm), Some(epic_id), Some(issue_id)) = (
+            self.pm_service.as_deref(),
+            epic_id.as_deref(),
+            issue_id.as_deref(),
+        ) {
             let bootstrap = read_persisted_plan_bootstrap(pm, &plan_id, epic_id)
                 .await
                 .ok();
@@ -3530,8 +3619,8 @@ impl McpCallbackServer {
                     "Repository root not configured; get_task_diff cannot reconstruct persisted diffs"
                         .to_string()
                 })?;
-                let diff = diff_text_from_branches(repo_root, &base_ref, &recovered_worker_branch)
-                    .await?;
+                let diff =
+                    diff_text_from_branches(repo_root, &base_ref, &recovered_worker_branch).await?;
                 resp.insert("worker_branch".into(), json!(recovered_worker_branch));
                 resp.insert("diff".into(), json!(diff));
                 if let Some(summary) = completion.and_then(|record| record.summary) {
@@ -4027,7 +4116,13 @@ mod merge_plan_tests {
         )
         .await
         .expect("checkout worker-a1");
-        commit_file(dir.path(), "worker-1.txt", "attempt-1\n", "worker attempt 1").await;
+        commit_file(
+            dir.path(),
+            "worker-1.txt",
+            "attempt-1\n",
+            "worker attempt 1",
+        )
+        .await;
 
         run_git_capture(
             dir.path(),
@@ -4049,7 +4144,13 @@ mod merge_plan_tests {
         )
         .await
         .expect("checkout worker-a2");
-        commit_file(dir.path(), "worker-2.txt", "attempt-2\n", "worker attempt 2").await;
+        commit_file(
+            dir.path(),
+            "worker-2.txt",
+            "attempt-2\n",
+            "worker attempt 2",
+        )
+        .await;
 
         run_git_capture(
             dir.path(),
@@ -4418,9 +4519,14 @@ mod merge_plan_tests {
         let status = decode_merge_status(response);
         assert_eq!(status["merge"]["status"], "succeeded");
 
-        let epic = fixture.pm.get_issue(&fixture.epic_id).await.expect("get epic");
+        let epic = fixture
+            .pm
+            .get_issue(&fixture.epic_id)
+            .await
+            .expect("get epic");
         assert!(
-            !epic.labels
+            !epic
+                .labels
                 .iter()
                 .any(|label| label == crate::plan::labels::INTEGRATION_PENDING),
             "merge_plan should clear integration-pending: {:?}",
