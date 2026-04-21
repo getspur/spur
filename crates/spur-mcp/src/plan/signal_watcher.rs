@@ -1,6 +1,10 @@
-//! Brain-side signal watcher: polls `awaiting_review` tasks bearing
-//! `signal:*` labels, dedupes by `signal_id`, invokes a `MutationProposer` +
-//! `MutationScorer`, and applies the highest-scored batch.
+//! Brain-side signal watcher: polls open (non-closed) tasks bearing a
+//! `signal:*` label and no `spur:signal-processed:*` label, dedupes by
+//! `signal_id`, invokes a `MutationProposer` + `MutationScorer`, and applies
+//! the highest-scored batch. Status filter uses `PmService::closed_status()`
+//! per I5 (beads vocabulary compression); the pre-I5 description of
+//! "`awaiting_review` tasks" was pre-shipping framing — beads never persists
+//! that SPUR-vocab string.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
