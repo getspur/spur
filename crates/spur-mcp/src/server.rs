@@ -3991,6 +3991,181 @@ mod merge_plan_tests {
         }
     }
 
+    async fn setup_persisted_retried_plan(
+        plan_id: &str,
+        clear_cache: bool,
+    ) -> PersistedMergeFixture {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let pm = init_beads_pm(dir.path()).await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["branch", "spur/brain-snapshot-test", "HEAD"],
+        )
+        .await
+        .expect("snapshot branch");
+        let base_snapshot_oid = run_git_capture(
+            dir.path(),
+            None,
+            &["rev-parse", "--verify", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("snapshot oid");
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a1",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-a1");
+        commit_file(dir.path(), "worker-1.txt", "attempt-1\n", "worker attempt 1").await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot branch");
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a2",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-a2");
+        commit_file(dir.path(), "worker-2.txt", "attempt-2\n", "worker attempt 2").await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot branch");
+
+        let tasks = vec![PlanTask {
+            task_id: "task-a".into(),
+            agent: "codex".into(),
+            task: "Integrate worker branch".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        let subgraph = crate::build_epic_subgraph(pm.as_ref(), plan_id, "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+        let adv = pm.advanced().expect("advanced beads backend");
+        crate::emit_plan_submit_audit(
+            adv,
+            plan_id,
+            &subgraph,
+            Some("spur/brain-snapshot-test"),
+            Some(base_snapshot_oid.as_str()),
+            Some("submit_plan"),
+        )
+        .await;
+
+        let task_issue_id = subgraph
+            .task_map
+            .get("task-a")
+            .cloned()
+            .expect("task issue id");
+        for audit in [
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-1".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-a1".into()),
+                result_summary: Some("attempt 1 summary".into()),
+            },
+            AuditSentinelKind::Rejection {
+                delegation_id: "del-1".into(),
+                feedback: "needs changes".into(),
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-2".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-2".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-a2".into()),
+                result_summary: Some("attempt 2 summary".into()),
+            },
+            AuditSentinelKind::Approval {
+                delegation_id: "del-2".into(),
+            },
+        ] {
+            adv.add_comment(&task_issue_id, &encode_comment(&audit))
+                .await
+                .expect("attempt audit");
+        }
+        pm.update_issue(
+            &task_issue_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close task issue");
+
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (mut server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            Some(Arc::clone(&pm)),
+            None,
+            continuation_ctx,
+        );
+        server.set_repo_root(dir.path().to_path_buf());
+
+        let projected = crate::plan::projector::project_plan_from_beads(pm.as_ref(), plan_id)
+            .await
+            .expect("project persisted plan");
+        assert_eq!(
+            crate::plan::build_plan_status(plan_id, &projected)["ready_to_merge"],
+            Value::Bool(true)
+        );
+        server.install_projected_plan(projected).await;
+        if clear_cache {
+            server.active_plans.lock().await.remove(plan_id);
+        }
+
+        PersistedMergeFixture {
+            _dir: dir,
+            pm,
+            server,
+            plan_id: plan_id.to_string(),
+            epic_id: subgraph.epic_id,
+        }
+    }
+
     fn decode_merge_status(response: super::JsonRpcResponse) -> Value {
         assert!(
             response.error.is_none(),
@@ -4275,6 +4450,38 @@ mod merge_plan_tests {
                 .map(|diff| diff.contains("worker.txt"))
                 .unwrap_or(false),
             "latest-attempt cache miss should rebuild full diff text: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_task_diff_historical_attempts_remain_summary_only() {
+        let fixture = setup_persisted_retried_plan("plan-diff-history", true).await;
+
+        let text = fixture
+            .server
+            .handle_get_task_diff(&json!({
+                "plan_id": fixture.plan_id,
+                "task_id": "task-a",
+                "attempt": 1,
+            }))
+            .await
+            .expect("historical get_task_diff should succeed");
+        let response = decode_task_diff_response(&text);
+
+        assert_eq!(response["status"], "historical");
+        assert_eq!(response["worker_branch"], "spur/worker-a1");
+        assert_eq!(response["summary"], "attempt 1 summary");
+        assert_eq!(response["feedback"], "needs changes");
+        assert!(
+            response.get("diff").is_none(),
+            "historical responses must remain summary-only: {response}"
+        );
+        assert!(
+            response["note"]
+                .as_str()
+                .map(|note| note.contains("Historical attempt"))
+                .unwrap_or(false),
+            "historical responses must explain the summary-only contract: {response}"
         );
     }
 }
