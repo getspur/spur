@@ -26,6 +26,7 @@ fn render_status(width: u16) -> String {
             issue_count: 0,
             alert_summary: None,
             license_badge: None,
+            flag_summary: None,
         };
         StatusBar::render(f, area, props);
     })

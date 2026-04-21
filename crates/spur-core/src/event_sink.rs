@@ -17,7 +17,7 @@ use spur_acp::domain::events::SpurEvent;
 
 /// Maximum file size before rotation. Override with
 /// `SPUR_EVENT_LOG_MAX_BYTES`.
-const DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
+pub const DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
 const FLUSH_BYTES: usize = 64 * 1024; // 64 KB buffer threshold
 const FLUSH_INTERVAL_MS: u64 = 100;
 
@@ -27,7 +27,7 @@ static ROTATION_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Spawn the sink task. Returns immediately; the task runs until the
 /// broadcast channel closes (orchestrator shutdown).
-pub fn spawn_sink(mut rx: broadcast::Receiver<SpurEvent>) {
+pub fn spawn_sink(mut rx: broadcast::Receiver<SpurEvent>, max_bytes: u64) {
     let events_dir = events_dir();
     if let Err(e) = fs::create_dir_all(&events_dir) {
         tracing::error!(error = %e, dir = %events_dir.display(),
@@ -36,7 +36,7 @@ pub fn spawn_sink(mut rx: broadcast::Receiver<SpurEvent>) {
     }
 
     tokio::spawn(async move {
-        let mut state = match SinkState::open(&events_dir) {
+        let mut state = match SinkState::open(&events_dir, max_bytes) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e,
@@ -84,11 +84,7 @@ struct SinkState {
 }
 
 impl SinkState {
-    fn open(dir: &Path) -> std::io::Result<Self> {
-        let max_bytes = std::env::var("SPUR_EVENT_LOG_MAX_BYTES")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_MAX_BYTES);
+    fn open(dir: &Path, max_bytes: u64) -> std::io::Result<Self> {
         let path = rotated_path(dir);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -154,20 +150,7 @@ mod tests {
     /// Helper: open a `SinkState` with an explicit `max_bytes`, bypassing
     /// `SPUR_EVENT_LOG_MAX_BYTES` so tests don't race on the process env.
     fn open_with_max(dir: &std::path::Path, max_bytes: u64) -> SinkState {
-        let path = rotated_path(dir);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap();
-        let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
-        SinkState {
-            dir: dir.to_path_buf(),
-            writer: BufWriter::with_capacity(FLUSH_BYTES, file),
-            current_path: path,
-            bytes_in_file: bytes,
-            max_bytes,
-        }
+        SinkState::open(dir, max_bytes).unwrap()
     }
 
     #[tokio::test]

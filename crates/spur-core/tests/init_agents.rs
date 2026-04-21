@@ -39,7 +39,8 @@ async fn init_agents_finds_only_stubs_on_path() {
         let prev_path = std::env::var_os("PATH");
         std::env::set_var("PATH", format!("{}:/usr/bin", tmp.path().display()));
         let r = {
-            let mut orch = Orchestrator::new(tmp.path().into(), SpurConfig::default()).unwrap();
+            let mut orch =
+                Orchestrator::new(tmp.path().into(), SpurConfig::default(), None).unwrap();
             orch.init_agents().await.unwrap()
         };
         if let Some(p) = prev_path {
@@ -66,7 +67,8 @@ async fn init_agents_with_empty_path_returns_empty() {
         let prev_path = std::env::var_os("PATH");
         std::env::set_var("PATH", format!("{}:/usr/bin", tmp.path().display()));
         let r = {
-            let mut orch = Orchestrator::new(tmp.path().into(), SpurConfig::default()).unwrap();
+            let mut orch =
+                Orchestrator::new(tmp.path().into(), SpurConfig::default(), None).unwrap();
             orch.init_agents().await.unwrap()
         };
         if let Some(p) = prev_path {
@@ -96,7 +98,8 @@ async fn init_agents_registers_full_spec12_config() {
         let prev_path = std::env::var_os("PATH");
         std::env::set_var("PATH", format!("{}:/usr/bin", tmp.path().display()));
         let r = {
-            let mut orch = Orchestrator::new(tmp.path().into(), SpurConfig::default()).unwrap();
+            let mut orch =
+                Orchestrator::new(tmp.path().into(), SpurConfig::default(), None).unwrap();
             orch.init_agents().await.unwrap();
             orch.registry
                 .list()

@@ -82,6 +82,8 @@ pub struct StatusBarProps<'a> {
     pub alert_summary: Option<(usize, usize, usize)>,
     /// Compact license snapshot rendered as a pill, if licensing is active.
     pub license_badge: Option<&'a LicenseBadge>,
+    /// Compact flag snapshot: (active_count, total_count). None if unavailable.
+    pub flag_summary: Option<(usize, usize)>,
 }
 
 impl StatusBar {
@@ -141,6 +143,17 @@ impl StatusBar {
         if let Some(badge) = props.license_badge {
             right_spans.push(Span::styled(format!("{} ", badge.label), badge.style()));
             right_spans.push(Span::styled("· ", Style::default().fg(Color::DarkGray)));
+        }
+        if let Some((active, total)) = props.flag_summary {
+            let flag_style = if active == total {
+                Style::default().fg(Color::Green)
+            } else if active == 0 {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            right_spans.push(Span::styled(format!("F:{active}/{total}"), flag_style));
+            right_spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
         }
         right_spans.extend([
             Span::styled(

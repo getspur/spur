@@ -118,7 +118,9 @@ fn from_provider_returns_a_usable_facade() {
         }
     }
 
-    let license = SpurLicense::from_provider(Arc::new(Noop));
+    let policy = spur_license::policy::PolicyResolver::with_default_overlay();
+    let feature_gate = Arc::new(spur_license::FeatureGate::new(policy));
+    let license = SpurLicense::from_provider(Arc::new(Noop), feature_gate);
     assert!(matches!(
         license.current_state().status,
         spur_license::LicenseStatus::Inactive

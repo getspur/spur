@@ -140,6 +140,29 @@ fn license_badge_from_state(state: &LicenseStateEvent) -> Option<LicenseBadge> {
     }
 }
 
+fn compute_flag_summary() -> Option<(usize, usize)> {
+    use spur_license::policy::PolicyResolver;
+    use spur_license::{FeatureGate, FeatureKey};
+
+    let policy = PolicyResolver::embedded();
+    let gate = FeatureGate::new(policy);
+
+    let flags = [
+        FeatureKey::KILL_ADVANCED_PLANNER,
+        FeatureKey::ENABLE_BROWSER_TOOL,
+        FeatureKey::ENABLE_COMPACTION_V2,
+        FeatureKey::ENABLE_TELEMETRY,
+    ];
+
+    let total = flags.len();
+    let active = flags
+        .iter()
+        .filter(|&&k| gate.is_flag_enabled(k).unwrap_or(false))
+        .count();
+
+    Some((active, total))
+}
+
 // ─── App state ─────────────────────────────────────────────────────────
 
 pub struct App {
@@ -164,6 +187,7 @@ pub struct App {
     pub(crate) worker_streams: crate::worker_streams::WorkerStreams,
     license_state: LicenseStateEvent,
     license_badge: Option<LicenseBadge>,
+    flag_summary: Option<(usize, usize)>, // (active_count, total_count)
     #[cfg(feature = "markdown")]
     pub(crate) mermaid_picker: Option<Picker>,
     #[cfg(feature = "markdown")]
@@ -277,6 +301,7 @@ impl App {
             mermaid_viewer: None,
             license_state,
             license_badge: None,
+            flag_summary: None,
             metadata_store,
             edit_mode: EditMode::default(),
             config,
@@ -287,6 +312,7 @@ impl App {
         };
 
         app.license_badge = license_badge_from_state(&app.license_state);
+        app.flag_summary = compute_flag_summary();
 
         // Validate every agent entry. Fatal errors abort the agent (but we don't
         // crash the whole TUI — other agents may still work). Warnings are logged
@@ -669,6 +695,7 @@ impl App {
                     lineage: &self.lineage,
                     brain_status: &self.brain_status,
                     license_badge: self.license_badge.as_ref(),
+                    flag_summary: self.flag_summary,
                 };
                 let action = match self.current_view {
                     ViewId::Dashboard => self.dashboard.handle_key_with_worker_streams(
@@ -1146,6 +1173,7 @@ impl App {
             lineage: &self.lineage,
             brain_status: &self.brain_status,
             license_badge: self.license_badge.as_ref(),
+            flag_summary: self.flag_summary,
         };
         self.dashboard.handle_spur_event(&event, &ctx);
         if let Some(ref mut detail) = self.session_detail {
@@ -2053,6 +2081,7 @@ impl App {
             lineage: &self.lineage,
             brain_status: &self.brain_status,
             license_badge: self.license_badge.as_ref(),
+            flag_summary: self.flag_summary,
         };
 
         match self.current_view.clone() {
@@ -2062,6 +2091,7 @@ impl App {
                 &self.lineage,
                 self.license_badge.as_ref(),
                 &mut self.worker_streams,
+                self.flag_summary,
             ),
             ViewId::SessionDetail(_) => {
                 if let Some(ref mut detail) = self.session_detail {

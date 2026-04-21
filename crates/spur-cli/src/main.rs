@@ -1,4 +1,5 @@
 mod commands;
+mod onboarding;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 use tracing_subscriber::prelude::*;
 
 use commands::auth::AuthCommands;
+use commands::flags::FlagsCommands;
 use spur_acp::config::SpurConfig;
 use spur_acp::SessionId;
 use spur_core::{Orchestrator, RunOpts};
@@ -119,6 +121,11 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// List and inspect runtime feature flags
+    Flags {
+        #[command(subcommand)]
+        command: FlagsCommands,
     },
     /// Launch interactive TUI dashboard
     Watch {
@@ -414,6 +421,7 @@ async fn main() -> Result<()> {
                 std::process::exit(exit);
             }
         },
+        Commands::Flags { command } => commands::flags::run(command).await,
         Commands::Watch {
             brain,
             sessions,
@@ -428,25 +436,36 @@ async fn main() -> Result<()> {
             };
             let config_arc = std::sync::Arc::new(config.clone());
             let license = SpurLicense::from_env_or_disabled();
+            if let Err(e) = onboarding::maybe_prompt_first_run(&license).await {
+                tracing::warn!("first-run prompt failed: {e}; continuing");
+            }
             let initial_license_state =
                 spur_core::license_runtime::to_event_state(license.current_state());
 
             // Create PmService (optional — returns None if no backend available)
-            let pm_service = spur_pm::PmService::try_new(
-                config.pm.github.as_ref().and_then(|g| g.repo.clone()),
-                config.pm.beads.as_ref().is_none_or(|b| b.enabled),
-                config.pm.github.as_ref().is_none_or(|g| g.enabled),
-                &repo_root,
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("PM service initialization failed: {e}");
+            let pm_service = if license
+                .feature_gate()
+                .has(spur_license::FeatureKey::PM_INTEGRATION)
+            {
+                spur_pm::PmService::try_new(
+                    config.pm.github.as_ref().and_then(|g| g.repo.clone()),
+                    config.pm.beads.as_ref().is_none_or(|b| b.enabled),
+                    config.pm.github.as_ref().is_none_or(|g| g.enabled),
+                    &repo_root,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("PM service initialization failed: {e}");
+                    None
+                })
+            } else {
+                tracing::info!("PM integration not available on current tier");
                 None
-            });
+            };
             let pm_arc = pm_service.map(std::sync::Arc::new);
 
-            let orch = Orchestrator::new(repo_root.clone(), config)?;
+            let orch = Orchestrator::new(repo_root.clone(), config, Some(license.feature_gate()))?;
             let mut orch = if let Some(pm) = pm_arc {
                 orch.with_pm_service(pm)
             } else {
@@ -654,7 +673,7 @@ async fn main() -> Result<()> {
 
 async fn cmd_agents(repo_root: PathBuf, command: Option<AgentsCommands>) -> Result<()> {
     let config = load_config()?;
-    let mut orch = Orchestrator::new(repo_root, config)?;
+    let mut orch = Orchestrator::new(repo_root, config, None)?;
 
     match command {
         None => {
@@ -741,5 +760,6 @@ fn load_config() -> Result<SpurConfig> {
 
 fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
     let config = load_config()?;
-    Orchestrator::new(repo_root, config)
+    let license = SpurLicense::from_env_or_disabled();
+    Orchestrator::new(repo_root, config, Some(license.feature_gate()))
 }
