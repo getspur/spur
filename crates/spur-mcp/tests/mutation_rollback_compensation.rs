@@ -155,53 +155,24 @@ fn issue_ids_for_label(repo: &Path, label: &str) -> Result<Vec<String>, String> 
     Ok(ids)
 }
 
-fn parent_closed(repo: &Path, parent_id: &str) -> Result<bool, String> {
-    let rows = run_sql_json(
-        repo,
-        &format!(
-            "SELECT status
-             FROM issues
-             WHERE id = '{parent_id}';"
-        ),
-    )?;
-    let parsed = serde_json::from_str::<Vec<serde_json::Value>>(&rows)
-        .map_err(|err| format!("parse parent readiness rows: {err}; raw={rows}"))?;
-    let Some(row) = parsed.first() else {
-        return Ok(false);
-    };
-    let status = row
-        .get("status")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    Ok(status == "closed")
-}
-
 async fn inject_partial_rollback_failure(
     repo: PathBuf,
     mutation_id: Uuid,
-    parent_id: String,
-    downstream_id: String,
 ) -> Result<(), String> {
     let label = mutation_id_label(&mutation_id);
-    let mut cycle_injected = false;
     for _ in 0..2_000 {
-        let mut ids = issue_ids_for_label(&repo, &label)?;
-        if ids.len() >= 2 && !cycle_injected {
-            ids.sort();
-            let sql = format!(
-                "INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by)
-                 VALUES ('{}', '{}', 'blocks', 'mutation-test');
-                 INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by)
-                 VALUES ('{}', '{}', 'blocks', 'mutation-test');",
-                ids[0], ids[1], ids[1], ids[0]
-            );
-            run_sql(&repo, &sql)?;
-            cycle_injected = true;
-        }
-        if cycle_injected && parent_closed(&repo, &parent_id)? {
+        let mut child_ids = issue_ids_for_label(&repo, &label)?;
+        child_ids.sort();
+        if child_ids.len() >= 2 {
             run_sql(
                 &repo,
-                &format!("DELETE FROM issues WHERE id = '{}';", downstream_id),
+                &format!(
+                    "INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by)
+                     VALUES ('{}', '{}', 'blocks', 'mutation-test');
+                     INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by)
+                     VALUES ('{}', '{}', 'blocks', 'mutation-test');",
+                    child_ids[0], child_ids[1], child_ids[1], child_ids[0]
+                ),
             )?;
             return Ok(());
         }
@@ -238,6 +209,18 @@ async fn t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensa
         .unwrap(),
     );
     run_br(dir.path(), &["dep", "add", &downstream, &parent]).expect("seed downstream dep");
+    run_sql(
+        dir.path(),
+        &format!(
+            "CREATE TRIGGER delete_downstream_after_parent_close
+             AFTER UPDATE OF status ON issues
+             WHEN NEW.id = '{parent}' AND NEW.status = 'closed'
+             BEGIN
+               DELETE FROM issues WHERE id = '{downstream}';
+             END;"
+        ),
+    )
+    .expect("install downstream deletion trigger");
 
     let pm = Arc::new(
         spur_pm::PmService::try_new(None, true, false, dir.path(), None)
@@ -264,8 +247,6 @@ async fn t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensa
     let injector = tokio::spawn(inject_partial_rollback_failure(
         dir.path().to_path_buf(),
         mutation_id,
-        parent.clone(),
-        downstream.clone(),
     ));
 
     let apply_result = apply_mutation(pm.clone(), &batch).await;

@@ -3578,6 +3578,7 @@ dependencies = [
  "serde_json",
  "spur-acp",
  "spur-core",
+ "spur-license",
  "spur-pm",
  "tempfile",
  "tokio",
