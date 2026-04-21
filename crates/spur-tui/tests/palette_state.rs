@@ -7,7 +7,9 @@ fn mk(kind: PaletteKind, label: &str) -> PaletteResult {
         subtitle: String::new(),
         payload: match kind {
             PaletteKind::Command => PalettePayload::Command { name: label.into() },
-            PaletteKind::Session => PalettePayload::Session { session_id: label.into() },
+            PaletteKind::Session => PalettePayload::Session {
+                session_id: label.into(),
+            },
             PaletteKind::Worker => PalettePayload::Worker {
                 session_id: spur_acp::SessionId(label.into()),
             },
@@ -27,14 +29,14 @@ fn empty_state_has_empty_query_and_no_cursor_movement() {
 #[test]
 fn push_raw_accumulates_without_ranking() {
     let mut state = PaletteState::new();
-    state.push_raw(vec![
-        PaletteResult {
-            kind: PaletteKind::Command,
-            label: "/plan".into(),
-            subtitle: "cmd · toggle plan mode".into(),
-            payload: PalettePayload::Command { name: "/plan".into() },
+    state.push_raw(vec![PaletteResult {
+        kind: PaletteKind::Command,
+        label: "/plan".into(),
+        subtitle: "cmd · toggle plan mode".into(),
+        payload: PalettePayload::Command {
+            name: "/plan".into(),
         },
-    ]);
+    }]);
     // With empty query, raw results pass through as ranked (input order preserved,
     // matching `commands::fuzzy::rank` semantics).
     assert_eq!(state.ranked_len(), 1);
@@ -65,11 +67,17 @@ fn cursor_up_down_stay_in_bounds_and_wrap_disabled() {
         mk(PaletteKind::Command, "/c"),
     ]);
     assert_eq!(s.cursor(), 0);
-    s.cursor_down(); assert_eq!(s.cursor(), 1);
-    s.cursor_down(); assert_eq!(s.cursor(), 2);
-    s.cursor_down(); assert_eq!(s.cursor(), 2); // clamped, no wrap
-    s.cursor_up();   assert_eq!(s.cursor(), 1);
-    s.cursor_up();   s.cursor_up(); assert_eq!(s.cursor(), 0); // clamped at 0
+    s.cursor_down();
+    assert_eq!(s.cursor(), 1);
+    s.cursor_down();
+    assert_eq!(s.cursor(), 2);
+    s.cursor_down();
+    assert_eq!(s.cursor(), 2); // clamped, no wrap
+    s.cursor_up();
+    assert_eq!(s.cursor(), 1);
+    s.cursor_up();
+    s.cursor_up();
+    assert_eq!(s.cursor(), 0); // clamped at 0
 }
 
 #[test]
@@ -174,13 +182,17 @@ fn subtitle_weight_actually_demotes_subtitle_only_matches() {
             kind: PaletteKind::Session,
             label: "irrelevant".into(),
             subtitle: "alpha".into(),
-            payload: PalettePayload::Session { session_id: "b".into() },
+            payload: PalettePayload::Session {
+                session_id: "b".into(),
+            },
         },
         PaletteResult {
             kind: PaletteKind::Session,
             label: "alpha".into(),
             subtitle: "irrelevant".into(),
-            payload: PalettePayload::Session { session_id: "a".into() },
+            payload: PalettePayload::Session {
+                session_id: "a".into(),
+            },
         },
     ]);
     s.set_query("alpha");

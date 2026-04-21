@@ -69,7 +69,9 @@ fn ctrl_r_esc_leaves_input_bar_untouched() {
     let mut v = mk_view();
     seed_history(
         &mut v,
-        vec![InputHistoryEntry::new(InputStateSnapshot::from_text("hello"))],
+        vec![InputHistoryEntry::new(InputStateSnapshot::from_text(
+            "hello",
+        ))],
     );
 
     // Start with a draft in the InputBar.
@@ -103,7 +105,9 @@ fn ctrl_r_accept_roundtrips_resource_link_on_resubmit() {
         Action::SendMessage { blocks, .. } => {
             // Expect a Text("hi ") + ResourceLink { uri: file:///foo, name: foo }.
             assert_eq!(blocks.len(), 2);
-            assert!(matches!(&blocks[1], ContentBlock::ResourceLink(r) if r.uri == "file:///foo" && r.name == "foo"));
+            assert!(
+                matches!(&blocks[1], ContentBlock::ResourceLink(r) if r.uri == "file:///foo" && r.name == "foo")
+            );
         }
         other => panic!("expected SendMessage, got {:?}", other),
     }

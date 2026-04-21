@@ -50,8 +50,7 @@ impl InputStateSnapshot {
         let mut last_end: usize = 0;
         for r in sorted {
             let in_bounds = r.start <= r.end && r.end <= text.len();
-            let on_boundaries =
-                text.is_char_boundary(r.start) && text.is_char_boundary(r.end);
+            let on_boundaries = text.is_char_boundary(r.start) && text.is_char_boundary(r.end);
             let non_overlapping = r.start >= last_end;
             if in_bounds && on_boundaries && non_overlapping {
                 last_end = r.end;

@@ -1,6 +1,8 @@
 use spur_tui::commands::registry::CommandRegistry;
 use spur_tui::components::palette::{PaletteKind, PalettePayload};
-use spur_tui::components::palette_sources::{CommandSource, PaletteSource, SessionSource, WorkerSource};
+use spur_tui::components::palette_sources::{
+    CommandSource, PaletteSource, SessionSource, WorkerSource,
+};
 use spur_tui::session_metadata::{SessionEntry, SessionMetadata};
 
 #[test]
@@ -9,7 +11,10 @@ fn command_source_yields_all_registered_commands_as_command_kind() {
     let src = CommandSource::new(&registry);
     let results = src.collect();
 
-    assert!(!results.is_empty(), "default registry should contain builtin commands");
+    assert!(
+        !results.is_empty(),
+        "default registry should contain builtin commands"
+    );
     assert!(results.iter().all(|r| r.kind == PaletteKind::Command));
 
     // Every result has a command payload with a non-empty name.
@@ -48,7 +53,10 @@ fn session_source_yields_session_kind_rows_with_title_as_label() {
     assert!(labels.contains(&"sess-2"));
 
     for r in &results {
-        assert!(matches!(r.kind, spur_tui::components::palette::PaletteKind::Session));
+        assert!(matches!(
+            r.kind,
+            spur_tui::components::palette::PaletteKind::Session
+        ));
     }
 }
 

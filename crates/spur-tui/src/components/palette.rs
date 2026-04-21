@@ -81,18 +81,28 @@ impl PaletteState {
         }
     }
 
-    pub fn query(&self) -> &str { &self.query }
-    pub fn cursor(&self) -> usize { self.cursor }
-    pub fn ranked_len(&self) -> usize { self.order.len() }
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+    pub fn ranked_len(&self) -> usize {
+        self.order.len()
+    }
 
     /// Borrow the `i`th ranked result, if any.
     pub fn nth_ranked(&self, i: usize) -> Option<&PaletteResult> {
-        self.order.get(i).and_then(|&idx| self.raw.get(idx as usize))
+        self.order
+            .get(i)
+            .and_then(|&idx| self.raw.get(idx as usize))
     }
 
     /// Iterate ranked results in rank order. Zero-copy.
     pub fn iter_ranked(&self) -> impl Iterator<Item = &PaletteResult> + '_ {
-        self.order.iter().filter_map(move |&i| self.raw.get(i as usize))
+        self.order
+            .iter()
+            .filter_map(move |&i| self.raw.get(i as usize))
     }
 
     /// Populate from a source batch. Call once per source at open time.
@@ -111,7 +121,10 @@ impl PaletteState {
     }
 
     fn rerank(&mut self) {
-        use nucleo_matcher::{pattern::{CaseMatching, Normalization, Pattern}, Utf32Str};
+        use nucleo_matcher::{
+            pattern::{CaseMatching, Normalization, Pattern},
+            Utf32Str,
+        };
 
         let _rerank_start = std::time::Instant::now();
         self.order.clear();
@@ -178,20 +191,32 @@ impl PaletteState {
     /// Clamped to `[0, order.len()-1]`. No-op when ranked is empty.
     pub fn move_cursor(&mut self, delta: isize) {
         let n = self.order.len() as isize;
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
         let new_cursor = (self.cursor as isize + delta).clamp(0, n - 1);
         self.cursor = new_cursor as usize;
     }
 
-    pub fn cursor_up(&mut self)   { self.move_cursor(-1); }
-    pub fn cursor_down(&mut self) { self.move_cursor(1); }
+    pub fn cursor_up(&mut self) {
+        self.move_cursor(-1);
+    }
+    pub fn cursor_down(&mut self) {
+        self.move_cursor(1);
+    }
 
     /// Move the cursor up by `n` rows (for PageUp). Clamped at 0.
-    pub fn page_up(&mut self, n: usize)   { self.move_cursor(-(n as isize)); }
+    pub fn page_up(&mut self, n: usize) {
+        self.move_cursor(-(n as isize));
+    }
     /// Move the cursor down by `n` rows (for PageDown). Clamped at end.
-    pub fn page_down(&mut self, n: usize) { self.move_cursor(n as isize); }
+    pub fn page_down(&mut self, n: usize) {
+        self.move_cursor(n as isize);
+    }
 
-    pub fn cursor_home(&mut self) { self.cursor = 0; }
+    pub fn cursor_home(&mut self) {
+        self.cursor = 0;
+    }
     pub fn cursor_end(&mut self) {
         self.cursor = self.order.len().saturating_sub(1);
     }
@@ -211,7 +236,9 @@ impl PaletteState {
 }
 
 impl Default for PaletteState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -228,17 +255,13 @@ impl PaletteState {
     /// mutated but the overlay stays open.
     pub fn handle_key(&mut self, ev: KeyEvent) -> Option<PaletteIntent> {
         // Ctrl+C always dismisses.
-        if ev.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(ev.code, KeyCode::Char('c'))
-        {
+        if ev.modifiers.contains(KeyModifiers::CONTROL) && matches!(ev.code, KeyCode::Char('c')) {
             return Some(PaletteIntent::Dismiss);
         }
 
         match ev.code {
             KeyCode::Esc => Some(PaletteIntent::Dismiss),
-            KeyCode::Enter | KeyCode::Tab => {
-                self.selected().cloned().map(PaletteIntent::Accept)
-            }
+            KeyCode::Enter | KeyCode::Tab => self.selected().cloned().map(PaletteIntent::Accept),
             KeyCode::Up => {
                 self.cursor_up();
                 None

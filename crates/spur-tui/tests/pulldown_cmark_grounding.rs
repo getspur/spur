@@ -99,11 +99,10 @@ fn claim_2_paragraph_with_content_after_is_authoritative() {
     let evs = events(input);
     let mut saw_first_paragraph_end_before_eof = false;
     for (ev, range) in &evs {
-        if matches!(ev, Event::End(TagEnd::Paragraph))
-            && range.end < input.len() {
-                saw_first_paragraph_end_before_eof = true;
-                break;
-            }
+        if matches!(ev, Event::End(TagEnd::Paragraph)) && range.end < input.len() {
+            saw_first_paragraph_end_before_eof = true;
+            break;
+        }
     }
     assert!(
         saw_first_paragraph_end_before_eof,

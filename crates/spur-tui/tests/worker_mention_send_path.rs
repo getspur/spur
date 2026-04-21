@@ -109,7 +109,7 @@ fn direct_session_skips_hint_even_with_worker_atom_pasted() {
     let mut v = SessionDetailView::new(
         spur_acp::SessionId::new(),
         "claude".into(),
-        "worker".into(),     // role != "brain"
+        "worker".into(), // role != "brain"
         tmp.path().to_path_buf(),
         spur_tui::test_support::default_agent_config("claude"),
         vec![WorkerMentionDescriptor {

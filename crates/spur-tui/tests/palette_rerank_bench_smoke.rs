@@ -24,7 +24,9 @@ fn make_results(n: usize) -> Vec<PaletteResult> {
             kind: PaletteKind::Session,
             label: format!("session-{}-refactor-auth-module-endpoint-{}", i, i * 3),
             subtitle: format!("session · synthetic #{}", i),
-            payload: PalettePayload::Session { session_id: format!("s{}", i) },
+            payload: PalettePayload::Session {
+                session_id: format!("s{}", i),
+            },
         })
         .collect()
 }
@@ -68,7 +70,10 @@ fn rerank_at_n500_per_keystroke_is_within_budget() {
     let rl = state.ranked_len();
     assert!(rl <= 500, "ranked_len exceeds N");
     if rl > 0 {
-        assert!(state.selected().is_some(), "selected must be Some when ranked non-empty");
+        assert!(
+            state.selected().is_some(),
+            "selected must be Some when ranked non-empty"
+        );
     }
 }
 
@@ -88,7 +93,11 @@ fn rerank_on_empty_query_at_n500_is_within_budget() {
         budget_ms,
         dt
     );
-    assert_eq!(state.ranked_len(), 500, "empty query must yield all entries");
+    assert_eq!(
+        state.ranked_len(),
+        500,
+        "empty query must yield all entries"
+    );
 }
 
 #[test]
@@ -99,7 +108,7 @@ fn rerank_cursor_stays_valid_across_query_mutation() {
     state.cursor_down();
     state.cursor_down(); // cursor at 3
     state.set_query("refactor"); // shrinks ranked dramatically
-    // cursor must be clamped to the new (smaller) ranked length.
+                                 // cursor must be clamped to the new (smaller) ranked length.
     assert!(state.cursor() < state.ranked_len().max(1));
     if state.ranked_len() > 0 {
         assert!(state.selected().is_some());

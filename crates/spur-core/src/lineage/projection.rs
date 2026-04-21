@@ -347,9 +347,7 @@ impl ExecutorLineage {
         if let Some(n) = self.nodes.get(root) {
             if matches!(
                 n.phase,
-                LifecycleState::Succeeded
-                    | LifecycleState::Failed
-                    | LifecycleState::Cancelled
+                LifecycleState::Succeeded | LifecycleState::Failed | LifecycleState::Cancelled
             ) {
                 return;
             }
@@ -371,9 +369,7 @@ impl ExecutorLineage {
                 // succeeded/failed/cancelled keeps its terminal status.
                 if matches!(
                     n.phase,
-                    LifecycleState::Succeeded
-                        | LifecycleState::Failed
-                        | LifecycleState::Cancelled
+                    LifecycleState::Succeeded | LifecycleState::Failed | LifecycleState::Cancelled
                 ) {
                     continue;
                 }
@@ -502,4 +498,3 @@ fn terminal_attempt_status(p: LifecycleState) -> Option<AttemptStatus> {
         _ => None,
     }
 }
-

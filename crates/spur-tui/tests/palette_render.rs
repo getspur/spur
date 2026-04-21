@@ -15,13 +15,23 @@ fn render_to_string_with_session_flag(
     let backend = TestBackend::new(width, height);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| {
-        let area = Rect { x: 0, y: 0, width, height };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
         let overlay = PaletteOverlay::new(state).with_session_active(session_active);
         f.render_widget(overlay, area);
-    }).unwrap();
+    })
+    .unwrap();
     let buf = term.backend().buffer().clone();
     (0..buf.area.height)
-        .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -34,13 +44,17 @@ fn overlay_renders_title_query_and_rows() {
             kind: PaletteKind::Session,
             label: "refactor-auth".into(),
             subtitle: "session · 2h ago".into(),
-            payload: PalettePayload::Session { session_id: "s1".into() },
+            payload: PalettePayload::Session {
+                session_id: "s1".into(),
+            },
         },
         PaletteResult {
             kind: PaletteKind::Command,
             label: "/plan".into(),
             subtitle: "cmd · toggle plan".into(),
-            payload: PalettePayload::Command { name: "/plan".into() },
+            payload: PalettePayload::Command {
+                name: "/plan".into(),
+            },
         },
     ]);
     // Set a non-empty query so the flat render path is used instead of the
@@ -74,7 +88,9 @@ fn overlay_renders_no_match_hint_when_query_nonempty_and_ranked_empty() {
         kind: PaletteKind::Session,
         label: "zzz".into(),
         subtitle: "".into(),
-        payload: PalettePayload::Session { session_id: "z".into() },
+        payload: PalettePayload::Session {
+            session_id: "z".into(),
+        },
     }]);
     state.set_query("xyzzyfoobar");
     let rendered = render_to_string_with_session_flag(&state, 60, 12, true);
@@ -105,13 +121,17 @@ fn overlay_renders_grouped_sections_when_query_empty() {
             kind: PaletteKind::Command,
             label: "/help".into(),
             subtitle: "cmd · show help".into(),
-            payload: PalettePayload::Command { name: "help".into() },
+            payload: PalettePayload::Command {
+                name: "help".into(),
+            },
         },
         PaletteResult {
             kind: PaletteKind::Session,
             label: "refactor-auth".into(),
             subtitle: "session · s1".into(),
-            payload: PalettePayload::Session { session_id: "s1".into() },
+            payload: PalettePayload::Session {
+                session_id: "s1".into(),
+            },
         },
         PaletteResult {
             kind: PaletteKind::Worker,
@@ -123,9 +143,18 @@ fn overlay_renders_grouped_sections_when_query_empty() {
         },
     ]);
     let rendered = render_to_string_with_session_flag(&state, 80, 24, true);
-    assert!(rendered.contains("COMMANDS"), "missing COMMANDS header:\n{rendered}");
-    assert!(rendered.contains("SESSIONS"), "missing SESSIONS header:\n{rendered}");
-    assert!(rendered.contains("WORKERS"), "missing WORKERS header:\n{rendered}");
+    assert!(
+        rendered.contains("COMMANDS"),
+        "missing COMMANDS header:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("SESSIONS"),
+        "missing SESSIONS header:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("WORKERS"),
+        "missing WORKERS header:\n{rendered}"
+    );
     assert!(
         rendered.contains("TRACE \u{2014} coming soon") || rendered.contains("TRACE - coming soon"),
         "missing TRACE placeholder:\n{rendered}"
@@ -142,12 +171,17 @@ fn overlay_falls_back_to_flat_render_when_query_nonempty() {
         kind: PaletteKind::Command,
         label: "/help".into(),
         subtitle: "cmd · show help".into(),
-        payload: PalettePayload::Command { name: "help".into() },
+        payload: PalettePayload::Command {
+            name: "help".into(),
+        },
     }]);
     state.set_query("help");
     let rendered = render_to_string_with_session_flag(&state, 80, 24, true);
     // Flat render = no section headers.
-    assert!(!rendered.contains("COMMANDS"), "unexpected header in flat render:\n{rendered}");
+    assert!(
+        !rendered.contains("COMMANDS"),
+        "unexpected header in flat render:\n{rendered}"
+    );
     assert!(rendered.contains("/help"));
 }
 
@@ -166,7 +200,9 @@ fn overlay_grouped_view_shows_trace_placeholder_at_80x24_with_full_data() {
             kind: PaletteKind::Command,
             label: format!("/cmd-{i}"),
             subtitle: "cmd".into(),
-            payload: PalettePayload::Command { name: format!("cmd-{i}") },
+            payload: PalettePayload::Command {
+                name: format!("cmd-{i}"),
+            },
         });
     }
     for i in 0..5 {
@@ -174,7 +210,9 @@ fn overlay_grouped_view_shows_trace_placeholder_at_80x24_with_full_data() {
             kind: PaletteKind::Session,
             label: format!("session-{i}"),
             subtitle: "session".into(),
-            payload: PalettePayload::Session { session_id: format!("s{i}") },
+            payload: PalettePayload::Session {
+                session_id: format!("s{i}"),
+            },
         });
     }
     for i in 0..5 {
@@ -209,13 +247,17 @@ fn overlay_grouped_view_highlights_cursor_row() {
             kind: PaletteKind::Session,
             label: "first-session".into(),
             subtitle: "session · 1".into(),
-            payload: PalettePayload::Session { session_id: "s1".into() },
+            payload: PalettePayload::Session {
+                session_id: "s1".into(),
+            },
         },
         PaletteResult {
             kind: PaletteKind::Session,
             label: "second-session".into(),
             subtitle: "session · 2".into(),
-            payload: PalettePayload::Session { session_id: "s2".into() },
+            payload: PalettePayload::Session {
+                session_id: "s2".into(),
+            },
         },
     ]);
     state.cursor_down(); // move cursor to index 1
@@ -248,14 +290,26 @@ fn overlay_grouped_view_caps_rows_per_kind() {
         shown <= 5,
         "expected cap of 5 sessions in grouped view; got {shown}:\n{rendered}"
     );
-    assert!(shown >= 2, "expected at least 2 sessions rendered; got {shown}");
+    assert!(
+        shown >= 2,
+        "expected at least 2 sessions rendered; got {shown}"
+    );
 }
 
 #[test]
 fn overlay_hints_row_has_select_accept_dismiss() {
     let state = PaletteState::new();
     let rendered = render_to_string_with_session_flag(&state, 80, 12, true);
-    assert!(rendered.contains("select"), "hints missing 'select': {rendered}");
-    assert!(rendered.contains("accept"), "hints missing 'accept': {rendered}");
-    assert!(rendered.contains("dismiss"), "hints missing 'dismiss': {rendered}");
+    assert!(
+        rendered.contains("select"),
+        "hints missing 'select': {rendered}"
+    );
+    assert!(
+        rendered.contains("accept"),
+        "hints missing 'accept': {rendered}"
+    );
+    assert!(
+        rendered.contains("dismiss"),
+        "hints missing 'dismiss': {rendered}"
+    );
 }

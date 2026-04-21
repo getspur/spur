@@ -11,13 +11,16 @@ pub mod input_bar_wrap;
 pub mod issue_detail_pane;
 pub mod issues_panel;
 pub mod line_wrap;
-pub mod mini_input;
-pub mod picker_shell;
-pub mod query_source;
 #[cfg(feature = "markdown")]
 pub mod markdown_stream;
 #[cfg(feature = "markdown")]
 pub mod mermaid;
+pub mod mini_input;
+pub mod palette;
+pub mod palette_overlay;
+pub mod palette_sources;
+pub mod picker_shell;
+pub mod query_source;
 pub mod quit_confirm;
 pub mod react_trace;
 pub mod resume_banner;
@@ -26,9 +29,6 @@ pub mod session_preview;
 pub mod status_bar;
 pub(crate) mod trace_format;
 pub mod workers_panel;
-pub mod palette;
-pub mod palette_overlay;
-pub mod palette_sources;
 
 use ratatui::style::{Color, Style};
 use std::time::Instant;

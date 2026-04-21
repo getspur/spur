@@ -19,8 +19,7 @@ use crate::input_history::InputHistoryEntry;
 
 use super::View;
 
-const READY_BANNER_TEXT: &str =
-    "✨ Session cleared — your next prompt starts a fresh brain.";
+const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts a fresh brain.";
 
 /// Full-screen view of a brain session's ReAct trace with chat input.
 pub struct SessionDetailView {
@@ -215,8 +214,7 @@ impl SessionDetailView {
             context_used: None,
             context_size: None,
             auth_error: None,
-            trigger_detector:
-                crate::components::completion_trigger::TriggerDetector::new(),
+            trigger_detector: crate::components::completion_trigger::TriggerDetector::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
             cwd: std::path::PathBuf::from("."),
             #[cfg(feature = "markdown")]
@@ -1809,9 +1807,7 @@ impl SessionDetailView {
     /// Test-only: mutable tool_depth map for seeding tests.
     #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
-    pub fn tool_depth_for_test_mut(
-        &mut self,
-    ) -> &mut std::collections::HashMap<String, u8> {
+    pub fn tool_depth_for_test_mut(&mut self) -> &mut std::collections::HashMap<String, u8> {
         &mut self.tool_depth
     }
 }
@@ -2391,9 +2387,8 @@ mod tests {
 
     #[test]
     fn new_view_defaults_cleared_false_and_no_ready_banner() {
-        let view = SessionDetailView::new_for_palette_test(
-            crate::commands::CommandRegistry::default(),
-        );
+        let view =
+            SessionDetailView::new_for_palette_test(crate::commands::CommandRegistry::default());
         assert!(!view.is_cleared(), "new view must default cleared=false");
         assert!(
             view.ready_banner_text().is_none(),
@@ -2403,9 +2398,8 @@ mod tests {
 
     #[test]
     fn reset_for_clear_wipes_conversation_state() {
-        let mut view = SessionDetailView::new_for_palette_test(
-            crate::commands::CommandRegistry::default(),
-        );
+        let mut view =
+            SessionDetailView::new_for_palette_test(crate::commands::CommandRegistry::default());
         // Seed state that reset_for_clear must wipe.
         view.tool_depth.insert("t1".to_string(), 2);
         #[cfg(feature = "markdown")]
@@ -2423,17 +2417,13 @@ mod tests {
         // If no direct accessor, assert via rendered output in Task 10.
         // For now, assert the flag was set:
         assert!(view.is_cleared());
-        assert_eq!(
-            view.ready_banner_text(),
-            Some(READY_BANNER_TEXT)
-        );
+        assert_eq!(view.ready_banner_text(), Some(READY_BANNER_TEXT));
     }
 
     #[test]
     fn reset_for_clear_clears_header_status_fields() {
-        let mut view = SessionDetailView::new_for_palette_test(
-            crate::commands::CommandRegistry::default(),
-        );
+        let mut view =
+            SessionDetailView::new_for_palette_test(crate::commands::CommandRegistry::default());
         // Seed via existing public APIs.
         view.set_current_mode(Some("plan".into()));
         view.cost = 1.23;
@@ -2458,9 +2448,8 @@ mod tests {
 
     #[test]
     fn cleared_view_suppresses_force_save_draft() {
-        let mut view = SessionDetailView::new_for_palette_test(
-            crate::commands::CommandRegistry::default(),
-        );
+        let mut view =
+            SessionDetailView::new_for_palette_test(crate::commands::CommandRegistry::default());
         view.reset_for_clear();
         // Even with new text in the InputBar, force_save_draft must not
         // emit an Action keyed on the retired session_id.
@@ -2473,9 +2462,8 @@ mod tests {
 
     #[test]
     fn cleared_view_suppresses_draft_save_action() {
-        let mut view = SessionDetailView::new_for_palette_test(
-            crate::commands::CommandRegistry::default(),
-        );
+        let mut view =
+            SessionDetailView::new_for_palette_test(crate::commands::CommandRegistry::default());
         view.reset_for_clear();
         view.input_bar.set_text("new text".into(), 8);
         // Simulate a debounce trigger: set last_draft_change_at 600ms ago.
@@ -2490,9 +2478,8 @@ mod tests {
 
     #[test]
     fn reset_for_clear_is_idempotent() {
-        let mut view = SessionDetailView::new_for_palette_test(
-            crate::commands::CommandRegistry::default(),
-        );
+        let mut view =
+            SessionDetailView::new_for_palette_test(crate::commands::CommandRegistry::default());
         view.react_trace.clear(); // normalize
         view.tool_depth.insert("seeded".into(), 1);
         view.reset_for_clear();
@@ -2509,9 +2496,8 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let mut view = SessionDetailView::new_for_palette_test(
-            crate::commands::CommandRegistry::default(),
-        );
+        let mut view =
+            SessionDetailView::new_for_palette_test(crate::commands::CommandRegistry::default());
         view.reset_for_clear();
 
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
@@ -2526,19 +2512,19 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                <SessionDetailView as crate::views::View>::render(
-                    &mut view,
-                    f,
-                    f.area(),
-                    &ctx,
-                );
+                <SessionDetailView as crate::views::View>::render(&mut view, f, f.area(), &ctx);
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let rendered: String = (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
-                    .map(|x| buffer.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .map(|c| c.symbol().to_string())
+                            .unwrap_or_default()
+                    })
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
@@ -2552,9 +2538,8 @@ mod tests {
 
     #[test]
     fn reset_for_clear_wipes_draft_debounce_locals() {
-        let mut view = SessionDetailView::new_for_palette_test(
-            crate::commands::CommandRegistry::default(),
-        );
+        let mut view =
+            SessionDetailView::new_for_palette_test(crate::commands::CommandRegistry::default());
         view.last_persisted_draft = "stale".into();
         view.last_draft_change_at = Some(std::time::Instant::now());
         view.reset_for_clear();

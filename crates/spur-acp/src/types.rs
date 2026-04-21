@@ -187,7 +187,9 @@ impl AgentKind {
         let norm = name.trim().to_ascii_lowercase();
         match norm.as_str() {
             "claude-stream-json" => AgentKind::ClaudeStreamJson,
-            "claude-code-acp" | "claude" | "claude code" | "claude-code" => AgentKind::ClaudeCodeAcp,
+            "claude-code-acp" | "claude" | "claude code" | "claude-code" => {
+                AgentKind::ClaudeCodeAcp
+            }
             "codex-acp" | "codex" => AgentKind::CodexAcp,
             "kiro" => AgentKind::Kiro,
             _ => AgentKind::Generic,
@@ -251,8 +253,14 @@ mod agent_kind_tests {
 
     #[test]
     fn from_name_matches_kebab_case_serde_repr() {
-        assert_eq!(AgentKind::from_name("claude-stream-json"), AgentKind::ClaudeStreamJson);
-        assert_eq!(AgentKind::from_name("claude-code-acp"), AgentKind::ClaudeCodeAcp);
+        assert_eq!(
+            AgentKind::from_name("claude-stream-json"),
+            AgentKind::ClaudeStreamJson
+        );
+        assert_eq!(
+            AgentKind::from_name("claude-code-acp"),
+            AgentKind::ClaudeCodeAcp
+        );
         assert_eq!(AgentKind::from_name("codex-acp"), AgentKind::CodexAcp);
         assert_eq!(AgentKind::from_name("kiro"), AgentKind::Kiro);
         assert_eq!(AgentKind::from_name("generic"), AgentKind::Generic);
@@ -261,7 +269,10 @@ mod agent_kind_tests {
     #[test]
     fn from_name_accepts_human_aliases() {
         assert_eq!(AgentKind::from_name("claude"), AgentKind::ClaudeCodeAcp);
-        assert_eq!(AgentKind::from_name("Claude Code"), AgentKind::ClaudeCodeAcp);
+        assert_eq!(
+            AgentKind::from_name("Claude Code"),
+            AgentKind::ClaudeCodeAcp
+        );
         assert_eq!(AgentKind::from_name("codex"), AgentKind::CodexAcp);
     }
 

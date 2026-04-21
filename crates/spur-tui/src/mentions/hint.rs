@@ -69,8 +69,7 @@ mod tests {
 
     #[test]
     fn dedupes_and_sorts_known_workers() {
-        let mut blocks: Vec<ContentBlock> =
-            vec![ContentBlock::Text(TextContent::new("user text"))];
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
         let ranges = vec![
             range("worker://a"),
             range("worker://a"),
@@ -89,8 +88,7 @@ mod tests {
 
     #[test]
     fn noop_when_no_worker_ranges() {
-        let mut blocks: Vec<ContentBlock> =
-            vec![ContentBlock::Text(TextContent::new("user text"))];
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
         let ranges = vec![range("file:///abs/foo.rs")];
         let known = known(&["a"]);
         let prepended = prepend_worker_hint(&mut blocks, &ranges, &known);
@@ -101,8 +99,7 @@ mod tests {
 
     #[test]
     fn noop_when_all_worker_names_unknown() {
-        let mut blocks: Vec<ContentBlock> =
-            vec![ContentBlock::Text(TextContent::new("user text"))];
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
         let ranges = vec![range("worker://ghost"), range("worker://phantom")];
         let known = known(&["a", "b"]);
         let prepended = prepend_worker_hint(&mut blocks, &ranges, &known);

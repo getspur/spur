@@ -14,13 +14,17 @@ fn seed_state() -> PaletteState {
             kind: PaletteKind::Session,
             label: "refactor-auth".into(),
             subtitle: "".into(),
-            payload: PalettePayload::Session { session_id: "s1".into() },
+            payload: PalettePayload::Session {
+                session_id: "s1".into(),
+            },
         },
         PaletteResult {
             kind: PaletteKind::Command,
             label: "/plan".into(),
             subtitle: "".into(),
-            payload: PalettePayload::Command { name: "/plan".into() },
+            payload: PalettePayload::Command {
+                name: "/plan".into(),
+            },
         },
     ]);
     s

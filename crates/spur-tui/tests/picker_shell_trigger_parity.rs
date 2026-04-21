@@ -73,7 +73,9 @@ fn mention_tab_inserts_resource_link_on_submit() {
     match act {
         Action::SendMessage { blocks, .. } => {
             assert!(
-                blocks.iter().any(|b| matches!(b, ContentBlock::ResourceLink(_))),
+                blocks
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ResourceLink(_))),
                 "expected a ResourceLink in outbound blocks, got {:?}",
                 blocks
             );
@@ -96,7 +98,9 @@ fn mention_esc_leaves_typed_at_query_literal() {
         Action::SendMessage { blocks, .. } => {
             // No ResourceLink (never accepted); '@NOT' is in the text block.
             assert!(
-                !blocks.iter().any(|b| matches!(b, ContentBlock::ResourceLink(_))),
+                !blocks
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ResourceLink(_))),
                 "did not expect a ResourceLink after Esc, got {:?}",
                 blocks
             );

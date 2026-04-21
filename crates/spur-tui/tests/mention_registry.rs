@@ -25,13 +25,11 @@ fn file_mentions_index_and_fuzzy_match() {
 
 #[test]
 fn brain_session_includes_workers_in_empty_query() {
-    let mut reg = MentionRegistry::for_brain_session(vec![
-        WorkerMentionDescriptor {
-            name: "claude-code".into(),
-            description: Some("Refactors Rust".into()),
-            tier: Some("specialist".into()),
-        },
-    ]);
+    let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
+        name: "claude-code".into(),
+        description: Some("Refactors Rust".into()),
+        tier: Some("specialist".into()),
+    }]);
     let sid = SessionId::new();
     // Use an empty temp dir so file source returns nothing and worker entries
     // are always within the limit.
@@ -39,8 +37,8 @@ fn brain_session_includes_workers_in_empty_query() {
     let cwd = tmp.path();
     let hits = reg.query(&sid, cwd, "", 10);
     assert!(
-        hits.iter().any(|h| h.kind == MentionKind::Worker
-            && h.display == "worker:claude-code"),
+        hits.iter()
+            .any(|h| h.kind == MentionKind::Worker && h.display == "worker:claude-code"),
         "expected worker:claude-code in hits, got {:?}",
         hits.iter().map(|h| &h.display).collect::<Vec<_>>()
     );
@@ -85,9 +83,13 @@ fn empty_query_pins_workers_first() {
         .filter(|h| h.kind == MentionKind::Worker)
         .count();
     assert_eq!(
-        worker_count, 6,
+        worker_count,
+        6,
         "expected first 6 rows to be workers, got {:?}",
-        hits.iter().take(6).map(|h| (&h.kind, &h.display)).collect::<Vec<_>>()
+        hits.iter()
+            .take(6)
+            .map(|h| (&h.kind, &h.display))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -134,20 +136,22 @@ fn empty_query_caps_workers_at_pin_cap() {
 
 #[test]
 fn typed_query_boosts_worker_in_ambiguous_match() {
-    let mut reg = MentionRegistry::for_brain_session(vec![
-        WorkerMentionDescriptor {
-            name: "claude-code".into(),
-            description: None,
-            tier: None,
-        },
-    ]);
+    let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
+        name: "claude-code".into(),
+        description: None,
+        tier: None,
+    }]);
     let sid = SessionId::new();
     // Use a real workspace dir so FileMentionSource has files to compete.
     let cwd = std::env::current_dir().unwrap();
     let hits = reg.query(&sid, &cwd, "cla", 5);
     assert!(
-        hits.first().map(|h| h.kind == MentionKind::Worker).unwrap_or(false),
+        hits.first()
+            .map(|h| h.kind == MentionKind::Worker)
+            .unwrap_or(false),
         "expected worker:claude-code at row 0 for 'cla', got {:?}",
-        hits.iter().map(|h| (&h.kind, &h.display)).collect::<Vec<_>>()
+        hits.iter()
+            .map(|h| (&h.kind, &h.display))
+            .collect::<Vec<_>>()
     );
 }

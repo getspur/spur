@@ -1,9 +1,9 @@
 use proptest::prelude::*;
+use spur_acp::domain::delegation::DelegationStatus;
+use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
+use spur_acp::types::SessionId;
 use spur_core::scheduler::{BrainScheduler, ScheduledAction};
 use spur_core::InteractiveInput;
-use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
-use spur_acp::domain::delegation::DelegationStatus;
-use spur_acp::types::SessionId;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -13,7 +13,7 @@ enum Event {
     TurnStart,
     TurnEnd,
     CancelResolve,
-    Tick(u64),            // advance clock by N ms
+    Tick(u64), // advance clock by N ms
 }
 
 fn event_strategy() -> impl Strategy<Value = Event> {
@@ -33,7 +33,9 @@ fn mk_cont(id: &str) -> BrainContinuation {
         source: ContinuationSource::AsyncRequested,
         payload: ContinuationPayload {
             status: DelegationStatus::Success,
-            summary: None, diff_summary: None, worker_branch: None,
+            summary: None,
+            diff_summary: None,
+            worker_branch: None,
             artifact: None,
         },
         created_at: Instant::now(),

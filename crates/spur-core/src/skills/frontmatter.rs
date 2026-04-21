@@ -46,7 +46,11 @@ pub(crate) fn parse_source(raw: &str) -> ParsedSource<'_> {
         }
     }
 
-    ParsedSource { name, description, body }
+    ParsedSource {
+        name,
+        description,
+        body,
+    }
 }
 
 #[cfg(test)]

@@ -34,7 +34,8 @@ fn bench_render_compact_cold(c: &mut Criterion) {
                     b.iter(|| {
                         // Force cold cache on every iter.
                         trace.drop_compact_cache();
-                        term.draw(|f| trace.render_compact(f, Rect::new(0, 0, w, 24))).unwrap();
+                        term.draw(|f| trace.render_compact(f, Rect::new(0, 0, w, 24)))
+                            .unwrap();
                     });
                 },
             );
@@ -57,9 +58,11 @@ fn bench_render_compact_hit(c: &mut Criterion) {
             }
             let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
             // Warm the cache once.
-            term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24))).unwrap();
+            term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24)))
+                .unwrap();
             b.iter(|| {
-                term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24))).unwrap();
+                term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24)))
+                    .unwrap();
             });
         });
     }
@@ -79,7 +82,8 @@ fn bench_render_compact_incremental(c: &mut Criterion) {
                 }
             }
             let mut term = Terminal::new(TestBackend::new(40, 24)).unwrap();
-            term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24))).unwrap();
+            term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24)))
+                .unwrap();
             let mut counter = 0usize;
             b.iter(|| {
                 // Alternate kinds per iter so each append creates a new entry.
@@ -89,7 +93,8 @@ fn bench_render_compact_incremental(c: &mut Criterion) {
                     trace.append_think(&format!("t-new-{}", counter), "12:01".into());
                 }
                 counter += 1;
-                term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24))).unwrap();
+                term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 40, 24)))
+                    .unwrap();
             });
         });
     }

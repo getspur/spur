@@ -68,8 +68,12 @@ impl WorkerStreams {
     /// startup for executors that pre-date the current process.
     /// Produces coarse entries only — full fidelity resumes once live
     /// `WorkerNotification` events flow.
-    pub fn seed_from_stream_buffer<'a, I>(&mut self, executor_id: &str, agent_name: &str, entries: I)
-    where
+    pub fn seed_from_stream_buffer<'a, I>(
+        &mut self,
+        executor_id: &str,
+        agent_name: &str,
+        entries: I,
+    ) where
         I: IntoIterator<Item = &'a WorkerStreamEntry>,
     {
         let kind = AgentKind::from_name(agent_name);
@@ -82,21 +86,21 @@ impl WorkerStreams {
             let (entry_kind, text) = match e.kind {
                 WorkerStreamKind::Thought => (TraceKind::Think, e.text.clone()),
                 WorkerStreamKind::Message => (
-                    TraceKind::AgentMessage { agent: agent_name.to_string() },
+                    TraceKind::AgentMessage {
+                        agent: agent_name.to_string(),
+                    },
                     e.text.clone(),
                 ),
-                WorkerStreamKind::ToolCall => {
-                    (
-                        TraceKind::Act {
-                            tool: e.text.clone(),
-                            family: spur_acp::adapter::ToolFamily::Unknown,
-                            input: spur_acp::adapter::ToolInputDisplay::Empty,
-                            tool_call_id: None,
-                            status: ActStatus::Completed(None),
-                        },
-                        String::new(),
-                    )
-                }
+                WorkerStreamKind::ToolCall => (
+                    TraceKind::Act {
+                        tool: e.text.clone(),
+                        family: spur_acp::adapter::ToolFamily::Unknown,
+                        input: spur_acp::adapter::ToolInputDisplay::Empty,
+                        tool_call_id: None,
+                        status: ActStatus::Completed(None),
+                    },
+                    String::new(),
+                ),
             };
             trace.push(TraceEntry {
                 kind: entry_kind,
@@ -161,7 +165,10 @@ fn now_stamp_hhmm() -> String {
 
 fn format_system_time(t: &std::time::SystemTime) -> String {
     use std::time::UNIX_EPOCH;
-    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let h = (secs / 3600) % 24;
     let m = (secs / 60) % 60;
     format!("{:02}:{:02}", h, m)
@@ -173,9 +180,9 @@ mod tests {
     use spur_acp::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
 
     fn msg(text: &str) -> SessionUpdate {
-        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-            TextContent::new(text),
-        )))
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            text,
+        ))))
     }
 
     #[test]
@@ -204,9 +211,17 @@ mod tests {
         ws.route("exec-r", "claude", &msg("hi"));
         assert_eq!(ws.get("exec-r").unwrap().entry_count(), 1);
         ws.reset("exec-r");
-        assert_eq!(ws.get("exec-r").unwrap().entry_count(), 0, "reset clears entries");
+        assert_eq!(
+            ws.get("exec-r").unwrap().entry_count(),
+            0,
+            "reset clears entries"
+        );
         ws.route("exec-r", "claude", &msg("hi-again"));
-        assert_eq!(ws.get("exec-r").unwrap().entry_count(), 1, "reset preserves slot for reuse");
+        assert_eq!(
+            ws.get("exec-r").unwrap().entry_count(),
+            1,
+            "reset preserves slot for reuse"
+        );
     }
 
     #[test]

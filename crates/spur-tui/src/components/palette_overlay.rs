@@ -47,10 +47,7 @@ impl<'a> PaletteOverlay<'a> {
                     ),
                     Span::styled(r.label.clone(), style),
                     Span::raw("   "),
-                    Span::styled(
-                        r.subtitle.clone(),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(r.subtitle.clone(), Style::default().fg(Color::DarkGray)),
                 ];
                 ListItem::new(Line::from(spans))
             })
@@ -90,19 +87,13 @@ impl<'a> PaletteOverlay<'a> {
         // entirely (see `if rows.is_empty() { return }` in render_section).
         const TRACE_ROW: u16 = 1;
         const PER_KIND_MAX: u16 = 5;
-        let kinds_with_data: u16 = [
-            commands.is_empty(),
-            sessions.is_empty(),
-            workers.is_empty(),
-        ]
-        .iter()
-        .filter(|empty| !*empty)
-        .count() as u16;
+        let kinds_with_data: u16 = [commands.is_empty(), sessions.is_empty(), workers.is_empty()]
+            .iter()
+            .filter(|empty| !*empty)
+            .count() as u16;
 
         let header_rows = kinds_with_data;
-        let available_for_data = area
-            .height
-            .saturating_sub(TRACE_ROW + header_rows);
+        let available_for_data = area.height.saturating_sub(TRACE_ROW + header_rows);
         let cap: usize = if kinds_with_data == 0 {
             0
         } else {
@@ -122,10 +113,17 @@ impl<'a> PaletteOverlay<'a> {
                     // Section header
                     Paragraph::new(Line::from(Span::styled(
                         $title.to_string(),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     )))
                     .render(
-                        Rect { x: area.x, y, width: area.width, height: 1 },
+                        Rect {
+                            x: area.x,
+                            y,
+                            width: area.width,
+                            height: 1,
+                        },
                         buf,
                     );
                     y = y.saturating_add(1);
@@ -146,16 +144,17 @@ impl<'a> PaletteOverlay<'a> {
                             ),
                             Span::styled(r.label.clone(), label_style),
                             Span::raw("   "),
-                            Span::styled(
-                                r.subtitle.clone(),
-                                Style::default().fg(Color::DarkGray),
-                            ),
+                            Span::styled(r.subtitle.clone(), Style::default().fg(Color::DarkGray)),
                         ];
-                        Paragraph::new(Line::from(spans))
-                            .render(
-                                Rect { x: area.x, y, width: area.width, height: 1 },
-                                buf,
-                            );
+                        Paragraph::new(Line::from(spans)).render(
+                            Rect {
+                                x: area.x,
+                                y,
+                                width: area.width,
+                                height: 1,
+                            },
+                            buf,
+                        );
                         y = y.saturating_add(1);
                     }
                 }
@@ -177,7 +176,12 @@ impl<'a> PaletteOverlay<'a> {
                     .add_modifier(Modifier::ITALIC),
             )))
             .render(
-                Rect { x: area.x, y, width: area.width, height: 1 },
+                Rect {
+                    x: area.x,
+                    y,
+                    width: area.width,
+                    height: 1,
+                },
                 buf,
             );
         }
@@ -199,7 +203,12 @@ fn modal_rect(outer: Rect) -> Rect {
     let h = (outer.height as u32 * 6 / 10).max(8) as u16;
     let x = outer.x + (outer.width.saturating_sub(w)) / 2;
     let y = outer.y + (outer.height.saturating_sub(h)) / 2;
-    Rect { x, y, width: w.min(outer.width), height: h.min(outer.height) }
+    Rect {
+        x,
+        y,
+        width: w.min(outer.width),
+        height: h.min(outer.height),
+    }
 }
 
 impl<'a> Widget for PaletteOverlay<'a> {
@@ -214,10 +223,17 @@ impl<'a> Widget for PaletteOverlay<'a> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        if inner.height < 3 || inner.width < 10 { return; }
+        if inner.height < 3 || inner.width < 10 {
+            return;
+        }
 
         // Layout: row 0 = query; row 1 = blank; rows 2..=h-2 = results; last row = hints.
-        let query_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+        let query_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
         let hints_area = Rect {
             x: inner.x,
             y: inner.y + inner.height - 1,
@@ -250,7 +266,9 @@ impl<'a> Widget for PaletteOverlay<'a> {
             };
             Paragraph::new(Line::from(Span::styled(
                 msg,
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             )))
             .render(list_area, buf);
         } else if self.state.query().is_empty() {

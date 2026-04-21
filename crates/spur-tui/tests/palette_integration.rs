@@ -41,8 +41,10 @@ fn ctrl_k_while_help_visible_does_not_open_palette_even_if_help_does_not_swallow
     // Directly attempt to open palette via the internal path (bypassing the
     // priority chain). The guard in open_palette must prevent it.
     app.try_open_palette_for_test();
-    assert!(!app.is_palette_visible(),
-        "open_palette must refuse to open while help_visible is true");
+    assert!(
+        !app.is_palette_visible(),
+        "open_palette must refuse to open while help_visible is true"
+    );
 }
 
 #[test]
@@ -53,8 +55,13 @@ fn palette_session_accept_emits_resume_session_action() {
     app.seed_palette_with_session_for_test("s1", "refactor-auth");
     // Enter accepts.
     app.handle_crossterm_event(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(!app.is_palette_visible(), "palette should close after accept");
-    let last = app.last_action_for_test().expect("an Action should have been dispatched");
+    assert!(
+        !app.is_palette_visible(),
+        "palette should close after accept"
+    );
+    let last = app
+        .last_action_for_test()
+        .expect("an Action should have been dispatched");
     match last {
         spur_tui::action::Action::ResumeSession { session_id } => {
             assert_eq!(session_id, "s1");
@@ -90,17 +97,10 @@ fn accept_spur_local_command_emits_concrete_action() {
     // Palette should emit Action::ShowHelp on Accept.
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use spur_tui::action::Action;
-    let mut app = util::app_with_seeded_session_and_dynamic_command(
-        "codex",
-        "anything",
-        "unused",
-    );
+    let mut app = util::app_with_seeded_session_and_dynamic_command("codex", "anything", "unused");
     app.try_open_palette_for_test();
     app.palette_state_for_test_mut().set_query("help");
-    app.handle_crossterm_event_for_test(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::NONE,
-    ));
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(
         matches!(app.last_action_for_test(), Some(Action::ShowHelp)),
         "expected Action::ShowHelp; got {:?}",
@@ -119,10 +119,7 @@ fn accept_agent_dynamic_command_emits_send_message() {
     );
     app.try_open_palette_for_test();
     app.palette_state_for_test_mut().set_query("review");
-    app.handle_crossterm_event_for_test(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::NONE,
-    ));
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     // CommandsConfig::default() sets dispatch = DispatchKind::PromptText,
     // so build_entry produces a Dispatch::PromptText entry and routing
     // always lands on SubmitDecision::Send → Action::SendMessage. A
@@ -147,10 +144,7 @@ fn accept_spur_local_command_works_without_session() {
     // only spur-local entries.
     app.try_open_palette_for_test();
     app.palette_state_for_test_mut().set_query("help");
-    app.handle_crossterm_event_for_test(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::NONE,
-    ));
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(
         matches!(app.last_action_for_test(), Some(Action::ShowHelp)),
         "spur-local /help should work without a session; got {:?}",
