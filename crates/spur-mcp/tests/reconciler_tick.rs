@@ -482,7 +482,10 @@ async fn epic_closes_when_scoped_children_terminal() {
         Some("P1".into()),
     );
 
-    reconciler.tick_once().await.expect("tick_once must succeed");
+    reconciler
+        .tick_once()
+        .await
+        .expect("tick_once must succeed");
 
     let epic = pm.get_issue(&epic_id).await.expect("get epic");
     assert_eq!(epic.status, pm.closed_status());
@@ -586,7 +589,10 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
         Some("P1".into()),
     );
 
-    reconciler.tick_once().await.expect("tick_once must succeed");
+    reconciler
+        .tick_once()
+        .await
+        .expect("tick_once must succeed");
 
     let events = sink.events.lock().unwrap();
     assert!(events.iter().any(|event| matches!(

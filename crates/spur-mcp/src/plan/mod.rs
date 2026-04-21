@@ -1333,13 +1333,7 @@ pub async fn run_plan(
     }
 
     // INV-7: Compute terminal counts and emit lifecycle events OUTSIDE the lock.
-    let (
-        approved_count,
-        rejected_count,
-        failed_count,
-        cancelled_count,
-        awaiting_review_count,
-    ) = {
+    let (approved_count, rejected_count, failed_count, cancelled_count, awaiting_review_count) = {
         let p = plan.lock().await;
         let mut a = 0u32;
         let mut r = 0u32;

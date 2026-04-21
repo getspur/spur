@@ -208,9 +208,7 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
 #[tokio::test]
 async fn plan_submit_sentinel_round_trips_base_snapshot_oid() {
     if !br_available() {
-        eprintln!(
-            "skipping plan_submit_sentinel_round_trips_base_snapshot_oid: `br` not on PATH"
-        );
+        eprintln!("skipping plan_submit_sentinel_round_trips_base_snapshot_oid: `br` not on PATH");
         return;
     }
 
