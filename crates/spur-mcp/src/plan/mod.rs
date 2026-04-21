@@ -1336,7 +1336,6 @@ pub async fn run_plan(
         failed_count,
         cancelled_count,
         awaiting_review_count,
-        all_approved,
     ) = {
         let p = plan.lock().await;
         let mut a = 0u32;
@@ -1344,34 +1343,25 @@ pub async fn run_plan(
         let mut f = 0u32;
         let mut c = 0u32;
         let mut ar = 0u32;
-        let non_empty = !p.tasks.is_empty();
-        let mut all_a = non_empty;
         for t in &p.tasks {
             match &t.status {
                 PlanTaskStatus::Approved { .. } => a += 1,
                 PlanTaskStatus::Rejected { .. } => {
                     r += 1;
-                    all_a = false;
                 }
                 PlanTaskStatus::Failed { .. } => {
                     f += 1;
-                    all_a = false;
                 }
                 PlanTaskStatus::Cancelled { .. } => {
                     c += 1;
-                    all_a = false;
                 }
                 PlanTaskStatus::AwaitingReview { .. } => {
                     ar += 1;
-                    all_a = false;
                 }
-                // Pending / Ready / Dispatched / Iterating: not terminal, not all_approved.
-                _ => {
-                    all_a = false;
-                }
+                _ => {}
             }
         }
-        (a, r, f, c, ar, all_a)
+        (a, r, f, c, ar)
     }; // Lock released before emitting.
 
     info!(
@@ -1391,11 +1381,6 @@ pub async fn run_plan(
             failed: failed_count,
             cancelled: cancelled_count,
         });
-        if all_approved && cancelled_count == 0 {
-            sink.emit(spur_acp::SpurEventBody::PlanReadyToMerge {
-                plan_id: plan_id.clone(),
-            });
-        }
     }
 }
 
