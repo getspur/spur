@@ -72,29 +72,18 @@ fn scroll_label(
     visible_h: usize,
     scroll_offset: usize,
     is_following: bool,
-    stream_trace_following: Option<bool>,
 ) -> Cow<'static, str> {
-    // Stream tab — follow flag comes from the trace (if present).
-    if matches!(tab, DetailTab::Stream) {
-        return match stream_trace_following {
-            Some(true) => Cow::Borrowed(" ▼ following "),
-            Some(false) => Cow::Borrowed(" ▲ paused "),
-            // No trace yet — placeholder path. Default to "following"
-            // so the initial render does not look stalled.
-            None => Cow::Borrowed(" ▼ following "),
-        };
-    }
-
-    // Non-Stream tabs — authoritative scroll + follow state on DetailPane.
     if total == 0 {
         return Cow::Borrowed("");
     }
     let max_offset = total.saturating_sub(visible_h);
     if max_offset == 0 {
-        // Content fits viewport; nothing to scroll.
         return Cow::Borrowed(" ▼ ");
     }
     if is_following {
+        if matches!(tab, DetailTab::Stream) {
+            return Cow::Borrowed(" ▼ following ");
+        }
         return Cow::Borrowed(" ▼ ");
     }
     if scroll_offset == 0 {
@@ -122,40 +111,27 @@ impl DetailPane {
         self.current_tab
     }
 
+    /// Test-only accessor for the follow flag.
+    #[doc(hidden)]
+    pub fn is_following(&self) -> bool {
+        self.is_following
+    }
+
     /// Private shared helper. Encodes the per-tab reset invariants so
     /// every entry point (`cycle_tab`, `jump_to_tab`) cannot accidentally
-    /// diverge. Opens at top (`scroll_offset = 0`) on every tab; sets
-    /// `is_following` based on the destination tab kind; snaps the
-    /// Stream trace to bottom when landing on Stream.
-    fn set_tab(
-        &mut self,
-        tab: DetailTab,
-        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
-    ) {
+    /// diverge. Opens at top (`scroll_offset = 0`) on every tab and sets
+    /// `is_following` based on the destination tab kind.
+    fn set_tab(&mut self, tab: DetailTab) {
         self.current_tab = tab;
         self.scroll_offset = 0;
-        match tab {
-            DetailTab::Stream => {
-                self.is_following = true;
-                if let Some(t) = stream_trace {
-                    t.scroll_to_bottom();
-                }
-            }
-            _ => {
-                self.is_following = false;
-            }
-        }
+        self.is_following = matches!(tab, DetailTab::Stream);
     }
 
     /// Cycle to the next (or previous) tab.
     ///
     /// Per-tab reset invariants (`scroll_offset = 0`, `is_following`
     /// per tab kind) are centralised in [`DetailPane::set_tab`].
-    pub fn cycle_tab(
-        &mut self,
-        forward: bool,
-        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
-    ) {
+    pub fn cycle_tab(&mut self, forward: bool) {
         let all = DetailTab::all();
         let idx = all.iter().position(|t| *t == self.current_tab).unwrap_or(0);
         let next = if forward {
@@ -163,75 +139,35 @@ impl DetailPane {
         } else {
             (idx + all.len() - 1) % all.len()
         };
-        self.set_tab(all[next], stream_trace);
+        self.set_tab(all[next]);
     }
 
     /// Jump directly to a specific tab. Applies the same per-tab reset
     /// invariants as [`DetailPane::cycle_tab`] (scroll to top, set
-    /// `is_following` per tab kind, snap Stream trace to bottom).
+    /// `is_following` per tab kind).
     ///
     /// Use this from outside the pane instead of writing `current_tab`
     /// directly — the field is `pub(crate)` and only readable via
     /// [`DetailPane::current_tab`].
-    pub fn jump_to_tab(
-        &mut self,
-        tab: DetailTab,
-        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
-    ) {
-        self.set_tab(tab, stream_trace);
+    pub fn jump_to_tab(&mut self, tab: DetailTab) {
+        self.set_tab(tab);
     }
 
-    pub fn scroll_up(
-        &mut self,
-        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
-    ) {
-        if matches!(self.current_tab, DetailTab::Stream) {
-            if let Some(trace) = stream_trace {
-                trace.scroll_up();
-                return;
-            }
-        }
+    pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
         self.is_following = false;
     }
 
-    pub fn scroll_down(
-        &mut self,
-        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
-    ) {
-        if matches!(self.current_tab, DetailTab::Stream) {
-            if let Some(trace) = stream_trace {
-                trace.scroll_down();
-                return;
-            }
-        }
+    pub fn scroll_down(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_add(1);
     }
 
-    pub fn scroll_to_top(
-        &mut self,
-        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
-    ) {
-        if matches!(self.current_tab, DetailTab::Stream) {
-            if let Some(trace) = stream_trace {
-                trace.scroll_to_top();
-                return;
-            }
-        }
+    pub fn scroll_to_top(&mut self) {
         self.scroll_offset = 0;
         self.is_following = false;
     }
 
-    pub fn scroll_to_bottom(
-        &mut self,
-        stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
-    ) {
-        if matches!(self.current_tab, DetailTab::Stream) {
-            if let Some(trace) = stream_trace {
-                trace.scroll_to_bottom();
-                return;
-            }
-        }
+    pub fn scroll_to_bottom(&mut self) {
         self.is_following = true;
     }
 
@@ -243,14 +179,7 @@ impl DetailPane {
         issue_badge: Option<&str>,
         stream_trace: Option<&mut crate::components::react_trace::ReactTrace>,
     ) {
-        // ── 1. Compute the trace-follow flag (Stream tab authoritative
-        //       source) before any rendering side-effects. ─────────────
-        let trace_following: Option<bool> = match self.current_tab {
-            DetailTab::Stream => stream_trace.as_deref().map(|t| t.is_following()),
-            _ => None,
-        };
-
-        // ── 2. Skeleton block — shape-equivalent to the final block so
+        // ── 1. Skeleton block — shape-equivalent to the final block so
         //       Block::inner() returns the same rect. ──────────────────
         //
         // Every title POSITION that will appear on the final block must
@@ -269,70 +198,55 @@ impl DetailPane {
         let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
         let body_area = chunks[1];
 
-        // ── 3. Compute body content + metrics for non-Stream (and Stream
-        //       placeholder) paths. For Stream-with-trace, body is owned
-        //       by ReactTrace::render_compact; total/visible still
-        //       meaningful only for the `scroll_label` derivation. ─────
-        let stream_with_trace =
-            matches!(self.current_tab, DetailTab::Stream) && stream_trace.is_some();
-
-        // `wrapped` is only populated for paths that render a Paragraph.
-        let mut wrapped: Vec<Line<'static>> = Vec::new();
+        // ── 2. Compute body content. ─────────────────────────────────
         let visible_h = body_area.height as usize;
-        let total: usize;
 
-        if stream_with_trace {
-            // ReactTrace owns the body; we do not wrap. `total` is not used
-            // for the Stream label (trace_following is authoritative).
-            total = 0;
-        } else {
-            let body_lines = match self.current_tab {
-                DetailTab::Stream => {
-                    // No trace materialized yet (orphan event or first-load race).
+        let body_lines = match self.current_tab {
+            DetailTab::Stream => {
+                if let Some(trace) = stream_trace {
+                    trace.build_body_lines(body_area.width)
+                } else {
                     vec![Line::from(Span::styled(
                         "(no stream yet)",
                         Style::default().fg(Color::DarkGray),
                     ))]
                 }
-                DetailTab::Artifacts => self.render_artifacts(node),
-                DetailTab::Attempts => self.render_attempts(node),
-                DetailTab::Task => self.render_task(node),
-                DetailTab::Review => self.render_review(node),
-            };
-            wrapped = body_lines
-                .iter()
-                .flat_map(|l| crate::components::line_wrap::wrap_line_to_width(l, body_area.width))
-                .collect();
-            total = wrapped.len();
-        }
+            }
+            DetailTab::Artifacts => self.render_artifacts(node),
+            DetailTab::Attempts => self.render_attempts(node),
+            DetailTab::Task => self.render_task(node),
+            DetailTab::Review => self.render_review(node),
+        };
+        let wrapped: Vec<Line<'static>> = body_lines
+            .iter()
+            .flat_map(|l| crate::components::line_wrap::wrap_line_to_width(l, body_area.width))
+            .collect();
+        let total = wrapped.len();
 
-        // ── 4. Apply the scroll clamp + re-engage-following BEFORE
+        // ── 3. Apply the scroll clamp + re-engage-following BEFORE
         //       deriving the label and rendering the block. This fixes
         //       the one-frame lag where the border used to show stale
         //       "not following" on the frame the user reached bottom. ─
-        if !stream_with_trace {
-            let max_offset = total.saturating_sub(visible_h);
-            if self.is_following {
-                self.scroll_offset = max_offset;
-            } else {
-                self.scroll_offset = self.scroll_offset.min(max_offset);
-                if self.scroll_offset >= max_offset && max_offset > 0 {
-                    self.is_following = true;
-                }
+        let max_offset = total.saturating_sub(visible_h);
+        if self.is_following {
+            self.scroll_offset = max_offset;
+        } else {
+            self.scroll_offset = self.scroll_offset.min(max_offset);
+            if self.scroll_offset >= max_offset && max_offset > 0 {
+                self.is_following = true;
             }
         }
 
-        // ── 5. Derive the scroll label from final post-clamp state. ──
+        // ── 4. Derive the scroll label from final post-clamp state. ──
         let scroll_label_text = scroll_label(
             self.current_tab,
             total,
             visible_h,
             self.scroll_offset,
             self.is_following,
-            trace_following,
         );
 
-        // ── 6. Build the real block with all titles. ─────────────────
+        // ── 5. Build the real block with all titles. ─────────────────
         let mut block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", node.agent))
@@ -344,7 +258,7 @@ impl DetailPane {
         }
         frame.render_widget(block, area);
 
-        // ── 7. Render tabs. ──────────────────────────────────────────
+        // ── 6. Render tabs. ──────────────────────────────────────────
         let titles: Vec<Line> = DetailTab::all()
             .iter()
             .map(|t| {
@@ -368,12 +282,7 @@ impl DetailPane {
             .divider("│");
         frame.render_widget(tabs, chunks[0]);
 
-        // ── 8. Render body. ──────────────────────────────────────────
-        if stream_with_trace {
-            let trace = stream_trace.expect("stream_with_trace implies Some");
-            trace.render_compact(frame, body_area);
-            return;
-        }
+        // ── 7. Render body. ──────────────────────────────────────────
         let p = Paragraph::new(wrapped).scroll((self.scroll_offset as u16, 0));
         frame.render_widget(p, body_area);
     }
@@ -452,62 +361,61 @@ mod scroll_label_tests {
     use super::*;
 
     #[test]
-    fn stream_with_trace_following_shows_following() {
-        let s = scroll_label(DetailTab::Stream, 0, 0, 0, false, Some(true));
+    fn stream_following_shows_following() {
+        let s = scroll_label(DetailTab::Stream, 100, 20, 80, true);
         assert_eq!(s, Cow::Borrowed(" ▼ following "));
     }
 
     #[test]
-    fn stream_with_trace_paused_shows_paused() {
-        let s = scroll_label(DetailTab::Stream, 0, 0, 0, false, Some(false));
-        assert_eq!(s, Cow::Borrowed(" ▲ paused "));
+    fn stream_not_following_shows_scroll_state() {
+        let s = scroll_label(DetailTab::Stream, 100, 20, 42, false);
+        assert_eq!(s, Cow::<'static, str>::Owned(" ▲ 42 ↑ ".to_string()));
     }
 
     #[test]
-    fn stream_without_trace_shows_following() {
-        // Placeholder path — no trace yet but pane wants to look live.
-        let s = scroll_label(DetailTab::Stream, 1, 10, 0, true, None);
-        assert_eq!(s, Cow::Borrowed(" ▼ following "));
+    fn stream_empty_total_shows_blank() {
+        let s = scroll_label(DetailTab::Stream, 0, 20, 0, false);
+        assert_eq!(s, Cow::Borrowed(""));
     }
 
     #[test]
     fn non_stream_empty_total_shows_blank() {
-        let s = scroll_label(DetailTab::Artifacts, 0, 20, 0, false, None);
+        let s = scroll_label(DetailTab::Artifacts, 0, 20, 0, false);
         assert_eq!(s, Cow::Borrowed(""));
     }
 
     #[test]
     fn non_stream_content_fits_viewport_shows_down() {
         // total=10, visible=20 → max_offset=0 → content fits.
-        let s = scroll_label(DetailTab::Task, 10, 20, 0, false, None);
+        let s = scroll_label(DetailTab::Task, 10, 20, 0, false);
         assert_eq!(s, Cow::Borrowed(" ▼ "));
     }
 
     #[test]
     fn non_stream_at_end_following_shows_down() {
         // total=100, visible=20, offset=80, following → " ▼ ".
-        let s = scroll_label(DetailTab::Attempts, 100, 20, 80, true, None);
+        let s = scroll_label(DetailTab::Attempts, 100, 20, 80, true);
         assert_eq!(s, Cow::Borrowed(" ▼ "));
     }
 
     #[test]
     fn non_stream_at_top_shows_top() {
         // total=100, visible=20, offset=0, not following → " top ".
-        let s = scroll_label(DetailTab::Review, 100, 20, 0, false, None);
+        let s = scroll_label(DetailTab::Review, 100, 20, 0, false);
         assert_eq!(s, Cow::Borrowed(" top "));
     }
 
     #[test]
     fn non_stream_at_end_not_following_shows_end() {
         // total=100, visible=20, offset=80 (= max_offset), not following.
-        let s = scroll_label(DetailTab::Artifacts, 100, 20, 80, false, None);
+        let s = scroll_label(DetailTab::Artifacts, 100, 20, 80, false);
         assert_eq!(s, Cow::Borrowed(" end "));
     }
 
     #[test]
     fn non_stream_mid_scroll_shows_arrow_count() {
         // total=100, visible=20, offset=42 → " ▲ 42 ↑ ".
-        let s = scroll_label(DetailTab::Artifacts, 100, 20, 42, false, None);
+        let s = scroll_label(DetailTab::Artifacts, 100, 20, 42, false);
         assert_eq!(s, Cow::<'static, str>::Owned(" ▲ 42 ↑ ".to_string()));
     }
 }
@@ -522,7 +430,7 @@ mod jump_to_tab_tests {
         // Simulate user having scrolled on a prior tab.
         pane.scroll_offset = 42;
         pane.is_following = true;
-        pane.jump_to_tab(DetailTab::Review, None);
+        pane.jump_to_tab(DetailTab::Review);
         assert_eq!(pane.current_tab, DetailTab::Review);
         assert_eq!(pane.scroll_offset, 0);
         assert!(!pane.is_following);
@@ -533,7 +441,7 @@ mod jump_to_tab_tests {
         let mut pane = DetailPane::new();
         pane.scroll_offset = 100;
         pane.is_following = true;
-        pane.jump_to_tab(DetailTab::Artifacts, None);
+        pane.jump_to_tab(DetailTab::Artifacts);
         assert_eq!(pane.current_tab, DetailTab::Artifacts);
         assert_eq!(pane.scroll_offset, 0);
         assert!(!pane.is_following);
@@ -546,7 +454,7 @@ mod jump_to_tab_tests {
         pane.current_tab = DetailTab::Artifacts;
         pane.scroll_offset = 42;
         pane.is_following = false;
-        pane.jump_to_tab(DetailTab::Stream, None);
+        pane.jump_to_tab(DetailTab::Stream);
         assert_eq!(pane.current_tab, DetailTab::Stream);
         assert_eq!(pane.scroll_offset, 0);
         assert!(pane.is_following);
@@ -559,7 +467,7 @@ mod jump_to_tab_tests {
         pane.current_tab = DetailTab::Task;
         pane.scroll_offset = 99;
         pane.is_following = true;
-        pane.jump_to_tab(DetailTab::Task, None);
+        pane.jump_to_tab(DetailTab::Task);
         assert_eq!(pane.current_tab, DetailTab::Task);
         assert_eq!(pane.scroll_offset, 0);
         assert!(!pane.is_following);

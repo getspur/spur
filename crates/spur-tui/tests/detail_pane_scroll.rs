@@ -80,9 +80,10 @@ fn seeded_compact_trace() -> ReactTrace {
 }
 
 /// T-D3a: On the Stream tab, the footer "▼ following" indicator must
-/// reflect `ReactTrace.anchor` — not a stale local flag.
+/// reflect the pane's `is_following` flag, which is authoritative for
+/// scroll state now that DetailPane manages its own viewport.
 #[test]
-fn stream_footer_badge_reflects_trace_anchor() {
+fn stream_footer_badge_reflects_pane_follow_state() {
     let mut pane = DetailPane::new();
     assert_eq!(pane.current_tab(), DetailTab::Stream);
     let mut trace = seeded_compact_trace();
@@ -106,11 +107,11 @@ fn stream_footer_badge_reflects_trace_anchor() {
         frame_following
     );
 
-    // Scroll the trace up (delegated through DetailPane).
-    pane.scroll_up(Some(&mut trace));
+    // Scroll up — pane leaves Following.
+    pane.scroll_up();
     assert!(
-        !trace.is_following(),
-        "scroll_up should take trace off Following"
+        !pane.is_following(),
+        "scroll_up should take pane off Following"
     );
 
     // Re-render: badge must NOT appear.
@@ -133,10 +134,10 @@ fn stream_footer_badge_reflects_trace_anchor() {
 }
 
 /// T-D3b: On the Stream tab with `stream_trace = None` (placeholder state
-/// before the first trace materializes), the footer must default to
-/// "▼ following". Pins the fallback semantics.
+/// before the first trace materializes), the footer shows the same
+/// content-fits indicator as any other tab with short content.
 #[test]
-fn stream_footer_badge_placeholder_defaults_to_following() {
+fn stream_footer_badge_placeholder_shows_content_fits() {
     let mut pane = DetailPane::new();
     let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
     term.draw(|f| {
@@ -144,9 +145,11 @@ fn stream_footer_badge_placeholder_defaults_to_following() {
     })
     .unwrap();
     let buf = term.backend().buffer().clone();
+    // Placeholder is one line "(no stream yet)"; viewport is 10 rows,
+    // so max_offset == 0 and the label is the generic "▼".
     assert!(
-        buffer_contains(&buf, "▼ following"),
-        "Stream placeholder path must show '▼ following' footer:\n{:#?}",
+        buffer_contains(&buf, "▼"),
+        "Stream placeholder path must show '▼' footer:\n{:#?}",
         buf
     );
 }
@@ -167,7 +170,7 @@ fn cycle_tab_opens_task_at_top() {
 
     // Cycle Stream → Artifacts → Attempts → Task.
     for _ in 0..3 {
-        pane.cycle_tab(true, None);
+        pane.cycle_tab(true);
     }
     assert_eq!(pane.current_tab(), DetailTab::Task);
 
@@ -206,7 +209,7 @@ fn non_stream_scroll_reaches_wrapped_bottom() {
 
     // Cycle Stream → Artifacts → Attempts → Task.
     for _ in 0..3 {
-        pane.cycle_tab(true, None);
+        pane.cycle_tab(true);
     }
     assert_eq!(pane.current_tab(), DetailTab::Task);
 
@@ -219,7 +222,7 @@ fn non_stream_scroll_reaches_wrapped_bottom() {
     // each scroll so the pane's max_offset is re-clamped using whatever
     // total-row count the render path sees.
     for _ in 0..50 {
-        pane.scroll_down(None);
+        pane.scroll_down();
         term.draw(|f| pane.render(f, Rect::new(0, 0, 40, 10), &n, None, None))
             .unwrap();
     }
@@ -234,27 +237,32 @@ fn non_stream_scroll_reaches_wrapped_bottom() {
 }
 
 /// T-D4b: Cycling back into the Stream tab from elsewhere must snap the
-/// trace back to Following so the user sees the latest output — otherwise
+/// pane back to Following so the user sees the latest output — otherwise
 /// returning to Stream may leave the viewport pinned mid-history.
 #[test]
-fn cycle_tab_into_stream_snaps_trace_to_bottom() {
+fn cycle_tab_into_stream_snaps_pane_to_following() {
     let mut pane = DetailPane::new();
-    let mut trace = seeded_compact_trace();
+    let _trace = seeded_compact_trace();
 
     // Walk away from Stream (Artifacts).
-    pane.cycle_tab(true, Some(&mut trace));
+    pane.cycle_tab(true);
     assert_ne!(pane.current_tab(), DetailTab::Stream);
 
-    // Drag the anchor off Following so the "snap back" is observable.
-    trace.scroll_up();
-    assert!(!trace.is_following());
-
-    // Cycle back around to Stream — must re-engage Following.
+    // Return to Stream, scroll up, then leave again so the "snap back"
+    // is observable on re-entry.
     while pane.current_tab() != DetailTab::Stream {
-        pane.cycle_tab(true, Some(&mut trace));
+        pane.cycle_tab(true);
+    }
+    pane.scroll_up();
+    assert!(!pane.is_following());
+
+    // Walk away and cycle back around to Stream — must re-engage Following.
+    pane.cycle_tab(true);
+    while pane.current_tab() != DetailTab::Stream {
+        pane.cycle_tab(true);
     }
     assert!(
-        trace.is_following(),
+        pane.is_following(),
         "entering the Stream tab must re-engage Following"
     );
 }

@@ -105,9 +105,7 @@ fn dashboard_reads_attempt_n_from_lineage_on_submit() {
     // so that the 'a' keypress is interpreted as an approve review decision.
     let mut dashboard = DashboardView::new();
     dashboard.set_focused_node(Some(ExecutorId::new("e1")));
-    dashboard
-        .detail_pane_mut()
-        .jump_to_tab(DetailTab::Review, None);
+    dashboard.detail_pane_mut().jump_to_tab(DetailTab::Review);
 
     // Simulate pressing 'a' — InputBar appends the char, then the review-key
     // intercept emits Action::SubmitReview. The attempt_n MUST be read from

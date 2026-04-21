@@ -86,6 +86,9 @@ pub struct ReactTrace {
     /// Independent from `line_cache` because the two paths produce
     /// different row layouts. `None` until first compact render.
     pub(in crate::components::react_trace) compact_cache: Option<compact_render::CompactCacheEntry>,
+    /// Cache for the external body-lines path used by DetailPane Stream.
+    /// Independent from `line_cache` and `compact_cache`.
+    pub(in crate::components::react_trace) body_cache: Option<render::BodyCacheEntry>,
 }
 
 /// Inverse of `resolve_anchor` for the Row variant: given a row index,
@@ -221,6 +224,7 @@ impl ReactTrace {
             dirty_from: None,
             line_cache: None,
             compact_cache: None,
+            body_cache: None,
         }
     }
 
@@ -242,6 +246,9 @@ impl ReactTrace {
             ..Self::new()
         }
     }
+
+    // TODO: with_kind_compact is deprecated; callers should use with_kind.
+    // The compact render path is no longer used by DetailPane.
 
     /// True if this trace was constructed with `with_kind_compact`.
     pub fn is_compact(&self) -> bool {
@@ -270,6 +277,7 @@ impl ReactTrace {
         self.last_render_width = None;
         self.line_cache = None;
         self.compact_cache = None;
+        self.body_cache = None;
         self.invalidate_cache();
     }
 
@@ -780,6 +788,32 @@ impl ReactTrace {
 
     pub fn entry_count(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Build wrapped display lines for external pane consumption
+    /// (DetailPane Stream tab). Uses `build_display_lines` with no lineage
+    /// and wraps to `width`. Caches result keyed by `(generation, width)`.
+    pub fn build_body_lines(&mut self, width: u16) -> Vec<ratatui::text::Line<'static>> {
+        if let Some(c) = &self.body_cache {
+            if c.generation == self.generation && c.width == width {
+                return c.lines.clone();
+            }
+        }
+        let spinner_frame = crate::components::spinner::frame(
+            crate::components::spinner::BRAILLE,
+            self.tick_counter as u32,
+        );
+        let lines = self.build_display_lines(spinner_frame, None);
+        let wrapped: Vec<ratatui::text::Line<'static>> = lines
+            .into_iter()
+            .flat_map(|l| crate::components::line_wrap::wrap_line_to_width(&l, width))
+            .collect();
+        self.body_cache = Some(crate::components::react_trace::render::BodyCacheEntry {
+            lines: wrapped.clone(),
+            width,
+            generation: self.generation,
+        });
+        wrapped
     }
 
     /// Expose the trace entries as a slice for testing and inspection.

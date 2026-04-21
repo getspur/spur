@@ -1659,7 +1659,7 @@ impl App {
                     self.dashboard.set_focused_node(Some(id));
                     self.dashboard
                         .detail_pane_mut()
-                        .jump_to_tab(crate::components::detail_pane::DetailTab::Review, None);
+                        .jump_to_tab(crate::components::detail_pane::DetailTab::Review);
                 }
             }
             Action::ToggleCollapse => {
