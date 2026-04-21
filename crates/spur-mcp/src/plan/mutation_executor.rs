@@ -54,6 +54,31 @@ pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result
                     .get_issue(parent)
                     .await
                     .with_context(|| format!("load parent issue {parent}"))?;
+                let parent_plan_id = parent_issue
+                    .labels
+                    .iter()
+                    .find_map(|label| super::labels::parse_plan_id(label))
+                    .map(str::to_string);
+                let parent_agent = parent_issue
+                    .labels
+                    .iter()
+                    .find_map(|label| super::labels::parse_agent(label))
+                    .map(str::to_string);
+                if parent_plan_id.is_some() ^ parent_agent.is_some() {
+                    anyhow::bail!(
+                        "parent issue {parent} has inconsistent persisted scope labels (plan_id={:?}, agent={:?})",
+                        parent_plan_id,
+                        parent_agent
+                    );
+                }
+                let parent_context_files =
+                    super::projector::latest_task_spec(&super::projector::collect_sorted_audits(
+                        adv.list_comments(parent)
+                            .await
+                            .with_context(|| format!("list comments for parent issue {parent}"))?,
+                    ))
+                    .map(|(_, context_files)| context_files)
+                    .unwrap_or_default();
                 let original_downstreams = downstream_issue_ids(pm.as_ref(), parent).await?;
 
                 let mut child_ids: Vec<String> = Vec::with_capacity(children.len());
@@ -71,6 +96,26 @@ pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result
                         })
                         .await
                         .context("create child issue")?;
+                    if let (Some(parent_plan_id), Some(parent_agent)) =
+                        (parent_plan_id.as_deref(), parent_agent.as_deref())
+                    {
+                        add_labels_individually(
+                            pm.as_ref(),
+                            &id,
+                            &[
+                                super::labels::plan_id(parent_plan_id),
+                                super::labels::plan_task_id(&id),
+                                super::labels::agent(parent_agent),
+                            ],
+                        )
+                        .await
+                        .with_context(|| format!("persist plan scope on child {id}"))?;
+                    }
+                    if parent_plan_id.is_some() && !parent_context_files.is_empty() {
+                        super::emit_task_spec_audit(adv, &id, &id, &parent_context_files)
+                            .await
+                            .with_context(|| format!("persist child task spec {id}"))?;
+                    }
                     child_ids.push(id);
                 }
                 children_created.extend(child_ids.iter().cloned());

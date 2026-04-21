@@ -34,6 +34,11 @@ pub enum AuditSentinelKind {
         #[serde(default)]
         execution_mode: Option<String>,
     },
+    TaskSpec {
+        task_id: String,
+        #[serde(default)]
+        context_files: Vec<String>,
+    },
     Dispatch {
         delegation_id: String,
         worker: String,
@@ -101,6 +106,7 @@ impl AuditSentinelKind {
     pub fn kind_str(&self) -> &'static str {
         match self {
             Self::PlanSubmit { .. } => "plan-submit",
+            Self::TaskSpec { .. } => "task-spec",
             Self::Dispatch { .. } => "dispatch",
             Self::DispatchOrphanCleared { .. } => "dispatch-orphan-cleared",
             Self::Completion { .. } => "completion",
@@ -163,8 +169,8 @@ mod tests {
             plan_id: "P1".into(),
             epic_issue_id: "bd-1".into(),
             task_ids: vec!["bd-2".into(), "bd-3".into()],
-            base_snapshot_branch: Some("refs/heads/main".into()),
-            execution_mode: Some("submit_plan".into()),
+            base_snapshot_branch: None,
+            execution_mode: None,
         }
     }
 
@@ -172,10 +178,18 @@ mod tests {
     fn encode_then_parse_round_trips_all_variants() {
         let cases = vec![
             sample_plan_submit(),
+            AuditSentinelKind::TaskSpec {
+                task_id: "t1".into(),
+                context_files: vec!["docs/spec.md".into(), "src/lib.rs".into()],
+            },
             AuditSentinelKind::Dispatch {
                 delegation_id: "del-A".into(),
                 worker: "codex".into(),
                 attempt: 1,
+            },
+            AuditSentinelKind::DispatchOrphanCleared {
+                delegation_id: "del-A".into(),
+                reason: "restart-orphan-cleared".into(),
             },
             AuditSentinelKind::Completion {
                 delegation_id: "del-A".into(),
@@ -183,10 +197,6 @@ mod tests {
                 superseded: false,
                 worker_branch: Some("feat/x".into()),
                 result_summary: None,
-            },
-            AuditSentinelKind::DispatchOrphanCleared {
-                delegation_id: "del-A".into(),
-                reason: "restart-orphan-cleared".into(),
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-A".into(),
@@ -275,16 +285,16 @@ mod tests {
                 worker: "y".into(),
                 attempt: 0,
             },
+            AuditSentinelKind::DispatchOrphanCleared {
+                delegation_id: "x".into(),
+                reason: "restart-orphan-cleared".into(),
+            },
             AuditSentinelKind::Completion {
                 delegation_id: "x".into(),
                 completion_state: CompletionState::AwaitingReview,
                 superseded: false,
                 worker_branch: None,
                 result_summary: None,
-            },
-            AuditSentinelKind::DispatchOrphanCleared {
-                delegation_id: "x".into(),
-                reason: "cleanup".into(),
             },
             AuditSentinelKind::Approval {
                 delegation_id: "x".into(),
@@ -375,6 +385,30 @@ mod tests {
     }
 
     #[test]
+    fn completion_state_and_dispatch_orphan_cleared_round_trip() {
+        let completion = AuditSentinelKind::Completion {
+            delegation_id: "del-A".into(),
+            completion_state: CompletionState::Superseded,
+            superseded: true,
+            worker_branch: Some("feat/stale".into()),
+            result_summary: Some("late completion ignored".into()),
+        };
+        let orphan = AuditSentinelKind::DispatchOrphanCleared {
+            delegation_id: "del-A".into(),
+            reason: "restart-orphan-cleared".into(),
+        };
+
+        let completion_body = encode_comment(&completion);
+        let orphan_body = encode_comment(&orphan);
+
+        assert_eq!(
+            parse_comment(&completion_body).unwrap().unwrap(),
+            completion
+        );
+        assert_eq!(parse_comment(&orphan_body).unwrap().unwrap(), orphan);
+    }
+
+    #[test]
     fn signal_variant_round_trips() {
         let kind = AuditSentinelKind::Signal {
             signal_id: "sig-1".into(),
@@ -426,16 +460,5 @@ mod tests {
         };
         let parsed = parse_comment(&encode_comment(&kind)).unwrap().unwrap();
         assert_eq!(parsed, kind);
-    }
-
-    #[test]
-    fn dispatch_orphan_cleared_round_trips() {
-        let kind = AuditSentinelKind::DispatchOrphanCleared {
-            delegation_id: "del-A".into(),
-            reason: "restart-orphan-cleared".into(),
-        };
-        let parsed = parse_comment(&encode_comment(&kind)).unwrap().unwrap();
-        assert_eq!(parsed, kind);
-        assert_eq!(parsed.kind_str(), "dispatch-orphan-cleared");
     }
 }

@@ -27,7 +27,7 @@ use spur_pm::{pidfile::PidFileGuard, IssueFilter, IssueUpdate, PmService, PrPara
 use spur_worktree::WorktreeManager;
 
 use crate::plan::proposers::{ScopeDriftSplitProposer, TrivialScorer};
-use crate::plan::reconciler::{Reconciler, ReconcilerConfig};
+use crate::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use crate::plan::signal_watcher::SignalWatcher;
 use crate::tools::{self, DelegationChannel, DelegationRequest};
 
@@ -366,6 +366,7 @@ pub async fn build_epic_subgraph(
 ) -> Result<EpicSubgraph, String> {
     let (epic_create, child_specs) =
         plan_epic_issue_creates(plan_id, epic_title, epic_body, tasks)?;
+    let advanced = pm.advanced();
 
     let epic_id = pm
         .create_issue(epic_create)
@@ -390,6 +391,22 @@ pub async fn build_epic_subgraph(
             .create_issue(child_create)
             .await
             .map_err(|e| format!("failed to create child for task '{task_id}': {e}"))?;
+        let task = tasks
+            .iter()
+            .find(|task| task.task_id == task_id)
+            .ok_or_else(|| format!("task spec for '{task_id}' disappeared during persistence"))?;
+        if !task.context_files.is_empty() {
+            let adv = advanced.ok_or_else(|| {
+                format!(
+                    "failed to persist child task spec for task '{task_id}': beads backend missing"
+                )
+            })?;
+            crate::plan::emit_task_spec_audit(adv, &child_id, &task.task_id, &task.context_files)
+                .await
+                .map_err(|e| {
+                    format!("failed to persist child task spec for task '{task_id}': {e}")
+                })?;
+        }
         task_map.insert(task_id, child_id);
     }
 
@@ -424,11 +441,15 @@ pub async fn emit_plan_submit_audit(
     advanced: &dyn spur_pm::BeadsAdvanced,
     plan_id: &str,
     sg: &EpicSubgraph,
+    base_snapshot_branch: Option<&str>,
+    execution_mode: Option<&str>,
 ) {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
         plan_id: plan_id.to_string(),
         epic_issue_id: sg.epic_id.clone(),
         task_ids: sg.task_map.values().cloned().collect(),
+        base_snapshot_branch: base_snapshot_branch.map(str::to_string),
+        execution_mode: execution_mode.map(str::to_string),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
@@ -440,6 +461,253 @@ pub async fn emit_plan_submit_audit(
             "PlanSubmit audit comment emission failed (graph is persisted; audit missing): {e}"
         );
     }
+}
+
+async fn apply_issue_update(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+    mut update: spur_pm::IssueUpdate,
+) -> anyhow::Result<()> {
+    let core_update = spur_pm::IssueUpdate {
+        status: update.status.take(),
+        comment: update.comment.take(),
+        priority: update.priority.take(),
+        assignee: update.assignee.take(),
+        ..Default::default()
+    };
+    if core_update.status.is_some()
+        || core_update.comment.is_some()
+        || core_update.priority.is_some()
+        || core_update.assignee.is_some()
+    {
+        pm.update_issue(issue_id, core_update).await?;
+    }
+
+    for label in update.add_labels {
+        pm.update_issue(
+            issue_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![label],
+                ..Default::default()
+            },
+        )
+        .await?;
+    }
+    for label in update.remove_labels {
+        pm.update_issue(
+            issue_id,
+            spur_pm::IssueUpdate {
+                remove_labels: vec![label],
+                ..Default::default()
+            },
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn discover_plan_ids(issues: &[spur_pm::IssueSummary]) -> Vec<String> {
+    let mut plan_ids = std::collections::BTreeSet::new();
+    for issue in issues {
+        if issue.status != "open" || issue.issue_type.as_deref() != Some("epic") {
+            continue;
+        }
+        for label in &issue.labels {
+            if let Some(plan_id) = crate::plan::labels::parse_plan_id(label) {
+                plan_ids.insert(plan_id.to_string());
+            }
+        }
+    }
+    plan_ids.into_iter().collect()
+}
+
+fn mutation_orphan_ids(audits: &[crate::plan::audit_sentinel::AuditSentinelKind]) -> Vec<String> {
+    let planned: std::collections::BTreeSet<String> = audits
+        .iter()
+        .filter_map(|audit| {
+            if let crate::plan::audit_sentinel::AuditSentinelKind::MutationPlan {
+                mutation_id,
+                ..
+            } = audit
+            {
+                Some(mutation_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let terminal: std::collections::BTreeSet<String> = audits
+        .iter()
+        .filter_map(|audit| match audit {
+            crate::plan::audit_sentinel::AuditSentinelKind::MutationCommit {
+                mutation_id, ..
+            } => Some(mutation_id.clone()),
+            crate::plan::audit_sentinel::AuditSentinelKind::MutationInvariantViolation {
+                mutation_id,
+                ..
+            } => Some(mutation_id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    planned.difference(&terminal).cloned().collect()
+}
+
+fn replace_execution_labels(
+    issue: &spur_pm::Issue,
+    plan_id: &str,
+    agent_name: &str,
+) -> spur_pm::IssueUpdate {
+    let mut remove_labels = Vec::new();
+    for label in &issue.labels {
+        if crate::plan::labels::parse_plan_id(label).is_some()
+            || crate::plan::labels::parse_agent(label).is_some()
+        {
+            remove_labels.push(label.clone());
+        }
+    }
+
+    spur_pm::IssueUpdate {
+        add_labels: vec![
+            crate::plan::labels::plan_id(plan_id),
+            crate::plan::labels::agent(agent_name),
+        ],
+        remove_labels,
+        ..Default::default()
+    }
+}
+
+fn replace_task_execution_labels(
+    issue: &spur_pm::Issue,
+    plan_id: &str,
+    task_id: &str,
+    agent_name: &str,
+) -> spur_pm::IssueUpdate {
+    let mut update = replace_execution_labels(issue, plan_id, agent_name);
+    update
+        .add_labels
+        .push(crate::plan::labels::plan_task_id(task_id));
+    for label in &issue.labels {
+        if crate::plan::labels::parse_plan_task_id(label).is_some() {
+            update.remove_labels.push(label.clone());
+        }
+    }
+    update
+}
+
+fn invert_label_update(update: &spur_pm::IssueUpdate) -> spur_pm::IssueUpdate {
+    spur_pm::IssueUpdate {
+        add_labels: update.remove_labels.clone(),
+        remove_labels: update.add_labels.clone(),
+        ..Default::default()
+    }
+}
+
+#[doc(hidden)]
+pub async fn compensate_mutation_orphans(
+    pm: Arc<spur_pm::PmService>,
+    task_id: &str,
+) -> anyhow::Result<()> {
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| anyhow::anyhow!("mutation recovery requires beads backend"))?;
+    let audits = crate::plan::projector::collect_sorted_audits(adv.list_comments(task_id).await?);
+
+    for mutation_id in mutation_orphan_ids(&audits) {
+        if let Ok(uuid) = uuid::Uuid::parse_str(&mutation_id) {
+            let mutation_label = crate::plan::labels::mutation_id_label(&uuid);
+            let summaries = pm
+                .list_issues(spur_pm::IssueFilter {
+                    labels: vec![mutation_label],
+                    limit: Some(1_000),
+                    ..Default::default()
+                })
+                .await?;
+            let child_ids: Vec<String> = summaries.into_iter().map(|summary| summary.id).collect();
+            for child_id in &child_ids {
+                pm.update_issue(
+                    child_id,
+                    spur_pm::IssueUpdate {
+                        status: Some(pm.closed_status().to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            apply_issue_update(
+                pm.as_ref(),
+                task_id,
+                spur_pm::IssueUpdate {
+                    status: Some("open".to_string()),
+                    remove_labels: crate::plan::labels::superseded_by_labels(&child_ids),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+
+        adv.add_comment(
+            task_id,
+            &crate::plan::audit_sentinel::encode_comment(
+                &crate::plan::audit_sentinel::AuditSentinelKind::MutationInvariantViolation {
+                    mutation_id: mutation_id.clone(),
+                    violation: "restart-orphan".into(),
+                    rollback_status: "compensated".into(),
+                },
+            ),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[doc(hidden)]
+pub async fn resolve_dispatch_orphan(
+    pm: Arc<spur_pm::PmService>,
+    task_id: &str,
+) -> anyhow::Result<bool> {
+    let issue = pm.get_issue(task_id).await?;
+    if issue.status != "open" {
+        return Ok(false);
+    }
+    let Some(delegation_id) = issue.labels.iter().find_map(|label| {
+        crate::plan::labels::parse_delegation_id(label)
+            .or_else(|| label.strip_prefix("delegation-id:"))
+    }) else {
+        return Ok(false);
+    };
+    if issue
+        .labels
+        .iter()
+        .any(|label| label == crate::plan::labels::READY_FOR_REVIEW)
+    {
+        return Ok(false);
+    }
+
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| anyhow::anyhow!("dispatch recovery requires beads backend"))?;
+    let audits = crate::plan::projector::collect_sorted_audits(adv.list_comments(task_id).await?);
+    if audits.iter().any(|audit| matches!(
+        audit,
+        crate::plan::audit_sentinel::AuditSentinelKind::Completion { delegation_id: did, .. } if did == delegation_id
+    )) {
+        return Ok(false);
+    }
+
+    adv.add_comment(
+        task_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::DispatchOrphanCleared {
+                delegation_id: delegation_id.to_string(),
+                reason: "restart-orphan-cleared".into(),
+            },
+        ),
+    )
+    .await?;
+    crate::plan::clear_dispatch_intent(pm.as_ref(), task_id, delegation_id).await?;
+    Ok(true)
 }
 
 /// Worker-facing handler for the `report_signal` MCP tool.
@@ -939,6 +1207,10 @@ impl McpCallbackServer {
         self.reconciler_fast_forward = fast_forward;
     }
 
+    pub fn fast_forward_reconciler(&self) {
+        notify_fast_forward(&self.reconciler_fast_forward);
+    }
+
     /// Set the repository root path. Required for pidfile acquisition.
     pub fn set_repo_root(&mut self, root: std::path::PathBuf) {
         self.repo_root = Some(root);
@@ -1108,6 +1380,39 @@ impl McpCallbackServer {
         serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
     }
 
+    /// Test-only: invoke the `execute_epic` JSON-RPC handler directly.
+    ///
+    /// Exposed for integration tests that need to verify persisted label and
+    /// audit behavior without standing up the full HTTP transport.
+    #[doc(hidden)]
+    pub async fn __test_call_execute_epic(
+        &self,
+        epic_id: &str,
+        default_agent: Option<&str>,
+    ) -> Value {
+        let args = match default_agent {
+            Some(agent) => json!({
+                "epic_id": epic_id,
+                "default_agent": agent,
+            }),
+            None => json!({
+                "epic_id": epic_id,
+            }),
+        };
+        let resp = self.handle_execute_epic(Value::from(1), args).await;
+        serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
+    /// Test-only: invoke the `submit_plan` JSON-RPC handler directly.
+    ///
+    /// Accepts a raw `arguments` object so integration tests can exercise both
+    /// ephemeral and persisted submit paths without the HTTP transport.
+    #[doc(hidden)]
+    pub async fn __test_call_submit_plan(&self, arguments: Value) -> Value {
+        let resp = self.handle_submit_plan(Value::from(1), arguments).await;
+        serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
     /// Test-only: peek whether a result is sitting in `completed_delegations`
     /// awaiting a `check_delegation_status` poll. Used to detect the
     /// double-delivery failure mode (map write AND continuation callback both
@@ -1118,6 +1423,12 @@ impl McpCallbackServer {
             .lock()
             .await
             .contains_key(&DelegationId::from(delegation_id))
+    }
+
+    /// Test-only: current number of cached plan entries in `active_plans`.
+    #[doc(hidden)]
+    pub async fn __test_active_plan_count(&self) -> usize {
+        self.active_plans.lock().await.len()
     }
 
     /// Remove completed delegation results older than `COMPLETED_TTL`.
@@ -1163,6 +1474,15 @@ impl McpCallbackServer {
             None
         };
 
+        if let Some(pm) = self.pm_service.as_ref() {
+            if pm.advanced().is_some() {
+                self.reclaim_persisted_plans_on_startup(Arc::clone(pm))
+                    .await
+                    .context("failed to reclaim persisted plans before startup")?;
+            }
+        }
+        let has_reclaimed_plans = !self.active_plans.lock().await.is_empty();
+
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("Failed to bind TCP listener")?;
@@ -1178,10 +1498,6 @@ impl McpCallbackServer {
         };
         let router = Router::new().nest_service("/mcp", service);
 
-        // v0a.3: Spawn reconciler if enabled.
-        // The reconciler is observation-only (does NOT dispatch in v0a). It observes ready
-        // tasks via bv/br, logs metrics, and surfaces signals for the brain.
-        // Dispatch lands in v0b.
         let mut reconciler_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
         let reconciler_task = if self.reconciler_enabled {
             let fast_forward = self.reconciler_fast_forward.as_ref().cloned();
@@ -1190,6 +1506,12 @@ impl McpCallbackServer {
                 if pm.advanced().is_some() {
                     let pm = Arc::clone(pm);
                     let fast = fast_forward.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
+                    let dispatch = ReconcilerDispatchCtx {
+                        delegation_tx: self.delegation_tx.clone(),
+                        task_tracker: self.task_tracker.clone(),
+                        brain_session_id: self.brain_session_id.clone(),
+                        event_sink: self.event_sink.clone(),
+                    };
                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                     reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
@@ -1198,6 +1520,7 @@ impl McpCallbackServer {
                             ReconcilerConfig::default(),
                             pm,
                             fast,
+                            Some(dispatch),
                             None, // plan_id: observe all plans when None
                         );
                         reconciler.run(cancel_rx).await;
@@ -1215,6 +1538,10 @@ impl McpCallbackServer {
             tracing::debug!("reconciler disabled: reconciler_enabled = false");
             None
         };
+        if reconciler_task.is_some() && has_reclaimed_plans {
+            tokio::task::yield_now().await;
+            self.fast_forward_reconciler();
+        }
 
         let mut signal_watcher_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
         let signal_watcher_task = if let Some(pm) = self.pm_service.as_ref() {
@@ -2436,16 +2763,6 @@ impl McpCallbackServer {
             None
         };
 
-        // v0a.2: Emit PlanSubmit audit sentinel comment on the epic. Advisory —
-        // failure is warned and swallowed. See docs/superpowers/plans/
-        // 2026-04-20-adaptive-plan-repair-v0a.md "Review addendum II" for why
-        // comments (not br audit record) are the audit transport.
-        if let Some(sg) = &epic_subgraph {
-            if let Some(adv) = self.pm_service.as_deref().and_then(|pm| pm.advanced()) {
-                emit_plan_submit_audit(adv, &plan_id, sg).await;
-            }
-        }
-
         let entries: Vec<crate::plan::PlanTaskEntry> =
             build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
 
@@ -2464,24 +2781,42 @@ impl McpCallbackServer {
         };
         let state = Arc::new(tokio::sync::Mutex::new(state));
 
+        if let Some(sg) = &epic_subgraph {
+            if let Some(adv) = self.pm_service.as_deref().and_then(|pm| pm.advanced()) {
+                let base_snapshot_branch = state.lock().await.base_snapshot_branch.clone();
+                emit_plan_submit_audit(
+                    adv,
+                    &plan_id,
+                    sg,
+                    base_snapshot_branch.as_deref(),
+                    Some("submit_plan"),
+                )
+                .await;
+            }
+        }
+
         self.active_plans
             .lock()
             .await
             .insert(plan_id.clone(), Arc::clone(&state));
 
-        // Spawn the plan executor.
-        let delegation_tx = self.delegation_tx.clone();
-        let plan_sink = self.event_sink.clone();
-        let plan_pm = self
-            .pm_service
-            .clone()
-            .map(|p| p as Arc<dyn crate::plan::PmLike>);
-        self.task_tracker.spawn(crate::plan::run_plan(
-            state,
-            delegation_tx,
-            plan_sink,
-            plan_pm,
-        ));
+        if epic_subgraph.is_some() {
+            self.fast_forward_reconciler();
+        } else {
+            let delegation_tx = self.delegation_tx.clone();
+            let plan_sink = self.event_sink.clone();
+            let plan_pm = self
+                .pm_service
+                .clone()
+                .map(|p| p as Arc<dyn crate::plan::PmLike>);
+            self.task_tracker.spawn(crate::plan::run_plan(
+                state,
+                delegation_tx,
+                plan_sink,
+                plan_pm,
+                self.reconciler_fast_forward.as_ref().cloned(),
+            ));
+        }
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
@@ -2671,12 +3006,108 @@ impl McpCallbackServer {
             brain_session_id: self.brain_session_id.clone(),
             base_snapshot_branch,
             merge_state: crate::plan::PlanMergeState::NotStarted,
-            epic_id: None, // TODO follow-up: set to Some(epic_id_arg.clone()) so review_task can correlate
+            epic_id: Some(epic_id.clone()),
         };
         let state = Arc::new(tokio::sync::Mutex::new(state));
 
         // Keep a clone of the Arc to build the initial status response.
         let state_for_status = Arc::clone(&state);
+
+        let (task_scope, base_snapshot_branch) = {
+            let state = state_for_status.lock().await;
+            let task_scope = state
+                .tasks
+                .iter()
+                .filter_map(|entry| {
+                    entry.spec.issue_id.as_ref().map(|issue_id| {
+                        (
+                            issue_id.clone(),
+                            entry.spec.task_id.clone(),
+                            entry.spec.agent.clone(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            (task_scope, state.base_snapshot_branch.clone())
+        };
+
+        let mut rollback_updates: Vec<(String, spur_pm::IssueUpdate)> = Vec::new();
+        if let Ok(epic_issue) = pm.get_issue(&epic_id).await {
+            let mut remove_labels = Vec::new();
+            for label in &epic_issue.labels {
+                if crate::plan::labels::parse_plan_id(label).is_some()
+                    || crate::plan::labels::parse_agent(label).is_some()
+                {
+                    remove_labels.push(label.clone());
+                }
+            }
+            let update = spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::plan_id(&plan_id)],
+                remove_labels,
+                ..Default::default()
+            };
+            if let Err(error) = apply_issue_update(pm, &epic_id, update.clone()).await {
+                self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("failed to persist execute_epic labels on epic: {error}"),
+                );
+            }
+            rollback_updates.push((epic_id.clone(), invert_label_update(&update)));
+        }
+
+        for (issue_id, task_id, agent_name) in &task_scope {
+            let issue = match pm.get_issue(issue_id).await {
+                Ok(issue) => issue,
+                Err(error) => {
+                    self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                    return JsonRpcResponse::internal_error(
+                        id,
+                        format!("failed to fetch execute_epic task '{issue_id}': {error}"),
+                    );
+                }
+            };
+            let update = replace_task_execution_labels(&issue, &plan_id, task_id, agent_name);
+            if let Err(error) = apply_issue_update(pm, issue_id, update.clone()).await {
+                let mut compensations = vec![(issue_id.clone(), invert_label_update(&update))];
+                compensations.extend(rollback_updates.iter().rev().cloned());
+                for (rollback_issue_id, rollback_update) in compensations {
+                    if let Err(rollback_error) =
+                        apply_issue_update(pm, &rollback_issue_id, rollback_update).await
+                    {
+                        tracing::warn!(
+                            issue_id = %rollback_issue_id,
+                            "failed to roll back execute_epic scope after task persist failure: {rollback_error}"
+                        );
+                    }
+                }
+                self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("failed to persist execute_epic labels on task '{issue_id}': {error}"),
+                );
+            }
+            rollback_updates.push((issue_id.clone(), invert_label_update(&update)));
+        }
+
+        if let Some(adv) = pm.advanced() {
+            let task_map = task_scope
+                .iter()
+                .map(|(issue_id, task_id, _)| (task_id.clone(), issue_id.clone()))
+                .collect();
+            let sg = EpicSubgraph {
+                epic_id: epic_id.clone(),
+                task_map,
+            };
+            emit_plan_submit_audit(
+                adv,
+                &plan_id,
+                &sg,
+                base_snapshot_branch.as_deref(),
+                Some("execute_epic"),
+            )
+            .await;
+        }
 
         // Insert into active_plans first (no registry lock held here).
         self.active_plans
@@ -2693,11 +3124,6 @@ impl McpCallbackServer {
             .by_epic
             .insert(epic_id.clone(), plan_id.clone());
 
-        // Spawn the plan executor.
-        // tokio_util 0.7 TaskTracker::spawn returns JoinHandle directly (not
-        // Option), but it will panic if the underlying Tokio runtime has shut
-        // down. Guard with is_closed() so a shutting-down orchestrator rolls
-        // back instead of leaving a zombie plan in active_plans + registry.
         if self.task_tracker.is_closed() {
             // Roll back: remove the active_plans entry we just inserted.
             {
@@ -2715,18 +3141,7 @@ impl McpCallbackServer {
                 "orchestrator shutting down — execute_epic aborted",
             );
         }
-        let delegation_tx = self.delegation_tx.clone();
-        let plan_sink = self.event_sink.clone();
-        let plan_pm = self
-            .pm_service
-            .clone()
-            .map(|p| p as Arc<dyn crate::plan::PmLike>);
-        self.task_tracker.spawn(crate::plan::run_plan(
-            state,
-            delegation_tx,
-            plan_sink,
-            plan_pm,
-        ));
+        self.fast_forward_reconciler();
 
         info!(
             plan_id = %plan_id,
@@ -2765,17 +3180,9 @@ impl McpCallbackServer {
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
         };
 
-        // Clone the Arc before releasing the outer lock so we don't hold
-        // active_plans while awaiting the inner plan lock — prevents
-        // blocking concurrent submit_plan calls.
-        let plan_arc = {
-            let plans = self.active_plans.lock().await;
-            plans.get(&plan_id).cloned()
-        };
-
-        let plan_state = match plan_arc {
-            Some(s) => s,
-            None => {
+        let plan_state = match self.load_or_project_plan(&plan_id).await {
+            Ok(plan_state) => plan_state,
+            Err(_) => {
                 return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"))
             }
         };
@@ -2798,13 +3205,7 @@ impl McpCallbackServer {
             .to_string();
         let attempt = args["attempt"].as_u64().map(|n| n as u32);
 
-        let plan_arc = {
-            let plans = self.active_plans.lock().await;
-            plans
-                .get(&plan_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown plan '{plan_id}'"))?
-        };
+        let plan_arc = self.load_or_project_plan(&plan_id).await?;
 
         let state = plan_arc.lock().await;
         let entry = state
@@ -2907,13 +3308,7 @@ impl McpCallbackServer {
         let decision = args["decision"].as_str().ok_or("missing decision")?;
         let feedback = args["feedback"].as_str();
 
-        let plan_arc = {
-            let plans = self.active_plans.lock().await;
-            plans
-                .get(&plan_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown plan '{plan_id}'"))?
-        };
+        let plan_arc = self.load_or_project_plan(&plan_id).await?;
 
         let sink: Option<&dyn crate::events::McpEventSink> = self.event_sink.as_deref();
 
@@ -2940,6 +3335,93 @@ impl McpCallbackServer {
         .await?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    async fn install_projected_plan(&self, projected: crate::plan::PlanState) {
+        let plan_id = projected.plan_id.clone();
+        if let Some(epic_id) = projected.epic_id.clone() {
+            self.plan_registry
+                .lock()
+                .await
+                .by_epic
+                .insert(epic_id, plan_id.clone());
+        }
+        self.active_plans
+            .lock()
+            .await
+            .insert(plan_id, Arc::new(tokio::sync::Mutex::new(projected)));
+    }
+
+    async fn recover_persisted_plans(&self, pm: Arc<spur_pm::PmService>) -> anyhow::Result<()> {
+        let epics = pm
+            .list_issues(spur_pm::IssueFilter {
+                status: Some("open".to_string()),
+                issue_type: Some("epic".to_string()),
+                limit: Some(1_000),
+                ..Default::default()
+            })
+            .await?;
+
+        for plan_id in discover_plan_ids(&epics) {
+            let projected =
+                crate::plan::projector::project_plan_from_beads(pm.as_ref(), &plan_id).await?;
+            for task in &projected.tasks {
+                if let Some(issue_id) = &task.spec.issue_id {
+                    compensate_mutation_orphans(Arc::clone(&pm), issue_id).await?;
+                    let _ = resolve_dispatch_orphan(Arc::clone(&pm), issue_id).await?;
+                }
+            }
+            let refreshed =
+                crate::plan::projector::project_plan_from_beads(pm.as_ref(), &plan_id).await?;
+            self.install_projected_plan(refreshed).await;
+        }
+
+        Ok(())
+    }
+
+    async fn reclaim_persisted_plans_on_startup(
+        &self,
+        pm: Arc<spur_pm::PmService>,
+    ) -> anyhow::Result<()> {
+        self.recover_persisted_plans(pm).await
+    }
+
+    async fn load_or_project_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
+        let cached = self.active_plans.lock().await.get(plan_id).cloned();
+        let persisted_cached = if let Some(existing) = cached.as_ref() {
+            existing.lock().await.epic_id.is_some()
+        } else {
+            false
+        };
+        if let Some(existing) = cached.clone() {
+            if !persisted_cached {
+                return Ok(existing);
+            }
+        }
+
+        let pm = self
+            .pm_service
+            .as_deref()
+            .ok_or_else(|| format!("unknown plan '{plan_id}'"))?;
+        let projected = crate::plan::projector::project_plan_from_beads(pm, plan_id)
+            .await
+            .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
+        self.install_projected_plan(projected).await;
+        self.active_plans
+            .lock()
+            .await
+            .get(plan_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown plan '{plan_id}'"))
+    }
+}
+
+pub(crate) fn notify_fast_forward(fast_forward: &Option<Arc<tokio::sync::Notify>>) {
+    if let Some(notify) = fast_forward {
+        notify.notify_one();
     }
 }
 
@@ -3271,5 +3753,387 @@ mod merge_plan_tests {
         .await
         .expect("show partial merge branch");
         assert_eq!(merged_contents, "worker-a");
+    }
+}
+
+#[cfg(test)]
+mod reconciler_fast_forward_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn notify_fast_forward_wakes_waiter() {
+        let notify = Arc::new(Notify::new());
+        let waiter = tokio::spawn({
+            let notify = Arc::clone(&notify);
+            async move { notify.notified().await }
+        });
+
+        super::notify_fast_forward(&Some(Arc::clone(&notify)));
+
+        tokio::time::timeout(Duration::from_millis(50), waiter)
+            .await
+            .expect("waiter must wake")
+            .expect("waiter task must not panic");
+    }
+
+    #[tokio::test]
+    async fn fast_forward_reconciler_uses_configured_notify() {
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (mut server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        let notify = Arc::new(Notify::new());
+        server.set_reconciler_enabled(true, Some(Arc::clone(&notify)));
+
+        let waiter = tokio::spawn({
+            let notify = Arc::clone(&notify);
+            async move { notify.notified().await }
+        });
+
+        server.fast_forward_reconciler();
+
+        tokio::time::timeout(Duration::from_millis(50), waiter)
+            .await
+            .expect("fast-forward must wake the configured reconciler channel")
+            .expect("waiter task must not panic");
+    }
+
+    #[tokio::test]
+    async fn load_or_project_plan_returns_cached_entry_when_present() {
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        let plan = Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
+            plan_id: "plan-1".into(),
+            tasks: Vec::new(),
+            brain_session_id: session_id.clone(),
+            base_snapshot_branch: None,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: None,
+        }));
+        server
+            .active_plans
+            .lock()
+            .await
+            .insert("plan-1".into(), Arc::clone(&plan));
+
+        let loaded = server
+            .load_or_project_plan("plan-1")
+            .await
+            .expect("load cached plan");
+        assert!(Arc::ptr_eq(&loaded, &plan));
+    }
+
+    #[test]
+    fn discover_plan_ids_collects_unique_prefix_values() {
+        let issues = vec![
+            spur_pm::IssueSummary {
+                id: "bd-1".into(),
+                source: spur_pm::PmSource::Beads,
+                title: "Epic A".into(),
+                status: "open".into(),
+                labels: vec![
+                    crate::plan::labels::plan_id("plan-1"),
+                    crate::plan::labels::PLAN_COMPLETE.to_string(),
+                ],
+                url: "beads://bd-1".into(),
+                priority: Some(2),
+                issue_type: Some("epic".into()),
+                assignee: None,
+            },
+            spur_pm::IssueSummary {
+                id: "bd-2".into(),
+                source: spur_pm::PmSource::Beads,
+                title: "Epic B".into(),
+                status: "open".into(),
+                labels: vec![
+                    crate::plan::labels::plan_id("plan-2"),
+                    crate::plan::labels::plan_id("plan-1"),
+                ],
+                url: "beads://bd-2".into(),
+                priority: Some(2),
+                issue_type: Some("epic".into()),
+                assignee: None,
+            },
+        ];
+
+        let plan_ids = super::discover_plan_ids(&issues);
+        assert_eq!(plan_ids, vec!["plan-1".to_string(), "plan-2".to_string()]);
+    }
+
+    #[test]
+    fn mutation_orphan_ids_require_terminal_companion_breadcrumb() {
+        use crate::plan::audit_sentinel::AuditSentinelKind;
+
+        let audits = vec![
+            AuditSentinelKind::MutationPlan {
+                mutation_id: "mut-1".into(),
+                op: "split".into(),
+                trigger_signal_id: Some("sig-1".into()),
+                trigger_task_id: "bd-1".into(),
+            },
+            AuditSentinelKind::MutationPlan {
+                mutation_id: "mut-2".into(),
+                op: "split".into(),
+                trigger_signal_id: Some("sig-2".into()),
+                trigger_task_id: "bd-1".into(),
+            },
+            AuditSentinelKind::MutationCommit {
+                mutation_id: "mut-2".into(),
+                children_created: vec!["bd-2".into()],
+            },
+        ];
+
+        assert_eq!(
+            super::mutation_orphan_ids(&audits),
+            vec!["mut-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn execution_label_replacement_removes_old_plan_and_agent_labels() {
+        let issue = spur_pm::Issue {
+            id: "bd-1".into(),
+            source: spur_pm::PmSource::Beads,
+            title: "Task".into(),
+            body: "Body".into(),
+            status: "open".into(),
+            labels: vec![
+                crate::plan::labels::plan_id("old-plan"),
+                crate::plan::labels::agent("old-agent"),
+            ],
+            assignee: None,
+            url: "beads://bd-1".into(),
+            priority: Some(2),
+            issue_type: Some("task".into()),
+            blocked_by: Vec::new(),
+            due_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let update = super::replace_execution_labels(&issue, "new-plan", "codex");
+        assert!(update
+            .add_labels
+            .contains(&crate::plan::labels::plan_id("new-plan")));
+        assert!(update
+            .add_labels
+            .contains(&crate::plan::labels::agent("codex")));
+        assert!(update
+            .remove_labels
+            .contains(&crate::plan::labels::plan_id("old-plan")));
+        assert!(update
+            .remove_labels
+            .contains(&crate::plan::labels::agent("old-agent")));
+    }
+
+    #[tokio::test]
+    async fn install_projected_plan_replaces_stale_cache_entry() {
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+
+        let stale = Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
+            plan_id: "plan-1".into(),
+            tasks: Vec::new(),
+            brain_session_id: session_id.clone(),
+            base_snapshot_branch: None,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: None,
+        }));
+        server
+            .active_plans
+            .lock()
+            .await
+            .insert("plan-1".into(), Arc::clone(&stale));
+
+        let fresh = crate::plan::PlanState {
+            plan_id: "plan-1".into(),
+            tasks: vec![crate::plan::PlanTaskEntry {
+                spec: crate::plan::PlanTask {
+                    task_id: "t1".into(),
+                    agent: "codex".into(),
+                    task: "Task".into(),
+                    depends_on: Vec::new(),
+                    issue_id: Some("bd-1".into()),
+                    context_files: Vec::new(),
+                },
+                status: crate::plan::PlanTaskStatus::Ready,
+                result: None,
+                worker_branch: None,
+                attempt: 1,
+                history: Vec::new(),
+                last_delegation_id: None,
+            }],
+            brain_session_id: session_id.clone(),
+            base_snapshot_branch: Some("refs/heads/main".into()),
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: Some("bd-epic".into()),
+        };
+
+        server.install_projected_plan(fresh).await;
+        let loaded = server
+            .active_plans
+            .lock()
+            .await
+            .get("plan-1")
+            .cloned()
+            .expect("cached plan");
+        assert_eq!(loaded.lock().await.tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reclaim_persisted_plans_hydrates_empty_cache() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let output = std::process::Command::new("br")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("br init");
+        assert!(output.status.success(), "br init failed: {:?}", output);
+
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected Some(PmService)"),
+        );
+        let tasks = vec![crate::plan::PlanTask {
+            task_id: "t1".into(),
+            agent: "codex".into(),
+            task: "Task".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        crate::build_epic_subgraph(pm.as_ref(), "plan-1", "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            Some(Arc::clone(&pm)),
+            None,
+            continuation_ctx,
+        );
+        assert!(server.active_plans.lock().await.is_empty());
+
+        server
+            .reclaim_persisted_plans_on_startup(pm)
+            .await
+            .expect("reclaim persisted plans");
+        assert!(!server.active_plans.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reclaim_replaces_existing_cache_entry_instead_of_merging() {
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        server.active_plans.lock().await.insert(
+            "plan-1".into(),
+            Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
+                plan_id: "plan-1".into(),
+                tasks: Vec::new(),
+                brain_session_id: session_id.clone(),
+                base_snapshot_branch: None,
+                merge_state: crate::plan::PlanMergeState::NotStarted,
+                epic_id: None,
+            })),
+        );
+
+        let fresh_plan = crate::plan::PlanState {
+            plan_id: "plan-1".into(),
+            tasks: vec![crate::plan::PlanTaskEntry {
+                spec: crate::plan::PlanTask {
+                    task_id: "t1".into(),
+                    agent: "codex".into(),
+                    task: "Task".into(),
+                    depends_on: Vec::new(),
+                    issue_id: Some("bd-1".into()),
+                    context_files: Vec::new(),
+                },
+                status: crate::plan::PlanTaskStatus::Ready,
+                result: None,
+                worker_branch: None,
+                attempt: 1,
+                history: Vec::new(),
+                last_delegation_id: None,
+            }],
+            brain_session_id: session_id.clone(),
+            base_snapshot_branch: None,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: Some("bd-epic".into()),
+        };
+        let replacement_plan = crate::plan::PlanState {
+            plan_id: "plan-1".into(),
+            tasks: vec![
+                crate::plan::PlanTaskEntry {
+                    spec: crate::plan::PlanTask {
+                        task_id: "t1".into(),
+                        agent: "codex".into(),
+                        task: "Task".into(),
+                        depends_on: Vec::new(),
+                        issue_id: Some("bd-1".into()),
+                        context_files: Vec::new(),
+                    },
+                    status: crate::plan::PlanTaskStatus::Ready,
+                    result: None,
+                    worker_branch: None,
+                    attempt: 1,
+                    history: Vec::new(),
+                    last_delegation_id: None,
+                },
+                crate::plan::PlanTaskEntry {
+                    spec: crate::plan::PlanTask {
+                        task_id: "t2".into(),
+                        agent: "codex".into(),
+                        task: "Task 2".into(),
+                        depends_on: Vec::new(),
+                        issue_id: Some("bd-2".into()),
+                        context_files: Vec::new(),
+                    },
+                    status: crate::plan::PlanTaskStatus::Pending,
+                    result: None,
+                    worker_branch: None,
+                    attempt: 1,
+                    history: Vec::new(),
+                    last_delegation_id: None,
+                },
+            ],
+            brain_session_id: session_id,
+            base_snapshot_branch: None,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: Some("bd-epic".into()),
+        };
+
+        server.install_projected_plan(fresh_plan).await;
+        server.install_projected_plan(replacement_plan).await;
+        let cached = server
+            .active_plans
+            .lock()
+            .await
+            .get("plan-1")
+            .cloned()
+            .expect("cached");
+        assert_eq!(cached.lock().await.tasks.len(), 2);
     }
 }

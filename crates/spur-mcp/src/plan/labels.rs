@@ -41,6 +41,8 @@ pub fn source_issue(issue_id: &str) -> String {
     format!("spur:source-issue:{issue_id}")
 }
 
+pub const DELEGATION_ID_PREFIX: &str = "spur:delegation-id:";
+
 pub fn delegation_id(delegation_id: &str) -> String {
     format!("{DELEGATION_ID_PREFIX}{delegation_id}")
 }
@@ -54,7 +56,6 @@ pub fn signal_kind_bucket(kind: &str, bucket: &str) -> String {
 }
 
 pub const SIGNAL_LATE_ARRIVAL: &str = "signal:late-arrival";
-pub const DELEGATION_ID_PREFIX: &str = "spur:delegation-id:";
 pub const READY_FOR_REVIEW: &str = "spur:ready-for-review";
 pub const REVIEW_REJECTED: &str = "spur:review-rejected";
 /// Marker applied to an epic after `build_epic_subgraph` successfully creates
@@ -68,6 +69,10 @@ pub const PLAN_ID_PREFIX: &str = "spur:plan-id:";
 pub const PLAN_TASK_ID_PREFIX: &str = "spur:plan-task-id:";
 pub const AGENT_PREFIX: &str = "spur:agent:";
 pub const SOURCE_ISSUE_PREFIX: &str = "spur:source-issue:";
+
+pub fn parse_delegation_id(label: &str) -> Option<&str> {
+    label.strip_prefix(DELEGATION_ID_PREFIX)
+}
 
 /// Returns `Some(task_id)` if the given label is a `spur:plan-task-id:<id>` label.
 pub fn parse_plan_task_id(label: &str) -> Option<&str> {
@@ -87,11 +92,6 @@ pub fn parse_agent(label: &str) -> Option<&str> {
 /// Returns `Some(issue_id)` if the given label is a `spur:source-issue:<id>` label.
 pub fn parse_source_issue(label: &str) -> Option<&str> {
     label.strip_prefix(SOURCE_ISSUE_PREFIX)
-}
-
-/// Returns `Some(delegation_id)` if the given label is a `spur:delegation-id:<id>` label.
-pub fn parse_delegation_id(label: &str) -> Option<&str> {
-    label.strip_prefix(DELEGATION_ID_PREFIX)
 }
 
 /// Returns `Some(kind)` if the given label is a `signal:<kind>` label
@@ -150,13 +150,15 @@ mod tests {
         assert_eq!(plan_task_id("T1"), "spur:plan-task-id:T1");
         assert_eq!(agent("codex"), "spur:agent:codex");
         assert_eq!(source_issue("bd-42"), "spur:source-issue:bd-42");
-        assert_eq!(delegation_id("del-A"), "delegation-id:del-A");
+        assert_eq!(delegation_id("del-A"), "spur:delegation-id:del-A");
         assert_eq!(signal_kind("scope-drift"), "signal:scope-drift");
         assert_eq!(
             signal_kind_bucket("scope-drift", "high"),
             "signal:scope-drift:high"
         );
         assert_eq!(SIGNAL_LATE_ARRIVAL, "signal:late-arrival");
+        assert_eq!(READY_FOR_REVIEW, "spur:ready-for-review");
+        assert_eq!(REVIEW_REJECTED, "spur:review-rejected");
         assert_eq!(PLAN_COMPLETE, "spur:plan-complete");
     }
 
@@ -175,7 +177,10 @@ mod tests {
     #[test]
     fn delegation_and_review_labels_use_spur_namespace() {
         assert_eq!(delegation_id("del-A"), "spur:delegation-id:del-A");
-        assert_eq!(parse_delegation_id("spur:delegation-id:del-A"), Some("del-A"));
+        assert_eq!(
+            parse_delegation_id("spur:delegation-id:del-A"),
+            Some("del-A")
+        );
         assert_eq!(READY_FOR_REVIEW, "spur:ready-for-review");
         assert_eq!(REVIEW_REJECTED, "spur:review-rejected");
     }
@@ -202,6 +207,8 @@ mod tests {
             signal_kind_bucket("scope-drift", "high"),
             mutation_id_label(&uuid::Uuid::nil()),
             signal_processed_label(&uuid::Uuid::nil()),
+            READY_FOR_REVIEW.to_string(),
+            REVIEW_REJECTED.to_string(),
         ] {
             assert!(is_br_legal(&s), "constructor emitted br-illegal label: {s}");
         }
