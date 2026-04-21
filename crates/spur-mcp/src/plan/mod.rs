@@ -1052,6 +1052,11 @@ pub async fn run_plan(
     pm: Option<Arc<dyn PmLike>>,
     fast_forward: Option<Arc<tokio::sync::Notify>>,
 ) {
+    if plan.lock().await.epic_id.is_some() {
+        tracing::warn!("run_plan is ephemeral-only in v0e; persisted plans must use the reconciler");
+        return;
+    }
+
     let plan_id = plan.lock().await.plan_id.clone();
     info!(plan_id = %plan_id, "Plan executor started");
 
@@ -2793,7 +2798,10 @@ mod tests {
             rx.recv(),
         )
         .await;
-        assert!(recv.is_err());
+        assert!(
+            matches!(recv, Ok(None) | Err(_)),
+            "run_plan must not dispatch when epic_id is present; got {recv:?}"
+        );
     }
 
     #[tokio::test]
@@ -2805,7 +2813,10 @@ mod tests {
             rx.recv(),
         )
         .await;
-        assert!(recv.is_ok());
+        assert!(
+            matches!(recv, Ok(Some(_))),
+            "run_plan must dispatch when epic_id is None; got {recv:?}"
+        );
     }
 
     #[test]
