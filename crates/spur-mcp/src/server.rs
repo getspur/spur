@@ -465,6 +465,54 @@ pub async fn emit_plan_submit_audit(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PersistedPlanBootstrap {
+    epic_id: String,
+    base_snapshot_branch: Option<String>,
+    base_snapshot_oid: Option<String>,
+}
+
+impl PersistedPlanBootstrap {
+    fn preferred_base_ref(&self) -> Option<&str> {
+        self.base_snapshot_oid
+            .as_deref()
+            .or(self.base_snapshot_branch.as_deref())
+    }
+}
+
+async fn read_persisted_plan_bootstrap(
+    pm: &spur_pm::PmService,
+    plan_id: &str,
+    epic_id: &str,
+) -> Result<PersistedPlanBootstrap, String> {
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| "persisted bootstrap recovery requires beads backend".to_string())?;
+    let comments = adv
+        .list_comments(epic_id)
+        .await
+        .map_err(|e| format!("failed to load comments for epic '{epic_id}': {e}"))?;
+    let audits = crate::plan::projector::collect_sorted_audits(comments);
+
+    audits
+        .into_iter()
+        .rev()
+        .find_map(|audit| match audit {
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                plan_id: audit_plan_id,
+                base_snapshot_branch,
+                base_snapshot_oid,
+                ..
+            } if audit_plan_id == plan_id => Some(PersistedPlanBootstrap {
+                epic_id: epic_id.to_string(),
+                base_snapshot_branch,
+                base_snapshot_oid,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| format!("plan '{plan_id}' has no PlanSubmit audit on epic '{epic_id}'"))
+}
+
 async fn apply_issue_update(
     pm: &spur_pm::PmService,
     issue_id: &str,
@@ -969,8 +1017,12 @@ async fn snapshot_plan_base(
         .await
         .map_err(|e| format!("failed to snapshot plan base: {e}"))?;
     let oid = Some(
-        run_git_capture(&manager.repo_root, None, &["rev-parse", "--verify", branch.as_str()])
-            .await?,
+        run_git_capture(
+            &manager.repo_root,
+            None,
+            &["rev-parse", "--verify", branch.as_str()],
+        )
+        .await?,
     );
     Ok(PlanBaseSnapshot {
         branch: Some(branch),
@@ -2461,15 +2513,15 @@ impl McpCallbackServer {
             }
         };
 
-        let plan_arc = {
-            let plans = self.active_plans.lock().await;
-            plans.get(&plan_id).cloned()
-        };
-        let Some(plan_arc) = plan_arc else {
-            return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"));
+        let had_cached_entry = self.active_plans.lock().await.contains_key(&plan_id);
+        let plan_arc = match self.load_or_project_plan(&plan_id).await {
+            Ok(plan_arc) => plan_arc,
+            Err(_) => {
+                return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"))
+            }
         };
 
-        let (base_snapshot_branch, tasks, merge_state) = {
+        let (base_snapshot_branch, base_snapshot_oid, tasks, merge_state, epic_id) = {
             let state = plan_arc.lock().await;
             let status = crate::plan::build_plan_status(&plan_id, &state);
             let ready = status
@@ -2484,8 +2536,10 @@ impl McpCallbackServer {
             }
             (
                 state.base_snapshot_branch.clone(),
+                state.base_snapshot_oid.clone(),
                 state.tasks.clone(),
                 state.merge_state.clone(),
+                state.epic_id.clone(),
             )
         };
 
@@ -2499,8 +2553,28 @@ impl McpCallbackServer {
             );
         }
 
-        let base_snapshot_branch = match base_snapshot_branch {
-            Some(branch) => branch,
+        let persisted_bootstrap = if !had_cached_entry {
+            match (self.pm_service.as_deref(), epic_id.as_deref()) {
+                (Some(pm), Some(epic_id)) => {
+                    match read_persisted_plan_bootstrap(pm, &plan_id, epic_id).await {
+                        Ok(bootstrap) => Some(bootstrap),
+                        Err(error) => return JsonRpcResponse::internal_error(id, error),
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let base_snapshot_ref = match persisted_bootstrap
+            .as_ref()
+            .and_then(PersistedPlanBootstrap::preferred_base_ref)
+            .map(str::to_string)
+            .or(base_snapshot_oid)
+            .or(base_snapshot_branch)
+        {
+            Some(reference) => reference,
             None => {
                 return JsonRpcResponse::internal_error(
                     id,
@@ -2550,7 +2624,7 @@ impl McpCallbackServer {
 
         let merge_state = match integrate_plan_branches(
             &repo_root,
-            &base_snapshot_branch,
+            &base_snapshot_ref,
             &merge_branch,
             &ordered_branches,
         )
@@ -3879,9 +3953,10 @@ mod merge_plan_tests {
             issue_id: None,
             context_files: Vec::new(),
         }];
-        let subgraph = crate::build_epic_subgraph(pm.as_ref(), "plan-merge-recover", "Epic", None, &tasks)
-            .await
-            .expect("build epic subgraph");
+        let subgraph =
+            crate::build_epic_subgraph(pm.as_ref(), "plan-merge-recover", "Epic", None, &tasks)
+                .await
+                .expect("build epic subgraph");
         let adv = pm.advanced().expect("advanced beads backend");
         crate::emit_plan_submit_audit(
             adv,
@@ -3940,15 +4015,20 @@ mod merge_plan_tests {
         );
         server.set_repo_root(dir.path().to_path_buf());
 
-        let projected = crate::plan::projector::project_plan_from_beads(pm.as_ref(), "plan-merge-recover")
-            .await
-            .expect("project persisted plan");
+        let projected =
+            crate::plan::projector::project_plan_from_beads(pm.as_ref(), "plan-merge-recover")
+                .await
+                .expect("project persisted plan");
         assert_eq!(
             crate::plan::build_plan_status("plan-merge-recover", &projected)["ready_to_merge"],
             Value::Bool(true)
         );
         server.install_projected_plan(projected).await;
-        server.active_plans.lock().await.remove("plan-merge-recover");
+        server
+            .active_plans
+            .lock()
+            .await
+            .remove("plan-merge-recover");
 
         let response = server
             .handle_merge_plan(Value::Null, json!({ "plan_id": "plan-merge-recover" }))
@@ -3963,8 +4043,7 @@ mod merge_plan_tests {
         let text = result["content"][0]["text"]
             .as_str()
             .expect("merge_plan text response");
-        let status: serde_json::Value =
-            serde_json::from_str(text).expect("merge_plan status JSON");
+        let status: serde_json::Value = serde_json::from_str(text).expect("merge_plan status JSON");
         assert_eq!(status["merge"]["status"], "succeeded");
         assert_eq!(status["ready_to_merge"], true);
         assert_eq!(status["merge"]["merged_task_ids"], json!(["task-a"]));
