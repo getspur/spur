@@ -3584,7 +3584,10 @@ mod cancel_delegation_tests {
 #[cfg(test)]
 mod merge_plan_tests {
     use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base};
-    use crate::plan::PlanMergeState;
+    use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind, CompletionState};
+    use crate::plan::{PlanMergeState, PlanTask};
+    use serde_json::{json, Value};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     async fn init_repo() -> TempDir {
@@ -3609,6 +3612,22 @@ mod merge_plan_tests {
         run_git_capture(repo, None, &["commit", "-q", "-m", message])
             .await
             .expect("git commit");
+    }
+
+    async fn init_beads_pm(repo: &std::path::Path) -> Arc<spur_pm::PmService> {
+        let output = std::process::Command::new("br")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .expect("br init");
+        assert!(output.status.success(), "br init failed: {:?}", output);
+
+        Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected Some(PmService)"),
+        )
     }
 
     #[tokio::test]
@@ -3807,6 +3826,148 @@ mod merge_plan_tests {
         .await
         .expect("show partial merge branch");
         assert_eq!(merged_contents, "worker-a");
+    }
+
+    #[tokio::test]
+    async fn merge_plan_rehydrates_when_cache_missing() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let pm = init_beads_pm(dir.path()).await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["branch", "spur/brain-snapshot-test", "HEAD"],
+        )
+        .await
+        .expect("snapshot branch");
+        let base_snapshot_oid = run_git_capture(
+            dir.path(),
+            None,
+            &["rev-parse", "--verify", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("snapshot oid");
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot branch");
+
+        let tasks = vec![PlanTask {
+            task_id: "task-a".into(),
+            agent: "codex".into(),
+            task: "Integrate worker branch".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        let subgraph = crate::build_epic_subgraph(pm.as_ref(), "plan-merge-recover", "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+        let adv = pm.advanced().expect("advanced beads backend");
+        crate::emit_plan_submit_audit(
+            adv,
+            "plan-merge-recover",
+            &subgraph,
+            Some("spur/brain-snapshot-test"),
+            Some(base_snapshot_oid.as_str()),
+            Some("submit_plan"),
+        )
+        .await;
+
+        let task_issue_id = subgraph
+            .task_map
+            .get("task-a")
+            .cloned()
+            .expect("task issue id");
+        adv.add_comment(
+            &task_issue_id,
+            &encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-1".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-a".into()),
+                result_summary: Some("worker branch ready".into()),
+            }),
+        )
+        .await
+        .expect("completion audit");
+        adv.add_comment(
+            &task_issue_id,
+            &encode_comment(&AuditSentinelKind::Approval {
+                delegation_id: "del-1".into(),
+            }),
+        )
+        .await
+        .expect("approval audit");
+        pm.update_issue(
+            &task_issue_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close task issue");
+
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (mut server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            Some(Arc::clone(&pm)),
+            None,
+            continuation_ctx,
+        );
+        server.set_repo_root(dir.path().to_path_buf());
+
+        let projected = crate::plan::projector::project_plan_from_beads(pm.as_ref(), "plan-merge-recover")
+            .await
+            .expect("project persisted plan");
+        assert_eq!(
+            crate::plan::build_plan_status("plan-merge-recover", &projected)["ready_to_merge"],
+            Value::Bool(true)
+        );
+        server.install_projected_plan(projected).await;
+        server.active_plans.lock().await.remove("plan-merge-recover");
+
+        let response = server
+            .handle_merge_plan(Value::Null, json!({ "plan_id": "plan-merge-recover" }))
+            .await;
+        assert!(
+            response.error.is_none(),
+            "merge_plan should rehydrate from durable state: {:?}",
+            response.error
+        );
+
+        let result = response.result.expect("merge_plan result");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("merge_plan text response");
+        let status: serde_json::Value =
+            serde_json::from_str(text).expect("merge_plan status JSON");
+        assert_eq!(status["merge"]["status"], "succeeded");
+        assert_eq!(status["ready_to_merge"], true);
+        assert_eq!(status["merge"]["merged_task_ids"], json!(["task-a"]));
     }
 }
 
