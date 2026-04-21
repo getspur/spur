@@ -63,6 +63,7 @@ pub const REVIEW_REJECTED: &str = "spur:review-rejected";
 /// to avoid observing partially-persisted plan graphs as ready work.
 /// If creation fails mid-loop, the epic will NOT carry this label.
 pub const PLAN_COMPLETE: &str = "spur:plan-complete";
+pub const INTEGRATION_PENDING: &str = "spur:integration-pending";
 
 /// Prefix strings for parsing. Use these with `label_value()` or `strip_prefix()`.
 pub const PLAN_ID_PREFIX: &str = "spur:plan-id:";
@@ -160,6 +161,7 @@ mod tests {
         assert_eq!(READY_FOR_REVIEW, "spur:ready-for-review");
         assert_eq!(REVIEW_REJECTED, "spur:review-rejected");
         assert_eq!(PLAN_COMPLETE, "spur:plan-complete");
+        assert_eq!(INTEGRATION_PENDING, "spur:integration-pending");
     }
 
     #[test]
@@ -209,6 +211,7 @@ mod tests {
             signal_processed_label(&uuid::Uuid::nil()),
             READY_FOR_REVIEW.to_string(),
             REVIEW_REJECTED.to_string(),
+            INTEGRATION_PENDING.to_string(),
         ] {
             assert!(is_br_legal(&s), "constructor emitted br-illegal label: {s}");
         }
@@ -216,6 +219,14 @@ mod tests {
             is_br_legal(PLAN_COMPLETE),
             "PLAN_COMPLETE is br-illegal: {PLAN_COMPLETE}"
         );
+    }
+
+    #[test]
+    fn integration_pending_label_is_br_legal() {
+        assert_eq!(INTEGRATION_PENDING, "spur:integration-pending");
+        assert!(INTEGRATION_PENDING
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':')));
     }
 
     #[test]
