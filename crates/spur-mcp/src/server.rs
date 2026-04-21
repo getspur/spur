@@ -1136,22 +1136,9 @@ impl McpCallbackServer {
             .map(|pm| pm.advanced().is_some())
             .unwrap_or(false);
 
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("Failed to bind TCP listener")?;
-
-        let addr = listener.local_addr()?;
-        let url = format!("http://{addr}/mcp");
-        let mut config = StreamableHttpServerConfig::default();
-        config.stateful_mode = true;
-        let session_manager = Arc::new(LocalSessionManager::default());
-        let service = {
-            let server = Arc::clone(&self);
-            StreamableHttpService::new(move || Ok(Arc::clone(&server)), session_manager, config)
-        };
-        let router = Router::new().nest_service("/mcp", service);
-
         // I4: acquire single-brain pidfile when beads backend is present.
+        // Do this before binding a listener so missing repo_root / pidfile
+        // failures do not leave network side effects behind.
         let brain_pidfile = if has_beads_backend {
             let repo_root = repo_root
                 .as_ref()
@@ -1169,6 +1156,21 @@ impl McpCallbackServer {
         } else {
             None
         };
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("Failed to bind TCP listener")?;
+
+        let addr = listener.local_addr()?;
+        let url = format!("http://{addr}/mcp");
+        let mut config = StreamableHttpServerConfig::default();
+        config.stateful_mode = true;
+        let session_manager = Arc::new(LocalSessionManager::default());
+        let service = {
+            let server = Arc::clone(&self);
+            StreamableHttpService::new(move || Ok(Arc::clone(&server)), session_manager, config)
+        };
+        let router = Router::new().nest_service("/mcp", service);
 
         // v0a.3: Spawn reconciler if enabled.
         // The reconciler is observation-only (does NOT dispatch in v0a). It observes ready
