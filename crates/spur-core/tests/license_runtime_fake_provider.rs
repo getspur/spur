@@ -16,6 +16,12 @@ use spur_license::test_support::FakeProvider;
 use spur_license::{
     LicenseError, LicenseEventKind, LicenseState, LicenseStatus, Plan, SpurLicense,
 };
+use spur_license::policy::PolicyResolver;
+use spur_license::FeatureGate;
+
+fn test_feature_gate() -> Arc<FeatureGate> {
+    Arc::new(FeatureGate::new(PolicyResolver::embedded()))
+}
 use tokio::sync::broadcast;
 
 #[tokio::test]
@@ -33,7 +39,7 @@ async fn active_to_degraded_and_back_via_validate() {
         Default::default(),
     )));
 
-    let license = SpurLicense::from_provider(fake.clone());
+    let license = SpurLicense::from_provider(fake.clone(), test_feature_gate());
     let (bcast_tx, mut bcast_rx) = broadcast::channel::<SpurEvent>(64);
     let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
     let handle = spawn_license_runtime(license, funnel);
@@ -87,7 +93,7 @@ async fn authoritative_invalid_propagates_to_funnel() {
     invalid.status = LicenseStatus::Invalid;
     fake.push_validate_result(Ok(invalid));
 
-    let license = SpurLicense::from_provider(fake);
+    let license = SpurLicense::from_provider(fake, test_feature_gate());
     let (bcast_tx, mut bcast_rx) = broadcast::channel::<SpurEvent>(64);
     let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
     let handle = spawn_license_runtime(license, funnel);
@@ -111,7 +117,7 @@ async fn authoritative_invalid_propagates_to_funnel() {
 async fn injected_subscription_event_reaches_funnel() {
     let seed = LicenseState::active_validated(Plan::Pro, Default::default());
     let fake = Arc::new(FakeProvider::new(seed));
-    let license = SpurLicense::from_provider(fake.clone());
+    let license = SpurLicense::from_provider(fake.clone(), test_feature_gate());
     let (bcast_tx, mut bcast_rx) = broadcast::channel::<SpurEvent>(64);
     let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
     let handle = spawn_license_runtime(license, funnel);
@@ -154,7 +160,7 @@ async fn degraded_from_preserves_invalid_status_text() {
     ));
     fake.push_validate_result(Err(LicenseError::Provider("transient".into())));
 
-    let license = SpurLicense::from_provider(fake);
+    let license = SpurLicense::from_provider(fake, test_feature_gate());
     let (bcast_tx, mut bcast_rx) = broadcast::channel::<SpurEvent>(64);
     let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
     let handle = spawn_license_runtime(license, funnel);
@@ -201,7 +207,7 @@ async fn runtime_skips_heartbeat_when_provider_declines() {
             .with_requires_heartbeat(false),
     );
     let probe = fake.clone();
-    let license = SpurLicense::from_provider(fake);
+    let license = SpurLicense::from_provider(fake, test_feature_gate());
 
     let (bcast_tx, _bcast_rx) = broadcast::channel::<SpurEvent>(64);
     let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
@@ -230,7 +236,7 @@ async fn runtime_heartbeats_when_provider_requires_it() {
             .with_requires_heartbeat(true),
     );
     let probe = fake.clone();
-    let license = SpurLicense::from_provider(fake);
+    let license = SpurLicense::from_provider(fake, test_feature_gate());
 
     let (bcast_tx, _bcast_rx) = broadcast::channel::<SpurEvent>(64);
     let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
@@ -261,7 +267,7 @@ async fn runtime_validates_within_first_minute_after_boot() {
         Default::default(),
     )));
 
-    let license = SpurLicense::from_provider(fake.clone());
+    let license = SpurLicense::from_provider(fake.clone(), test_feature_gate());
     let (bcast_tx, _rx) = broadcast::channel::<SpurEvent>(64);
     let funnel = spawn_funnel(bcast_tx, Arc::new(AtomicU64::new(0)));
     let handle = spawn_license_runtime(license, funnel);
