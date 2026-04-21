@@ -25,7 +25,52 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
-use spur_pm::{PmService, ReadyFilter};
+use spur_pm::{IssueFilter, PmService, ReadyFilter};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectedEpicCompletion {
+    audit_outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
+    add_integration_pending: bool,
+}
+
+fn classify_epic_completion(
+    children: &[spur_pm::IssueSummary],
+    closed_status: &str,
+) -> Option<ProjectedEpicCompletion> {
+    if children.is_empty() {
+        return None;
+    }
+
+    let is_terminal_status = |status: &str| {
+        status == closed_status || matches!(status, "failed" | "cancelled" | "rejected")
+    };
+
+    if children
+        .iter()
+        .any(|child| !is_terminal_status(child.status.as_str()))
+    {
+        return None;
+    }
+
+    let has_terminal_failures = children.iter().any(|child| {
+        matches!(child.status.as_str(), "failed" | "cancelled" | "rejected")
+            || child.labels.iter().any(|label| {
+                matches!(
+                    label.as_str(),
+                    "rejected" | "review-rejected" | crate::plan::labels::REVIEW_REJECTED
+                )
+            })
+    });
+
+    Some(ProjectedEpicCompletion {
+        audit_outcome: if has_terminal_failures {
+            crate::plan::audit_sentinel::EpicCompletionOutcome::TerminalWithFailures
+        } else {
+            crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved
+        },
+        add_integration_pending: !has_terminal_failures,
+    })
+}
 
 #[derive(Clone)]
 pub struct ReconcilerDispatchCtx {
@@ -120,16 +165,17 @@ impl Reconciler {
     }
 
     pub async fn tick_once(&self) -> anyhow::Result<bool> {
+        let mut did_work = self.reconcile_terminal_epics().await?;
+
         let Some(dispatch) = &self.dispatch else {
             let ready_ids = self.observe_ready().await?;
             for id in &ready_ids {
                 tracing::debug!(%id, "reconciler observed ready task");
             }
-            return Ok(!ready_ids.is_empty());
+            return Ok(did_work || !ready_ids.is_empty());
         };
 
         let ready = self.observe_ready_summaries().await?;
-        let mut did_work = false;
 
         for summary in ready {
             let Some(plan_id) = summary
@@ -237,6 +283,119 @@ impl Reconciler {
         Ok(did_work)
     }
 
+    async fn reconcile_terminal_epics(&self) -> anyhow::Result<bool> {
+        let Some(adv) = self.pm.advanced() else {
+            return Ok(false);
+        };
+
+        let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
+        if let Some(plan_id) = self.plan_id.as_deref() {
+            labels.push(crate::plan::labels::plan_id(plan_id));
+        }
+
+        let epics = self
+            .pm
+            .list_issues(IssueFilter {
+                labels,
+                issue_type: Some("epic".into()),
+                limit: Some(10_000),
+                ..Default::default()
+            })
+            .await?;
+
+        let mut did_work = false;
+        let closed_status = self.pm.closed_status().to_string();
+
+        for epic in epics {
+            if epic.status == closed_status {
+                continue;
+            }
+
+            let Some(plan_id) = epic
+                .labels
+                .iter()
+                .find_map(|label| crate::plan::labels::parse_plan_id(label))
+            else {
+                continue;
+            };
+
+            let mut children = self
+                .pm
+                .list_issues(IssueFilter {
+                    labels: vec![crate::plan::labels::plan_id(plan_id)],
+                    limit: Some(10_000),
+                    ..Default::default()
+                })
+                .await?;
+            let closed_children = self
+                .pm
+                .list_issues(IssueFilter {
+                    labels: vec![crate::plan::labels::plan_id(plan_id)],
+                    status: Some(closed_status.clone()),
+                    limit: Some(10_000),
+                    ..Default::default()
+                })
+                .await?;
+            let mut seen_ids = children
+                .iter()
+                .map(|summary| summary.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            for summary in closed_children {
+                if seen_ids.insert(summary.id.clone()) {
+                    children.push(summary);
+                }
+            }
+            let children = children
+                .into_iter()
+                .filter(|summary| summary.id != epic.id)
+                .collect::<Vec<_>>();
+
+            let Some(outcome) = classify_epic_completion(&children, &closed_status) else {
+                continue;
+            };
+
+            let mut update = spur_pm::IssueUpdate {
+                status: Some(closed_status.clone()),
+                ..Default::default()
+            };
+            if outcome.add_integration_pending {
+                if !epic
+                    .labels
+                    .contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+                {
+                    update
+                        .add_labels
+                        .push(crate::plan::labels::INTEGRATION_PENDING.to_string());
+                }
+            } else if epic
+                .labels
+                .contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+            {
+                update
+                    .remove_labels
+                    .push(crate::plan::labels::INTEGRATION_PENDING.to_string());
+            }
+
+            self.pm.update_issue(&epic.id, update).await?;
+            crate::plan::emit_epic_completion_audit(adv, &epic.id, plan_id, outcome.audit_outcome)
+                .await;
+            if outcome.add_integration_pending {
+                if let Some(sink) = self
+                    .dispatch
+                    .as_ref()
+                    .and_then(|dispatch| dispatch.event_sink.as_ref())
+                {
+                    sink.emit(spur_acp::SpurEventBody::PlanReadyToMerge {
+                        plan_id: plan_id.to_string(),
+                    });
+                }
+            }
+            did_work = true;
+        }
+
+        Ok(did_work)
+    }
+
     pub async fn observe_ready_summaries(&self) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
         let label_filter = self.plan_id.as_deref().map(crate::plan::labels::plan_id);
         let Some(adv) = self.pm.advanced() else {
@@ -329,6 +488,44 @@ mod tests {
 
         let cloned = ctx.clone();
         assert_eq!(cloned.brain_session_id, ctx.brain_session_id);
+    }
+
+    fn summary(id: &str, status: &str) -> spur_pm::IssueSummary {
+        spur_pm::IssueSummary {
+            id: id.into(),
+            source: spur_pm::PmSource::Beads,
+            title: id.into(),
+            status: status.into(),
+            labels: vec![],
+            url: format!("https://example.invalid/{id}"),
+            priority: None,
+            issue_type: Some("task".into()),
+            assignee: None,
+        }
+    }
+
+    #[test]
+    fn classify_epic_completion_reports_all_approved() {
+        let children = vec![summary("bd-1", "closed"), summary("bd-2", "closed")];
+        let outcome = super::classify_epic_completion(&children, "closed").expect("terminal");
+        assert_eq!(
+            outcome.audit_outcome,
+            crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved
+        );
+        assert!(outcome.add_integration_pending);
+    }
+
+    #[test]
+    fn classify_epic_completion_reports_terminal_failures() {
+        let mut rejected = summary("bd-2", "closed");
+        rejected.labels.push("rejected".into());
+        let children = vec![summary("bd-1", "closed"), rejected];
+        let outcome = super::classify_epic_completion(&children, "closed").expect("terminal");
+        assert_eq!(
+            outcome.audit_outcome,
+            crate::plan::audit_sentinel::EpicCompletionOutcome::TerminalWithFailures
+        );
+        assert!(!outcome.add_integration_pending);
     }
 
     /// D1 fix coverage: verify that the biased select! pattern used inside

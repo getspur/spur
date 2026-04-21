@@ -442,6 +442,7 @@ pub async fn emit_plan_submit_audit(
     plan_id: &str,
     sg: &EpicSubgraph,
     base_snapshot_branch: Option<&str>,
+    base_snapshot_oid: Option<&str>,
     execution_mode: Option<&str>,
 ) {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
@@ -449,6 +450,7 @@ pub async fn emit_plan_submit_audit(
         epic_issue_id: sg.epic_id.clone(),
         task_ids: sg.task_map.values().cloned().collect(),
         base_snapshot_branch: base_snapshot_branch.map(str::to_string),
+        base_snapshot_oid: base_snapshot_oid.map(str::to_string),
         execution_mode: execution_mode.map(str::to_string),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
@@ -461,6 +463,161 @@ pub async fn emit_plan_submit_audit(
             "PlanSubmit audit comment emission failed (graph is persisted; audit missing): {e}"
         );
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PersistedPlanBootstrap {
+    epic_id: String,
+    base_snapshot_branch: Option<String>,
+    base_snapshot_oid: Option<String>,
+}
+
+impl PersistedPlanBootstrap {
+    fn preferred_base_ref(&self) -> Option<&str> {
+        self.base_snapshot_oid
+            .as_deref()
+            .or(self.base_snapshot_branch.as_deref())
+    }
+}
+
+async fn read_persisted_plan_bootstrap(
+    pm: &spur_pm::PmService,
+    plan_id: &str,
+    epic_id: &str,
+) -> Result<PersistedPlanBootstrap, String> {
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| "persisted bootstrap recovery requires beads backend".to_string())?;
+    let comments = adv
+        .list_comments(epic_id)
+        .await
+        .map_err(|e| format!("failed to load comments for epic '{epic_id}': {e}"))?;
+    let audits = crate::plan::projector::collect_sorted_audits(comments);
+
+    audits
+        .into_iter()
+        .rev()
+        .find_map(|audit| match audit {
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                plan_id: audit_plan_id,
+                base_snapshot_branch,
+                base_snapshot_oid,
+                ..
+            } if audit_plan_id == plan_id => Some(PersistedPlanBootstrap {
+                epic_id: epic_id.to_string(),
+                base_snapshot_branch,
+                base_snapshot_oid,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| format!("plan '{plan_id}' has no PlanSubmit audit on epic '{epic_id}'"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PersistedTaskCompletion {
+    worker_branch: Option<String>,
+    summary: Option<String>,
+}
+
+async fn read_latest_task_completion(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+) -> Result<Option<PersistedTaskCompletion>, String> {
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| "persisted task completion recovery requires beads backend".to_string())?;
+    let comments = adv
+        .list_comments(issue_id)
+        .await
+        .map_err(|e| format!("failed to load comments for task '{issue_id}': {e}"))?;
+    let audits = crate::plan::projector::collect_sorted_audits(comments);
+
+    Ok(audits.into_iter().rev().find_map(|audit| match audit {
+        crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+            worker_branch,
+            result_summary,
+            ..
+        } => Some(PersistedTaskCompletion {
+            worker_branch,
+            summary: result_summary,
+        }),
+        _ => None,
+    }))
+}
+
+async fn reconstruct_historical_attempts(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+    current_attempt: u32,
+) -> Result<Vec<crate::plan::AttemptRecord>, String> {
+    #[derive(Debug, Default)]
+    struct AttemptAccumulator {
+        attempt: u32,
+        worker_branch: Option<String>,
+        summary: Option<String>,
+        feedback: String,
+    }
+
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| "persisted attempt recovery requires beads backend".to_string())?;
+    let comments = adv
+        .list_comments(issue_id)
+        .await
+        .map_err(|e| format!("failed to load comments for task '{issue_id}': {e}"))?;
+    let audits = crate::plan::projector::collect_sorted_audits(comments);
+
+    let mut attempts_by_delegation: std::collections::HashMap<String, AttemptAccumulator> =
+        std::collections::HashMap::new();
+    for audit in audits {
+        match audit {
+            crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                delegation_id,
+                attempt,
+                ..
+            } if attempt < current_attempt => {
+                attempts_by_delegation
+                    .entry(delegation_id)
+                    .or_insert_with(|| AttemptAccumulator {
+                        attempt,
+                        ..Default::default()
+                    });
+            }
+            crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                delegation_id,
+                worker_branch,
+                result_summary,
+                ..
+            } => {
+                if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
+                    record.worker_branch = worker_branch;
+                    record.summary = result_summary;
+                }
+            }
+            crate::plan::audit_sentinel::AuditSentinelKind::Rejection {
+                delegation_id,
+                feedback,
+            } => {
+                if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
+                    record.feedback = feedback;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut history: Vec<crate::plan::AttemptRecord> = attempts_by_delegation
+        .into_values()
+        .map(|record| crate::plan::AttemptRecord {
+            attempt: record.attempt,
+            worker_branch: record.worker_branch,
+            diff_summary: None,
+            summary: record.summary,
+            feedback: record.feedback,
+        })
+        .collect();
+    history.sort_by_key(|record| record.attempt);
+    Ok(history)
 }
 
 async fn apply_issue_update(
@@ -654,6 +811,8 @@ pub async fn compensate_mutation_orphans(
                     mutation_id: mutation_id.clone(),
                     violation: "restart-orphan".into(),
                     rollback_status: "compensated".into(),
+                    rollback_ops_succeeded: Vec::new(),
+                    rollback_ops_failed: Vec::new(),
                 },
             ),
         )
@@ -957,16 +1116,33 @@ fn topological_order(tasks: &[crate::plan::PlanTask]) -> Result<Vec<usize>, Stri
 
 async fn snapshot_plan_base(
     repo_root: Option<&std::path::PathBuf>,
-) -> Result<Option<String>, String> {
+) -> Result<PlanBaseSnapshot, String> {
     let Some(root) = repo_root.cloned() else {
-        return Ok(None);
+        return Ok(PlanBaseSnapshot::default());
     };
     let manager = WorktreeManager::new(root);
-    manager
+    let branch = manager
         .snapshot_brain_state()
         .await
-        .map(Some)
-        .map_err(|e| format!("failed to snapshot plan base: {e}"))
+        .map_err(|e| format!("failed to snapshot plan base: {e}"))?;
+    let oid = Some(
+        run_git_capture(
+            &manager.repo_root,
+            None,
+            &["rev-parse", "--verify", branch.as_str()],
+        )
+        .await?,
+    );
+    Ok(PlanBaseSnapshot {
+        branch: Some(branch),
+        oid,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct PlanBaseSnapshot {
+    branch: Option<String>,
+    oid: Option<String>,
 }
 
 async fn run_git_capture(
@@ -992,6 +1168,15 @@ async fn run_git_capture(
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
+}
+
+async fn diff_text_from_branches(
+    repo_root: &std::path::Path,
+    base_ref: &str,
+    worker_branch: &str,
+) -> Result<String, String> {
+    let range = format!("{base_ref}..{worker_branch}");
+    run_git_capture(repo_root, None, &["diff", range.as_str()]).await
 }
 
 async fn integrate_plan_branches(
@@ -1411,6 +1596,59 @@ impl McpCallbackServer {
     pub async fn __test_call_submit_plan(&self, arguments: Value) -> Value {
         let resp = self.handle_submit_plan(Value::from(1), arguments).await;
         serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
+    /// Test-only: invoke any tool handler through the same JSON-RPC dispatch
+    /// path used by the MCP transport.
+    #[doc(hidden)]
+    pub async fn __test_call_tool(&self, tool_name: &str, arguments: Value) -> Value {
+        let response = self
+            .handle_tool_call(
+                Value::Null,
+                json!({
+                    "name": tool_name,
+                    "arguments": arguments,
+                }),
+            )
+            .await;
+        serde_json::to_value(&response).expect("serialize JsonRpcResponse")
+    }
+
+    /// Test-only: mutate a cached plan entry into an impossible state so
+    /// persisted read paths can prove they refresh from durable projection
+    /// instead of trusting `active_plans`.
+    #[doc(hidden)]
+    pub async fn __test_corrupt_cached_plan(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        worker_branch: &str,
+        base_snapshot_branch: &str,
+    ) -> Result<(), String> {
+        let plan = self
+            .active_plans
+            .lock()
+            .await
+            .get(plan_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown cached plan '{plan_id}'"))?;
+        let mut state = plan.lock().await;
+        let entry = state
+            .tasks
+            .iter_mut()
+            .find(|task| task.spec.task_id == task_id)
+            .ok_or_else(|| format!("unknown task '{task_id}' in cached plan '{plan_id}'"))?;
+        entry.status = crate::plan::PlanTaskStatus::Approved {
+            summary: Some("corrupted-cache".into()),
+        };
+        entry.worker_branch = Some(worker_branch.to_string());
+        state.base_snapshot_branch = Some(base_snapshot_branch.to_string());
+        state.base_snapshot_oid = Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into());
+        state.merge_state = crate::plan::PlanMergeState::Succeeded {
+            merge_branch: "spur/bogus-merge".into(),
+            merged_task_ids: vec![task_id.to_string()],
+        };
+        Ok(())
     }
 
     /// Test-only: peek whether a result is sitting in `completed_delegations`
@@ -2231,6 +2469,7 @@ impl McpCallbackServer {
                     .unwrap_or(20)
                     .min(100) as usize,
             ),
+            offset: None,
             labels,
             since: None,
         };
@@ -2446,15 +2685,15 @@ impl McpCallbackServer {
             }
         };
 
-        let plan_arc = {
-            let plans = self.active_plans.lock().await;
-            plans.get(&plan_id).cloned()
-        };
-        let Some(plan_arc) = plan_arc else {
-            return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"));
+        let had_cached_entry = self.active_plans.lock().await.contains_key(&plan_id);
+        let plan_arc = match self.load_or_project_plan(&plan_id).await {
+            Ok(plan_arc) => plan_arc,
+            Err(_) => {
+                return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"))
+            }
         };
 
-        let (base_snapshot_branch, tasks, merge_state) = {
+        let (base_snapshot_branch, base_snapshot_oid, tasks, merge_state, epic_id) = {
             let state = plan_arc.lock().await;
             let status = crate::plan::build_plan_status(&plan_id, &state);
             let ready = status
@@ -2469,8 +2708,10 @@ impl McpCallbackServer {
             }
             (
                 state.base_snapshot_branch.clone(),
+                state.base_snapshot_oid.clone(),
                 state.tasks.clone(),
                 state.merge_state.clone(),
+                state.epic_id.clone(),
             )
         };
 
@@ -2484,8 +2725,28 @@ impl McpCallbackServer {
             );
         }
 
-        let base_snapshot_branch = match base_snapshot_branch {
-            Some(branch) => branch,
+        let persisted_bootstrap = if !had_cached_entry {
+            match (self.pm_service.as_deref(), epic_id.as_deref()) {
+                (Some(pm), Some(epic_id)) => {
+                    match read_persisted_plan_bootstrap(pm, &plan_id, epic_id).await {
+                        Ok(bootstrap) => Some(bootstrap),
+                        Err(error) => return JsonRpcResponse::internal_error(id, error),
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let base_snapshot_ref = match persisted_bootstrap
+            .as_ref()
+            .and_then(PersistedPlanBootstrap::preferred_base_ref)
+            .map(str::to_string)
+            .or(base_snapshot_oid)
+            .or(base_snapshot_branch)
+        {
+            Some(reference) => reference,
             None => {
                 return JsonRpcResponse::internal_error(
                     id,
@@ -2535,7 +2796,7 @@ impl McpCallbackServer {
 
         let merge_state = match integrate_plan_branches(
             &repo_root,
-            &base_snapshot_branch,
+            &base_snapshot_ref,
             &merge_branch,
             &ordered_branches,
         )
@@ -2544,10 +2805,36 @@ impl McpCallbackServer {
             Ok(state) => state,
             Err(error) => crate::plan::PlanMergeState::Failed { error },
         };
+        let merged_successfully =
+            matches!(merge_state, crate::plan::PlanMergeState::Succeeded { .. });
 
-        let status = {
+        {
             let mut state = plan_arc.lock().await;
             state.merge_state = merge_state;
+        }
+
+        if merged_successfully {
+            if let (Some(pm), Some(epic_id)) = (self.pm_service.as_ref(), epic_id.as_deref()) {
+                if let Err(error) = apply_issue_update(
+                    pm,
+                    epic_id,
+                    spur_pm::IssueUpdate {
+                        remove_labels: vec![crate::plan::labels::INTEGRATION_PENDING.to_string()],
+                        ..Default::default()
+                    },
+                )
+                .await
+                {
+                    return JsonRpcResponse::internal_error(
+                        id,
+                        format!("failed to clear integration-pending on epic '{epic_id}': {error}"),
+                    );
+                }
+            }
+        }
+
+        let status = {
+            let state = plan_arc.lock().await;
             crate::plan::build_plan_status(&plan_id, &state)
         };
         let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
@@ -2767,15 +3054,16 @@ impl McpCallbackServer {
             build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
 
         let task_count = entries.len();
-        let base_snapshot_branch = match snapshot_plan_base(self.repo_root.as_ref()).await {
-            Ok(branch) => branch,
+        let base_snapshot = match snapshot_plan_base(self.repo_root.as_ref()).await {
+            Ok(snapshot) => snapshot,
             Err(e) => return JsonRpcResponse::internal_error(id, e),
         };
         let state = crate::plan::PlanState {
             plan_id: plan_id.clone(),
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
-            base_snapshot_branch,
+            base_snapshot_branch: base_snapshot.branch,
+            base_snapshot_oid: base_snapshot.oid,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: epic_subgraph.as_ref().map(|sg| sg.epic_id.clone()),
         };
@@ -2783,12 +3071,19 @@ impl McpCallbackServer {
 
         if let Some(sg) = &epic_subgraph {
             if let Some(adv) = self.pm_service.as_deref().and_then(|pm| pm.advanced()) {
-                let base_snapshot_branch = state.lock().await.base_snapshot_branch.clone();
+                let (base_snapshot_branch, base_snapshot_oid) = {
+                    let state = state.lock().await;
+                    (
+                        state.base_snapshot_branch.clone(),
+                        state.base_snapshot_oid.clone(),
+                    )
+                };
                 emit_plan_submit_audit(
                     adv,
                     &plan_id,
                     sg,
                     base_snapshot_branch.as_deref(),
+                    base_snapshot_oid.as_deref(),
                     Some("submit_plan"),
                 )
                 .await;
@@ -2993,8 +3288,8 @@ impl McpCallbackServer {
             .collect();
 
         let task_count = entries.len();
-        let base_snapshot_branch = match snapshot_plan_base(self.repo_root.as_ref()).await {
-            Ok(branch) => branch,
+        let base_snapshot = match snapshot_plan_base(self.repo_root.as_ref()).await {
+            Ok(snapshot) => snapshot,
             Err(e) => {
                 self.plan_registry.lock().await.by_epic.remove(&epic_id);
                 return JsonRpcResponse::internal_error(id, e);
@@ -3004,7 +3299,8 @@ impl McpCallbackServer {
             plan_id: plan_id.clone(),
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
-            base_snapshot_branch,
+            base_snapshot_branch: base_snapshot.branch,
+            base_snapshot_oid: base_snapshot.oid,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some(epic_id.clone()),
         };
@@ -3013,7 +3309,7 @@ impl McpCallbackServer {
         // Keep a clone of the Arc to build the initial status response.
         let state_for_status = Arc::clone(&state);
 
-        let (task_scope, base_snapshot_branch) = {
+        let (task_scope, base_snapshot_branch, base_snapshot_oid) = {
             let state = state_for_status.lock().await;
             let task_scope = state
                 .tasks
@@ -3028,7 +3324,11 @@ impl McpCallbackServer {
                     })
                 })
                 .collect::<Vec<_>>();
-            (task_scope, state.base_snapshot_branch.clone())
+            (
+                task_scope,
+                state.base_snapshot_branch.clone(),
+                state.base_snapshot_oid.clone(),
+            )
         };
 
         let mut rollback_updates: Vec<(String, spur_pm::IssueUpdate)> = Vec::new();
@@ -3104,6 +3404,7 @@ impl McpCallbackServer {
                 &plan_id,
                 &sg,
                 base_snapshot_branch.as_deref(),
+                base_snapshot_oid.as_deref(),
                 Some("execute_epic"),
             )
             .await;
@@ -3207,42 +3508,100 @@ impl McpCallbackServer {
 
         let plan_arc = self.load_or_project_plan(&plan_id).await?;
 
-        let state = plan_arc.lock().await;
-        let entry = state
-            .tasks
-            .iter()
-            .find(|t| t.spec.task_id == task_id)
-            .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
+        let (
+            current_attempt,
+            history,
+            agent,
+            task_description,
+            issue_id,
+            status_str,
+            status_summary,
+            worker_branch,
+            result,
+            epic_id,
+            base_snapshot_branch,
+            base_snapshot_oid,
+        ) = {
+            let state = plan_arc.lock().await;
+            let entry = state
+                .tasks
+                .iter()
+                .find(|t| t.spec.task_id == task_id)
+                .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
 
-        match &entry.status {
-            crate::plan::PlanTaskStatus::Pending | crate::plan::PlanTaskStatus::Ready => {
-                return Err(format!("task '{task_id}' has not been dispatched yet"));
+            match &entry.status {
+                crate::plan::PlanTaskStatus::Pending | crate::plan::PlanTaskStatus::Ready => {
+                    return Err(format!("task '{task_id}' has not been dispatched yet"));
+                }
+                crate::plan::PlanTaskStatus::Dispatched { .. } => {
+                    return Err(format!(
+                        "task '{task_id}' is still running — diff not available yet"
+                    ));
+                }
+                _ => {}
             }
-            crate::plan::PlanTaskStatus::Dispatched { .. } => {
-                return Err(format!(
-                    "task '{task_id}' is still running — diff not available yet"
-                ));
+
+            let status_str = match &entry.status {
+                crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
+                crate::plan::PlanTaskStatus::Approved { .. } => "approved",
+                crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
+                crate::plan::PlanTaskStatus::Failed { .. } => "failed",
+                _ => "unknown",
             }
-            _ => {}
-        }
+            .to_string();
+            let status_summary = match &entry.status {
+                crate::plan::PlanTaskStatus::AwaitingReview { summary }
+                | crate::plan::PlanTaskStatus::Approved { summary } => summary.clone(),
+                _ => None,
+            };
+
+            (
+                entry.attempt,
+                entry.history.clone(),
+                entry.spec.agent.clone(),
+                entry.spec.task.clone(),
+                entry.spec.issue_id.clone(),
+                status_str,
+                status_summary,
+                entry.worker_branch.clone(),
+                entry.result.clone(),
+                state.epic_id.clone(),
+                state.base_snapshot_branch.clone(),
+                state.base_snapshot_oid.clone(),
+            )
+        };
 
         // If attempt specified and differs from current, look up historical attempt.
         if let Some(want_attempt) = attempt {
-            if want_attempt != entry.attempt {
-                let Some(rec) = entry.history.iter().find(|r| r.attempt == want_attempt) else {
+            if want_attempt != current_attempt {
+                let historical_attempts = if history.is_empty() {
+                    if let (Some(pm), Some(issue_id)) =
+                        (self.pm_service.as_deref(), issue_id.as_deref())
+                    {
+                        reconstruct_historical_attempts(pm, issue_id, current_attempt).await?
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    history.clone()
+                };
+                let Some(rec) = historical_attempts
+                    .iter()
+                    .find(|r| r.attempt == want_attempt)
+                else {
                     return Err(format!(
                         "task '{task_id}' has no attempt {want_attempt} (current: {}, history: {} entries)",
-                        entry.attempt,
-                        entry.history.len()
+                        current_attempt,
+                        historical_attempts.len()
                     ));
                 };
                 let mut resp = serde_json::Map::new();
                 resp.insert("task_id".into(), json!(task_id));
-                resp.insert("agent".into(), json!(entry.spec.agent));
+                resp.insert("agent".into(), json!(agent));
                 resp.insert("attempt".into(), json!(want_attempt));
                 resp.insert("status".into(), json!("historical"));
-                resp.insert("task_description".into(), json!(entry.spec.task));
-                if let Some(ref id) = entry.spec.issue_id {
+                resp.insert("task_description".into(), json!(task_description));
+                if let Some(ref id) = issue_id {
                     resp.insert("issue_id".into(), json!(id));
                 }
                 if let Some(ref b) = rec.worker_branch {
@@ -3269,27 +3628,60 @@ impl McpCallbackServer {
 
         let mut resp = serde_json::Map::new();
         resp.insert("task_id".into(), json!(task_id));
-        resp.insert("agent".into(), json!(entry.spec.agent));
-        resp.insert("task_description".into(), json!(entry.spec.task));
-        if let Some(ref issue_id) = entry.spec.issue_id {
+        resp.insert("agent".into(), json!(agent));
+        resp.insert("task_description".into(), json!(task_description));
+        if let Some(ref issue_id) = issue_id {
             resp.insert("issue_id".into(), json!(issue_id));
         }
-
-        let status_str = match &entry.status {
-            crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
-            crate::plan::PlanTaskStatus::Approved { .. } => "approved",
-            crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
-            crate::plan::PlanTaskStatus::Failed { .. } => "failed",
-            _ => "unknown",
-        };
         resp.insert("status".into(), json!(status_str));
 
-        if let Some(ref branch) = entry.worker_branch {
+        if let Some(ref branch) = worker_branch {
             resp.insert("worker_branch".into(), json!(branch));
         }
-        if let Some(ref result) = entry.result {
+        if let Some(ref summary) = status_summary {
+            resp.insert("summary".into(), json!(summary));
+        }
+        if let Some(ref result) = result {
             for (k, v) in crate::plan::build_task_diff_fields(result) {
                 resp.insert(k, v);
+            }
+        } else if let (Some(pm), Some(epic_id), Some(issue_id)) = (
+            self.pm_service.as_deref(),
+            epic_id.as_deref(),
+            issue_id.as_deref(),
+        ) {
+            let bootstrap = read_persisted_plan_bootstrap(pm, &plan_id, epic_id)
+                .await
+                .ok();
+            let completion = read_latest_task_completion(pm, issue_id).await?;
+            let recovered_worker_branch = completion
+                .as_ref()
+                .and_then(|record| record.worker_branch.clone())
+                .or(worker_branch);
+
+            if let Some(recovered_worker_branch) = recovered_worker_branch {
+                let base_ref = bootstrap
+                    .as_ref()
+                    .and_then(PersistedPlanBootstrap::preferred_base_ref)
+                    .map(str::to_string)
+                    .or(base_snapshot_oid)
+                    .or(base_snapshot_branch)
+                    .ok_or_else(|| {
+                        format!(
+                            "plan '{plan_id}' has no captured base snapshot; latest diff unavailable"
+                        )
+                    })?;
+                let repo_root = self.repo_root.as_deref().ok_or_else(|| {
+                    "Repository root not configured; get_task_diff cannot reconstruct persisted diffs"
+                        .to_string()
+                })?;
+                let diff =
+                    diff_text_from_branches(repo_root, &base_ref, &recovered_worker_branch).await?;
+                resp.insert("worker_branch".into(), json!(recovered_worker_branch));
+                resp.insert("diff".into(), json!(diff));
+                if let Some(summary) = completion.and_then(|record| record.summary) {
+                    resp.insert("summary".into(), json!(summary));
+                }
             }
         }
 
@@ -3554,8 +3946,11 @@ mod cancel_delegation_tests {
 
 #[cfg(test)]
 mod merge_plan_tests {
-    use super::{integrate_plan_branches, run_git_capture};
-    use crate::plan::PlanMergeState;
+    use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base};
+    use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind, CompletionState};
+    use crate::plan::{PlanMergeState, PlanTask};
+    use serde_json::{json, Value};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     async fn init_repo() -> TempDir {
@@ -3580,6 +3975,395 @@ mod merge_plan_tests {
         run_git_capture(repo, None, &["commit", "-q", "-m", message])
             .await
             .expect("git commit");
+    }
+
+    async fn init_beads_pm(repo: &std::path::Path) -> Arc<spur_pm::PmService> {
+        let output = std::process::Command::new("br")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .expect("br init");
+        assert!(output.status.success(), "br init failed: {:?}", output);
+
+        Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected Some(PmService)"),
+        )
+    }
+
+    struct PersistedMergeFixture {
+        _dir: TempDir,
+        pm: Arc<spur_pm::PmService>,
+        server: super::McpCallbackServer,
+        plan_id: String,
+        epic_id: String,
+    }
+
+    async fn setup_persisted_merge_ready_plan(
+        plan_id: &str,
+        clear_cache: bool,
+    ) -> PersistedMergeFixture {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let pm = init_beads_pm(dir.path()).await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["branch", "spur/brain-snapshot-test", "HEAD"],
+        )
+        .await
+        .expect("snapshot branch");
+        let base_snapshot_oid = run_git_capture(
+            dir.path(),
+            None,
+            &["rev-parse", "--verify", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("snapshot oid");
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot branch");
+
+        let tasks = vec![PlanTask {
+            task_id: "task-a".into(),
+            agent: "codex".into(),
+            task: "Integrate worker branch".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        let subgraph = crate::build_epic_subgraph(pm.as_ref(), plan_id, "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+        let adv = pm.advanced().expect("advanced beads backend");
+        crate::emit_plan_submit_audit(
+            adv,
+            plan_id,
+            &subgraph,
+            Some("spur/brain-snapshot-test"),
+            Some(base_snapshot_oid.as_str()),
+            Some("submit_plan"),
+        )
+        .await;
+
+        let task_issue_id = subgraph
+            .task_map
+            .get("task-a")
+            .cloned()
+            .expect("task issue id");
+        adv.add_comment(
+            &task_issue_id,
+            &encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-1".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-a".into()),
+                result_summary: Some("worker branch ready".into()),
+            }),
+        )
+        .await
+        .expect("completion audit");
+        adv.add_comment(
+            &task_issue_id,
+            &encode_comment(&AuditSentinelKind::Approval {
+                delegation_id: "del-1".into(),
+            }),
+        )
+        .await
+        .expect("approval audit");
+        pm.update_issue(
+            &task_issue_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close task issue");
+
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (mut server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            Some(Arc::clone(&pm)),
+            None,
+            continuation_ctx,
+        );
+        server.set_repo_root(dir.path().to_path_buf());
+
+        let projected = crate::plan::projector::project_plan_from_beads(pm.as_ref(), plan_id)
+            .await
+            .expect("project persisted plan");
+        assert_eq!(
+            crate::plan::build_plan_status(plan_id, &projected)["ready_to_merge"],
+            Value::Bool(true)
+        );
+        server.install_projected_plan(projected).await;
+        if clear_cache {
+            server.active_plans.lock().await.remove(plan_id);
+        }
+
+        PersistedMergeFixture {
+            _dir: dir,
+            pm,
+            server,
+            plan_id: plan_id.to_string(),
+            epic_id: subgraph.epic_id,
+        }
+    }
+
+    async fn setup_persisted_retried_plan(
+        plan_id: &str,
+        clear_cache: bool,
+    ) -> PersistedMergeFixture {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let pm = init_beads_pm(dir.path()).await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["branch", "spur/brain-snapshot-test", "HEAD"],
+        )
+        .await
+        .expect("snapshot branch");
+        let base_snapshot_oid = run_git_capture(
+            dir.path(),
+            None,
+            &["rev-parse", "--verify", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("snapshot oid");
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a1",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-a1");
+        commit_file(
+            dir.path(),
+            "worker-1.txt",
+            "attempt-1\n",
+            "worker attempt 1",
+        )
+        .await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot branch");
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a2",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-a2");
+        commit_file(
+            dir.path(),
+            "worker-2.txt",
+            "attempt-2\n",
+            "worker attempt 2",
+        )
+        .await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot branch");
+
+        let tasks = vec![PlanTask {
+            task_id: "task-a".into(),
+            agent: "codex".into(),
+            task: "Integrate worker branch".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        let subgraph = crate::build_epic_subgraph(pm.as_ref(), plan_id, "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+        let adv = pm.advanced().expect("advanced beads backend");
+        crate::emit_plan_submit_audit(
+            adv,
+            plan_id,
+            &subgraph,
+            Some("spur/brain-snapshot-test"),
+            Some(base_snapshot_oid.as_str()),
+            Some("submit_plan"),
+        )
+        .await;
+
+        let task_issue_id = subgraph
+            .task_map
+            .get("task-a")
+            .cloned()
+            .expect("task issue id");
+        for audit in [
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-1".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-a1".into()),
+                result_summary: Some("attempt 1 summary".into()),
+            },
+            AuditSentinelKind::Rejection {
+                delegation_id: "del-1".into(),
+                feedback: "needs changes".into(),
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-2".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-2".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-a2".into()),
+                result_summary: Some("attempt 2 summary".into()),
+            },
+            AuditSentinelKind::Approval {
+                delegation_id: "del-2".into(),
+            },
+        ] {
+            adv.add_comment(&task_issue_id, &encode_comment(&audit))
+                .await
+                .expect("attempt audit");
+        }
+        pm.update_issue(
+            &task_issue_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close task issue");
+
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (mut server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            Some(Arc::clone(&pm)),
+            None,
+            continuation_ctx,
+        );
+        server.set_repo_root(dir.path().to_path_buf());
+
+        let projected = crate::plan::projector::project_plan_from_beads(pm.as_ref(), plan_id)
+            .await
+            .expect("project persisted plan");
+        assert_eq!(
+            crate::plan::build_plan_status(plan_id, &projected)["ready_to_merge"],
+            Value::Bool(true)
+        );
+        server.install_projected_plan(projected).await;
+        if clear_cache {
+            server.active_plans.lock().await.remove(plan_id);
+        }
+
+        PersistedMergeFixture {
+            _dir: dir,
+            pm,
+            server,
+            plan_id: plan_id.to_string(),
+            epic_id: subgraph.epic_id,
+        }
+    }
+
+    fn decode_merge_status(response: super::JsonRpcResponse) -> Value {
+        assert!(
+            response.error.is_none(),
+            "merge_plan should succeed: {:?}",
+            response.error
+        );
+
+        let result = response.result.expect("merge_plan result");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("merge_plan text response");
+        serde_json::from_str(text).expect("merge_plan status JSON")
+    }
+
+    fn decode_task_diff_response(text: &str) -> Value {
+        serde_json::from_str(text).expect("get_task_diff response JSON")
+    }
+
+    #[tokio::test]
+    async fn snapshot_plan_base_captures_oid() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+
+        let repo_root = dir.path().to_path_buf();
+        let snapshot = snapshot_plan_base(Some(&repo_root))
+            .await
+            .expect("snapshot_plan_base");
+
+        let expected_oid = run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "rev-parse",
+                "--verify",
+                snapshot.branch.as_deref().expect("snapshot branch"),
+            ],
+        )
+        .await
+        .expect("rev-parse snapshot branch");
+
+        assert_eq!(snapshot.oid.as_deref(), Some(expected_oid.as_str()));
     }
 
     #[tokio::test]
@@ -3754,6 +4538,114 @@ mod merge_plan_tests {
         .expect("show partial merge branch");
         assert_eq!(merged_contents, "worker-a");
     }
+
+    #[tokio::test]
+    async fn merge_plan_rehydrates_when_cache_missing() {
+        let fixture = setup_persisted_merge_ready_plan("plan-merge-recover", true).await;
+
+        let response = fixture
+            .server
+            .handle_merge_plan(Value::Null, json!({ "plan_id": fixture.plan_id }))
+            .await;
+        let status = decode_merge_status(response);
+        assert_eq!(status["merge"]["status"], "succeeded");
+        assert_eq!(status["ready_to_merge"], true);
+        assert_eq!(status["merge"]["merged_task_ids"], json!(["task-a"]));
+    }
+
+    #[tokio::test]
+    async fn merge_plan_clears_integration_pending_on_success() {
+        let fixture = setup_persisted_merge_ready_plan("plan-merge-clear-label", true).await;
+        fixture
+            .pm
+            .update_issue(
+                &fixture.epic_id,
+                spur_pm::IssueUpdate {
+                    add_labels: vec![crate::plan::labels::INTEGRATION_PENDING.to_string()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("add integration-pending label");
+
+        let response = fixture
+            .server
+            .handle_merge_plan(Value::Null, json!({ "plan_id": fixture.plan_id }))
+            .await;
+        let status = decode_merge_status(response);
+        assert_eq!(status["merge"]["status"], "succeeded");
+
+        let epic = fixture
+            .pm
+            .get_issue(&fixture.epic_id)
+            .await
+            .expect("get epic");
+        assert!(
+            !epic
+                .labels
+                .iter()
+                .any(|label| label == crate::plan::labels::INTEGRATION_PENDING),
+            "merge_plan should clear integration-pending: {:?}",
+            epic.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn get_task_diff_rehydrates_latest_attempt_when_cache_missing() {
+        let fixture = setup_persisted_merge_ready_plan("plan-diff-recover", true).await;
+
+        let text = fixture
+            .server
+            .handle_get_task_diff(&json!({
+                "plan_id": fixture.plan_id,
+                "task_id": "task-a",
+            }))
+            .await
+            .expect("get_task_diff should succeed");
+        let response = decode_task_diff_response(&text);
+
+        assert_eq!(response["worker_branch"], "spur/worker-a");
+        assert_eq!(response["summary"], "worker branch ready");
+        assert!(
+            response["diff"]
+                .as_str()
+                .map(|diff| diff.contains("worker.txt"))
+                .unwrap_or(false),
+            "latest-attempt cache miss should rebuild full diff text: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_task_diff_historical_attempts_remain_summary_only() {
+        let fixture = setup_persisted_retried_plan("plan-diff-history", true).await;
+
+        let text = fixture
+            .server
+            .handle_get_task_diff(&json!({
+                "plan_id": fixture.plan_id,
+                "task_id": "task-a",
+                "attempt": 1,
+            }))
+            .await
+            .expect("historical get_task_diff should succeed");
+        let response = decode_task_diff_response(&text);
+
+        assert_eq!(response["status"], "historical");
+        assert_eq!(response["worker_branch"], "spur/worker-a1");
+        assert_eq!(response["summary"], "attempt 1 summary");
+        assert_eq!(response["feedback"], "needs changes");
+        assert!(
+            response.get("diff").is_none(),
+            "historical responses must remain summary-only: {response}"
+        );
+        assert!(
+            response["note"]
+                .as_str()
+                .map(|note| note.contains("Historical attempt"))
+                .unwrap_or(false),
+            "historical responses must explain the summary-only contract: {response}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3816,6 +4708,7 @@ mod reconciler_fast_forward_tests {
             tasks: Vec::new(),
             brain_session_id: session_id.clone(),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: None,
         }));
@@ -3949,6 +4842,7 @@ mod reconciler_fast_forward_tests {
             tasks: Vec::new(),
             brain_session_id: session_id.clone(),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: None,
         }));
@@ -3978,6 +4872,7 @@ mod reconciler_fast_forward_tests {
             }],
             brain_session_id: session_id.clone(),
             base_snapshot_branch: Some("refs/heads/main".into()),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some("bd-epic".into()),
         };
@@ -4055,6 +4950,7 @@ mod reconciler_fast_forward_tests {
                 tasks: Vec::new(),
                 brain_session_id: session_id.clone(),
                 base_snapshot_branch: None,
+                base_snapshot_oid: None,
                 merge_state: crate::plan::PlanMergeState::NotStarted,
                 epic_id: None,
             })),
@@ -4080,6 +4976,7 @@ mod reconciler_fast_forward_tests {
             }],
             brain_session_id: session_id.clone(),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some("bd-epic".into()),
         };
@@ -4121,6 +5018,7 @@ mod reconciler_fast_forward_tests {
             ],
             brain_session_id: session_id,
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some("bd-epic".into()),
         };

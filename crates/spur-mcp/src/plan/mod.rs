@@ -162,6 +162,9 @@ pub struct PlanState {
     /// dedicated integration branch from this ref so merge results are
     /// reproducible and detached from later brain edits.
     pub base_snapshot_branch: Option<String>,
+    /// OID matching `base_snapshot_branch` when it was captured. Prefer this
+    /// over the branch name when reconstructing restart-time merge/diff state.
+    pub base_snapshot_oid: Option<String>,
     /// Latest integration attempt state. Reset to `NotStarted` whenever the
     /// plan changes through review decisions.
     pub merge_state: PlanMergeState,
@@ -709,6 +712,29 @@ pub async fn emit_completion_audit(
             plan_id = %plan_id,
             delegation_id = %delegation_id,
             "Completion audit comment emission failed: {e}"
+        );
+    }
+}
+
+pub async fn emit_epic_completion_audit(
+    adv: &dyn spur_pm::BeadsAdvanced,
+    epic_id: &str,
+    plan_id: &str,
+    outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
+) {
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::EpicCompletion {
+        outcome,
+        plan_id: plan_id.to_string(),
+        epic_id: epic_id.to_string(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(error) = adv.add_comment(epic_id, &body).await {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "epic_completion",
+            epic_id = %epic_id,
+            plan_id = %plan_id,
+            "EpicCompletion audit comment emission failed: {error}"
         );
     }
 }
@@ -1307,48 +1333,32 @@ pub async fn run_plan(
     }
 
     // INV-7: Compute terminal counts and emit lifecycle events OUTSIDE the lock.
-    let (
-        approved_count,
-        rejected_count,
-        failed_count,
-        cancelled_count,
-        awaiting_review_count,
-        all_approved,
-    ) = {
+    let (approved_count, rejected_count, failed_count, cancelled_count, awaiting_review_count) = {
         let p = plan.lock().await;
         let mut a = 0u32;
         let mut r = 0u32;
         let mut f = 0u32;
         let mut c = 0u32;
         let mut ar = 0u32;
-        let non_empty = !p.tasks.is_empty();
-        let mut all_a = non_empty;
         for t in &p.tasks {
             match &t.status {
                 PlanTaskStatus::Approved { .. } => a += 1,
                 PlanTaskStatus::Rejected { .. } => {
                     r += 1;
-                    all_a = false;
                 }
                 PlanTaskStatus::Failed { .. } => {
                     f += 1;
-                    all_a = false;
                 }
                 PlanTaskStatus::Cancelled { .. } => {
                     c += 1;
-                    all_a = false;
                 }
                 PlanTaskStatus::AwaitingReview { .. } => {
                     ar += 1;
-                    all_a = false;
                 }
-                // Pending / Ready / Dispatched / Iterating: not terminal, not all_approved.
-                _ => {
-                    all_a = false;
-                }
+                _ => {}
             }
         }
-        (a, r, f, c, ar, all_a)
+        (a, r, f, c, ar)
     }; // Lock released before emitting.
 
     info!(
@@ -1368,11 +1378,6 @@ pub async fn run_plan(
             failed: failed_count,
             cancelled: cancelled_count,
         });
-        if all_approved && cancelled_count == 0 {
-            sink.emit(spur_acp::SpurEventBody::PlanReadyToMerge {
-                plan_id: plan_id.clone(),
-            });
-        }
     }
 }
 
@@ -3225,6 +3230,7 @@ mod tests {
                 .collect(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: super::PlanMergeState::NotStarted,
             epic_id: None,
         };
@@ -3476,6 +3482,7 @@ mod tests {
             plan_id: "persist-order".into(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: PlanMergeState::NotStarted,
             epic_id: None,
             tasks: vec![PlanTaskEntry {
@@ -3565,6 +3572,7 @@ mod tests {
             plan_id: "persist-failure".into(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: PlanMergeState::NotStarted,
             epic_id: None,
             tasks: vec![PlanTaskEntry {
@@ -3649,6 +3657,7 @@ mod tests {
             tasks: vec![entry],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("test-brain".into())),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: PlanMergeState::NotStarted,
             epic_id: None,
         };
@@ -3865,6 +3874,7 @@ mod tests {
             }],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
             merge_state: super::PlanMergeState::NotStarted,
             epic_id: None,
         };
@@ -3901,6 +3911,7 @@ mod tests {
             }],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
             merge_state: super::PlanMergeState::Succeeded {
                 merge_branch: "spur/plan-merge-1".into(),
                 merged_task_ids: vec!["a".into()],

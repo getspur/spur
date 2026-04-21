@@ -317,6 +317,7 @@ async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
         }],
         brain_session_id: BrainSessionId::new(SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: PlanMergeState::NotStarted,
         epic_id: Some("bd-epic".into()),
     }));
@@ -391,6 +392,7 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
         }],
         brain_session_id: BrainSessionId::new(SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: PlanMergeState::NotStarted,
         epic_id: Some("bd-epic".into()),
     }));

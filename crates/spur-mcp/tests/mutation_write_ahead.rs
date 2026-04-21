@@ -245,6 +245,7 @@ async fn compensate_mutation_orphans_emits_violation_breadcrumb() {
             mutation_id: audit_mutation_id,
             violation,
             rollback_status,
+            ..
         } if audit_mutation_id == "11111111-1111-1111-1111-111111111111"
             && violation == "restart-orphan"
             && rollback_status == "compensated"

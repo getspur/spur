@@ -1,4 +1,4 @@
-//! T-I2: post-mutation cycle triggers compensating rollback.
+//! T-v0d-6: rollback audit enumerates succeeded and failed compensations.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -155,35 +155,73 @@ fn issue_ids_for_label(repo: &Path, label: &str) -> Result<Vec<String>, String> 
     Ok(ids)
 }
 
-async fn inject_cycle_when_children_exist(repo: PathBuf, mutation_id: Uuid) -> Result<(), String> {
+fn parent_closed(repo: &Path, parent_id: &str) -> Result<bool, String> {
+    let rows = run_sql_json(
+        repo,
+        &format!(
+            "SELECT status
+             FROM issues
+             WHERE id = '{parent_id}';"
+        ),
+    )?;
+    let parsed = serde_json::from_str::<Vec<serde_json::Value>>(&rows)
+        .map_err(|err| format!("parse parent readiness rows: {err}; raw={rows}"))?;
+    let Some(row) = parsed.first() else {
+        return Ok(false);
+    };
+    let status = row
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    Ok(status == "closed")
+}
+
+async fn inject_partial_rollback_failure(
+    repo: PathBuf,
+    mutation_id: Uuid,
+    parent_id: String,
+    downstream_id: String,
+) -> Result<(), String> {
     let label = mutation_id_label(&mutation_id);
+    let mut cycle_injected = false;
     for _ in 0..2_000 {
         let mut ids = issue_ids_for_label(&repo, &label)?;
-        if ids.len() >= 2 {
+        if ids.len() >= 2 && !cycle_injected {
             ids.sort();
             let sql = format!(
-                "INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by) \
-                 VALUES ('{}', '{}', 'blocks', 'mutation-test'); \
-                 INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by) \
+                "INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by)
+                 VALUES ('{}', '{}', 'blocks', 'mutation-test');
+                 INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by)
                  VALUES ('{}', '{}', 'blocks', 'mutation-test');",
                 ids[0], ids[1], ids[1], ids[0]
             );
             run_sql(&repo, &sql)?;
+            cycle_injected = true;
+        }
+        if cycle_injected && parent_closed(&repo, &parent_id)? {
+            run_sql(
+                &repo,
+                &format!("DELETE FROM issues WHERE id = '{}';", downstream_id),
+            )?;
             return Ok(());
         }
         sleep(Duration::from_millis(2)).await;
     }
-    Err("timed out waiting for mutation children before injecting cycle".into())
+    Err("timed out waiting to inject partial rollback failure".into())
 }
 
 #[tokio::test]
-async fn cycle_detection_emits_violation_and_rolls_back() {
+async fn t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensations() {
     if !br_available() {
-        eprintln!("skipping cycle_detection_emits_violation_and_rolls_back: `br` not on PATH");
+        eprintln!(
+            "skipping t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensations: `br` not on PATH"
+        );
         return;
     }
     if !sqlite_available() {
-        eprintln!("skipping cycle_detection_emits_violation_and_rolls_back: `sqlite3` not on PATH");
+        eprintln!(
+            "skipping t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensations: `sqlite3` not on PATH"
+        );
         return;
     }
 
@@ -209,35 +247,32 @@ async fn cycle_detection_emits_violation_and_rolls_back() {
     );
 
     let mutation_id = Uuid::new_v4();
-    let mut children = Vec::new();
-    for idx in 0..12 {
-        children.push(task_draft(
-            &format!("Child {idx}"),
-            &format!("Split child {idx}"),
-        ));
-    }
     let batch = mutation_batch(
         mutation_id,
         Some(Uuid::new_v4()),
         parent.clone(),
         vec![PlanMutationOp::SplitTask {
             parent: parent.clone(),
-            children,
+            children: vec![
+                task_draft("Child A", "First split child"),
+                task_draft("Child B", "Second split child"),
+            ],
             dep_rewire: DepRewirePolicy::Barrier,
         }],
     );
 
-    let injector = tokio::spawn(inject_cycle_when_children_exist(
+    let injector = tokio::spawn(inject_partial_rollback_failure(
         dir.path().to_path_buf(),
         mutation_id,
+        parent.clone(),
+        downstream.clone(),
     ));
 
     let apply_result = apply_mutation(pm.clone(), &batch).await;
-    let inject_result = injector
+    injector
         .await
-        .expect("cycle injector task panicked")
-        .map_err(|err| format!("{err}; apply_result={apply_result:?}"));
-    inject_result.expect("cycle injector failed");
+        .expect("partial rollback injector task panicked")
+        .expect("partial rollback injector failed");
     let err = apply_result.expect_err("injected cycle must force rollback");
 
     assert!(
@@ -259,125 +294,64 @@ async fn cycle_detection_emits_violation_and_rolls_back() {
             rollback_ops_succeeded,
             rollback_ops_failed,
             ..
-        } if mutation_id == &batch.mutation_id.to_string() && rollback_status == "completed" => {
-            Some((rollback_ops_succeeded, rollback_ops_failed))
+        } if mutation_id == &batch.mutation_id.to_string()
+            && rollback_status.starts_with("failed:") =>
+        {
+            Some((rollback_status, rollback_ops_succeeded, rollback_ops_failed))
         }
         _ => None,
     });
     assert!(
         violation.is_some(),
-        "MutationInvariantViolation sentinel missing after rollback: err={err:#} sentinels={sentinels:?}"
+        "MutationInvariantViolation sentinel missing after partial rollback: err={err:#} sentinels={sentinels:?}"
     );
-    let (rollback_ops_succeeded, rollback_ops_failed) =
+
+    let (rollback_status, rollback_ops_succeeded, rollback_ops_failed) =
         violation.expect("MutationInvariantViolation must exist");
     assert!(
         !rollback_ops_succeeded.is_empty(),
-        "rollback audit must describe successful compensation ops"
+        "partial rollback must still report succeeded compensation ops"
     );
     assert!(
-        rollback_ops_failed.is_empty(),
-        "full rollback path must not report failed compensation ops: {rollback_ops_failed:?}"
+        !rollback_ops_failed.is_empty(),
+        "partial rollback must report failed compensation ops"
     );
-    let rollback_kinds = rollback_ops_succeeded
-        .iter()
-        .map(|op| op.kind.as_str())
-        .collect::<Vec<_>>();
-    let expected_child_count = 12usize;
-    let expected_remove_dependency_count = (expected_child_count * 2) + 2;
-    let expected_total_count =
-        expected_remove_dependency_count + 1 + expected_child_count + 1 + expected_child_count;
     assert!(
-        rollback_kinds.iter().all(|kind| matches!(
-            *kind,
+        rollback_status.contains("rollback compensation op(s) failed"),
+        "rollback status should remain human-readable: {rollback_status}"
+    );
+
+    assert!(
+        rollback_ops_succeeded.iter().all(|op| matches!(
+            op.kind.as_str(),
             "remove_dependency"
                 | "restore_dependency"
                 | "close_child_issue"
                 | "restore_parent_status"
                 | "clear_superseded_by_label"
         )),
-        "rollback op kinds must stay human-readable: {rollback_kinds:?}"
-    );
-    assert_eq!(
-        rollback_kinds.len(),
-        expected_total_count,
-        "rollback should record the full compensation surface: {rollback_kinds:?}"
+        "successful rollback ops must stay human-readable: {rollback_ops_succeeded:?}"
     );
     assert!(
-        rollback_kinds[..expected_remove_dependency_count]
-            .iter()
-            .all(|kind| *kind == "remove_dependency"),
-        "rollback must clear child-touched dependencies first: {rollback_kinds:?}"
-    );
-    assert_eq!(
-        rollback_kinds[expected_remove_dependency_count],
-        "restore_dependency",
-        "rollback must restore downstream -> parent after removing child-touched edges: {rollback_kinds:?}"
-    );
-    assert!(
-        rollback_kinds[expected_remove_dependency_count + 1
-            ..expected_remove_dependency_count + 1 + expected_child_count]
-            .iter()
-            .all(|kind| *kind == "close_child_issue"),
-        "rollback must then close all child issues: {rollback_kinds:?}"
-    );
-    assert_eq!(
-        rollback_kinds[expected_remove_dependency_count + 1 + expected_child_count],
-        "restore_parent_status",
-        "rollback must restore the parent before clearing superseded markers: {rollback_kinds:?}"
+        rollback_ops_failed.iter().all(|(op, error)| {
+            matches!(
+                op.kind.as_str(),
+                "remove_dependency"
+                    | "restore_dependency"
+                    | "close_child_issue"
+                    | "restore_parent_status"
+                    | "clear_superseded_by_label"
+            ) && !error.trim().is_empty()
+        }),
+        "failed rollback ops must keep human-readable op kinds and non-empty errors: {rollback_ops_failed:?}"
     );
     assert!(
-        rollback_kinds[expected_remove_dependency_count + 2 + expected_child_count..]
-            .iter()
-            .all(|kind| *kind == "clear_superseded_by_label"),
-        "rollback must finish by clearing superseded labels: {rollback_kinds:?}"
-    );
-    assert!(
-        !sentinels.iter().any(|sentinel| matches!(
-            sentinel,
-            AuditSentinelKind::MutationCommit { mutation_id, .. }
-                if mutation_id == &batch.mutation_id.to_string()
-        )),
-        "MutationCommit must not be emitted on rolled-back mutation: err={err:#} sentinels={sentinels:?}"
-    );
-
-    let child_ids = issue_ids_for_label(dir.path(), &mutation_id_label(&batch.mutation_id))
-        .expect("query rollback children by label");
-    assert_eq!(
-        child_ids.len(),
-        12,
-        "expected all rollback children to exist"
-    );
-    for child_id in &child_ids {
-        let child = pm.get_issue(child_id).await.expect("load rollback child");
-        assert_eq!(
-            child.status,
-            pm.closed_status(),
-            "rolled-back child {child_id} must be mapped to backend closed status"
-        );
-    }
-
-    let downstream_issue = pm.get_issue(&downstream).await.expect("load downstream");
-    assert!(
-        downstream_issue.blocked_by.iter().any(|dep| dep == &parent),
-        "rollback must restore downstream -> parent dependency; blocked_by={:?}",
-        downstream_issue.blocked_by
-    );
-    for child in &child_ids {
-        assert!(
-            !downstream_issue.blocked_by.iter().any(|dep| dep == child),
-            "rollback must remove downstream -> child dependency for {child}; blocked_by={:?}",
-            downstream_issue.blocked_by
-        );
-    }
-
-    let cycles = pm
-        .advanced()
-        .expect("advanced surface")
-        .dep_cycles()
-        .await
-        .expect("dep_cycles");
-    assert!(
-        cycles.is_empty(),
-        "rollback must leave the graph acyclic: {cycles:?}"
+        rollback_ops_failed.iter().any(|(op, error)| {
+            op.kind == "restore_dependency"
+                && op.issue_id == downstream
+                && op.depends_on_id.as_deref() == Some(parent.as_str())
+                && error.contains(&downstream)
+        }),
+        "partial rollback should record the deleted downstream restore failure: {rollback_ops_failed:?}"
     );
 }
