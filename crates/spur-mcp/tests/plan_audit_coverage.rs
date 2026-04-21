@@ -104,8 +104,7 @@ async fn persist_dispatch_intent_writes_label_before_send() {
         .expect("expected beads pm");
 
     let issue_id = extract_id(
-        &run_br(dir.path(), &["create", "Dispatch Target", "-t", "task"])
-            .expect("create issue"),
+        &run_br(dir.path(), &["create", "Dispatch Target", "-t", "task"]).expect("create issue"),
     );
 
     spur_mcp::plan::persist_dispatch_intent(&pm, &issue_id, "plan-1", "del-A", "codex", 1)

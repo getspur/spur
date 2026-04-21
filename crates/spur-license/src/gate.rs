@@ -54,7 +54,7 @@ impl FeatureGate {
             .filter_map(|s| FeatureKey::from_known(&s))
             .collect();
 
-        let quotas = Self::merge_quotas(Tier::Community);
+        let quotas = Self::merge_quotas(Tier::Community, policy.document());
         let flags = Self::extract_flags(policy.document());
 
         EntitlementSnapshot {
@@ -90,7 +90,7 @@ impl FeatureGate {
                 .collect()
         };
 
-        let quotas = Self::merge_quotas(tier);
+        let quotas = Self::merge_quotas(tier, self.policy.document());
         let flags = Self::extract_flags(self.policy.document());
 
         EntitlementSnapshot {
@@ -106,8 +106,10 @@ impl FeatureGate {
         }
     }
 
-    fn merge_quotas(tier: Tier) -> HashMap<QuotaKey, QuotaValue> {
+    fn merge_quotas(tier: Tier, policy_doc: Arc<PolicyDocument>) -> HashMap<QuotaKey, QuotaValue> {
         let mut quotas = HashMap::new();
+
+        // 1. Start with hardcoded tier defaults (guaranteed baseline).
         match tier {
             Tier::Community => {
                 quotas.insert(QuotaKey::MaxConcurrentWorkers, QuotaValue::Count(1));
@@ -136,6 +138,19 @@ impl FeatureGate {
                 quotas.insert(QuotaKey::EventRetentionBytes, QuotaValue::Unlimited);
             }
         }
+
+        // 2. Overlay signed-policy quotas when present (policy overrides code).
+        let tier_label = tier.label().to_lowercase();
+        if let Some(tp) = policy_doc.tier_policies.get(&tier_label) {
+            for (key_str, val) in &tp.quotas {
+                if let Some(qk) = QuotaKey::from_known(key_str) {
+                    if let Some(qv) = parse_quota_value(val) {
+                        quotas.insert(qk, qv);
+                    }
+                }
+            }
+        }
+
         quotas
     }
 
@@ -144,6 +159,26 @@ impl FeatureGate {
             .iter()
             .filter_map(|(k, v)| FeatureKey::from_known(k).map(|key| (key, v.clone())))
             .collect()
+    }
+}
+
+/// Parse a raw JSON quota value from the signed policy document into the
+/// typed `QuotaValue` enum. Returns `None` for unrecognized shapes so the
+/// hardcoded default is preserved.
+fn parse_quota_value(val: &serde_json::Value) -> Option<QuotaValue> {
+    match val {
+        serde_json::Value::Number(n) => n.as_u64().map(QuotaValue::Count),
+        serde_json::Value::String(s) if s == "unlimited" => Some(QuotaValue::Unlimited),
+        serde_json::Value::Object(map) => map
+            .get("bytes")
+            .and_then(|v| v.as_u64())
+            .map(QuotaValue::Bytes)
+            .or_else(|| {
+                map.get("count")
+                    .and_then(|v| v.as_u64())
+                    .map(QuotaValue::Count)
+            }),
+        _ => None,
     }
 }
 

@@ -175,7 +175,10 @@ mod tests {
     #[test]
     fn delegation_and_review_labels_use_spur_namespace() {
         assert_eq!(delegation_id("del-A"), "spur:delegation-id:del-A");
-        assert_eq!(parse_delegation_id("spur:delegation-id:del-A"), Some("del-A"));
+        assert_eq!(
+            parse_delegation_id("spur:delegation-id:del-A"),
+            Some("del-A")
+        );
         assert_eq!(READY_FOR_REVIEW, "spur:ready-for-review");
         assert_eq!(REVIEW_REJECTED, "spur:review-rejected");
     }
