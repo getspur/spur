@@ -769,7 +769,6 @@ impl DashboardView {
                             self.verbose = !self.verbose;
                             Some(Action::ToggleVerbose)
                         }
-                        'q' => Some(Action::Quit),
                         '?' => Some(Action::ShowHelp),
                         's' => Some(Action::RequestSessions),
                         // Mode-entry keys fall through to InputBar
@@ -920,10 +919,6 @@ impl DashboardView {
                         self.verbose = !self.verbose;
                         return Some(Action::ToggleVerbose);
                     }
-                    'q' => {
-                        self.input_bar.clear();
-                        return Some(Action::Quit);
-                    }
                     '?' => {
                         self.input_bar.clear();
                         return Some(Action::ShowHelp);
@@ -1009,10 +1004,8 @@ impl DashboardView {
                 KeyCode::Esc if self.focused_node.is_some() => {
                     return Some(Action::UnfocusNode);
                 }
-                // Esc is the universal "back" key. App decides: if an
-                // active SessionDetail is alive, Esc returns to it; if
-                // not, Esc quits (possibly through the quit-confirm
-                // dialog when a brain is attached).
+                // Esc is the universal "back" key. App decides whether that
+                // returns to the active SessionDetail or becomes a no-op.
                 KeyCode::Esc => return Some(Action::NavigateBack),
                 _ => {}
             }

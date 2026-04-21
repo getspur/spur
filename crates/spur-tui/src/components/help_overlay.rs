@@ -45,7 +45,7 @@ impl HelpOverlay {
             header(" Dashboard — Lineage Tree"),
             Line::from("  j / k              Move selection in lineage tree"),
             Line::from("  Enter              Focus selected node"),
-            Line::from("  Esc                Unfocus (return to log) / quit"),
+            Line::from("  Esc                Unfocus (return to log)"),
             Line::from("  \u{2190} / \u{2192}               Cycle detail tabs (when focused)"),
             Line::from("  c                  Toggle collapse on selected subtree"),
             Line::from("  r                  Jump to next pending review"),
@@ -57,7 +57,7 @@ impl HelpOverlay {
             Line::from("  Tab                Cycle panel focus"),
             Line::from("  v                  Toggle verbose mode"),
             Line::from("  s                  Open session picker"),
-            Line::from("  q, Esc             Quit"),
+            Line::from("  Ctrl-C             Quit (press twice to force)"),
             Line::from(""),
         ];
 
@@ -229,6 +229,19 @@ mod tests {
         );
         assert!(joined.contains("Option+drag"), "must mention Option+drag");
         assert!(joined.contains("Shift+drag"), "must mention Shift+drag");
+    }
+
+    #[test]
+    fn help_advertises_ctrl_c_quit_flow() {
+        let joined = help_lines(false, false).join("\n");
+        assert!(
+            joined.contains("Ctrl-C             Quit"),
+            "help must advertise Ctrl-C quit: {joined}"
+        );
+        assert!(
+            !joined.contains("q, Esc             Quit"),
+            "legacy Esc quit hint should be removed: {joined}"
+        );
     }
 
     #[test]

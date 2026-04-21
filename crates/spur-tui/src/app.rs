@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::Frame;
 use tokio::sync::{broadcast, mpsc};
@@ -595,20 +595,28 @@ impl App {
             Event::Key(key) => {
                 // Quit-confirm dialog takes priority: it captures every key.
                 if self.quit_confirm_visible {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                            // Flush any unsent draft to disk before we exit so
-                            // the next `spur watch` restores the latest text.
-                            self.force_flush_active_draft();
-                            self.quit_confirm_visible = false;
-                            self.should_quit = true;
-                        }
-                        _ => {
-                            // Anything else (n/N/Esc/q/…) cancels the quit.
-                            self.quit_confirm_visible = false;
+                    if is_ctrl_c(key) {
+                        self.confirm_quit();
+                    } else {
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                                self.confirm_quit();
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                self.quit_confirm_visible = false;
+                            }
+                            _ => {}
                         }
                     }
                     self.dirty = true;
+                    return;
+                }
+
+                // Ctrl+C is the global quit chord. First press opens the
+                // confirmation prompt; pressing it again while the prompt is
+                // visible bypasses confirmation and exits immediately.
+                if is_ctrl_c(key) {
+                    self.request_quit();
                     return;
                 }
 
@@ -736,6 +744,20 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn request_quit(&mut self) {
+        self.quit_confirm_visible = true;
+        self.dirty = true;
+    }
+
+    fn confirm_quit(&mut self) {
+        // Flush any unsent draft to disk before we exit so the next
+        // `spur watch` restores the latest text.
+        self.force_flush_active_draft();
+        self.quit_confirm_visible = false;
+        self.should_quit = true;
+        self.dirty = true;
     }
 
     /// Handle mouse scroll events. Only scroll wheel is processed —
@@ -1128,14 +1150,7 @@ impl App {
         }
         match action {
             Action::Quit => {
-                // If a brain is attached, show the confirmation dialog so
-                // the user is aware the agent subprocess will be terminated.
-                // Otherwise exit immediately — nothing at risk.
-                if self.brain_name.is_some() {
-                    self.quit_confirm_visible = true;
-                } else {
-                    self.should_quit = true;
-                }
+                self.request_quit();
             }
 
             Action::NavigateTo(ViewId::SessionDetail(ref session_id)) => {
@@ -1172,18 +1187,12 @@ impl App {
                     return;
                 }
                 // From Dashboard: if an active session exists, return to it
-                // (the natural "back" from the activity log); if not, fall
-                // back to Quit — matching the previous `Esc = Quit on an
-                // empty Dashboard` behavior. Quit still respects the
-                // quit-confirm dialog when a brain is attached.
+                // (the natural "back" from the activity log). Otherwise do
+                // nothing — quitting is now an explicit Ctrl+C flow.
                 if matches!(self.current_view, ViewId::Dashboard) {
                     if let Some(ref detail) = self.session_detail {
                         self.current_view = ViewId::SessionDetail(detail.session_id().clone());
                         self.dirty = true;
-                    } else if self.brain_name.is_some() {
-                        self.quit_confirm_visible = true;
-                    } else {
-                        self.should_quit = true;
                     }
                     return;
                 }
@@ -2074,8 +2083,7 @@ impl App {
         }
 
         if self.quit_confirm_visible {
-            let brain = self.brain_name.as_deref().unwrap_or("(unknown)");
-            QuitConfirmDialog::render(frame, area, brain);
+            QuitConfirmDialog::render(frame, area, self.brain_name.as_deref());
         }
 
         if self.palette_visible {
@@ -2085,6 +2093,10 @@ impl App {
             frame.render_widget(overlay, frame.area());
         }
     }
+}
+
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c'))
 }
 
 // ─── Main TUI entry point ──────────────────────────────────────────────
@@ -3017,6 +3029,79 @@ mod brain_retired_tests {
             app.brain_status,
             BrainStatus::Thinking,
             "brain_status must be unchanged on send failure (not forced to Idle)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod quit_shortcut_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn first_ctrl_c_opens_quit_confirm_without_exiting() {
+        let mut app = App::new_for_tests();
+
+        app.handle_crossterm_event_for_test(ctrl_c());
+
+        assert!(
+            app.quit_confirm_visible,
+            "first Ctrl+C should open the quit prompt"
+        );
+        assert!(!app.should_quit, "first Ctrl+C must not exit immediately");
+    }
+
+    #[test]
+    fn second_ctrl_c_force_quits_from_confirm() {
+        let mut app = App::new_for_tests();
+
+        app.handle_crossterm_event_for_test(ctrl_c());
+        app.handle_crossterm_event_for_test(ctrl_c());
+
+        assert!(
+            app.should_quit,
+            "second Ctrl+C should bypass confirmation and exit"
+        );
+        assert!(
+            !app.quit_confirm_visible,
+            "force quit should dismiss the confirm dialog"
+        );
+    }
+
+    #[test]
+    fn quit_confirm_accepts_y_and_cancels_on_n() {
+        let mut app = App::new_for_tests();
+
+        app.handle_crossterm_event_for_test(ctrl_c());
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(
+            !app.quit_confirm_visible,
+            "n should dismiss the quit prompt"
+        );
+        assert!(!app.should_quit, "n must keep the app running");
+
+        app.handle_crossterm_event_for_test(ctrl_c());
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.should_quit, "y should confirm quit");
+    }
+
+    #[test]
+    fn dashboard_esc_no_longer_quits_when_nothing_is_active() {
+        let mut app = App::new_for_tests();
+
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(
+            !app.should_quit,
+            "Esc should not exit the app from an empty dashboard"
+        );
+        assert!(
+            !app.quit_confirm_visible,
+            "Esc should not open quit confirm from an empty dashboard"
         );
     }
 }
