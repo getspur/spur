@@ -70,15 +70,31 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
             .ok_or_else(|| anyhow::anyhow!("signal watcher requires beads backend"))?;
 
         let candidates = self.pm.list_issues(IssueFilter::default()).await?;
+        let closed_status = self.pm.closed_status();
 
         for issue in candidates {
-            if issue.status != "awaiting_review" {
+            // Beads persists a compressed status vocabulary: SPUR's nine-state
+            // PlanTaskStatus projects to open / closed in the backend. Skip
+            // closed tasks — their mutations are already committed or they are
+            // otherwise terminal; any signal arriving now is a late arrival
+            // (handled by handle_report_signal, not the watcher).
+            if issue.status.as_str() == closed_status {
                 continue;
             }
             if !issue
                 .labels
                 .iter()
                 .any(|label| label.starts_with("signal:"))
+            {
+                continue;
+            }
+            // Skip if the proposer already consumed this task's signal. The
+            // spur:signal-processed:<mutation_id> label is written by
+            // mutation_executor::apply_mutation on commit.
+            if issue
+                .labels
+                .iter()
+                .any(|label| label.starts_with("spur:signal-processed:"))
             {
                 continue;
             }

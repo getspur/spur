@@ -21,14 +21,6 @@ fn br_available() -> bool {
         .unwrap_or(false)
 }
 
-fn sqlite_available() -> bool {
-    Command::new("sqlite3")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("br")
         .args(args)
@@ -45,26 +37,6 @@ fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
         Err(format!(
             "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
             out.status
-        ))
-    }
-}
-
-fn run_sqlite(repo: &Path, sql: &str) -> Result<(), String> {
-    let db = repo.join(".beads").join("beads.db");
-    let out = Command::new("sqlite3")
-        .arg(&db)
-        .arg(sql)
-        .current_dir(repo)
-        .output()
-        .expect("sqlite3 invocation failed");
-    if out.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        Err(format!(
-            "sqlite3 {:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            db, out.status
         ))
     }
 }
@@ -116,16 +88,6 @@ fn issue_labels(repo: &Path, issue_id: &str) -> Vec<String> {
         .flatten()
         .filter_map(|label| label.as_str().map(String::from))
         .collect()
-}
-
-fn terminalize_issue(repo: &Path, issue_id: &str, status: &str) {
-    run_sqlite(
-        repo,
-        &format!(
-            "update issues set status = '{status}', updated_at = CURRENT_TIMESTAMP where id = '{issue_id}';"
-        ),
-    )
-    .expect("sqlite3 status update must succeed");
 }
 
 fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
@@ -223,23 +185,22 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
         eprintln!("skipping: `br` not on PATH");
         return;
     }
-    if !sqlite_available() {
-        eprintln!("skipping: `sqlite3` not on PATH");
-        return;
-    }
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
     let pm = beads_pm(dir.path()).await;
     let task_id = create_task(&pm, "Terminal signal task").await;
-    terminalize_issue(dir.path(), &task_id, "approved");
+    // Beads vocabulary reality: all SPUR terminals project to `closed`.
+    // Close via `br close` (production flow) instead of injecting a SPUR-vocab
+    // string via sqlite — the handler now gates on `status == closed_status()`.
+    run_br(dir.path(), &["close", &task_id]).expect("br close failed");
     assert_eq!(
         pm.get_issue(&task_id)
             .await
             .expect("get_issue should succeed")
             .status,
-        "approved"
+        pm.closed_status()
     );
 
     let signal = scope_drift_signal(Uuid::new_v4());
@@ -283,13 +244,14 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
         1,
         "late-arrival path should record exactly one audit sentinel"
     );
+    let expected_terminal = pm.closed_status().to_string();
     assert!(parsed_audits.iter().any(|kind| {
         matches!(
             kind,
             AuditSentinelKind::LateSignal {
                 signal_id: found_id,
                 terminal_status,
-            } if found_id == &signal_id && terminal_status == "approved"
+            } if found_id == &signal_id && terminal_status == &expected_terminal
         )
     }));
 

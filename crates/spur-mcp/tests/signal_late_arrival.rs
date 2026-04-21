@@ -22,14 +22,6 @@ fn br_available() -> bool {
         .unwrap_or(false)
 }
 
-fn sqlite_available() -> bool {
-    Command::new("sqlite3")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("br")
         .args(args)
@@ -46,26 +38,6 @@ fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
         Err(format!(
             "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
             out.status
-        ))
-    }
-}
-
-fn run_sqlite(repo: &Path, sql: &str) -> Result<(), String> {
-    let db = repo.join(".beads").join("beads.db");
-    let out = Command::new("sqlite3")
-        .arg(&db)
-        .arg(sql)
-        .current_dir(repo)
-        .output()
-        .expect("sqlite3 invocation failed");
-    if out.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        Err(format!(
-            "sqlite3 {:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            db, out.status
         ))
     }
 }
@@ -119,22 +91,6 @@ fn issue_labels(repo: &Path, issue_id: &str) -> Vec<String> {
         .collect()
 }
 
-fn transition_issue(repo: &Path, issue_id: &str, status: &str) -> String {
-    match run_br(repo, &["update", issue_id, "--status", status]) {
-        Ok(_) => format!("br update --status {status}"),
-        Err(_) => {
-            run_sqlite(
-                repo,
-                &format!(
-                    "update issues set status = '{status}', updated_at = CURRENT_TIMESTAMP where id = '{issue_id}';"
-                ),
-            )
-            .expect("sqlite3 status update must succeed");
-            format!("sqlite status override to {status}")
-        }
-    }
-}
-
 fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
     WorkerSignal::ScopeDrift {
         signal_id,
@@ -144,13 +100,19 @@ fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
     }
 }
 
-async fn assert_late_arrival_for_status(status: &str) {
+/// T-I3: a signal arriving on a task that beads reports as closed must be
+/// recorded as a late-arrival, never passed to the proposer.
+///
+/// Beads persists a compressed status vocabulary — SPUR's nine-state
+/// PlanTaskStatus terminals (Approved, Failed, Cancelled, Superseded) all
+/// project to `closed` in the backend. The prior 4-way parameterization over
+/// SPUR-vocab strings exercised dead code (beads never emits those strings
+/// via `br show`). This single test uses the production flow (`br close`)
+/// and verifies the invariant holds end-to-end.
+#[tokio::test]
+async fn report_signal_on_closed_task_records_late_arrival() {
     if !br_available() {
         eprintln!("skipping: `br` not on PATH");
-        return;
-    }
-    if !sqlite_available() {
-        eprintln!("skipping: `sqlite3` not on PATH");
         return;
     }
 
@@ -158,15 +120,15 @@ async fn assert_late_arrival_for_status(status: &str) {
     run_br(dir.path(), &["init"]).expect("br init failed");
 
     let pm = beads_pm(dir.path()).await;
-    let task_id = create_task(&pm, &format!("Late signal task ({status})")).await;
-    let transition_mode = transition_issue(dir.path(), &task_id, status);
+    let task_id = create_task(&pm, "Late signal closed task").await;
+    run_br(dir.path(), &["close", &task_id]).expect("br close failed");
     assert_eq!(
         pm.get_issue(&task_id)
             .await
             .expect("get_issue should succeed")
             .status,
-        status,
-        "task status should be {status} after {transition_mode}"
+        pm.closed_status(),
+        "task status should be closed after `br close`"
     );
 
     let signal = scope_drift_signal(Uuid::new_v4());
@@ -198,7 +160,7 @@ async fn assert_late_arrival_for_status(status: &str) {
         .collect();
     assert!(
         signal_comments.is_empty(),
-        "late-arrival path must not emit worker signal sentinels for {status}; got: {signal_comments:?}"
+        "late-arrival path must not emit worker signal sentinels; got: {signal_comments:?}"
     );
 
     let audit_comments: Vec<&String> = comments
@@ -211,7 +173,7 @@ async fn assert_late_arrival_for_status(status: &str) {
     assert_eq!(
         audit_comments.len(),
         1,
-        "late-arrival path should record exactly one audit sentinel for {status}"
+        "late-arrival path should record exactly one audit sentinel"
     );
 
     let parsed_audits: Vec<AuditSentinelKind> = audit_comments
@@ -226,7 +188,7 @@ async fn assert_late_arrival_for_status(status: &str) {
         parsed_audits,
         vec![AuditSentinelKind::LateSignal {
             signal_id: signal_id.clone(),
-            terminal_status: status.to_string(),
+            terminal_status: pm.closed_status().to_string(),
         }]
     );
 
@@ -236,39 +198,16 @@ async fn assert_late_arrival_for_status(status: &str) {
         .collect();
     assert!(
         parsed_signals.is_empty(),
-        "late-arrival path must not parse any worker signal sentinels for {status}; got: {parsed_signals:?}"
+        "late-arrival path must not parse any worker signal sentinels; got: {parsed_signals:?}"
     );
 
     let labels = issue_labels(dir.path(), &task_id);
     assert!(
         labels.contains(&labels::SIGNAL_LATE_ARRIVAL.to_string()),
-        "late-arrival path should carry the late-arrival label for {status}; got labels: {labels:?}"
+        "late-arrival path should carry the late-arrival label; got labels: {labels:?}"
     );
     assert!(
         !labels.contains(&labels::signal_kind(signal.kind_label())),
-        "late-arrival path must not carry the signal kind label for {status}; got labels: {labels:?}"
+        "late-arrival path must not carry the signal kind label; got labels: {labels:?}"
     );
 }
-
-macro_rules! late_arrival_case {
-    ($name:ident, $status:literal) => {
-        #[tokio::test]
-        async fn $name() {
-            assert_late_arrival_for_status($status).await;
-        }
-    };
-}
-
-late_arrival_case!(
-    report_signal_on_approved_task_records_late_arrival,
-    "approved"
-);
-late_arrival_case!(report_signal_on_failed_task_records_late_arrival, "failed");
-late_arrival_case!(
-    report_signal_on_cancelled_task_records_late_arrival,
-    "cancelled"
-);
-late_arrival_case!(
-    report_signal_on_superseded_task_records_late_arrival,
-    "superseded"
-);

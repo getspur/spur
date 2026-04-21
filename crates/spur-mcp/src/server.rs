@@ -464,10 +464,14 @@ pub async fn handle_report_signal(
     let issue = pm.get_issue(&args.task_id).await?;
     let signal_id = args.signal.signal_id().to_string();
 
-    if matches!(
-        issue.status.as_str(),
-        "approved" | "failed" | "cancelled" | "superseded"
-    ) {
+    // Beads persists a compressed status vocabulary — SPUR's nine-state
+    // PlanTaskStatus terminals (Approved, Failed, Cancelled, Superseded) all
+    // project to the beads `closed` status. Rejected stays `open` (retry-
+    // eligible). Using the beads closed-status predicate correctly models
+    // every SPUR terminal without matching vocabulary that beads never emits.
+    // Fine-grain which-terminal is recoverable from audit comments + labels
+    // (spur:superseded-by:*, Approval/Rejection sentinels) at consumer time.
+    if issue.status.as_str() == pm.closed_status() {
         adv.add_comment(
             &args.task_id,
             &audit_encode(&AuditSentinelKind::LateSignal {
