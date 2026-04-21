@@ -26,46 +26,51 @@ const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl FeatureKey {
-    // --- Community tier ---
-    pub const CHAT: Self = Self("chat");
-    pub const CODE_EDIT: Self = Self("code_edit");
-    pub const WATCH_LOOP: Self = Self("watch_loop");
-    pub const INLINE_COMPLETIONS: Self = Self("inline_completions");
-    pub const BASIC_SEARCH: Self = Self("basic_search");
-    pub const FILE_NAVIGATOR: Self = Self("file_navigator");
-    pub const SYNTAX_HIGHLIGHT: Self = Self("syntax_highlight");
-    pub const TERMINAL_INTEGRATION: Self = Self("terminal_integration");
+    // --- Community tier (11) ---
+    pub const BRAIN_SESSION: Self = Self("brain_session");
+    pub const SINGLE_WORKER: Self = Self("single_worker");
+    pub const WORKTREE_ISOLATION: Self = Self("worktree_isolation");
+    pub const MANUAL_REVIEW: Self = Self("manual_review");
+    pub const EVENT_PERSISTENCE: Self = Self("event_persistence");
+    pub const BASIC_LINEAGE: Self = Self("basic_lineage");
+    pub const TUI_DASHBOARD: Self = Self("tui_dashboard");
+    pub const BASIC_COST_DISPLAY: Self = Self("basic_cost_display");
+    pub const BASIC_NOTIFICATIONS: Self = Self("basic_notifications");
+    pub const LOCAL_CONFIG: Self = Self("local_config");
+    pub const MCP_STANDARD_TOOLS: Self = Self("mcp_standard_tools");
 
-    // --- Pro tier ---
-    pub const ADVANCED_AGENTS: Self = Self("advanced_agents");
-    pub const TEAM_SHARING: Self = Self("team_sharing");
-    pub const CLOUD_SYNC: Self = Self("cloud_sync");
-    pub const CUSTOM_AGENTS: Self = Self("custom_agents");
-    pub const MULTI_FILE_EDIT: Self = Self("multi_file_edit");
-    pub const CODE_REVIEW: Self = Self("code_review");
-    pub const SMART_REFACTOR: Self = Self("smart_refactor");
+    // --- Pro tier (8) ---
+    pub const PARALLEL_WORKERS: Self = Self("parallel_workers");
+    pub const AUTO_REVIEW_POLICIES: Self = Self("auto_review_policies");
+    pub const SESSION_RESUME: Self = Self("session_resume");
+    pub const ADVANCED_COST_ANALYTICS: Self = Self("advanced_cost_analytics");
+    pub const CUSTOM_WORKTREE_POLICIES: Self = Self("custom_worktree_policies");
+    pub const CUSTOM_NOTIFICATIONS: Self = Self("custom_notifications");
+    pub const EXTENDED_RETENTION: Self = Self("extended_retention");
+    pub const TUI_SESSION_DETAIL: Self = Self("tui_session_detail");
 
-    // --- Team tier ---
-    pub const ORG_ADMIN: Self = Self("org_admin");
-    pub const SEAT_MANAGEMENT: Self = Self("seat_management");
-    pub const USAGE_ANALYTICS: Self = Self("usage_analytics");
+    // --- Team tier (7) ---
+    pub const PM_INTEGRATION: Self = Self("pm_integration");
+    pub const SHARED_LINEAGE: Self = Self("shared_lineage");
+    pub const TEAM_COST_DASHBOARD: Self = Self("team_cost_dashboard");
+    pub const CENTRALIZED_CONFIG: Self = Self("centralized_config");
+    pub const RBAC: Self = Self("rbac");
+    pub const SHARED_REVIEW_QUEUE: Self = Self("shared_review_queue");
+    pub const PM_WEBHOOKS: Self = Self("pm_webhooks");
+
+    // --- Enterprise tier (6) ---
+    pub const SSO_SAML: Self = Self("sso_saml");
     pub const AUDIT_LOGS: Self = Self("audit_logs");
-    pub const SSO_INTEGRATION: Self = Self("sso_integration");
-    pub const TEAM_TEMPLATES: Self = Self("team_templates");
-
-    // --- Enterprise tier ---
-    pub const DEDICATED_HOSTING: Self = Self("dedicated_hosting");
+    pub const CUSTOM_POLICIES: Self = Self("custom_policies");
+    pub const CUSTOM_MCP_TOOLS: Self = Self("custom_mcp_tools");
+    pub const DEDICATED_SUPPORT: Self = Self("dedicated_support");
     pub const SLA_GUARANTEE: Self = Self("sla_guarantee");
-    pub const CUSTOM_MODELS: Self = Self("custom_models");
-    pub const PRIVATE_DEPLOYMENT: Self = Self("private_deployment");
-    pub const ADVANCED_SECURITY: Self = Self("advanced_security");
-    pub const COMPLIANCE_REPORTING: Self = Self("compliance_reporting");
 
-    // --- G2 flag keys ---
+    // --- G2 flag keys (4) ---
     pub const KILL_ADVANCED_PLANNER: Self = Self("kill_advanced_planner");
     pub const ENABLE_BROWSER_TOOL: Self = Self("enable_browser_tool");
     pub const ENABLE_COMPACTION_V2: Self = Self("enable_compaction_v2");
-    pub const ENABLE_TELEMETRY: Self = Self("enable_telemetry");
+    pub const ENABLE_TELEMETRY: Self = Self("enable_teLEMETRY");
 
     pub const fn as_str(&self) -> &'static str {
         self.0
@@ -77,67 +82,77 @@ impl FeatureKey {
     /// invariant explicit.
     pub const fn from_known(s: &str) -> Option<Self> {
         let b = s.as_bytes();
-        if bytes_eq(b, b"chat") {
-            Some(Self::CHAT)
-        } else if bytes_eq(b, b"code_edit") {
-            Some(Self::CODE_EDIT)
-        } else if bytes_eq(b, b"watch_loop") {
-            Some(Self::WATCH_LOOP)
-        } else if bytes_eq(b, b"inline_completions") {
-            Some(Self::INLINE_COMPLETIONS)
-        } else if bytes_eq(b, b"basic_search") {
-            Some(Self::BASIC_SEARCH)
-        } else if bytes_eq(b, b"file_navigator") {
-            Some(Self::FILE_NAVIGATOR)
-        } else if bytes_eq(b, b"syntax_highlight") {
-            Some(Self::SYNTAX_HIGHLIGHT)
-        } else if bytes_eq(b, b"terminal_integration") {
-            Some(Self::TERMINAL_INTEGRATION)
-        } else if bytes_eq(b, b"advanced_agents") {
-            Some(Self::ADVANCED_AGENTS)
-        } else if bytes_eq(b, b"team_sharing") {
-            Some(Self::TEAM_SHARING)
-        } else if bytes_eq(b, b"cloud_sync") {
-            Some(Self::CLOUD_SYNC)
-        } else if bytes_eq(b, b"custom_agents") {
-            Some(Self::CUSTOM_AGENTS)
-        } else if bytes_eq(b, b"multi_file_edit") {
-            Some(Self::MULTI_FILE_EDIT)
-        } else if bytes_eq(b, b"code_review") {
-            Some(Self::CODE_REVIEW)
-        } else if bytes_eq(b, b"smart_refactor") {
-            Some(Self::SMART_REFACTOR)
-        } else if bytes_eq(b, b"org_admin") {
-            Some(Self::ORG_ADMIN)
-        } else if bytes_eq(b, b"seat_management") {
-            Some(Self::SEAT_MANAGEMENT)
-        } else if bytes_eq(b, b"usage_analytics") {
-            Some(Self::USAGE_ANALYTICS)
+        if bytes_eq(b, b"brain_session") {
+            Some(Self::BRAIN_SESSION)
+        } else if bytes_eq(b, b"single_worker") {
+            Some(Self::SINGLE_WORKER)
+        } else if bytes_eq(b, b"worktree_isolation") {
+            Some(Self::WORKTREE_ISOLATION)
+        } else if bytes_eq(b, b"manual_review") {
+            Some(Self::MANUAL_REVIEW)
+        } else if bytes_eq(b, b"event_persistence") {
+            Some(Self::EVENT_PERSISTENCE)
+        } else if bytes_eq(b, b"basic_lineage") {
+            Some(Self::BASIC_LINEAGE)
+        } else if bytes_eq(b, b"tui_dashboard") {
+            Some(Self::TUI_DASHBOARD)
+        } else if bytes_eq(b, b"basic_cost_display") {
+            Some(Self::BASIC_COST_DISPLAY)
+        } else if bytes_eq(b, b"basic_notifications") {
+            Some(Self::BASIC_NOTIFICATIONS)
+        } else if bytes_eq(b, b"local_config") {
+            Some(Self::LOCAL_CONFIG)
+        } else if bytes_eq(b, b"mcp_standard_tools") {
+            Some(Self::MCP_STANDARD_TOOLS)
+        } else if bytes_eq(b, b"parallel_workers") {
+            Some(Self::PARALLEL_WORKERS)
+        } else if bytes_eq(b, b"auto_review_policies") {
+            Some(Self::AUTO_REVIEW_POLICIES)
+        } else if bytes_eq(b, b"session_resume") {
+            Some(Self::SESSION_RESUME)
+        } else if bytes_eq(b, b"advanced_cost_analytics") {
+            Some(Self::ADVANCED_COST_ANALYTICS)
+        } else if bytes_eq(b, b"custom_worktree_policies") {
+            Some(Self::CUSTOM_WORKTREE_POLICIES)
+        } else if bytes_eq(b, b"custom_notifications") {
+            Some(Self::CUSTOM_NOTIFICATIONS)
+        } else if bytes_eq(b, b"extended_retention") {
+            Some(Self::EXTENDED_RETENTION)
+        } else if bytes_eq(b, b"tui_session_detail") {
+            Some(Self::TUI_SESSION_DETAIL)
+        } else if bytes_eq(b, b"pm_integration") {
+            Some(Self::PM_INTEGRATION)
+        } else if bytes_eq(b, b"shared_lineage") {
+            Some(Self::SHARED_LINEAGE)
+        } else if bytes_eq(b, b"team_cost_dashboard") {
+            Some(Self::TEAM_COST_DASHBOARD)
+        } else if bytes_eq(b, b"centralized_config") {
+            Some(Self::CENTRALIZED_CONFIG)
+        } else if bytes_eq(b, b"rbac") {
+            Some(Self::RBAC)
+        } else if bytes_eq(b, b"shared_review_queue") {
+            Some(Self::SHARED_REVIEW_QUEUE)
+        } else if bytes_eq(b, b"pm_webhooks") {
+            Some(Self::PM_WEBHOOKS)
+        } else if bytes_eq(b, b"sso_saml") {
+            Some(Self::SSO_SAML)
         } else if bytes_eq(b, b"audit_logs") {
             Some(Self::AUDIT_LOGS)
-        } else if bytes_eq(b, b"sso_integration") {
-            Some(Self::SSO_INTEGRATION)
-        } else if bytes_eq(b, b"team_templates") {
-            Some(Self::TEAM_TEMPLATES)
-        } else if bytes_eq(b, b"dedicated_hosting") {
-            Some(Self::DEDICATED_HOSTING)
+        } else if bytes_eq(b, b"custom_policies") {
+            Some(Self::CUSTOM_POLICIES)
+        } else if bytes_eq(b, b"custom_mcp_tools") {
+            Some(Self::CUSTOM_MCP_TOOLS)
+        } else if bytes_eq(b, b"dedicated_support") {
+            Some(Self::DEDICATED_SUPPORT)
         } else if bytes_eq(b, b"sla_guarantee") {
             Some(Self::SLA_GUARANTEE)
-        } else if bytes_eq(b, b"custom_models") {
-            Some(Self::CUSTOM_MODELS)
-        } else if bytes_eq(b, b"private_deployment") {
-            Some(Self::PRIVATE_DEPLOYMENT)
-        } else if bytes_eq(b, b"advanced_security") {
-            Some(Self::ADVANCED_SECURITY)
-        } else if bytes_eq(b, b"compliance_reporting") {
-            Some(Self::COMPLIANCE_REPORTING)
         } else if bytes_eq(b, b"kill_advanced_planner") {
             Some(Self::KILL_ADVANCED_PLANNER)
         } else if bytes_eq(b, b"enable_browser_tool") {
             Some(Self::ENABLE_BROWSER_TOOL)
         } else if bytes_eq(b, b"enable_compaction_v2") {
             Some(Self::ENABLE_COMPACTION_V2)
-        } else if bytes_eq(b, b"enable_telemetry") {
+        } else if bytes_eq(b, b"enable_teLEMETRY") {
             Some(Self::ENABLE_TELEMETRY)
         } else {
             None
@@ -179,10 +194,10 @@ mod tests {
 
     #[test]
     fn as_str_matches_const_name_lowercase() {
-        assert_eq!(FeatureKey::CHAT.as_str(), "chat");
-        assert_eq!(FeatureKey::ADVANCED_AGENTS.as_str(), "advanced_agents");
-        assert_eq!(FeatureKey::ORG_ADMIN.as_str(), "org_admin");
-        assert_eq!(FeatureKey::DEDICATED_HOSTING.as_str(), "dedicated_hosting");
+        assert_eq!(FeatureKey::BRAIN_SESSION.as_str(), "brain_session");
+        assert_eq!(FeatureKey::PARALLEL_WORKERS.as_str(), "parallel_workers");
+        assert_eq!(FeatureKey::PM_INTEGRATION.as_str(), "pm_integration");
+        assert_eq!(FeatureKey::SSO_SAML.as_str(), "sso_saml");
         assert_eq!(
             FeatureKey::KILL_ADVANCED_PLANNER.as_str(),
             "kill_advanced_planner"
@@ -191,8 +206,8 @@ mod tests {
 
     #[test]
     fn copy_eq_and_hash_work() {
-        let a = FeatureKey::CHAT;
-        let b = FeatureKey::CHAT;
+        let a = FeatureKey::BRAIN_SESSION;
+        let b = FeatureKey::BRAIN_SESSION;
         assert_eq!(a, b);
         let mut set = std::collections::HashSet::new();
         set.insert(a);
@@ -200,134 +215,55 @@ mod tests {
     }
 
     #[test]
-    fn from_known_hits_all_31_keys() {
-        // Community (8)
-        assert_eq!(FeatureKey::from_known("chat"), Some(FeatureKey::CHAT));
-        assert_eq!(FeatureKey::from_known("code_edit"), Some(FeatureKey::CODE_EDIT));
-        assert_eq!(FeatureKey::from_known("watch_loop"), Some(FeatureKey::WATCH_LOOP));
-        assert_eq!(
-            FeatureKey::from_known("inline_completions"),
-            Some(FeatureKey::INLINE_COMPLETIONS)
-        );
-        assert_eq!(
-            FeatureKey::from_known("basic_search"),
-            Some(FeatureKey::BASIC_SEARCH)
-        );
-        assert_eq!(
-            FeatureKey::from_known("file_navigator"),
-            Some(FeatureKey::FILE_NAVIGATOR)
-        );
-        assert_eq!(
-            FeatureKey::from_known("syntax_highlight"),
-            Some(FeatureKey::SYNTAX_HIGHLIGHT)
-        );
-        assert_eq!(
-            FeatureKey::from_known("terminal_integration"),
-            Some(FeatureKey::TERMINAL_INTEGRATION)
-        );
-        // Pro (7)
-        assert_eq!(
-            FeatureKey::from_known("advanced_agents"),
-            Some(FeatureKey::ADVANCED_AGENTS)
-        );
-        assert_eq!(
-            FeatureKey::from_known("team_sharing"),
-            Some(FeatureKey::TEAM_SHARING)
-        );
-        assert_eq!(
-            FeatureKey::from_known("cloud_sync"),
-            Some(FeatureKey::CLOUD_SYNC)
-        );
-        assert_eq!(
-            FeatureKey::from_known("custom_agents"),
-            Some(FeatureKey::CUSTOM_AGENTS)
-        );
-        assert_eq!(
-            FeatureKey::from_known("multi_file_edit"),
-            Some(FeatureKey::MULTI_FILE_EDIT)
-        );
-        assert_eq!(
-            FeatureKey::from_known("code_review"),
-            Some(FeatureKey::CODE_REVIEW)
-        );
-        assert_eq!(
-            FeatureKey::from_known("smart_refactor"),
-            Some(FeatureKey::SMART_REFACTOR)
-        );
-        // Team (6)
-        assert_eq!(
-            FeatureKey::from_known("org_admin"),
-            Some(FeatureKey::ORG_ADMIN)
-        );
-        assert_eq!(
-            FeatureKey::from_known("seat_management"),
-            Some(FeatureKey::SEAT_MANAGEMENT)
-        );
-        assert_eq!(
-            FeatureKey::from_known("usage_analytics"),
-            Some(FeatureKey::USAGE_ANALYTICS)
-        );
-        assert_eq!(
-            FeatureKey::from_known("audit_logs"),
-            Some(FeatureKey::AUDIT_LOGS)
-        );
-        assert_eq!(
-            FeatureKey::from_known("sso_integration"),
-            Some(FeatureKey::SSO_INTEGRATION)
-        );
-        assert_eq!(
-            FeatureKey::from_known("team_templates"),
-            Some(FeatureKey::TEAM_TEMPLATES)
-        );
+    fn from_known_hits_all_36_keys() {
+        // Community (11)
+        assert_eq!(FeatureKey::from_known("brain_session"), Some(FeatureKey::BRAIN_SESSION));
+        assert_eq!(FeatureKey::from_known("single_worker"), Some(FeatureKey::SINGLE_WORKER));
+        assert_eq!(FeatureKey::from_known("worktree_isolation"), Some(FeatureKey::WORKTREE_ISOLATION));
+        assert_eq!(FeatureKey::from_known("manual_review"), Some(FeatureKey::MANUAL_REVIEW));
+        assert_eq!(FeatureKey::from_known("event_persistence"), Some(FeatureKey::EVENT_PERSISTENCE));
+        assert_eq!(FeatureKey::from_known("basic_lineage"), Some(FeatureKey::BASIC_LINEAGE));
+        assert_eq!(FeatureKey::from_known("tui_dashboard"), Some(FeatureKey::TUI_DASHBOARD));
+        assert_eq!(FeatureKey::from_known("basic_cost_display"), Some(FeatureKey::BASIC_COST_DISPLAY));
+        assert_eq!(FeatureKey::from_known("basic_notifications"), Some(FeatureKey::BASIC_NOTIFICATIONS));
+        assert_eq!(FeatureKey::from_known("local_config"), Some(FeatureKey::LOCAL_CONFIG));
+        assert_eq!(FeatureKey::from_known("mcp_standard_tools"), Some(FeatureKey::MCP_STANDARD_TOOLS));
+        // Pro (8)
+        assert_eq!(FeatureKey::from_known("parallel_workers"), Some(FeatureKey::PARALLEL_WORKERS));
+        assert_eq!(FeatureKey::from_known("auto_review_policies"), Some(FeatureKey::AUTO_REVIEW_POLICIES));
+        assert_eq!(FeatureKey::from_known("session_resume"), Some(FeatureKey::SESSION_RESUME));
+        assert_eq!(FeatureKey::from_known("advanced_cost_analytics"), Some(FeatureKey::ADVANCED_COST_ANALYTICS));
+        assert_eq!(FeatureKey::from_known("custom_worktree_policies"), Some(FeatureKey::CUSTOM_WORKTREE_POLICIES));
+        assert_eq!(FeatureKey::from_known("custom_notifications"), Some(FeatureKey::CUSTOM_NOTIFICATIONS));
+        assert_eq!(FeatureKey::from_known("extended_retention"), Some(FeatureKey::EXTENDED_RETENTION));
+        assert_eq!(FeatureKey::from_known("tui_session_detail"), Some(FeatureKey::TUI_SESSION_DETAIL));
+        // Team (7)
+        assert_eq!(FeatureKey::from_known("pm_integration"), Some(FeatureKey::PM_INTEGRATION));
+        assert_eq!(FeatureKey::from_known("shared_lineage"), Some(FeatureKey::SHARED_LINEAGE));
+        assert_eq!(FeatureKey::from_known("team_cost_dashboard"), Some(FeatureKey::TEAM_COST_DASHBOARD));
+        assert_eq!(FeatureKey::from_known("centralized_config"), Some(FeatureKey::CENTRALIZED_CONFIG));
+        assert_eq!(FeatureKey::from_known("rbac"), Some(FeatureKey::RBAC));
+        assert_eq!(FeatureKey::from_known("shared_review_queue"), Some(FeatureKey::SHARED_REVIEW_QUEUE));
+        assert_eq!(FeatureKey::from_known("pm_webhooks"), Some(FeatureKey::PM_WEBHOOKS));
         // Enterprise (6)
-        assert_eq!(
-            FeatureKey::from_known("dedicated_hosting"),
-            Some(FeatureKey::DEDICATED_HOSTING)
-        );
-        assert_eq!(
-            FeatureKey::from_known("sla_guarantee"),
-            Some(FeatureKey::SLA_GUARANTEE)
-        );
-        assert_eq!(
-            FeatureKey::from_known("custom_models"),
-            Some(FeatureKey::CUSTOM_MODELS)
-        );
-        assert_eq!(
-            FeatureKey::from_known("private_deployment"),
-            Some(FeatureKey::PRIVATE_DEPLOYMENT)
-        );
-        assert_eq!(
-            FeatureKey::from_known("advanced_security"),
-            Some(FeatureKey::ADVANCED_SECURITY)
-        );
-        assert_eq!(
-            FeatureKey::from_known("compliance_reporting"),
-            Some(FeatureKey::COMPLIANCE_REPORTING)
-        );
+        assert_eq!(FeatureKey::from_known("sso_saml"), Some(FeatureKey::SSO_SAML));
+        assert_eq!(FeatureKey::from_known("audit_logs"), Some(FeatureKey::AUDIT_LOGS));
+        assert_eq!(FeatureKey::from_known("custom_policies"), Some(FeatureKey::CUSTOM_POLICIES));
+        assert_eq!(FeatureKey::from_known("custom_mcp_tools"), Some(FeatureKey::CUSTOM_MCP_TOOLS));
+        assert_eq!(FeatureKey::from_known("dedicated_support"), Some(FeatureKey::DEDICATED_SUPPORT));
+        assert_eq!(FeatureKey::from_known("sla_guarantee"), Some(FeatureKey::SLA_GUARANTEE));
         // G2 flags (4)
-        assert_eq!(
-            FeatureKey::from_known("kill_advanced_planner"),
-            Some(FeatureKey::KILL_ADVANCED_PLANNER)
-        );
-        assert_eq!(
-            FeatureKey::from_known("enable_browser_tool"),
-            Some(FeatureKey::ENABLE_BROWSER_TOOL)
-        );
-        assert_eq!(
-            FeatureKey::from_known("enable_compaction_v2"),
-            Some(FeatureKey::ENABLE_COMPACTION_V2)
-        );
-        assert_eq!(
-            FeatureKey::from_known("enable_telemetry"),
-            Some(FeatureKey::ENABLE_TELEMETRY)
-        );
+        assert_eq!(FeatureKey::from_known("kill_advanced_planner"), Some(FeatureKey::KILL_ADVANCED_PLANNER));
+        assert_eq!(FeatureKey::from_known("enable_browser_tool"), Some(FeatureKey::ENABLE_BROWSER_TOOL));
+        assert_eq!(FeatureKey::from_known("enable_compaction_v2"), Some(FeatureKey::ENABLE_COMPACTION_V2));
+        assert_eq!(FeatureKey::from_known("enable_teLEMETRY"), Some(FeatureKey::ENABLE_TELEMETRY));
     }
 
     #[test]
     fn from_known_returns_none_for_unknown() {
         assert_eq!(FeatureKey::from_known("not_a_feature"), None);
         assert_eq!(FeatureKey::from_known(""), None);
-        assert_eq!(FeatureKey::from_known("Chat"), None); // case-sensitive
+        assert_eq!(FeatureKey::from_known("Brain_Session"), None); // case-sensitive
     }
 
     #[test]
