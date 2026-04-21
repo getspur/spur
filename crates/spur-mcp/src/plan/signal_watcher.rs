@@ -160,6 +160,8 @@ fn stub_plan_state() -> PlanState {
         plan_id: "signal-watcher-stub".into(),
         tasks: Vec::new(),
         brain_session_id: BrainSessionId::new(SessionId("signal-watcher".into())),
+        base_snapshot_branch: None,
+        merge_state: crate::plan::PlanMergeState::NotStarted,
         epic_id: None,
     }
 }

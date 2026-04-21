@@ -138,7 +138,13 @@ Decisions:
 When all tasks are approved and `ready_to_merge` is true:
 
 ```json
-{"name": "create_pr", "arguments": {"title": "...", "body": "...", "branch": "main"}}
+{"name": "merge_plan", "arguments": {"plan_id": "..."}}
+```
+
+Then create the PR from the returned merge branch:
+
+```json
+{"name": "create_pr", "arguments": {"title": "...", "body": "...", "branch": "<merge_branch>"}}
 ```
 
 ## Picking the right agent per task

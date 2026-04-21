@@ -176,6 +176,8 @@ async fn plan_audit_coverage_all_four_sentinels() {
         plan_id: "audit-plan-1".into(),
         tasks: vec![entry],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+        base_snapshot_branch: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some(epic_issue_id.clone()),
     };
     let plan_arc_state = Arc::new(Mutex::new(plan_state));
@@ -318,6 +320,8 @@ async fn rejection_emits_rejection_sentinel() {
         plan_id: "audit-reject-1".into(),
         tasks: vec![entry],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+        base_snapshot_branch: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some(subgraph.epic_id.clone()),
     };
     let plan_arc_state = Arc::new(Mutex::new(plan_state));
@@ -423,6 +427,8 @@ async fn request_changes_redispatch_emits_completion_sentinel() {
         plan_id: "audit-redis-1".into(),
         tasks: vec![entry],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+        base_snapshot_branch: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some(subgraph.epic_id.clone()),
     };
     let plan_arc_state = Arc::new(Mutex::new(plan_state));
@@ -587,6 +593,8 @@ async fn approval_cascade_dispatched_task_emits_completion_sentinel() {
         plan_id: "audit-cascade-1".into(),
         tasks: vec![entry_a, entry_b],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+        base_snapshot_branch: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some(subgraph.epic_id.clone()),
     };
     let plan_arc_state = Arc::new(Mutex::new(plan_state));

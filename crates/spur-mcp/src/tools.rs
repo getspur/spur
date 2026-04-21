@@ -213,6 +213,23 @@ fn create_pr_def() -> ToolDefinition {
     }
 }
 
+fn merge_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "merge_plan".into(),
+        description: "Integrate a fully approved plan onto a dedicated plan-scoped branch. Cherry-picks approved worker branches in deterministic topological order without mutating the active checkout. On success, returns a `merge_branch` you can pass to `create_pr`. On conflict, returns the partial branch plus the conflicting task and files.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id returned by submit_plan or execute_epic"
+                }
+            },
+            "required": ["plan_id"]
+        }),
+    }
+}
+
 fn check_delegation_status_def() -> ToolDefinition {
     ToolDefinition {
         name: "check_delegation_status".into(),
@@ -627,6 +644,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         create_issue_def(),
         add_dependency_def(),
         create_pr_def(),
+        merge_plan_def(),
         graph_triage_def(),
         graph_plan_def(),
         graph_insights_def(),
