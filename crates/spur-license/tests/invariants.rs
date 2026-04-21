@@ -35,7 +35,9 @@ proptest! {
             .unwrap();
         rt.block_on(async move {
             let fake = Arc::new(FakeProvider::new(LicenseState::active_cached()));
-            let license = SpurLicense::from_provider(fake.clone());
+            let policy = spur_license::policy::PolicyResolver::with_default_overlay();
+            let feature_gate = Arc::new(spur_license::FeatureGate::new(policy));
+            let license = SpurLicense::from_provider(fake.clone(), feature_gate);
 
             for step in &script {
                 match step {

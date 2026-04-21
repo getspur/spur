@@ -448,6 +448,8 @@ pub struct Orchestrator {
     /// Overflow buffer for detached continuations.  Mirrors the buffer
     /// passed to `run_interactive`; set alongside `continuation_tx`.
     continuation_overflow: Option<crate::continuation_bridge::OverflowBuf>,
+    /// Feature gate for dynamic quota/feature enforcement.
+    feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -493,7 +495,11 @@ fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
 
 impl Orchestrator {
     /// Create a new orchestrator for the given repo directory.
-    pub fn new(repo_root: PathBuf, config: SpurConfig) -> Result<Self> {
+    pub fn new(
+        repo_root: PathBuf,
+        config: SpurConfig,
+        feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
+    ) -> Result<Self> {
         let registry = AgentRegistry::load(config.agents.entries.clone());
         let worktrees = WorktreeManager::new(repo_root.clone());
 
@@ -522,7 +528,12 @@ impl Orchestrator {
         let event_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let funnel = crate::event_funnel::spawn_funnel(event_tx.clone(), event_seq.clone());
         // S3 — durable JSONL sink subscribes to the same broadcast.
-        crate::event_sink::spawn_sink(event_tx.subscribe());
+        let max_bytes = feature_gate
+            .as_ref()
+            .and_then(|g| g.quota(spur_license::QuotaKey::EventRetentionBytes))
+            .and_then(|v| v.as_bytes())
+            .unwrap_or(crate::event_sink::DEFAULT_MAX_BYTES);
+        crate::event_sink::spawn_sink(event_tx.subscribe(), max_bytes);
         let review_sink = ReviewSink::new();
 
         Ok(Self {
@@ -539,6 +550,7 @@ impl Orchestrator {
             cancellation_control: CancellationControl::new(),
             continuation_tx: None,
             continuation_overflow: None,
+            feature_gate,
         })
     }
 
@@ -806,7 +818,13 @@ impl Orchestrator {
 
             // Spawn delegation handler BEFORE prompt so delegation requests
             // that arrive during the prompt turn are not queued indefinitely.
-            let max_concurrent = self.config.worktree.max_concurrent;
+            let max_concurrent = self
+                .feature_gate
+                .as_ref()
+                .and_then(|g| g.quota(spur_license::QuotaKey::MaxConcurrentWorkers))
+                .and_then(|v| v.as_count())
+                .map(|n| n as usize)
+                .unwrap_or(self.config.worktree.max_concurrent);
             let delegation_handle = tokio::spawn(Self::handle_delegations(
                 delegation_channel,
                 self.repo_root.clone(),
@@ -2031,7 +2049,13 @@ impl Orchestrator {
         .await?;
 
         // Spawn delegation handler.
-        let max_concurrent = self.config.worktree.max_concurrent;
+        let max_concurrent = self
+            .feature_gate
+            .as_ref()
+            .and_then(|g| g.quota(spur_license::QuotaKey::MaxConcurrentWorkers))
+            .and_then(|v| v.as_count())
+            .map(|n| n as usize)
+            .unwrap_or(self.config.worktree.max_concurrent);
         let delegation_handle = tokio::spawn(Self::handle_delegations(
             delegation_channel,
             self.repo_root.clone(),
@@ -2273,7 +2297,13 @@ impl Orchestrator {
         .await?;
 
         // Spawn delegation handler.
-        let max_concurrent = self.config.worktree.max_concurrent;
+        let max_concurrent = self
+            .feature_gate
+            .as_ref()
+            .and_then(|g| g.quota(spur_license::QuotaKey::MaxConcurrentWorkers))
+            .and_then(|v| v.as_count())
+            .map(|n| n as usize)
+            .unwrap_or(self.config.worktree.max_concurrent);
         let delegation_handle = tokio::spawn(Self::handle_delegations(
             delegation_channel,
             self.repo_root.clone(),
@@ -2856,7 +2886,7 @@ impl Orchestrator {
         pm_service: Option<Arc<PmService>>,
         cancellation_control: CancellationControl,
     ) {
-        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
         // Debounce: skip post-delegation refresh if another completed <3s ago.
         // Initial value is in the past so the first refresh always runs.
         let last_refresh_at = Arc::new(tokio::sync::Mutex::new(

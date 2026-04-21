@@ -36,9 +36,9 @@ pub fn from_env_or_disabled() -> Arc<dyn LicenseProvider> {
         (Ok(api_key), Ok(product_slug)) => {
             Arc::new(LicenseSeatProvider::new(api_key, product_slug))
         }
-        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => {
-            Arc::new(DisabledProvider::new("licensing not configured"))
-        }
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => Arc::new(
+            crate::CommunityProvider::new(crate::policy::PolicyResolver::embedded()),
+        ),
         _ => Arc::new(DisabledProvider::new(
             "incomplete licensing environment configuration",
         )),

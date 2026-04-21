@@ -1,5 +1,15 @@
+mod community;
+mod gate;
+mod install_id;
 mod licenseseat;
+pub mod policy;
 pub mod provider;
+mod quota;
+mod snapshot;
+mod tier;
+
+pub use community::CommunityProvider;
+pub use gate::FeatureGate;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -10,10 +20,16 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use crate::install_id::InstallId;
 pub use crate::licenseseat::{
     classify_binding_mode, classify_subject, from_env, from_env_or_disabled,
 };
+pub use crate::policy::FeatureKey;
+pub use crate::policy::FlagEvaluator;
 pub use crate::provider::{LicenseProvider, RefreshPolicy};
+pub use crate::quota::{QuotaKey, QuotaValue};
+pub use crate::snapshot::EntitlementSnapshot;
+pub use crate::tier::Tier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LicenseStatus {
@@ -139,6 +155,19 @@ impl LicenseState {
         }
     }
 
+    pub fn active_community(features: BTreeSet<String>) -> Self {
+        Self {
+            status: LicenseStatus::Active,
+            subject_kind: SubjectKind::User,
+            plan: Plan::Community,
+            features,
+            expires_at: None,
+            binding_mode: BindingMode::Unknown,
+            offline_ok: true,
+            status_text: "Community tier".into(),
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         matches!(self.status, LicenseStatus::Active | LicenseStatus::Degraded)
     }
@@ -180,26 +209,47 @@ pub type Result<T> = std::result::Result<T, LicenseError>;
 #[derive(Clone)]
 pub struct SpurLicense {
     provider: Arc<dyn LicenseProvider>,
+    feature_gate: Arc<FeatureGate>,
 }
 
 impl SpurLicense {
     /// Construct a facade backed by an arbitrary provider. Primary use is
     /// test injection via `FakeProvider`; production paths should prefer
     /// `from_env` / `from_env_or_disabled`.
-    pub fn from_provider(provider: std::sync::Arc<dyn crate::provider::LicenseProvider>) -> Self {
-        Self { provider }
+    pub fn from_provider(
+        provider: std::sync::Arc<dyn crate::provider::LicenseProvider>,
+        feature_gate: Arc<FeatureGate>,
+    ) -> Self {
+        Self {
+            provider,
+            feature_gate,
+        }
     }
 
     pub fn from_env() -> Result<Self> {
+        let provider = Arc::new(crate::licenseseat::from_env()?);
+        let policy = crate::policy::PolicyResolver::with_default_overlay();
+        let feature_gate = Arc::new(FeatureGate::new(policy));
+        feature_gate.update_state(&provider.current_state());
         Ok(Self {
-            provider: Arc::new(crate::licenseseat::from_env()?),
+            provider,
+            feature_gate,
         })
     }
 
     pub fn from_env_or_disabled() -> Self {
+        let provider = crate::licenseseat::from_env_or_disabled();
+        let policy = crate::policy::PolicyResolver::with_default_overlay();
+        let feature_gate = Arc::new(FeatureGate::new(policy));
+        feature_gate.update_state(&provider.current_state());
         Self {
-            provider: crate::licenseseat::from_env_or_disabled(),
+            provider,
+            feature_gate,
         }
+    }
+
+    pub fn feature_gate(&self) -> Arc<FeatureGate> {
+        Arc::clone(&self.feature_gate)
     }
 
     pub fn current_state(&self) -> LicenseState {
@@ -251,5 +301,21 @@ mod tests {
     #[test]
     fn inactive_state_is_not_active() {
         assert!(!LicenseState::inactive("nope").is_active());
+    }
+
+    #[test]
+    fn active_community_state_has_correct_shape() {
+        use std::collections::BTreeSet;
+        let mut features = BTreeSet::new();
+        features.insert("chat".to_string());
+        features.insert("watch_loop".to_string());
+        let state = LicenseState::active_community(features.clone());
+        assert!(matches!(state.status, LicenseStatus::Active));
+        assert!(matches!(state.plan, Plan::Community));
+        assert!(matches!(state.subject_kind, SubjectKind::User));
+        assert!(matches!(state.binding_mode, BindingMode::Unknown));
+        assert!(state.offline_ok);
+        assert_eq!(state.features, features);
+        assert!(state.is_active(), "Community must be is_active() == true");
     }
 }

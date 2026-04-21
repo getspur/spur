@@ -90,6 +90,31 @@ async fn add_labels_individually(pm: &spur_pm::PmService, issue_id: &str, labels
         .await
         .expect("seed label");
     }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+
+    let issue_id = extract_id(
+        &run_br(dir.path(), &["create", "Dispatch Target", "-t", "task"]).expect("create issue"),
+    );
+
+    spur_mcp::plan::persist_dispatch_intent(&pm, &issue_id, "plan-1", "del-A", "codex", 1)
+        .await
+        .expect("persist dispatch intent");
+
+    let issue = pm.get_issue(&issue_id).await.expect("get issue");
+    assert!(
+        issue
+            .labels
+            .contains(&spur_mcp::plan::labels::delegation_id("del-A")),
+        "dispatch label must be present after persistence: {:?}",
+        issue.labels
+    );
 }
 
 #[tokio::test]

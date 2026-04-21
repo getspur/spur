@@ -105,14 +105,32 @@ fn print_by_format(state: &LicenseState, format: OutputFormat) {
     }
 }
 
+pub(crate) fn format_plain_summary(state: &LicenseState) -> String {
+    use spur_license::{LicenseStatus, Plan};
+    let plan_label = state.plan.label();
+    let expiry_suffix = state
+        .expires_at
+        .as_ref()
+        .map(|d| format!(" until {}", d.format("%Y-%m-%d")))
+        .unwrap_or_default();
+    match (state.status, state.plan) {
+        (LicenseStatus::Active, Plan::Community) => {
+            "spur Community — free tier  ⓘ run 'spur auth login --key …' to unlock Pro".to_string()
+        }
+        (LicenseStatus::Active, _) => {
+            format!("spur {plan_label} — active{expiry_suffix}  ✓ all features unlocked")
+        }
+        (LicenseStatus::Degraded, _) => {
+            format!("spur {plan_label} — degraded (network)  ⚠ cached license still valid offline")
+        }
+        (LicenseStatus::Invalid, _) => format!("spur — license invalid  ✗ {}", state.status_text),
+        (LicenseStatus::ConfigError, _) => format!("spur — config error  ✗ {}", state.status_text),
+        (LicenseStatus::Inactive, _) => {
+            "spur — inactive  ⓘ run 'spur auth login --key …' to activate".to_string()
+        }
+    }
+}
+
 fn print_state(state: &LicenseState) {
-    println!("[spur] License status: {:?}", state.status);
-    println!("[spur] Plan: {}", state.plan.label());
-    println!("[spur] Subject: {:?}", state.subject_kind);
-    println!("[spur] Binding: {:?}", state.binding_mode);
-    println!(
-        "[spur] Offline: {}",
-        if state.offline_ok { "yes" } else { "no" }
-    );
-    println!("[spur] Details: {}", state.status_text);
+    println!("{}", format_plain_summary(state));
 }
