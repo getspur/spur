@@ -21,6 +21,13 @@ pub enum CompletionState {
     Superseded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EpicCompletionOutcome {
+    AllApproved,
+    TerminalWithFailures,
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -57,6 +64,11 @@ pub enum AuditSentinelKind {
         worker_branch: Option<String>,
         #[serde(default)]
         result_summary: Option<String>,
+    },
+    EpicCompletion {
+        outcome: EpicCompletionOutcome,
+        plan_id: String,
+        epic_id: String,
     },
     Approval {
         delegation_id: String,
@@ -110,6 +122,7 @@ impl AuditSentinelKind {
             Self::Dispatch { .. } => "dispatch",
             Self::DispatchOrphanCleared { .. } => "dispatch-orphan-cleared",
             Self::Completion { .. } => "completion",
+            Self::EpicCompletion { .. } => "epic-completion",
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
             Self::Signal { .. } => "signal",
@@ -172,6 +185,19 @@ mod tests {
             base_snapshot_branch: None,
             execution_mode: None,
         }
+    }
+
+    #[test]
+    fn epic_completion_variant_round_trips() {
+        let kind = AuditSentinelKind::EpicCompletion {
+            outcome: EpicCompletionOutcome::AllApproved,
+            plan_id: "P1".into(),
+            epic_id: "bd-epic-1".into(),
+        };
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "epic-completion");
     }
 
     #[test]
