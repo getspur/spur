@@ -115,7 +115,7 @@ pub(crate) fn format_plain_summary(state: &LicenseState) -> String {
         .unwrap_or_default();
     match (state.status, state.plan) {
         (LicenseStatus::Active, Plan::Community) => {
-            format!("spur Community — free tier  ⓘ run 'spur auth login --key …' to unlock Pro")
+            "spur Community — free tier  ⓘ run 'spur auth login --key …' to unlock Pro".to_string()
         }
         (LicenseStatus::Active, _) => {
             format!("spur {plan_label} — active{expiry_suffix}  ✓ all features unlocked")
@@ -126,7 +126,7 @@ pub(crate) fn format_plain_summary(state: &LicenseState) -> String {
         (LicenseStatus::Invalid, _) => format!("spur — license invalid  ✗ {}", state.status_text),
         (LicenseStatus::ConfigError, _) => format!("spur — config error  ✗ {}", state.status_text),
         (LicenseStatus::Inactive, _) => {
-            format!("spur — inactive  ⓘ run 'spur auth login --key …' to activate")
+            "spur — inactive  ⓘ run 'spur auth login --key …' to activate".to_string()
         }
     }
 }

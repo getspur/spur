@@ -1,5 +1,6 @@
 mod community;
 mod gate;
+mod install_id;
 mod licenseseat;
 pub mod policy;
 pub mod provider;
@@ -19,10 +20,12 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use crate::install_id::InstallId;
 pub use crate::licenseseat::{
     classify_binding_mode, classify_subject, from_env, from_env_or_disabled,
 };
 pub use crate::policy::FeatureKey;
+pub use crate::policy::FlagEvaluator;
 pub use crate::provider::{LicenseProvider, RefreshPolicy};
 pub use crate::quota::{QuotaKey, QuotaValue};
 pub use crate::snapshot::EntitlementSnapshot;

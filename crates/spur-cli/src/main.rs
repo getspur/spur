@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use tracing_subscriber::prelude::*;
 
 use commands::auth::AuthCommands;
+use commands::flags::FlagsCommands;
 use spur_acp::config::SpurConfig;
 use spur_acp::SessionId;
 use spur_core::{Orchestrator, RunOpts};
@@ -120,6 +121,11 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// List and inspect runtime feature flags
+    Flags {
+        #[command(subcommand)]
+        command: FlagsCommands,
     },
     /// Launch interactive TUI dashboard
     Watch {
@@ -415,6 +421,7 @@ async fn main() -> Result<()> {
                 std::process::exit(exit);
             }
         },
+        Commands::Flags { command } => commands::flags::run(command).await,
         Commands::Watch {
             brain,
             sessions,

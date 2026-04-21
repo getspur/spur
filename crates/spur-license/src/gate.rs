@@ -4,23 +4,36 @@ use std::sync::Arc;
 use ahash::AHashSet;
 use arc_swap::ArcSwap;
 
+use crate::install_id::InstallId;
+use crate::policy::flags::FlagEvaluator;
 use crate::policy::{FeatureKey, FlagSpec, PolicyDocument, PolicyResolver};
 use crate::quota::{QuotaKey, QuotaValue};
 use crate::snapshot::{EntitlementSnapshot, SourceMetadata};
 use crate::tier::Tier;
 use crate::{LicenseState, Plan};
 
+#[allow(dead_code)]
 pub struct FeatureGate {
     snapshot: ArcSwap<EntitlementSnapshot>,
     policy: Arc<PolicyResolver>,
+    install_id: InstallId,
+    flag_evaluator: FlagEvaluator,
 }
 
 impl FeatureGate {
     pub fn new(policy: Arc<PolicyResolver>) -> Self {
+        let install_id = InstallId::load_or_create();
+        Self::new_with_install_id(policy, install_id)
+    }
+
+    pub fn new_with_install_id(policy: Arc<PolicyResolver>, install_id: InstallId) -> Self {
+        let flag_evaluator = FlagEvaluator::new(install_id.clone());
         let snapshot = Self::build_community_snapshot(&policy);
         Self {
             snapshot: ArcSwap::new(Arc::new(snapshot)),
             policy,
+            install_id,
+            flag_evaluator,
         }
     }
 
@@ -40,6 +53,12 @@ impl FeatureGate {
 
     pub fn snapshot(&self) -> arc_swap::Guard<Arc<EntitlementSnapshot>> {
         self.snapshot.load()
+    }
+
+    pub fn is_flag_enabled(&self, key: FeatureKey) -> Option<bool> {
+        let snap = self.snapshot.load();
+        let flag = snap.flags.get(&key)?;
+        Some(self.flag_evaluator.evaluate(key, flag, snap.tier))
     }
 
     pub fn update_state(&self, state: &LicenseState) {
