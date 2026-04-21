@@ -811,6 +811,8 @@ pub async fn compensate_mutation_orphans(
                     mutation_id: mutation_id.clone(),
                     violation: "restart-orphan".into(),
                     rollback_status: "compensated".into(),
+                    rollback_ops_succeeded: Vec::new(),
+                    rollback_ops_failed: Vec::new(),
                 },
             ),
         )
@@ -1594,6 +1596,59 @@ impl McpCallbackServer {
     pub async fn __test_call_submit_plan(&self, arguments: Value) -> Value {
         let resp = self.handle_submit_plan(Value::from(1), arguments).await;
         serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
+    /// Test-only: invoke any tool handler through the same JSON-RPC dispatch
+    /// path used by the MCP transport.
+    #[doc(hidden)]
+    pub async fn __test_call_tool(&self, tool_name: &str, arguments: Value) -> Value {
+        let response = self
+            .handle_tool_call(
+                Value::Null,
+                json!({
+                    "name": tool_name,
+                    "arguments": arguments,
+                }),
+            )
+            .await;
+        serde_json::to_value(&response).expect("serialize JsonRpcResponse")
+    }
+
+    /// Test-only: mutate a cached plan entry into an impossible state so
+    /// persisted read paths can prove they refresh from durable projection
+    /// instead of trusting `active_plans`.
+    #[doc(hidden)]
+    pub async fn __test_corrupt_cached_plan(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        worker_branch: &str,
+        base_snapshot_branch: &str,
+    ) -> Result<(), String> {
+        let plan = self
+            .active_plans
+            .lock()
+            .await
+            .get(plan_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown cached plan '{plan_id}'"))?;
+        let mut state = plan.lock().await;
+        let entry = state
+            .tasks
+            .iter_mut()
+            .find(|task| task.spec.task_id == task_id)
+            .ok_or_else(|| format!("unknown task '{task_id}' in cached plan '{plan_id}'"))?;
+        entry.status = crate::plan::PlanTaskStatus::Approved {
+            summary: Some("corrupted-cache".into()),
+        };
+        entry.worker_branch = Some(worker_branch.to_string());
+        state.base_snapshot_branch = Some(base_snapshot_branch.to_string());
+        state.base_snapshot_oid = Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into());
+        state.merge_state = crate::plan::PlanMergeState::Succeeded {
+            merge_branch: "spur/bogus-merge".into(),
+            merged_task_ids: vec![task_id.to_string()],
+        };
+        Ok(())
     }
 
     /// Test-only: peek whether a result is sitting in `completed_delegations`

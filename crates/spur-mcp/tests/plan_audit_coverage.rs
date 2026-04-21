@@ -225,8 +225,8 @@ async fn plan_audit_coverage_all_four_sentinels() {
     let epic_comments =
         run_br(dir.path(), &["comments", "list", &epic_issue_id]).expect("br comments list epic");
     let epic_sentinels = collect_sentinels(&epic_comments);
-    let plan_submit_found = epic_sentinels.iter().any(
-        |k| matches!(
+    let plan_submit_found = epic_sentinels.iter().any(|k| {
+        matches!(
             k,
             AuditSentinelKind::PlanSubmit {
                 plan_id,
@@ -236,8 +236,8 @@ async fn plan_audit_coverage_all_four_sentinels() {
             } if plan_id == "audit-plan-1"
                 && base_snapshot_branch == "spur/brain-snapshot-test"
                 && base_snapshot_oid == "0123456789abcdef0123456789abcdef01234567"
-        ),
-    );
+        )
+    });
     assert!(
         plan_submit_found,
         "PlanSubmit sentinel must be on epic {epic_issue_id}; got: {epic_sentinels:?}"

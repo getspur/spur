@@ -28,6 +28,14 @@ pub enum EpicCompletionOutcome {
     TerminalWithFailures,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpDescription {
+    pub kind: String,
+    pub issue_id: String,
+    #[serde(default)]
+    pub depends_on_id: Option<String>,
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -101,6 +109,10 @@ pub enum AuditSentinelKind {
         mutation_id: String,
         violation: String,
         rollback_status: String,
+        #[serde(default)]
+        rollback_ops_succeeded: Vec<OpDescription>,
+        #[serde(default)]
+        rollback_ops_failed: Vec<(OpDescription, String)>,
     },
     LateSignal {
         signal_id: String,
@@ -254,6 +266,8 @@ mod tests {
                 mutation_id: "mut-V".into(),
                 violation: "cycle".into(),
                 rollback_status: "completed".into(),
+                rollback_ops_succeeded: Vec::new(),
+                rollback_ops_failed: Vec::new(),
             },
             AuditSentinelKind::LateSignal {
                 signal_id: "sig-2".into(),
@@ -352,6 +366,8 @@ mod tests {
                 mutation_id: "mut-V".into(),
                 violation: "cycle".into(),
                 rollback_status: "completed".into(),
+                rollback_ops_succeeded: Vec::new(),
+                rollback_ops_failed: Vec::new(),
             },
             AuditSentinelKind::LateSignal {
                 signal_id: "sig-2".into(),
@@ -486,6 +502,19 @@ mod tests {
             mutation_id: "mut-V".into(),
             violation: "cycle".into(),
             rollback_status: "completed".into(),
+            rollback_ops_succeeded: vec![super::OpDescription {
+                kind: "remove_dependency".into(),
+                issue_id: "bd-2".into(),
+                depends_on_id: Some("bd-1".into()),
+            }],
+            rollback_ops_failed: vec![(
+                super::OpDescription {
+                    kind: "restore_parent_status".into(),
+                    issue_id: "bd-1".into(),
+                    depends_on_id: None,
+                },
+                "sqlite busy".into(),
+            )],
         };
         let parsed = parse_comment(&encode_comment(&kind)).unwrap().unwrap();
         assert_eq!(parsed, kind);

@@ -1,0 +1,134 @@
+use std::path::Path;
+use std::process::Command;
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+use spur_acp::{BrainSessionId, SessionId};
+use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
+use spur_pm::PmService;
+use tempfile::TempDir;
+
+fn br_available() -> bool {
+    Command::new("br")
+        .arg("--help")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
+    let output = Command::new("br")
+        .args(args)
+        .current_dir(repo)
+        .env("RUST_LOG", "error")
+        .output()
+        .expect("br invocation failed");
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        Err(format!(
+            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        ))
+    }
+}
+
+async fn beads_pm(repo: &Path) -> Arc<PmService> {
+    Arc::new(
+        PmService::try_new(None, true, false, repo, None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    )
+}
+
+fn continuation_ctx() -> DetachedContinuationCtx {
+    DetachedContinuationCtx {
+        on_complete: Arc::new(|_, _| Box::pin(async {})),
+    }
+}
+
+fn decode_tool_response(response: &Value) -> Value {
+    assert!(
+        response.get("error").is_none(),
+        "tool call should succeed: {response}"
+    );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool response text");
+    serde_json::from_str(text).expect("tool response must be json")
+}
+
+fn extract_submit_plan_id(response: &Value) -> String {
+    assert!(
+        response.get("error").is_none(),
+        "submit_plan should succeed: {response}"
+    );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("submit_plan response text");
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("plan_id: "))
+        .map(str::to_string)
+        .expect("submit_plan response must include plan_id line")
+}
+
+#[tokio::test]
+async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted_cache() {
+    if !br_available() {
+        eprintln!(
+            "skipping get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted_cache: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let session_id = BrainSessionId::new(SessionId("brain".into()));
+    let (server, _channel) =
+        McpCallbackServer::new(&session_id, Some(pm), None, continuation_ctx());
+
+    let submit_response = server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "epic_title": "Projection Harness Epic",
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "codex",
+                "task": "Projection Harness Task",
+                "depends_on": [],
+                "context_files": ["docs/harness.md"]
+            }]
+        }))
+        .await;
+    let plan_id = extract_submit_plan_id(&submit_response);
+
+    let baseline = decode_tool_response(
+        &server
+            .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id.clone() }))
+            .await,
+    );
+    assert_ne!(
+        baseline["tasks"][0]["status"], "approved",
+        "baseline status must differ from the injected corruption"
+    );
+
+    server
+        .__test_corrupt_cached_plan(&plan_id, "t1", "spur/bogus-worker", "spur/bogus-snapshot")
+        .await
+        .expect("corrupt cached plan");
+
+    let refreshed = decode_tool_response(
+        &server
+            .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
+            .await,
+    );
+
+    assert_eq!(
+        refreshed, baseline,
+        "get_plan_status must rebuild persisted state instead of trusting corrupted cache"
+    );
+}
