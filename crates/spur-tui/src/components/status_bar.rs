@@ -88,7 +88,7 @@ impl StatusBar {
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         let hints = match props.view {
             ViewId::Dashboard => {
-                " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [?]help [q]uit"
+                " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
             }
             ViewId::SessionDetail(_) => hint_for_session_detail(props.stream_in_flight),
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
