@@ -3475,14 +3475,20 @@ version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
+ "directories",
+ "ed25519-dalek",
  "licenseseat",
  "proptest",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -1,5 +1,9 @@
+mod community;
 mod licenseseat;
+pub mod policy;
 pub mod provider;
+
+pub use community::CommunityProvider;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -139,6 +143,19 @@ impl LicenseState {
         }
     }
 
+    pub fn active_community(features: BTreeSet<String>) -> Self {
+        Self {
+            status: LicenseStatus::Active,
+            subject_kind: SubjectKind::User,
+            plan: Plan::Community,
+            features,
+            expires_at: None,
+            binding_mode: BindingMode::Unknown,
+            offline_ok: true,
+            status_text: "Community tier".into(),
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         matches!(self.status, LicenseStatus::Active | LicenseStatus::Degraded)
     }
@@ -251,5 +268,21 @@ mod tests {
     #[test]
     fn inactive_state_is_not_active() {
         assert!(!LicenseState::inactive("nope").is_active());
+    }
+
+    #[test]
+    fn active_community_state_has_correct_shape() {
+        use std::collections::BTreeSet;
+        let mut features = BTreeSet::new();
+        features.insert("chat".to_string());
+        features.insert("watch_loop".to_string());
+        let state = LicenseState::active_community(features.clone());
+        assert!(matches!(state.status, LicenseStatus::Active));
+        assert!(matches!(state.plan, Plan::Community));
+        assert!(matches!(state.subject_kind, SubjectKind::User));
+        assert!(matches!(state.binding_mode, BindingMode::Unknown));
+        assert!(state.offline_ok);
+        assert_eq!(state.features, features);
+        assert!(state.is_active(), "Community must be is_active() == true");
     }
 }
