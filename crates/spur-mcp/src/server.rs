@@ -3738,6 +3738,7 @@ mod merge_plan_tests {
         server: super::McpCallbackServer,
         plan_id: String,
         epic_id: String,
+        task_issue_id: String,
     }
 
     async fn setup_persisted_merge_ready_plan(
@@ -3872,6 +3873,7 @@ mod merge_plan_tests {
             server,
             plan_id: plan_id.to_string(),
             epic_id: subgraph.epic_id,
+            task_issue_id,
         }
     }
 
@@ -3887,6 +3889,10 @@ mod merge_plan_tests {
             .as_str()
             .expect("merge_plan text response");
         serde_json::from_str(text).expect("merge_plan status JSON")
+    }
+
+    fn decode_task_diff_response(text: &str) -> Value {
+        serde_json::from_str(text).expect("get_task_diff response JSON")
     }
 
     #[tokio::test]
@@ -4130,6 +4136,31 @@ mod merge_plan_tests {
                 .any(|label| label == crate::plan::labels::INTEGRATION_PENDING),
             "merge_plan should clear integration-pending: {:?}",
             epic.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn get_task_diff_rehydrates_latest_attempt_when_cache_missing() {
+        let fixture = setup_persisted_merge_ready_plan("plan-diff-recover", true).await;
+
+        let text = fixture
+            .server
+            .handle_get_task_diff(&json!({
+                "plan_id": fixture.plan_id,
+                "task_id": "task-a",
+            }))
+            .await
+            .expect("get_task_diff should succeed");
+        let response = decode_task_diff_response(&text);
+
+        assert_eq!(response["worker_branch"], "spur/worker-a");
+        assert_eq!(response["summary"], "worker branch ready");
+        assert!(
+            response["diff"]
+                .as_str()
+                .map(|diff| diff.contains("worker.txt"))
+                .unwrap_or(false),
+            "latest-attempt cache miss should rebuild full diff text: {response}"
         );
     }
 }
