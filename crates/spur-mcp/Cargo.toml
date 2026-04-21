@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 axum = { workspace = true }
 rmcp = { workspace = true }
+parking_lot = "0.12"
 
 [dev-dependencies]
 toml = { workspace = true }

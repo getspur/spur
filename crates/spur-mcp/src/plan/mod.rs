@@ -11,6 +11,7 @@ pub mod mutation;
 pub mod mutation_executor;
 pub mod proposers;
 pub mod reconciler;
+pub mod signal_watcher;
 pub mod signals;
 
 use std::collections::{HashMap, HashSet, VecDeque};
