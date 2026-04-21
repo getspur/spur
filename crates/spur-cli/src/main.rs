@@ -1,4 +1,5 @@
 mod commands;
+mod onboarding;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -428,6 +429,9 @@ async fn main() -> Result<()> {
             };
             let config_arc = std::sync::Arc::new(config.clone());
             let license = SpurLicense::from_env_or_disabled();
+            if let Err(e) = onboarding::maybe_prompt_first_run(&license).await {
+                tracing::warn!("first-run prompt failed: {e}; continuing");
+            }
             let initial_license_state =
                 spur_core::license_runtime::to_event_state(license.current_state());
 
