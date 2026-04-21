@@ -501,7 +501,7 @@ impl Orchestrator {
         let event_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let funnel = crate::event_funnel::spawn_funnel(event_tx.clone(), event_seq.clone());
         // S3 — durable JSONL sink subscribes to the same broadcast.
-        crate::event_sink::spawn_sink(event_tx.subscribe());
+        crate::event_sink::spawn_sink(event_tx.subscribe(), crate::event_sink::DEFAULT_MAX_BYTES);
         let review_sink = ReviewSink::new();
 
         Ok(Self {
