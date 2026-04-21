@@ -137,7 +137,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
 
     // ── 1. PlanSubmit — on epic issue ───────────────────────────────────────
     let adv = pm.advanced().expect("beads backend must have advanced()");
-    spur_mcp::emit_plan_submit_audit(adv, "audit-plan-1", &subgraph, None, None).await;
+    spur_mcp::emit_plan_submit_audit(adv, "audit-plan-1", &subgraph, None, None, None).await;
 
     // ── 2. Dispatch — on task issue ─────────────────────────────────────────
     let delegation_id = "del-audit-001".to_string();
@@ -191,6 +191,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
         tasks: vec![entry],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some(epic_issue_id.clone()),
     };
@@ -650,6 +651,7 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
         tasks: vec![entry],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some(subgraph.epic_id.clone()),
     };
@@ -759,6 +761,7 @@ async fn request_changes_leaves_issue_open_and_not_review_ready() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some("bd-epic".into()),
     }));
@@ -846,6 +849,7 @@ async fn request_changes_does_not_emit_dispatch_audit() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some("bd-epic".into()),
     }));
@@ -937,6 +941,7 @@ async fn approve_closes_issue_and_clears_ready_for_review() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: Some("bd-epic".into()),
     };

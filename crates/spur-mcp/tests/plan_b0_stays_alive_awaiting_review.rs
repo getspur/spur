@@ -23,6 +23,7 @@ async fn run_plan_stays_alive_while_task_awaiting_review() {
         plan_id: "b0-test".into(),
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: None,
         tasks: vec![PlanTaskEntry {

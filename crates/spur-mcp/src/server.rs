@@ -442,6 +442,7 @@ pub async fn emit_plan_submit_audit(
     plan_id: &str,
     sg: &EpicSubgraph,
     base_snapshot_branch: Option<&str>,
+    base_snapshot_oid: Option<&str>,
     execution_mode: Option<&str>,
 ) {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
@@ -449,7 +450,7 @@ pub async fn emit_plan_submit_audit(
         epic_issue_id: sg.epic_id.clone(),
         task_ids: sg.task_map.values().cloned().collect(),
         base_snapshot_branch: base_snapshot_branch.map(str::to_string),
-        base_snapshot_oid: None,
+        base_snapshot_oid: base_snapshot_oid.map(str::to_string),
         execution_mode: execution_mode.map(str::to_string),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
@@ -2790,6 +2791,7 @@ impl McpCallbackServer {
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
             base_snapshot_branch: base_snapshot.branch,
+            base_snapshot_oid: base_snapshot.oid,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: epic_subgraph.as_ref().map(|sg| sg.epic_id.clone()),
         };
@@ -2797,12 +2799,19 @@ impl McpCallbackServer {
 
         if let Some(sg) = &epic_subgraph {
             if let Some(adv) = self.pm_service.as_deref().and_then(|pm| pm.advanced()) {
-                let base_snapshot_branch = state.lock().await.base_snapshot_branch.clone();
+                let (base_snapshot_branch, base_snapshot_oid) = {
+                    let state = state.lock().await;
+                    (
+                        state.base_snapshot_branch.clone(),
+                        state.base_snapshot_oid.clone(),
+                    )
+                };
                 emit_plan_submit_audit(
                     adv,
                     &plan_id,
                     sg,
                     base_snapshot_branch.as_deref(),
+                    base_snapshot_oid.as_deref(),
                     Some("submit_plan"),
                 )
                 .await;
@@ -3019,6 +3028,7 @@ impl McpCallbackServer {
             tasks: entries,
             brain_session_id: self.brain_session_id.clone(),
             base_snapshot_branch: base_snapshot.branch,
+            base_snapshot_oid: base_snapshot.oid,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some(epic_id.clone()),
         };
@@ -3027,7 +3037,7 @@ impl McpCallbackServer {
         // Keep a clone of the Arc to build the initial status response.
         let state_for_status = Arc::clone(&state);
 
-        let (task_scope, base_snapshot_branch) = {
+        let (task_scope, base_snapshot_branch, base_snapshot_oid) = {
             let state = state_for_status.lock().await;
             let task_scope = state
                 .tasks
@@ -3042,7 +3052,11 @@ impl McpCallbackServer {
                     })
                 })
                 .collect::<Vec<_>>();
-            (task_scope, state.base_snapshot_branch.clone())
+            (
+                task_scope,
+                state.base_snapshot_branch.clone(),
+                state.base_snapshot_oid.clone(),
+            )
         };
 
         let mut rollback_updates: Vec<(String, spur_pm::IssueUpdate)> = Vec::new();
@@ -3118,6 +3132,7 @@ impl McpCallbackServer {
                 &plan_id,
                 &sg,
                 base_snapshot_branch.as_deref(),
+                base_snapshot_oid.as_deref(),
                 Some("execute_epic"),
             )
             .await;
@@ -3855,6 +3870,7 @@ mod reconciler_fast_forward_tests {
             tasks: Vec::new(),
             brain_session_id: session_id.clone(),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: None,
         }));
@@ -3988,6 +4004,7 @@ mod reconciler_fast_forward_tests {
             tasks: Vec::new(),
             brain_session_id: session_id.clone(),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: None,
         }));
@@ -4017,6 +4034,7 @@ mod reconciler_fast_forward_tests {
             }],
             brain_session_id: session_id.clone(),
             base_snapshot_branch: Some("refs/heads/main".into()),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some("bd-epic".into()),
         };
@@ -4094,6 +4112,7 @@ mod reconciler_fast_forward_tests {
                 tasks: Vec::new(),
                 brain_session_id: session_id.clone(),
                 base_snapshot_branch: None,
+                base_snapshot_oid: None,
                 merge_state: crate::plan::PlanMergeState::NotStarted,
                 epic_id: None,
             })),
@@ -4119,6 +4138,7 @@ mod reconciler_fast_forward_tests {
             }],
             brain_session_id: session_id.clone(),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some("bd-epic".into()),
         };
@@ -4160,6 +4180,7 @@ mod reconciler_fast_forward_tests {
             ],
             brain_session_id: session_id,
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: Some("bd-epic".into()),
         };

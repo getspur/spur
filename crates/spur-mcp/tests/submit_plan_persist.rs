@@ -182,6 +182,7 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: None,
     };
@@ -270,6 +271,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: None,
     };
@@ -360,6 +362,7 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         base_snapshot_branch: None,
+        base_snapshot_oid: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
         epic_id: None,
     };
