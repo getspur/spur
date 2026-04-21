@@ -279,3 +279,67 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
         .count();
     assert_eq!(ready_events, 1, "expected one PlanReadyToMerge event");
 }
+
+#[tokio::test]
+async fn epic_completion_backfills_missing_audit_for_closed_terminal_epic() {
+    if !br_available() {
+        eprintln!(
+            "skipping epic_completion_backfills_missing_audit_for_closed_terminal_epic: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P1").await;
+
+    for task_id in [&task_a_id, &task_b_id] {
+        pm.update_issue(
+            task_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close child task");
+    }
+    pm.update_issue(
+        &task_b_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::REVIEW_REJECTED.to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("mark task B terminal failure");
+    pm.update_issue(
+        &epic_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close epic without audit");
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        Some("P1".into()),
+    );
+
+    reconciler.tick_once().await.expect("tick_once");
+
+    let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &epic_id]));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::EpicCompletion {
+            outcome: EpicCompletionOutcome::TerminalWithFailures,
+            plan_id,
+            epic_id: found_epic_id,
+        } if plan_id == "P1" && found_epic_id == &epic_id
+    )));
+}
