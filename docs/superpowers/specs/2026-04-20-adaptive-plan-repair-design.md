@@ -1,6 +1,6 @@
 # Adaptive Plan Repair — Design
 
-**Status:** design (rev 3, 2026-04-21)
+**Status:** design (rev 4, 2026-04-21)
 **Date:** 2026-04-20
 **Revised:** 2026-04-21
 
@@ -55,6 +55,41 @@ v0b ships `AuditSentinelKind` variants for the full mutation lifecycle: `Signal`
 **(j) Labels consolidated on shared constructors.**
 
 Early v0b introduced executor-private `persisted_mutation_label` / `persisted_signal_processed_label` helpers duplicated across three test files. Consolidated in `refactor(spur-mcp): unify mutation/signal-processed labels via shared constructors`. Canonical form is `spur:mutation-id:<compact-uuid>` / `spur:signal-processed:<compact-uuid>`; the pre-`spur:` form (`mutation-id:<uuid>`) was never written in practice and has been removed. `superseded-by` is emitted one label per child (not CSV), consistent with beads' set-valued label semantics.
+
+### rev 4 Reconciliations (2026-04-21)
+
+Rev 4 is an honesty pass. A staff-level invariant-enforcement review
+(codex-acp, delegation `173069c6`) plus a brain spec-vs-code drift review
+(13 forward drifts + 3 backward drifts) surfaced that rev 3 prose under-
+promised on some invariants and over-promised on others. Rev 4 aligns the
+spec to shipped reality; it does not redesign v0b.
+
+**(k) I1 is partially enforced — orphan resolution on restart is v0c.**
+
+Rev 3 stated I1 as "Brain MUST emit write-ahead … AND restart-path brain MUST resolve every orphan `mutation-plan`." Shipped v0b enforces the first half (see `mutation_executor::apply_mutation` emitting `MutationPlan` before any destructive op at `crates/spur-mcp/src/plan/mutation_executor.rs:43-53`). The restart-path orphan resolution is NOT shipped — no code walks the audit log at server startup to reconcile orphan mutations. If a brain crashes mid-`apply_mutation`, the parent remains labelled with `spur:mutation-id:<X>` and in an indeterminate ops-partially-applied state forever. Tracked as **G7** in §Known Correctness Gaps. I1's invariant statement is updated below to reflect this split.
+
+**(l) I3 enforcement is split across handler + watcher.**
+
+Rev 3 implied the terminal-gate in `handle_report_signal` alone enforced I3. In reality: (a) the handler's `get_issue` + status check is a fast-path informing the late-vs-non-late decision at call time; (b) the `SignalWatcher::tick_once` filter (`signal_watcher.rs:73-81`) is the authoritative enforcement at consumption — it re-checks `issue.status != closed_status()` before any proposer invocation. A TOCTOU window in the handler (task closes between the terminal check and subsequent writes) cannot trigger a late proposer call because the watcher re-gates. Rev 4 documents this split explicitly; `server.rs` also reorders the non-late path to emit the audit sentinel FIRST so partial failures are auditable (`685fdc4`).
+
+**(m) Same-process retry suppression (G4 same-process variant).**
+
+Rev 3 documented G4 (cross-restart retry loop) but missed the in-process variant: `SignalWatcher::tick_once` previously inserted `signal_id` into its in-memory `seen: HashSet<Uuid>` BEFORE invoking `apply_mutation`. On apply failure (transient PM error, rollback after cycle, etc.) the set was never cleared, suppressing retry of that signal for the lifetime of the brain process — not just across restarts. Fixed in `685fdc4`: `seen` is now inserted only on a decisive outcome (successful apply OR no proposer candidates); apply failures leave `seen` untouched so the next tick retries. G4 text below is updated to cover both variants.
+
+**(n) G2 mechanics corrected.**
+
+Rev 3 described G2 as a race "until the reconciler closes it." The reconciler is read-only (`crates/spur-mcp/src/plan/reconciler.rs:109-114`); rejection explicitly writes beads `open` status via `update_issue` and never writes a rejection-marker label. The hazard is real — a signal on a rejected-but-still-`open` task reaches the watcher — but the mechanism is "no durable marker distinguishes rejected from any other open task," not "reconciler race." Rev 4 rewrites G2.
+
+**(o) New gaps from review: G5 scan-limit, G6 rollback-compensation audit, G7 orphan resolution.**
+
+Three additional live gaps documented in §Known Correctness Gaps:
+- **G5**: `ISSUE_SCAN_LIMIT = 10_000` in `mutation_executor.rs:17` silently truncates scans used by `downstream_issue_ids` and rollback. `685fdc4` adds a saturation warning log; pagination is the real fix, deferred.
+- **G6**: Rollback failure surfaces honestly as `anyhow::bail!` but the `MutationInvariantViolation` sentinel payload does not record which compensation ops ran, so recovery requires live-state inspection.
+- **G7**: I1 orphan resolution missing (see rev note (k)).
+
+**(p) Stance-C interface refactor.**
+
+Rev 3 spec §Interfaces duplicated Rust type definitions (`BeadsAdvanced` trait, `ReadyFilter`, `AuditRecordInput`, `AuditEntryType`, `PlanMutationOp`, `DepRewirePolicy`, etc.) that drifted from shipped code across 13 forward drifts (brain review). Rev 4 adopts "Stance C" — spec owns JSON schemas + contracts + invariants; signatures are delegated to code modules with a one-line summary + file citation. This is the pattern §Label vocabulary already uses and is the only structural way to prevent recurrence. Spec prose is updated in the §Interfaces section accordingly.
 
 ---
 
@@ -124,7 +159,7 @@ Verified against current code and live `br` binary (Darwin 25.1.0, repo `/Volume
 | `br dep cycles` reports dependency cycles. | `br dep --help` output. |
 | `--actor <ACTOR>` is a global flag accepted on every subcommand. | `br --help` output. |
 | `br agents --update` manages AGENTS.md workflow instructions. | `br agents --help` output. |
-| `BeadsAdapter::poll` uses `last_poll: Mutex<Option<DateTime<Utc>>>`, compares `updated_at >= last_poll` client-side, sets cursor to `Utc::now()`. **Cursor race:** events with `updated_at` between fetch and cursor-write can be missed on subsequent polls. | `crates/spur-pm/src/beads.rs:149`, `465-514`, specifically `513`. |
+| `BeadsAdapter::poll` historically used `last_poll: Mutex<Option<DateTime<Utc>>>` with `Utc::now()` cursor-write (race). **Fixed in v0a:** cursor is now `max(updated_at)` over the returned set; disk backing optional via `connect_with_actor(.., cursor_path)`. | `crates/spur-pm/src/beads.rs` (current cursor logic at ~`:461-468`; disk save at `save_cursor`). |
 | `spur-mcp::plan` already carries a DAG executor with `PlanTask { depends_on }`, `PlanTaskStatus { Pending, Ready, Dispatched, AwaitingReview, Approved, Rejected, Failed, Cancelled }`, `AttemptRecord` history, and `review_task(approve/request_changes)`. | `crates/spur-mcp/src/plan.rs` (~3299 lines; structure confirmed). |
 | `PmService::analyzer()` already exposes a beads-only extension (`BvAdapter`) via `Option<&BvAdapter>`. Precedent for the proposed `PmService::advanced() -> Option<&dyn BeadsAdvanced>`. | `crates/spur-pm/src/service.rs:163-165`. |
 
@@ -256,6 +291,8 @@ Green = v0a (ships first, standalone value). Red = v0b (requires v0a).
 
 ### End-to-end sequence (happy path, v0a+v0b)
 
+Reflects shipped v0b.1 reality: beads status is compressed to `{open, closed, blocked}` (I5); audit records are `[[spur-audit v1]]` sentinel comments, not `br audit record` (rev note (a)); finer state distinctions live in labels.
+
 ```mermaid
 sequenceDiagram
     participant B as Brain
@@ -263,55 +300,60 @@ sequenceDiagram
     participant R as Reconciler
     participant W as Worker (gemini-acp)
 
-    B->>D: br create epic bd-101 --label plan-epic:P1
-    B->>D: br create task bd-102 --parent bd-101 --assignee worker:gemini-acp
-    B->>D: br create task bd-103 --parent bd-101
+    B->>D: br create epic bd-101 --label spur:plan-id:P1
+    B->>D: br create task bd-102 --parent bd-101 --label spur:plan-task-id:T1 --label spur:agent:gemini-acp
+    B->>D: br create task bd-103 --parent bd-101 --label spur:plan-task-id:T2
     B->>D: br dep add bd-103 bd-102
-    B->>D: br audit record bd-101 type=plan-submit
+    B->>D: br comments add bd-101 "[[spur-audit v1]] {kind: PlanSubmit, ...}"
 
     Note over R: reconciler tick (every 3s, adaptive)
-    R->>D: br ready --label plan-task:P1 --assignee worker:gemini-acp
+    R->>D: br ready --label-any spur:plan-task-id:T1
     D-->>R: [bd-102]
-    R->>D: br update bd-102 --status dispatched -l delegation-id:del-A
-    R->>D: br audit record bd-102 type=dispatch
+    R->>D: br label add bd-102 delegation-id:del-A
+    R->>D: br comments add bd-102 "[[spur-audit v1]] {kind: Dispatch, ...}"
     R->>W: ACP dispatch bd-102
 
     W-->>R: (mid-task) report_signal(bd-102, ScopeDrift{...})
-    R->>D: br comments add bd-102 "[[spur-signal v1]] {...}"
+    Note over R: non-late path: audit FIRST, then operational writes<br/>(I3 fast-path; see §report_signal)
+    R->>D: br comments add bd-102 "[[spur-audit v1]] {kind: Signal, ...}"
+    R->>D: br comments add bd-102 "[[spur-signal v1]] {signal_id: sig-U1, ...}"
     R->>D: br label add bd-102 signal:scope-drift
-    R->>D: br audit record bd-102 type=signal signal_id=sig-U1
 
     W-->>R: ACP completion
-    R->>D: br update bd-102 --status awaiting_review
-    R->>D: br audit record bd-102 type=completion
+    Note over R: v0c will write labels::READY_FOR_REVIEW here<br/>(G1 fix — not shipped in v0b)
+    R->>D: br comments add bd-102 "[[spur-audit v1]] {kind: Completion, ...}"
 
-    Note over R: reconciler tick
-    R->>D: br list -s awaiting_review --label-any signal:scope-drift
-    D-->>R: [bd-102 has signal]
-    R-->>B: emit signal event (via existing brain event channel)
+    Note over R: signal watcher tick
+    R->>D: br list (filter: status != closed, label signal:*, no spur:signal-processed:*)
+    D-->>R: [bd-102 open, signal:scope-drift]
+    R->>D: br comments list bd-102
+    D-->>R: [..., [[spur-signal v1]] body, ...]
+    Note over R: dedupe by signal_id (in-memory seen set);<br/>invoke proposer + scorer (brain-side)
 
-    B->>D: br comments list bd-102
-    D-->>B: [...comments...]
-    Note over B: parse [[spur-signal v1]], dedupe by signal_id
-    Note over B: MutationProposer.propose → one SplitTask candidate
-    Note over B: MutationScorer.score → 1.0
-
-    B->>D: br audit record bd-102 type=mutation-plan mutation_id=mut-V
-    B->>D: br create bd-201 --parent bd-102 -l mutation-id:mut-V
-    B->>D: br create bd-202 --parent bd-102 -l mutation-id:mut-V
+    B->>D: br comments add bd-102 "[[spur-audit v1]] {kind: MutationPlan, mutation_id: mut-V, ...}"
+    B->>D: br create bd-201 --parent bd-102 -l spur:mutation-id:<compact-uuid>
+    B->>D: br create bd-202 --parent bd-102 -l spur:mutation-id:<compact-uuid>
     B->>D: br dep add bd-202 bd-201
     B->>D: br dep remove bd-103 bd-102
     B->>D: br dep add bd-103 bd-202
-    B->>D: br update bd-102 --status superseded -l superseded-by:bd-201,bd-202
+    B->>D: br update bd-102 --status closed
+    B->>D: br label add bd-102 spur:superseded-by:bd-201
+    B->>D: br label add bd-102 spur:superseded-by:bd-202
     B->>D: br dep cycles
     D-->>B: (no cycles)
-    B->>D: br audit record bd-102 type=mutation-commit mutation_id=mut-V
+    B->>D: br comments add bd-102 "[[spur-audit v1]] {kind: MutationCommit, mutation_id: mut-V, ...}"
+    B->>D: br label add bd-102 spur:signal-processed:<compact-uuid>
 
     Note over R: next tick — bd-201 is ready
     R->>D: br ready ...
     D-->>R: [bd-201]
     R->>W: ACP dispatch bd-201
 ```
+
+SPUR's nine-state `PlanTaskStatus` (Dispatched, AwaitingReview, Approved,
+Superseded, etc.) is in-memory only; the beads column only sees
+`open | closed | blocked`. Distinctions are recovered from labels and
+audit sentinels per I5.
 
 ### PlanTaskStatus state machine
 
@@ -350,22 +392,28 @@ stateDiagram-v2
 
 ### Mutation write-ahead flow (v0b)
 
+Reflects shipped transport: audit records are `[[spur-audit v1]]` sentinel comments on the trigger task. See `crates/spur-mcp/src/plan/mutation_executor.rs::apply_mutation`.
+
 ```mermaid
 flowchart TD
-    S[Signal event received by brain] --> P[Proposer.propose]
+    S[Signal observed by brain<br/>via SignalWatcher] --> P[MutationProposer.propose]
     P --> C{candidates empty?}
-    C -->|yes| L[label signal:late-arrival<br/>audit record late-signal<br/>STOP]
-    C -->|no| Sc[Scorer.score → pick]
-    Sc --> WA[br audit record type=mutation-plan<br/>mutation_id=mut-V<br/>data=batch ops]
-    WA --> Ex[Execute batch ops:<br/>br create × N<br/>br dep add/remove × M<br/>br update parent --status superseded]
-    Ex --> Inv[br dep cycles]
+    C -->|yes| NoOp[seen.insert; no-op<br/>STOP]
+    C -->|no| Sc[MutationScorer.score → pick highest]
+    Sc --> WA[add_comment [[spur-audit v1]]<br/>kind=MutationPlan<br/>mutation_id=mut-V]
+    WA --> Ex[Execute batch ops:<br/>create children ×N with spur:mutation-id:mut-V label<br/>dep add/remove per DepRewirePolicy<br/>update parent --status closed<br/>label spur:superseded-by:child per child]
+    Ex --> Inv[adv.dep_cycles<br/>+ fallback parse for br stderr format]
     Inv --> Cycle{cycles found?}
-    Cycle -->|yes| Rb[audit record type=mutation-invariant-violation<br/>compensating rollback<br/>STOP]
-    Cycle -->|no| CM[br audit record type=mutation-commit<br/>mutation_id=mut-V]
-    CM --> Done[Done]
+    Cycle -->|yes| Rb[rollback_mutation: reverse ops<br/>add_comment [[spur-audit v1]]<br/>kind=MutationInvariantViolation<br/>STOP]
+    Cycle -->|no| CM[add_comment [[spur-audit v1]]<br/>kind=MutationCommit<br/>mutation_id=mut-V]
+    CM --> PL[label parent spur:signal-processed:mut-V]
+    PL --> Done[Done]
+    Rb --> Retry[Signal retried on next tick<br/>G4 same-process: fixed 685fdc4<br/>G4 cross-restart: v0c scope]
 
     classDef audit fill:#fdebd0,stroke:#b9770e
     class WA,CM,Rb audit
+    classDef gap fill:#fadbd8,stroke:#c0392b
+    class Retry gap
 ```
 
 **Crash-recovery rule:** on brain restart, walk `br audit log` for every plan-epic; any orphan `mutation-plan` (no matching `mutation-commit` or `mutation-invariant-violation` by the same `mutation_id`) is resolved per Invariant I1's orphan-resolution rule — complete OR cancel, never two orphans concurrent. Every op in a batch is designed idempotent: `br create` is not intrinsically idempotent, but mutation-id labels let us detect already-created children; `br dep add/remove` is idempotent; `br update --status` is idempotent. Replay therefore converges.
@@ -395,20 +443,32 @@ For readers placing this design against known systems:
 
 The four load-bearing rules. Each has a test spec (see Test Plan).
 
-**I1 — Write-ahead before any destructive op, with unique-orphan resolution on restart.**
-Brain MUST emit `br audit record type=mutation-plan mutation_id=X data=<batch>` before executing any op of batch X. Any op executed without a preceding mutation-plan record is a bug. The `mutation-plan`/`mutation-commit` pair is a **Kubernetes-style finalizer**: the reconciler treats any `mutation-plan` without a matching `mutation-commit` (or `mutation-invariant-violation`) as an in-flight mutation to either complete or cancel; parent tasks bearing `mutation-id:<X>` labels without a matching commit are held from terminal-status transitions.
+**I1 — Write-ahead before any destructive op (+ orphan resolution on restart; partial enforcement).**
 
-**Durability contract:** `br audit record` is durable-on-return only because beads runs in default SQLite WAL mode (`.beads/beads.db-wal` confirms). SPUR v0 requires this mode. `br --no-db` (JSONL-only) is NOT supported; the WAL guarantee I1 depends on does not hold.
+Brain MUST emit an `[[spur-audit v1]]` sentinel of kind `MutationPlan` before executing any op of batch X. Any op executed without a preceding `MutationPlan` sentinel is a bug. The `MutationPlan` / `MutationCommit` pair is a **Kubernetes-style finalizer**: the reconciler should treat any `MutationPlan` without a matching `MutationCommit` (or `MutationInvariantViolation`) as an in-flight mutation to either complete or cancel; parent tasks bearing `spur:mutation-id:<X>` labels without a matching commit sentinel are held from terminal-status transitions.
 
-**Orphan-resolution rule (restart path):** on brain startup, for every orphan `mutation-plan` (no matching `mutation-commit` or `mutation-invariant-violation` by the same `mutation_id`), brain MUST either (a) complete it by executing remaining ops and emitting `mutation-commit`, OR (b) emit `type=mutation-cancelled mutation_id=<X>` before starting any new mutation on the same parent. INVARIANT: no parent task ever has two orphan `mutation-plan` records with different `mutation_id`s.
+**Enforcement status (v0b ship):**
+- **Write-ahead half — ENFORCED.** `mutation_executor::apply_mutation` emits `MutationPlan` via `audit_encode` + `add_comment` before the op loop (`crates/spur-mcp/src/plan/mutation_executor.rs:43-53`). Integration test `tests/mutation_write_ahead.rs` verifies.
+- **Restart orphan-resolution half — NOT SHIPPED.** No code walks the audit log on server startup to reconcile orphan `MutationPlan` sentinels. If the brain crashes between `MutationPlan` emission and `MutationCommit`, the parent remains in a partially-applied indeterminate state — tracked as **G7** in §Known Correctness Gaps. The hold-from-terminal behavior is also unenforced (no code checks `spur:mutation-id:` labels at status transitions).
 
-Enforcement: unit test asserts the brain-side mutation helper always emits the audit record first; integration test simulates crash between mutation-plan and first op, verifies restart completes or cancels before any new mutation; integration test simulates two competing mutation-plans on the same parent and asserts the cancel path fires.
+**Durability contract:** sentinel comments are durable-on-return only because beads runs in default SQLite WAL mode (`.beads/beads.db-wal` confirms). SPUR v0 requires this mode. `br --no-db` (JSONL-only) is NOT supported; the WAL guarantee I1 depends on does not hold.
+
+**Orphan-resolution rule (restart path, v0c target):** on brain startup, for every orphan `MutationPlan` (no matching `MutationCommit` or `MutationInvariantViolation` by the same `mutation_id`), brain MUST either (a) complete it by executing remaining ops and emitting `MutationCommit`, OR (b) emit a `MutationCancelled` sentinel before starting any new mutation on the same parent. INVARIANT: no parent task ever has two orphan `MutationPlan` sentinels with different `mutation_id`s concurrently. The `MutationCancelled` variant does not yet exist in `AuditSentinelKind` — adding it is part of the G7 fix.
+
+Enforcement (target): unit test asserts the brain-side mutation helper always emits the sentinel first (shipped — `tests/mutation_write_ahead.rs`); integration test simulates crash between `MutationPlan` and first op, verifies restart completes or cancels before any new mutation (**v0c**); integration test simulates two competing `MutationPlan` sentinels on the same parent and asserts the cancel path fires (**v0c**).
 
 **I2 — Post-mutation acyclicity.**
 After committing any mutation batch, brain MUST call `br dep cycles`. If a cycle exists, brain MUST emit `type=mutation-invariant-violation` and run the compensating rollback encoded in the mutation-plan record. Enforcement: integration test inserts a SplitTask whose `DepRewirePolicy::Explicit` creates a cycle; asserts rollback completes and state is equivalent to pre-mutation. (Note: `br dep cycles` is first-class — we rely on beads' native detector, not a reimplementation.)
 
-**I3 — Late-signal safety.**
-A signal arriving on a task whose status is a terminal (`Approved`, `Failed`, `Cancelled`, `Superseded`) MUST NOT trigger the proposer. The signal MUST be recorded with `signal:late-arrival` label + `br audit record type=late-signal` and ignored for plan purposes. Enforcement: unit test against the signal-event handler with a fixture in each terminal state.
+**I3 — Late-signal safety (split enforcement: handler fast-path + watcher re-gate).**
+
+A signal arriving on a task whose beads status is terminal (via `PmService::closed_status()`) MUST NOT trigger the proposer. Per I5, the gate compares against the beads-persisted value, not SPUR-vocab strings.
+
+**Enforcement (shipped v0b):** authoritative enforcement is in **`SignalWatcher::tick_once`** (`crates/spur-mcp/src/plan/signal_watcher.rs:73-81`), which re-checks `issue.status != closed_status()` at consumption time before any proposer invocation. `handle_report_signal` (`crates/spur-mcp/src/server.rs:475`) also checks at recording time and routes to the late-arrival path (`signal:late-arrival` label + `LateSignal` audit sentinel, NO `[[spur-signal v1]]` comment) when terminal — this is a **fast-path**, not the authoritative gate.
+
+**TOCTOU note:** the handler's initial `get_issue` check and the subsequent operational writes are NOT transactional (beads has no transactions). If a task transitions to closed between the check and the writes, the handler records a non-late signal on a now-closed task. This is safe because the watcher's status-at-tick-time re-check at consumption catches it (proposer is never invoked). Commit `685fdc4` additionally reorders the non-late path to emit the audit sentinel first, so partial failures are at least auditable.
+
+Enforcement tests: `tests/signal_late_arrival.rs` (handler-side terminal gate via `br close`), `tests/report_signal_tool.rs` (open-task + terminal-task fixtures).
 
 **I4 — Single brain session per `.beads/`.**
 At most one brain session holds the pidfile `.beads/.spur-brain.pid` at any time. Any brain startup MUST acquire the pidfile or refuse to start. Enforcement: unit test with a stale pidfile (process absent) — startup should take the pidfile. Second unit test with a live pidfile (process present) — startup should refuse with a specific error.
@@ -440,36 +500,46 @@ beads offers two orthogonal read paths. Naming them separately prevents confusio
 
 When the two disagree — e.g., an audit sentinel shows a `mutation-commit` but `br list` shows the parent still open — the **state store wins**; the reconciler converges it on the next tick. This is the Datomic / Kafka-materialized-view pattern: dual representation, one authority per purpose.
 
-### Audit entry schema (v0a, via `br audit record`)
+### Audit entry schema (v0b, via `[[spur-audit v1]]` sentinel comments)
 
-Every plan-affecting action emits one structured record. The `type` field is a closed vocabulary in v0; adding a new type is a non-breaking extension.
+Every plan-affecting action emits one structured record, encoded as a
+comment body starting with the sentinel prefix `[[spur-audit v1]]`
+followed by a JSON object. Revision note (a) documents why `br audit
+record` was rejected as the transport. Encoder / parser:
+`crates/spur-mcp/src/plan/audit_sentinel.rs`.
 
-```json
+The envelope wraps the payload via serde's tag/content pattern. Adding a
+new variant is a non-breaking extension — see `AuditSentinelKind::Unknown`
+for the forward-compat deserialization guarantee.
+
+```
+[[spur-audit v1]]
 {
-  "id": "audit-uuid",
-  "issue_id": "bd-102",
-  "type": "plan-submit | dispatch | completion | approval | rejection | signal | mutation-plan | mutation-commit | mutation-invariant-violation | late-signal | orphan-dep-detected",
-  "actor": "brain:S1 | worker:gemini-acp | reconciler",
-  "timestamp": "2026-04-20T12:34:56.789Z",
-  "data": { /* type-specific, see below */ }
+  "kind": "Signal | MutationPlan | MutationCommit | MutationInvariantViolation | LateSignal | Dispatch | Completion | Approval | Rejection | PlanSubmit | OrphanDepDetected | Unknown",
+  /* kind-specific fields inlined at the top level */
 }
 ```
 
-Per-type `data` payloads:
+Attribution (`actor`, `timestamp`, `issue_id`) is recovered from the
+surrounding beads comment metadata — not duplicated in the JSON payload.
 
-| `type` | `data` fields |
+Per-kind payload fields (authoritative in `audit_sentinel.rs`; shown here
+for schema review):
+
+| `kind` | Payload fields |
 |---|---|
-| `plan-submit` | `{ plan_id, epic_issue_id, task_ids }` |
-| `dispatch` | `{ delegation_id, worker, attempt }` |
-| `completion` | `{ delegation_id, worker_branch, diff_summary }` |
-| `approval` | `{ delegation_id }` |
-| `rejection` | `{ delegation_id, feedback }` |
-| `signal` | `{ signal_id, kind, severity, reason }` (mirrors comment payload) |
-| `mutation-plan` | `{ mutation_id, op: "split", batch: { ops: [...] }, trigger_signal_id, trigger_task_id }` |
-| `mutation-commit` | `{ mutation_id, applied_ops: [...], children_created: [...] }` |
-| `mutation-invariant-violation` | `{ mutation_id, violation: "cycle" \| ..., rollback_status }` |
-| `late-signal` | `{ signal_id, terminal_status }` |
-| `orphan-dep-detected` | `{ orphan_task_id, missing_dep }` |
+| `PlanSubmit` | `{ plan_id, epic_issue_id, task_ids }` |
+| `Dispatch` | `{ delegation_id, worker, attempt }` |
+| `Completion` | `{ delegation_id, worker_branch, diff_summary }` |
+| `Approval` | `{ delegation_id }` |
+| `Rejection` | `{ delegation_id, feedback }` |
+| `Signal` | `{ signal_id, kind, severity, reason }` (mirrors `[[spur-signal v1]]` comment payload) |
+| `MutationPlan` | `{ mutation_id, op, trigger_signal_id, trigger_task_id }` |
+| `MutationCommit` | `{ mutation_id, children_created: [...] }` |
+| `MutationInvariantViolation` | `{ mutation_id, violation, rollback_status }` (see G6 for payload gap) |
+| `LateSignal` | `{ signal_id, terminal_status }` |
+| `OrphanDepDetected` | `{ orphan_task_id, missing_dep }` |
+| `Unknown` | `{ kind: String, raw: serde_json::Value }` — forward-compat capture |
 
 ### Signal schema (v0b, via `[[spur-signal v1]]` comment + `signal:*` label)
 
@@ -522,219 +592,131 @@ create-path requires verifying the output stays ≤50 chars.
 
 ## Interfaces
 
+Per rev 4 Stance C: this section owns contracts, method semantics, and
+JSON schemas. Rust signatures live in code and are not duplicated here —
+follow the file citations for authoritative definitions. The §Label
+vocabulary section uses the same pattern.
+
 ### `BeadsAdvanced` trait — v0a
 
 Beads-only extension. Exposed via `PmService::advanced() -> Option<&dyn BeadsAdvanced>`, parallel to the existing `PmService::analyzer()` pattern. `GitHubAdapter` does not implement.
 
-```rust
-#[async_trait::async_trait]
-pub trait BeadsAdvanced: Send + Sync {
-    /// `br ready --label ... --assignee ... --limit ...`
-    async fn list_ready(&self, filter: ReadyFilter) -> anyhow::Result<Vec<IssueSummary>>;
+**Authoritative definition:** `crates/spur-pm/src/advanced.rs`.
 
-    /// `br comments list <id>`
-    async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<Comment>>;
+| Method | Purpose | Backing CLI |
+|---|---|---|
+| `list_ready(filter: ReadyFilter)` | Unblocked-not-deferred issues matching filter | `br ready --label ... --assignee ... --limit ...` |
+| `list_comments(issue_id)` | All comments for an issue, chronological | `br comments list <id>` |
+| `add_comment(issue_id, body)` | Append a comment (used as audit sentinel transport) | `br comments add <id> <body>` |
+| `remove_dependency(issue_id, depends_on_id)` | Remove a dep edge | `br dep remove <issue_id> <depends_on_id>` |
+| `dep_cycles()` | All cycles in the current dep graph; empty when acyclic | `br dep cycles` |
 
-    /// `br comments add <id> <body>`
-    async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<CommentId>;
+**Removed since design inception:** `audit_record` + `audit_log` methods + `AuditRecordInput` / `AuditEntryType` / `AuditEntry` types. Rev note (a) explains: beads drops the `data` field on persist; we switched to `[[spur-audit v1]]` sentinel comments. The audit surface now lives in `crates/spur-mcp/src/plan/audit_sentinel.rs` as the `AuditSentinelKind` enum.
 
-    /// `br audit record <issue_id> --type <ty> --data <json>`
-    async fn audit_record(
-        &self,
-        issue_id: &str,
-        entry: AuditRecordInput,
-    ) -> anyhow::Result<AuditId>;
+**`ReadyFilter` shape (authoritative in code):** `crates/spur-pm/src/advanced.rs`. Fields include `assignee`, `labels_all`, `labels_any`, `issue_type`, `priorities: Vec<i32>` (set-membership over priority values), `limit`. Derives `Default`.
 
-    /// `br audit log <issue_id>` — returns chronological records
-    async fn audit_log(&self, issue_id: &str) -> anyhow::Result<Vec<AuditEntry>>;
+### `AuditSentinelKind` — v0b (replaces removed `AuditEntryType`)
 
-    /// `br dep remove <issue_id> <depends_on_id>`
-    async fn remove_dependency(
-        &self,
-        issue_id: &str,
-        depends_on_id: &str,
-    ) -> anyhow::Result<()>;
+**Authoritative definition:** `crates/spur-mcp/src/plan/audit_sentinel.rs`.
 
-    /// `br dep cycles` — returns empty when acyclic
-    async fn dep_cycles(&self) -> anyhow::Result<Vec<DependencyCycle>>;
-}
+The enum is `#[non_exhaustive]` at the enum level (external consumers must use `_ =>` catch-all). Variants:
 
-#[derive(Debug, Clone, Default)]
-pub struct ReadyFilter {
-    pub assignee: Option<String>,
-    pub labels_all: Vec<String>,
-    pub labels_any: Vec<String>,
-    pub issue_type: Option<String>,
-    pub priority_min: Option<i32>,
-    pub priority_max: Option<i32>,
-    pub limit: Option<usize>,
-}
+| Variant | Emitted by | Role |
+|---|---|---|
+| `PlanSubmit` | brain at plan submit | plan-creation breadcrumb |
+| `Dispatch` | reconciler on worker dispatch | worker-handoff record |
+| `Completion` | reconciler on worker completion | worker-return record |
+| `Approval` | brain on review approval | brain-decision record |
+| `Rejection` | brain on review rejection | brain-decision record |
+| `Signal` | `report_signal` handler (non-late path) | signal recording, paired with `[[spur-signal v1]]` operational comment |
+| `MutationPlan` | `apply_mutation` write-ahead (I1) | finalizer open |
+| `MutationCommit` | `apply_mutation` on success | finalizer close |
+| `MutationInvariantViolation` | `apply_mutation` on cycle detection (I2) | rollback audit (see G6 for payload gap) |
+| `LateSignal` | `report_signal` handler (late path, I3) | terminal-task signal record |
+| `OrphanDepDetected` | reconciler on missing-dep observation | triage breadcrumb |
+| `Unknown { kind, raw }` | deserialization fallback (forward-compat) | strong guarantee: old readers round-trip new sentinel kinds via raw JSON capture |
 
-pub struct AuditRecordInput {
-    pub entry_type: AuditEntryType,
-    pub data: serde_json::Value,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-#[serde(rename_all = "kebab-case")]
-pub enum AuditEntryType {
-    PlanSubmit,
-    Dispatch,
-    Completion,
-    Approval,
-    Rejection,
-    Signal,
-    MutationPlan,
-    MutationCommit,
-    MutationInvariantViolation,
-    LateSignal,
-    OrphanDepDetected,
-}
-
-pub struct AuditEntry {
-    pub id: AuditId,
-    pub issue_id: String,
-    pub entry_type: AuditEntryType,
-    pub actor: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub data: serde_json::Value,
-}
-
-pub struct Comment {
-    pub id: CommentId,
-    pub body: String,
-    pub actor: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-pub struct DependencyCycle {
-    pub issues: Vec<String>, // cycle members in order
-}
-
-pub type AuditId = String;
-pub type CommentId = String;
-```
+Comment format is `[[spur-audit v1]]\n<json>` where `<json>` carries the variant tag + payload per `serde(tag = "kind")`. Encoder: `audit_sentinel::encode_comment`. Parser: `audit_sentinel::parse_comment`.
 
 ### Actor threading (v0a, additive)
 
-`BeadsAdapter` acquires an optional `default_actor` field at construction. Every `run_br` call appends `--actor <actor>` when set. A per-call override is available via a new internal method.
-
-```rust
-impl BeadsAdapter {
-    pub async fn connect_with_actor(
-        repo_root: &Path,
-        default_actor: Option<String>,
-        cursor_path: Option<PathBuf>,  // see "Cursor fixes"
-    ) -> anyhow::Result<Self> { /* ... */ }
-
-    async fn run_br_as(
-        &self,
-        args: Vec<String>,
-        actor: Option<&str>,
-    ) -> anyhow::Result<String> { /* appends --actor when Some */ }
-}
-```
-
-Existing `BeadsAdapter::connect` remains and delegates to `connect_with_actor(..., None, None)` to preserve behavior.
+**Authoritative:** `crates/spur-pm/src/beads.rs` — `BeadsAdapter::connect_with_actor(repo_root, default_actor, cursor_path)` and private `run_br_as(args, actor_override)`. The existing `BeadsAdapter::connect` delegates to `connect_with_actor(..., None, None)`, preserving behavior. Every `run_br` call appends `--actor <actor>` when set.
 
 ### Cursor fixes (v0a, additive + bugfix)
 
-Two issues with the current `poll()` implementation at `crates/spur-pm/src/beads.rs:465-514`:
+**Authoritative:** `crates/spur-pm/src/beads.rs:461-468` for F1; `crates/spur-pm/src/beads.rs` `save_cursor` / `connect_with_actor` for F2.
 
-1. **F1 (race):** line 513 sets `last_poll = Utc::now()` but filter is `updated_at >= last_poll`. Writes with `updated_at` between the fetch and the cursor-write are never returned on subsequent polls. **Fix:** track `max(updated_at)` from the returned set and use that as the cursor.
-2. **F2 (lossy restart):** `last_poll: Mutex<Option<DateTime<Utc>>>` is in-memory only; adapter restart re-triggers the first-poll path and flood-emits all open issues as `IssueCreated`. **Fix:** optional `cursor_path: Option<PathBuf>` ctor arg; if set, read on connect and flush after each poll.
-
-Both fixes are additive: default behavior (no cursor_path) preserves current semantics; the race fix is pure improvement.
+- **F1 (race, shipped):** cursor is set from `max(updated_at)` over the returned set (not `Utc::now()`), eliminating the gap-between-fetch-and-cursor-write race.
+- **F2 (disk-backed restart, shipped):** `connect_with_actor` accepts `cursor_path: Option<PathBuf>`; if set, cursor is read on connect and flushed via `save_cursor` after each `poll` — best-effort (errors logged, not fatal).
 
 ### MCP tool `report_signal` — v0b
 
-Only new MCP surface. Workers call; server translates to three beads CLI calls. Brain never calls this tool.
+**Authoritative handler:** `crates/spur-mcp/src/server.rs::handle_report_signal` (~line 447).
 
-```
-Tool name:      report_signal
-Arguments:      { task_id: string, signal: WorkerSignal }
-Returns:        { recorded: bool, signal_id: string, late: bool }
+- **Tool name:** `report_signal`
+- **Arguments:** `{ task_id: string, signal: WorkerSignal }`
+- **Returns:** `{ recorded: bool, signal_id: string, late: bool }`
 
-Behavior:
-  1. Fetch task via BeadsAdvanced::get_issue(task_id)
-  2. If status is terminal (Approved, Failed, Cancelled, Superseded):
-     - Add label `signal:late-arrival`
-     - Emit AuditRecordInput { type: LateSignal, ... }
-     - Return { recorded: true, late: true }
-  3. Otherwise:
-     - Add label `signal:<kind>` (and optional severity bucket)
-     - Add comment `[[spur-signal v1]]\n{...}` with signal_id
-     - Emit AuditRecordInput { type: Signal, ... }
-     - Return { recorded: true, late: false }
-```
+**Behavior (shipped in v0b.1):**
 
-### `WorkerSignal` / `PlanMutationOp` / traits — v0b
+1. Fetch task via `PmService::get_issue(task_id)`.
+2. Check `issue.status == pm.closed_status()` (per I5; see also I3 split enforcement).
+3. **Late path (terminal task):**
+   - Emit `[[spur-audit v1]]` sentinel of kind `LateSignal { signal_id, terminal_status }` via `adv.add_comment`.
+   - Add label `signal:late-arrival` via `update_issue`.
+   - Return `{ recorded: true, late: true }`. No `[[spur-signal v1]]` operational comment is emitted (by design — the proposer must never see a late signal).
+4. **Non-late path (open task):**
+   - Emit `[[spur-audit v1]]` sentinel of kind `Signal { signal_id, kind, severity, reason }` FIRST (audit-before-operational-writes; makes partial failures auditable; see I3 TOCTOU note).
+   - Emit `[[spur-signal v1]]\n<json>` operational comment via `adv.add_comment` (this is what the brain-side proposer consumes).
+   - Add label `signal:<kind>` via `update_issue`.
+   - Return `{ recorded: true, late: false }`.
 
-```rust
-#[non_exhaustive]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WorkerSignal {
-    ScopeDrift {
-        signal_id: uuid::Uuid,
-        severity: f32,
-        reason: String,
-        estimated_subtasks: Option<u8>,
-    },
-    // future: SkewDetected, ConfidenceDrop, CostOverrun, DependencyDiscovered, ...
-}
+**Two-comment emission rationale:** operational reads (proposer consumers) use `[[spur-signal v1]]`; analytical reads (MCTS, dashboards) use `[[spur-audit v1]]`. Splitting the two surfaces lets each evolve independently — see §Operational reads vs. analytical reads and the rev 4 "Stance C" discussion.
 
-#[non_exhaustive]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum PlanMutationOp {
-    SplitTask {
-        parent: TaskId,
-        children: Vec<PlanTask>,
-        dep_rewire: DepRewirePolicy,
-    },
-    // future: RetargetWorker, CoalesceTasks, SpawnDepTask, ...
-}
+### `WorkerSignal` — v0b
 
-#[non_exhaustive]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum DepRewirePolicy {
-    /// Children form a sequential chain; original downstream rewires to the chain's `tail`.
-    /// (Pipeline-stage / Unix-pipe tradition.)
-    Pipeline { tail: TaskId },
-    /// Children are parallel; original downstream waits for all to complete before proceeding.
-    /// (OpenMP / MPI / rayon `join` barrier tradition.)
-    Barrier,
-    /// Caller supplies explicit edges between children and original downstream.
-    Explicit { edges: Vec<(TaskId, TaskId)> },
-}
+**Authoritative definition:** `crates/spur-mcp/src/plan/signals.rs`. `#[non_exhaustive]` at enum level. Variants tagged via `serde(tag = "kind", rename_all = "snake_case")`.
 
-pub struct MutationBatch {
-    pub mutation_id: uuid::Uuid,
-    pub ops: Vec<PlanMutationOp>,
-    pub trigger_signal_id: Option<uuid::Uuid>,
-    pub trigger_task_id: TaskId,
-}
+| Variant | Fields | Purpose |
+|---|---|---|
+| `ScopeDrift` | `signal_id: Uuid`, `severity: f32`, `reason: String`, `estimated_subtasks: Option<u8>` | Worker detects the task's scope is larger than the plan anticipated |
 
-#[async_trait::async_trait]
-pub trait MutationProposer: Send + Sync {
-    async fn propose(
-        &self,
-        state: &PlanState,
-        signal: &WorkerSignal,
-        triggering_task: TaskId,
-    ) -> Vec<MutationBatch>;
-}
+Future variants (named in §Generalization Map but not shipped): `SkewDetected`, `ConfidenceDrop`, `CostOverrun`, `DependencyDiscovered`. Adding them is a non-breaking extension.
 
-#[async_trait::async_trait]
-pub trait MutationScorer: Send + Sync {
-    async fn score(&self, state: &PlanState, batch: &MutationBatch) -> f32;
-}
-```
+### `PlanMutationOp` + `DepRewirePolicy` — v0b
 
-**v0b impls:** `ScopeDriftSplitProposer` (hardcoded: any `ScopeDrift` with severity ≥ 0.5 produces one `SplitTask` with `children.len() == signal.estimated_subtasks.unwrap_or(2)`); `TrivialScorer` (returns 1.0).
+**Authoritative definitions:** `crates/spur-mcp/src/plan/mutation.rs`. Both `#[non_exhaustive]` at enum level.
 
-**v1 substitution:** MCTS replanner ships as alternate impls of these traits; callsite in the brain is unchanged.
+| `PlanMutationOp` variant | Fields | Purpose |
+|---|---|---|
+| `SplitTask` | `parent: String` (beads issue ID), `children: Vec<TaskDraft>`, `dep_rewire: DepRewirePolicy` | Replace parent with a subplan of `children` wired per `dep_rewire` |
+
+Note: fields use `String` for issue IDs (not a typed `TaskId` newtype — SPUR uses `String` workspace-wide). `children` are `TaskDraft` (title + description + assignee + priority), not the richer in-memory `PlanTask` — a proposer authors mutations, not complete plan nodes.
+
+| `DepRewirePolicy` variant | Fields | Semantics |
+|---|---|---|
+| `Pipeline` | `tail_index: usize` | Children form a sequential chain; original downstream rewires to `children[tail_index]` |
+| `Barrier` | — | Children are parallel; original downstream waits on ALL to complete |
+| `Explicit` | `edges: Vec<(usize, String)>` | Caller supplies `(child_index, downstream_task_id)` pairs |
+
+Note: `Pipeline.tail_index` and `Explicit.edges[].0` are indices into the `children` array, not task IDs — at propose-time, children do not yet have IDs. The executor resolves indices to IDs at apply-time.
+
+**`MutationBatch`:** `crates/spur-mcp/src/plan/mutation.rs`. Fields: `mutation_id: Uuid`, `trigger_signal_id: Option<Uuid>`, `trigger_task_id: String`, `ops: Vec<PlanMutationOp>`.
+
+**`TaskDraft`:** `crates/spur-mcp/src/plan/mutation.rs`. Fields: `title`, `description`, `assignee: Option<String>`, `priority: Option<i32>`.
+
+### `MutationProposer` + `MutationScorer` — v0b trait seam
+
+**Authoritative definitions:** `crates/spur-mcp/src/plan/proposers.rs`. Both `#[async_trait]`.
+
+- `MutationProposer::propose(state: &PlanState, signal: &WorkerSignal, triggering_task: &str) -> Vec<MutationBatch>`.
+- `MutationScorer::score(state: &PlanState, batch: &MutationBatch) -> f32`.
+
+**v0b impls (same module):**
+- `ScopeDriftSplitProposer { severity_threshold: f32 }` (default 0.5) — `ScopeDrift` signals above threshold produce one `SplitTask` with `estimated_subtasks.unwrap_or(2)` children.
+- `TrivialScorer` — returns 1.0 for any non-empty batch, 0.0 for empty.
+
+**v1 substitution target:** MCTS replanner ships as alternate impls; `SignalWatcher<P, S>` callsite at `crates/spur-mcp/src/plan/signal_watcher.rs` is unchanged. Note: `stub_plan_state()` at `signal_watcher.rs:158` is a placeholder `PlanState` — real MCTS proposers will require brain-side `PlanState` projection plumbing.
 
 ---
 
@@ -774,7 +756,7 @@ pub trait MutationScorer: Send + Sync {
 - E1. `report_signal` MCP tool in `crates/spur-mcp/src/tools.rs` + handler in `server.rs`.
 - E2. Pidfile acquisition `.beads/.spur-brain.pid` at brain startup; wired into the brain session init. Ownership between `spur-cli` and `spur-mcp` is resolved in Open Question Q1.
 - E3. Late-signal rule implementation inside `report_signal` handler.
-- E4. Brain-side signal watcher: polls `br list -s awaiting_review --label-any signal:*`, dedupes signal_id via local cache + `br audit log`, invokes proposer on new signals.
+- E4. Brain-side signal watcher: `SignalWatcher<P, S>` at `crates/spur-mcp/src/plan/signal_watcher.rs`. Ticks every 3s by default. Filters open issues (`issue.status != pm.closed_status()`, per I5) carrying any `signal:*` label and not already labelled `spur:signal-processed:*`, parses `[[spur-signal v1]]` sentinel comments, dedupes `signal_id` via an in-memory `seen` set (marked only on decisive outcome — see G4 same-process fix), invokes `MutationProposer::propose` + `MutationScorer::score`, applies the highest-scored batch via `mutation_executor::apply_mutation`. G1 (mid-dispatch signals) + G3 (multi-signal-per-tick) + G4 (cross-restart retry) are live gaps documented in §Known Correctness Gaps.
 
 ---
 
@@ -874,23 +856,41 @@ The five mental models in §Mental Models are the ultimate leverage points — r
 
 ---
 
-## Known Correctness Gaps (as of v0b ship)
+## Known Correctness Gaps (as of v0b.1 ship)
 
-These are live behavioral gaps in shipped v0b code, surfaced by the staff
-review around commit `0823a42`. They are distinct from Future Work (which
-enumerates orthogonal extensions). Fixing them is v0c scope.
+These are live behavioral gaps in shipped v0b code, surfaced by:
+- Staff spec-vs-code drift review (brain, 13 forward + 3 backward drifts)
+- Staff invariant-enforcement review (codex-acp, delegation `173069c6`)
+
+They are distinct from Future Work (which enumerates orthogonal extensions).
+Fixing them is v0c scope unless noted.
 
 **G1 — SignalWatcher lacks a "worker finished" marker.**
 `SignalWatcher::tick_once` filters `issue.status != pm.closed_status()` + requires a `signal:*` label + requires no `spur:signal-processed:*` label. There is no durable backend marker distinguishing a task that has been *dispatched* (worker running) from one that has *finished and is awaiting review*. The `labels::READY_FOR_REVIEW` constant exists (`crates/spur-mcp/src/plan/labels.rs:48`) but **has zero writers today**. Consequence: signals on mid-dispatch tasks are processed by the watcher, producing a mutation while the worker is still generating output on the parent task (violates MM4: brain and worker never concurrently mutate the same task). Fix direction: either (a) reconciler writes `ready-for-review` on worker completion and watcher filters `labels.contains(READY_FOR_REVIEW)`, or (b) watcher reads task dispatch state via a separate mechanism (e.g., delegation-id label presence + in-memory dispatch set).
 
-**G2 — Rejected tasks remain eligible for signal processing.**
-A task the brain has decided to reject (SPUR-vocab `Rejected`) still projects to beads `open` status as long as the reconciler hasn't closed it. Under the current watcher filter, a signal on a rejected task would be proposed and applied, bypassing the brain's rejection decision. Same root cause as G1 (no durable "do not reprocess" marker). Fix direction: write a `spur:rejected` label (or equivalent) on rejection, and extend the watcher filter to skip it.
+**G2 — Rejected tasks remain eligible for signal processing (corrected from rev 3).**
+A task the brain has decided to reject is written with beads status `open` via `update_issue` in the rejection path (`crates/spur-mcp/src/plan/mod.rs:1548-1552, 1600-1603`); no durable marker distinguishes "rejected-and-retry-eligible" from "never-dispatched-open." The reconciler is read-only (`crates/spur-mcp/src/plan/reconciler.rs:109-114`), so it does not close the task — **the prior rev-3 description of a "reconciler close race" was wrong; there is no race, just a missing marker.** Under the current watcher filter, a signal on a rejected task is proposed and applied, bypassing the brain's rejection decision. Fix direction: write a `spur:rejected` label on rejection, extend the watcher filter to skip it.
 
 **G3 — Multi-signal-per-tick: watcher checks `spur:signal-processed:*` only once per issue.**
-In `signal_watcher.rs::tick_once`, the `spur:signal-processed:*` filter at the top of the issue loop runs once *before* the inner comments loop. If an issue has N valid signal comments, the first one triggers an `apply_mutation` that writes `spur:signal-processed:<M1>`, but the remaining N-1 comments are still processed in the same tick — producing N mutations back-to-back on the same (now-closed-after-first-split) parent. The in-memory `seen: HashSet<Uuid>` dedupe is per-signal-id, not per-task, and does not stop this. Fix direction: break the inner loop after a successful `apply_mutation`, OR re-check the label set between comments, OR switch from issue-labeled to comment-marker-based processed detection.
+In `signal_watcher.rs::tick_once`, the `spur:signal-processed:*` filter at the top of the issue loop runs once *before* the inner comments loop (`signal_watcher.rs:91-99`). If an issue has N valid signal comments, the first one triggers an `apply_mutation` that writes `spur:signal-processed:<M1>`, but the remaining N-1 comments are still processed in the same tick — producing N mutations back-to-back on the same (now-closed-after-first-split) parent. The in-memory `seen: HashSet<Uuid>` dedupe is per-signal-id, not per-task, and does not stop this. Fix direction: break the inner loop after a successful `apply_mutation`, OR re-check the label set between comments, OR switch from issue-labeled to comment-marker-based processed detection.
 
-**G4 — Cross-restart retry loop after rollback.**
-On `apply_mutation` failure (e.g., cycle detected → rollback), the `MutationInvariantViolation` audit sentinel is written but the triggering signal comment is NOT marked processed (there's no mutation-id to key the label against — the mutation never committed). On next brain restart, the watcher sees the signal-bearing task, the signal is in-memory-unseen, and a fresh proposer invocation fires — reproducing the same cycle if the proposer is deterministic for that state. Fix direction: write a signal-scoped marker (e.g., `spur:signal-tried:<signal_id>`) on rollback, and extend the watcher to skip signals already attempted + failed.
+**G4 — Retry loop after failed apply (cross-restart + same-process; same-process variant fixed in v0b.1).**
+Two variants of the same root cause: a failed `apply_mutation` leaves the triggering signal re-eligible.
+
+- **Cross-restart variant (unfixed, v0c scope):** On `apply_mutation` failure (e.g., cycle detected → rollback), the `MutationInvariantViolation` audit sentinel is written but the triggering signal comment is NOT marked processed (there's no mutation-id to key the label against — the mutation never committed). On next brain restart, the watcher sees the signal-bearing task, the signal is in-memory-unseen, and a fresh proposer invocation fires — reproducing the same cycle if the proposer is deterministic for that state. Fix direction: write a signal-scoped marker (e.g., `spur:signal-tried:<signal_id>`) on rollback, and extend the watcher to skip signals already attempted + failed.
+- **Same-process variant (fixed in `685fdc4`):** The watcher's in-memory `seen: HashSet<Uuid>` was previously inserted BEFORE `apply_mutation`; on failure, the signal was suppressed for the process lifetime. Fixed by moving the insert to after a decisive outcome (successful apply or no proposer candidates). Transient PM errors now retry on subsequent ticks as intended.
+
+**G5 — `ISSUE_SCAN_LIMIT = 10_000` silent truncation (warn-only in v0b.1).**
+
+`mutation_executor::list_all_issue_ids` passes `limit: Some(10_000)` to `list_issues` and is called from `downstream_issue_ids` (dependency scan) and `rollback_mutation` (compensation cleanup). At saturation, dependency rewrites and rollback compensations may miss issues. `685fdc4` logs a warning when the limit saturates; the real fix is pagination (iterate until the cursor signals end-of-stream). Deferred to v0c. Plans with <10k active issues are safe.
+
+**G6 — Rollback compensation audit payload does not record which ops ran.**
+
+On `apply_mutation` failure, `rollback_mutation` attempts to reverse executed ops (remove child deps, restore parent status, clear superseded-by labels). If rollback itself fails, `mutation_executor.rs:152-170` emits a `MutationInvariantViolation` sentinel with `rollback_status: "failed: <err>"` — honest about the failure, but the payload does not enumerate which compensations succeeded and which didn't. Live-state inspection is the only recovery path. Fix direction: extend `MutationInvariantViolation` payload with `rollback_ops_succeeded: Vec<String>` / `rollback_ops_failed: Vec<(String, String)>`; consumers gain a structured recovery trail.
+
+**G7 — I1 orphan resolution on restart is missing (architectural).**
+
+I1 specifies that on brain startup, orphan `MutationPlan` sentinels (no matching `MutationCommit` / `MutationInvariantViolation`) must be completed or cancelled. Shipped v0b does not implement this. If a brain crashes between write-ahead and commit, the parent task remains in a partially-applied indeterminate state: `spur:mutation-id:<X>` label present, children may or may not exist, downstream deps may or may not be rewired. Fix direction requires (a) a new `AuditSentinelKind::MutationCancelled` variant, (b) startup-path audit-log scan keyed by `mutation_id`, (c) restore-or-cancel logic that reuses `rollback_mutation` for the cancel branch. Size estimate: ~200 LOC + integration test. This is the largest v0c deliverable.
 
 ---
 
