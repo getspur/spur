@@ -713,6 +713,29 @@ pub async fn emit_completion_audit(
     }
 }
 
+pub async fn emit_epic_completion_audit(
+    adv: &dyn spur_pm::BeadsAdvanced,
+    epic_id: &str,
+    plan_id: &str,
+    outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
+) {
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::EpicCompletion {
+        outcome,
+        plan_id: plan_id.to_string(),
+        epic_id: epic_id.to_string(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(error) = adv.add_comment(epic_id, &body).await {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "epic_completion",
+            epic_id = %epic_id,
+            plan_id = %plan_id,
+            "EpicCompletion audit comment emission failed: {error}"
+        );
+    }
+}
+
 /// Emit a `[[spur-audit v1]] Approval` sentinel comment on the task issue.
 pub(crate) async fn emit_approval_audit(
     pm: Option<&dyn PmLike>,
