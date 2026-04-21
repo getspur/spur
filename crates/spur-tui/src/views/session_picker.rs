@@ -1053,7 +1053,9 @@ impl View for SessionPickerView {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         match &self.state {
-            PickerState::Loading => self.render_loading(frame, area, ctx.license_badge, ctx.flag_summary),
+            PickerState::Loading => {
+                self.render_loading(frame, area, ctx.license_badge, ctx.flag_summary)
+            }
             PickerState::Populated {
                 agent,
                 sessions,

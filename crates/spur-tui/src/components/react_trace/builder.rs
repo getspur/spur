@@ -10,7 +10,7 @@ use crate::components::trace_format::{
 
 use super::types::{ActStatus, TraceKind};
 use super::ReactTrace;
-use super::SPINNER_FRAMES;
+use crate::components::spinner;
 
 impl ReactTrace {
     /// Build the flat sequence of display lines produced by the trace,
@@ -510,7 +510,7 @@ impl ReactTrace {
         Vec<usize>,
         Vec<Option<std::ops::Range<usize>>>,
     ) {
-        let spinner_frame = SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+        let spinner_frame = spinner::frame(spinner::BRAILLE, self.tick_counter as u32);
         let collapsed = self.observe_collapsed;
 
         let mut rows: Vec<VirtualRow> = Vec::new();
