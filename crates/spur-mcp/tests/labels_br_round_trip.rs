@@ -68,7 +68,9 @@ fn every_label_constructor_is_accepted_by_br() {
         labels::delegation_id("del-abc-123"),
         labels::signal_kind("scope-drift"),
         labels::signal_kind_bucket("scope-drift", "high"),
-        labels::mutation_id(&uuid::Uuid::nil()),
+        labels::mutation_id_label(&uuid::Uuid::nil()),
+        labels::signal_processed_label(&uuid::Uuid::nil()),
+        labels::superseded_by_labels(&["bd-1".into()]).pop().unwrap(),
         labels::SIGNAL_LATE_ARRIVAL.to_string(),
         labels::READY_FOR_REVIEW.to_string(),
     ];
@@ -148,4 +150,66 @@ fn parsers_round_trip_through_real_br_labels() {
         }
     }
     assert!(seen_plan && seen_task && seen_agent && seen_src);
+}
+
+/// Regression guard for the asymmetric label-length cap in `br 0.1.14`.
+///
+/// `br create --label <label>` rejects labels longer than 50 characters
+/// (`Validation failed: label: exceeds 50 characters`), while `br label add`
+/// accepts arbitrary lengths. Constructors in `plan::labels` that feed into
+/// `IssueCreate.labels` MUST stay under 50 characters — enforced by using
+/// the compact (hyphen-free) UUID form for `mutation_id_label` and
+/// `signal_processed_label`.
+#[test]
+fn br_create_enforces_50_char_cap_but_label_add_does_not() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    run_br(dir.path(), &["init"]).unwrap();
+
+    // `br create --label` enforces the cap.
+    let create_49 = "x".repeat(49);
+    run_br(dir.path(), &["create", "t", "-t", "task", "-l", &create_49])
+        .expect("br create must accept 49-char label");
+    let create_51 = "x".repeat(51);
+    assert!(
+        run_br(dir.path(), &["create", "t", "-t", "task", "-l", &create_51]).is_err(),
+        "br create must reject 51-char label (regression: 50-char cap may have moved)"
+    );
+
+    // `br label add` does not enforce the cap.
+    let id = extract_id(&run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap());
+    for len in [51usize, 64, 128, 256] {
+        let label = "x".repeat(len);
+        run_br(dir.path(), &["label", "add", &id, "-l", &label]).unwrap_or_else(|e| {
+            panic!("br label add unexpectedly rejected {len}-char label: {e}")
+        });
+    }
+}
+
+/// Regression guard: constructors whose output feeds `IssueCreate.labels`
+/// (the `br create --label` path) must fit under the 50-character cap.
+/// Currently only `mutation_id_label` reaches that path
+/// (see `mutation_executor::apply_mutation`). `signal_processed_label` is
+/// used only via `IssueUpdate.add_labels` (the `br label add` path), so it
+/// is not constrained here — the module docstring documents this asymmetry.
+#[test]
+fn mutation_id_label_fits_under_br_create_cap() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    run_br(dir.path(), &["init"]).unwrap();
+
+    let label = labels::mutation_id_label(&uuid::Uuid::new_v4());
+    assert!(
+        label.len() <= 50,
+        "mutation_id_label must fit under br create cap: {label:?} ({} chars)",
+        label.len()
+    );
+    run_br(dir.path(), &["create", "t", "-t", "task", "-l", &label])
+        .unwrap_or_else(|e| panic!("br create rejected mutation_id_label {label:?}: {e}"));
 }

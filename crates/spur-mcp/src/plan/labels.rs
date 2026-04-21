@@ -13,6 +13,15 @@
 //! IDs, agent names) are responsible for ensuring those components use only
 //! `[A-Za-z0-9_:-]` characters.
 //!
+//! # Length cap (asymmetric)
+//!
+//! `br create --label <label>` enforces a **50-character cap** — longer labels
+//! surface as `Validation failed: label: exceeds 50 characters`. `br label add`
+//! imposes no such cap (accepts labels up to at least 512 chars). Constructors
+//! that MAY be used at create time (`mutation_id_label`, `signal_processed_label`)
+//! use the compact UUID form (32 hex chars, no hyphens) to stay under the cap.
+//! This asymmetry is pinned by `labels_br_round_trip::br_create_enforces_50_char_cap`.
+//!
 //! See `docs/superpowers/specs/2026-04-20-adaptive-plan-repair-design.md`
 //! §Information Flow → Label vocabulary for the authoritative list.
 
@@ -52,10 +61,6 @@ pub const READY_FOR_REVIEW: &str = "ready-for-review";
 /// If creation fails mid-loop, the epic will NOT carry this label.
 pub const PLAN_COMPLETE: &str = "spur:plan-complete";
 
-pub fn mutation_id(mutation_id: &uuid::Uuid) -> String {
-    format!("mutation-id:{mutation_id}")
-}
-
 /// Prefix strings for parsing. Use these with `label_value()` or `strip_prefix()`.
 pub const PLAN_ID_PREFIX: &str = "spur:plan-id:";
 pub const PLAN_TASK_ID_PREFIX: &str = "spur:plan-task-id:";
@@ -94,9 +99,13 @@ pub fn parse_signal_kind(label: &str) -> Option<&str> {
 }
 
 /// Label marker set on beads issues created as part of a mutation batch.
-/// Example: `spur:mutation-id:f30c1a2e-...`
+/// Uses the compact (hyphen-free) UUID form: `br create --label` enforces a
+/// 50-character cap (verified via `labels_br_round_trip.rs`), while
+/// `br label add` does not. The compact form keeps a single label shape
+/// across both code paths.
+/// Example: `spur:mutation-id:f30c1a2e...` (total 41 chars).
 pub fn mutation_id_label(mutation_id: &uuid::Uuid) -> String {
-    format!("spur:mutation-id:{mutation_id}")
+    format!("spur:mutation-id:{}", mutation_id.simple())
 }
 
 /// Labels attached to the SUPERSEDED parent task, one per replacement child.
@@ -112,10 +121,16 @@ pub fn superseded_by_labels(child_ids: &[String]) -> Vec<String> {
 }
 
 /// Label set after a proposer consumes a signal. Preserves the original
-/// `signal:<kind>` label for historical filtering.
-/// Example: `spur:signal-processed:f30c1a2e-...`
+/// `signal:<kind>` label for historical filtering. Uses the compact UUID
+/// form for consistency with `mutation_id_label`.
+///
+/// **Only safe via `br label add` (IssueUpdate.add_labels)**, not via
+/// `br create --label`: `spur:signal-processed:` is a 22-char prefix, which
+/// combined with the 32-char compact UUID totals 54 chars — over the 50-char
+/// create-path cap. Callers at create time must use `mutation_id_label` instead.
+/// Example: `spur:signal-processed:f30c1a2e...` (total 54 chars).
 pub fn signal_processed_label(mutation_id: &uuid::Uuid) -> String {
-    format!("spur:signal-processed:{mutation_id}")
+    format!("spur:signal-processed:{}", mutation_id.simple())
 }
 
 #[cfg(test)]
@@ -169,7 +184,8 @@ mod tests {
             delegation_id("del-A"),
             signal_kind("scope-drift"),
             signal_kind_bucket("scope-drift", "high"),
-            mutation_id(&uuid::Uuid::nil()),
+            mutation_id_label(&uuid::Uuid::nil()),
+            signal_processed_label(&uuid::Uuid::nil()),
         ] {
             assert!(is_br_legal(&s), "constructor emitted br-illegal label: {s}");
         }

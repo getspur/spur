@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
-use spur_mcp::plan::labels::superseded_by_labels;
+use spur_mcp::plan::labels::{mutation_id_label, signal_processed_label, superseded_by_labels};
 use spur_mcp::plan::mutation::{DepRewirePolicy, MutationBatch, PlanMutationOp, TaskDraft};
 use spur_mcp::plan::mutation_executor::apply_mutation;
 use tempfile::TempDir;
@@ -77,14 +77,6 @@ fn mutation_batch(
     .expect("MutationBatch JSON must deserialize")
 }
 
-fn persisted_mutation_label(mutation_id: &Uuid) -> String {
-    format!("spur:mutation-id:{}", mutation_id.simple())
-}
-
-fn persisted_signal_processed_label(mutation_id: &Uuid) -> String {
-    format!("spur:signal-processed:{}", mutation_id.simple())
-}
-
 #[tokio::test]
 async fn split_task_happy_path_rewires_downstream_and_commits() {
     if !br_available() {
@@ -148,7 +140,7 @@ async fn split_task_happy_path_rewires_downstream_and_commits() {
             parent_issue.labels
         );
     }
-    let processed_label = persisted_signal_processed_label(&batch.mutation_id);
+    let processed_label = signal_processed_label(&batch.mutation_id);
     assert!(
         parent_issue
             .labels
@@ -158,7 +150,7 @@ async fn split_task_happy_path_rewires_downstream_and_commits() {
         parent_issue.labels
     );
 
-    let mutation_label = persisted_mutation_label(&batch.mutation_id);
+    let mutation_label = mutation_id_label(&batch.mutation_id);
     for child_id in &child_ids {
         let child = pm.get_issue(child_id).await.expect("load child");
         assert!(
