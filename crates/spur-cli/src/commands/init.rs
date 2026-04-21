@@ -22,7 +22,7 @@ pub const INSTALL_HINTS: &[(&str, &str)] = &[
         "https://github.com/zed-industries/codex-acp/releases",
     ),
     ("codex-acp", "npx @zed-industries/codex-acp"),
-    ("gemini", "npm install -g @google/gemini-cli"),
+    ("gemini-acp", "npm install -g @google/gemini-cli"),
     ("opencode-acp", "npm install -g opencode"),
 ];
 

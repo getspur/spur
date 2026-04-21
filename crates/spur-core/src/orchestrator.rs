@@ -138,6 +138,9 @@ pub struct BrainSession {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum InteractiveInput {
+    /// Initialize and warm the brain transport without creating an ACP
+    /// session yet. Used by dashboard startup to reduce first-prompt latency.
+    WarmConnect,
     Message {
         blocks: Vec<ContentBlock>,
         interrupt: bool,
@@ -901,6 +904,46 @@ impl Orchestrator {
                 };
 
                 match raw {
+                    InteractiveInput::WarmConnect => {
+                        if brain.is_some() || agent_connection.is_some() {
+                            continue;
+                        }
+
+                        let target_brain = self.selected_brain_name(brain_override.as_deref());
+                        self.emit(SpurEvent::now(SpurEventBody::BrainConnectStarted {
+                            brain: target_brain.clone(),
+                        }));
+
+                        match self
+                            .connect_brain(brain_override.as_deref(), permission_tx.clone())
+                            .await
+                        {
+                            Ok((conn, brain_name)) => {
+                                agent_connection = Some((conn, brain_name.clone()));
+                                self.emit(SpurEvent::now(SpurEventBody::BrainConnected {
+                                    brain: brain_name,
+                                }));
+                            }
+                            Err(e) => {
+                                error!(
+                                    error = %e,
+                                    brain = %target_brain,
+                                    "Failed to warm-connect brain"
+                                );
+                                self.emit(SpurEvent::now(SpurEventBody::BrainConnectFailed {
+                                    brain: target_brain,
+                                    reason: e.to_string(),
+                                }));
+                                if Self::is_auth_required_error(&e) {
+                                    self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
+                                        session: SessionId(String::new()),
+                                        message: Self::auth_required_banner(),
+                                    }));
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // Continuation — route to scheduler for next tick.
                     InteractiveInput::SystemContinuation { continuation, .. } => {
                         scheduler.push_continuation(continuation);
@@ -1787,6 +1830,12 @@ impl Orchestrator {
     ///
     /// Steps: resolve brain name from config → get brain_config from registry →
     /// create connection → initialize. Returns (connection, brain_name).
+    fn selected_brain_name(&self, brain_override: Option<&str>) -> String {
+        brain_override
+            .unwrap_or(&self.config.brain.default)
+            .to_string()
+    }
+
     async fn connect_brain(
         &mut self,
         brain_override: Option<&str>,
@@ -1794,9 +1843,7 @@ impl Orchestrator {
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
     ) -> Result<(Box<dyn spur_acp::AgentConnection>, String)> {
-        let brain_name = brain_override
-            .unwrap_or(&self.config.brain.default)
-            .to_string();
+        let brain_name = self.selected_brain_name(brain_override);
 
         let brain_config = self
             .registry
@@ -5524,6 +5571,15 @@ mod interactive_input_tests {
         match input {
             InteractiveInput::SystemContinuation { .. } => (),
             _ => panic!("expected SystemContinuation variant"),
+        }
+    }
+
+    #[test]
+    fn warm_connect_variant_constructs() {
+        let input = InteractiveInput::WarmConnect;
+        match input {
+            InteractiveInput::WarmConnect => (),
+            _ => panic!("expected WarmConnect variant"),
         }
     }
 }

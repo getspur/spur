@@ -61,6 +61,7 @@ pub struct DashboardView {
     focused_panel: Panel,
     focused_node: Option<ExecutorId>,
     verbose: bool,
+    session_attached: bool,
     text_batch: HashMap<String, (String, Instant)>,
     start_time: Instant,
     tracked_issues: Vec<spur_pm::IssueSummary>,
@@ -153,6 +154,7 @@ impl DashboardView {
             focused_panel: Panel::Log,
             focused_node: None,
             verbose: false,
+            session_attached: false,
             text_batch: HashMap::new(),
             start_time: Instant::now(),
             tracked_issues: Vec::new(),
@@ -183,7 +185,7 @@ impl DashboardView {
         };
 
         let text = self.input_bar.text();
-        let hint = if text.is_empty() && !self.input_bar.has_status() {
+        let hint = if text.is_empty() && !self.session_attached {
             // Empty state hint
             Paragraph::new(Span::styled(
                 " [/] command \u{00b7} [@] mention \u{00b7} [!] interrupt \u{00b7} [Alt+I] vim \u{00b7} [Alt+Enter] newline \u{00b7} ? for help",
@@ -289,7 +291,8 @@ impl DashboardView {
     }
 
     /// Update the brain status label shown in the InputBar.
-    pub fn set_brain_status(&mut self, name: Option<&str>, status: &str) {
+    pub fn set_brain_status(&mut self, name: Option<&str>, status: &str, session_attached: bool) {
+        self.session_attached = session_attached;
         let mention_count = self.input_bar.protected_ranges().len();
         let mention_suffix = if mention_count > 0 {
             format!(
@@ -317,6 +320,8 @@ impl DashboardView {
                 "[{} \u{00b7}\u{00b7}\u{00b7}{}]",
                 n, mention_suffix
             )),
+            (Some(n), "connecting") => Some(format!("[{}: connecting{}]", n, mention_suffix)),
+            (Some(n), "connected") => Some(format!("[{}: connected{}]", n, mention_suffix)),
             (Some(n), "streaming") => Some(format!(
                 "[{} \u{25b8}\u{25b8}\u{25b8}{}]",
                 n, mention_suffix
@@ -800,11 +805,10 @@ impl DashboardView {
                 let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
                     text,
                 ))];
-                // Routing: if brain is attached (status is set), this is a
-                // routed message to the active session — App substitutes the
-                // correct SessionId. Otherwise it's an explicit new-session
-                // intent that spawns a brain atomically with the first prompt.
-                if self.input_bar.has_status() {
+                // Routing: only an attached session can use the SendMessage
+                // path. A warm "connected, no session yet" state still needs
+                // NewSessionWithMessage so the first prompt spawns lazily.
+                if self.session_attached {
                     return Some(Action::SendMessage {
                         // Placeholder — App replaces with active session id.
                         session: spur_acp::SessionId(String::new()),
@@ -1026,6 +1030,33 @@ impl View for DashboardView {
 
     fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
         match &event.body {
+            SpurEventBody::BrainConnectStarted { brain } => {
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: format!("[brain:{}]", brain),
+                    message: "Connecting…".to_string(),
+                    kind: LogEntryKind::Info,
+                });
+            }
+
+            SpurEventBody::BrainConnected { brain } => {
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: format!("[brain:{}]", brain),
+                    message: "Connected".to_string(),
+                    kind: LogEntryKind::Info,
+                });
+            }
+
+            SpurEventBody::BrainConnectFailed { brain, reason } => {
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: format!("[brain:{}]", brain),
+                    message: format!("Connect failed: {}", truncate_display(reason, 120)),
+                    kind: LogEntryKind::Error,
+                });
+            }
+
             SpurEventBody::BrainSpawned { agent, session: _ } => {
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),

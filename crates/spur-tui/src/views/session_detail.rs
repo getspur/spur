@@ -568,6 +568,14 @@ impl SessionDetailView {
                 "[{} \u{00b7}\u{00b7}\u{00b7}{}]",
                 self.agent_name, mention_suffix
             )),
+            "connecting" => Some(format!(
+                "[{}: connecting{}]",
+                self.agent_name, mention_suffix
+            )),
+            "connected" => Some(format!(
+                "[{}: connected{}]",
+                self.agent_name, mention_suffix
+            )),
             "streaming" => Some(format!(
                 "[{} \u{25b8}\u{25b8}\u{25b8}{}]",
                 self.agent_name, mention_suffix
