@@ -59,6 +59,11 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             base_snapshot_branch: None,
             execution_mode: None,
         },
+        AuditSentinelKind::EpicCompletion {
+            outcome: spur_mcp::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,
+            plan_id: "P1".into(),
+            epic_id: id.clone(),
+        },
         AuditSentinelKind::Dispatch {
             delegation_id: "del-1".into(),
             worker: "codex".into(),
