@@ -3,6 +3,12 @@ use std::sync::Arc;
 use spur_cli::commands::auth::{run_with_license, AuthCommands, OutputFormat};
 use spur_license::test_support::FakeProvider;
 use spur_license::{LicenseState, Plan, SpurLicense};
+use spur_license::policy::PolicyResolver;
+use spur_license::FeatureGate;
+
+fn test_feature_gate() -> Arc<FeatureGate> {
+    Arc::new(FeatureGate::new(PolicyResolver::embedded()))
+}
 
 #[tokio::test]
 async fn login_happy_path_activates_and_prints() {
@@ -11,7 +17,7 @@ async fn login_happy_path_activates_and_prints() {
         Plan::Pro,
         Default::default(),
     )));
-    let license = SpurLicense::from_provider(fake.clone());
+    let license = SpurLicense::from_provider(fake.clone(), test_feature_gate());
 
     run_with_license(
         AuthCommands::Login {
@@ -38,7 +44,7 @@ async fn refresh_invokes_validate_exactly_once() {
         Plan::Pro,
         Default::default(),
     )));
-    let license = SpurLicense::from_provider(fake.clone());
+    let license = SpurLicense::from_provider(fake.clone(), test_feature_gate());
 
     run_with_license(
         AuthCommands::Refresh {
@@ -54,7 +60,7 @@ async fn refresh_invokes_validate_exactly_once() {
 #[tokio::test]
 async fn logout_invokes_deactivate_and_transitions_to_inactive() {
     let fake = Arc::new(FakeProvider::new(LicenseState::active_cached()));
-    let license = SpurLicense::from_provider(fake.clone());
+    let license = SpurLicense::from_provider(fake.clone(), test_feature_gate());
 
     run_with_license(
         AuthCommands::Logout {
@@ -80,7 +86,7 @@ async fn login_fails_on_config_error_state() {
     let mut seed = LicenseState::inactive("unconfigured");
     seed.status = LicenseStatus::ConfigError;
     let fake = Arc::new(FakeProvider::new(seed));
-    let license = SpurLicense::from_provider(fake);
+    let license = SpurLicense::from_provider(fake, test_feature_gate());
 
     let res = run_with_license(
         AuthCommands::Login {
