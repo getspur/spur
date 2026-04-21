@@ -538,13 +538,12 @@ pub fn review_task_def() -> ToolDefinition {
     ToolDefinition {
         name: "review_task".to_string(),
         description: "Submit a review decision for a plan task awaiting review. \
-            Three decisions: 'approve' (task done, beads→done), 'reject' (task \
-            dead, beads→open, dependent tasks auto-failed), or 'request_changes' \
-            (re-dispatch worker with feedback — max 3 attempts per task, requires \
-            `feedback`). After approve, dependent tasks whose deps are now all \
-            Approved are auto-dispatched. Returns updated plan status with counts, \
-            ready_to_merge flag, and (for request_changes) new_attempt + \
-            new_delegation_id fields."
+            Three decisions: 'approve' (task done, beads→closed), 'reject' (task \
+            dead, beads→closed with `spur:review-rejected`, dependent tasks \
+            auto-failed), or 'request_changes' (persist task back to open, clear \
+            review ownership, and let the reconciler redispatch when ready — max 3 \
+            attempts per task, requires `feedback`). Returns updated plan status \
+            with counts and ready_to_merge flag."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -560,11 +559,11 @@ pub fn review_task_def() -> ToolDefinition {
                 "decision": {
                     "type": "string",
                     "enum": ["approve", "reject", "request_changes"],
-                    "description": "Review verdict. 'approve' → task marked done, dependents auto-dispatched. 'reject' → task terminal, pending/ready dependents cascaded to failed (dispatched/awaiting_review dependents flagged in warnings). 'request_changes' → worker re-dispatched with feedback, bounded by max_attempts (3); response carries remaining_attempts."
+                    "description": "Review verdict. 'approve' → task marked done and persisted closed; newly-ready work is picked up by the reconciler. 'reject' → task terminal, pending/ready dependents cascaded to failed (dispatched/awaiting_review dependents flagged in warnings). 'request_changes' → task persisted back to open so the reconciler can redispatch it later, bounded by max_attempts (3)."
                 },
                 "feedback": {
                     "type": "string",
-                    "description": "Review notes. REQUIRED when decision='request_changes' (passed verbatim to the re-dispatched worker as the current request). Optional for approve/reject (stored as rationale)."
+                    "description": "Review notes. REQUIRED when decision='request_changes' (stored in the persisted retry comment for the next reconciler dispatch). Optional for approve/reject (stored as rationale)."
                 }
             },
             "required": ["plan_id", "task_id", "decision"]
