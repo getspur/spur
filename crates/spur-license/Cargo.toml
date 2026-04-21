@@ -20,6 +20,9 @@ base64 = "0.22"
 uuid = { workspace = true }
 directories = { workspace = true }
 tracing = { workspace = true }
+ahash = "0.8"
+arc-swap = "1.7"
+seahash = "4"
 
 [build-dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8"] }
