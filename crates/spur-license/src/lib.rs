@@ -1,5 +1,6 @@
 mod community;
 mod licenseseat;
+mod quota;
 pub mod policy;
 pub mod provider;
 
@@ -18,6 +19,7 @@ pub use crate::licenseseat::{
     classify_binding_mode, classify_subject, from_env, from_env_or_disabled,
 };
 pub use crate::provider::{LicenseProvider, RefreshPolicy};
+pub use crate::quota::{QuotaKey, QuotaValue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LicenseStatus {
