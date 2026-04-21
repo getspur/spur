@@ -72,6 +72,8 @@ pub struct IssueFilter {
     pub text_search: Option<String>,
     /// None = backend default (typically 50)
     pub limit: Option<usize>,
+    /// Optional zero-based offset for paginated scans.
+    pub offset: Option<usize>,
 }
 
 /// Parameters for creating a new issue.
@@ -125,4 +127,14 @@ pub struct PrParams {
 pub enum PmEvent {
     IssueCreated(IssueSummary),
     IssueUpdated(IssueSummary),
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn issue_filter_offset_defaults_to_none() {
+        let filter = super::IssueFilter::default();
+        assert_eq!(filter.offset, None);
+        assert_eq!(filter.limit, None);
+    }
 }
