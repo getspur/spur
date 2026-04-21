@@ -449,6 +449,7 @@ pub async fn emit_plan_submit_audit(
         epic_issue_id: sg.epic_id.clone(),
         task_ids: sg.task_map.values().cloned().collect(),
         base_snapshot_branch: base_snapshot_branch.map(str::to_string),
+        base_snapshot_oid: None,
         execution_mode: execution_mode.map(str::to_string),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);

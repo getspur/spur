@@ -201,3 +201,68 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
             && execution_mode == "execute_epic"
     )));
 }
+
+#[tokio::test]
+async fn plan_submit_sentinel_round_trips_base_snapshot_oid() {
+    if !br_available() {
+        eprintln!(
+            "skipping plan_submit_sentinel_round_trips_base_snapshot_oid: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+
+    let subgraph =
+        spur_mcp::build_epic_subgraph(&pm, "P3", "Audit Test Epic", None, &minimal_tasks())
+            .await
+            .expect("build_epic_subgraph must succeed");
+
+    let adv = pm
+        .advanced()
+        .expect("beads-backed PmService must return advanced()");
+    let sentinel = AuditSentinelKind::PlanSubmit {
+        plan_id: "P3".into(),
+        epic_issue_id: subgraph.epic_id.clone(),
+        task_ids: subgraph.task_map.values().cloned().collect(),
+        base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
+        base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
+        execution_mode: Some("submit_plan".into()),
+    };
+    adv.add_comment(
+        &subgraph.epic_id,
+        &audit_sentinel::encode_comment(&sentinel),
+    )
+    .await
+    .expect("write sentinel");
+
+    let list_out = run_br(dir.path(), &["comments", "list", &subgraph.epic_id])
+        .expect("br comments list failed");
+    let items: serde_json::Value =
+        serde_json::from_str(&list_out).expect("br comments list output must be valid JSON");
+    let texts: Vec<String> = items
+        .as_array()
+        .expect("comments list must be a JSON array")
+        .iter()
+        .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from))
+        .collect();
+    let sentinels = collect_sentinels(&texts);
+
+    assert!(sentinels.iter().any(|candidate| matches!(
+        candidate,
+        AuditSentinelKind::PlanSubmit {
+            plan_id,
+            base_snapshot_branch: Some(base_snapshot_branch),
+            base_snapshot_oid: Some(base_snapshot_oid),
+            ..
+        } if plan_id == "P3"
+            && base_snapshot_branch == "spur/brain-snapshot-test"
+            && base_snapshot_oid == "0123456789abcdef0123456789abcdef01234567"
+    )));
+}
