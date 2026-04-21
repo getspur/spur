@@ -61,6 +61,14 @@ fn minimal_tasks() -> Vec<PlanTask> {
     ]
 }
 
+fn collect_sentinels(texts: &[String]) -> Vec<AuditSentinelKind> {
+    texts
+        .iter()
+        .filter_map(|text| audit_sentinel::parse_comment(text))
+        .filter_map(|result| result.ok())
+        .collect()
+}
+
 #[tokio::test]
 async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
     if !br_available() {
@@ -92,7 +100,7 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
     let adv = pm
         .advanced()
         .expect("beads-backed PmService must return advanced()");
-    spur_mcp::emit_plan_submit_audit(adv, "P1", &subgraph).await;
+    spur_mcp::emit_plan_submit_audit(adv, "P1", &subgraph, None, None).await;
 
     // Read comments back via br and assert the PlanSubmit sentinel is present.
     let list_out = run_br(dir.path(), &["comments", "list", &subgraph.epic_id])
@@ -109,24 +117,23 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
     let expected_task_ids: std::collections::HashSet<String> =
         subgraph.task_map.values().cloned().collect();
 
-    let found = texts.iter().any(|t| {
-        audit_sentinel::parse_comment(t)
-            .and_then(|r| r.ok())
-            .is_some_and(|k| match k {
-                AuditSentinelKind::PlanSubmit {
-                    plan_id,
-                    epic_issue_id,
-                    task_ids,
-                } => {
-                    plan_id == "P1"
-                        && epic_issue_id == subgraph.epic_id
-                        && task_ids
-                            .into_iter()
-                            .collect::<std::collections::HashSet<_>>()
-                            == expected_task_ids
-                }
-                _ => false,
-            })
+    let sentinels = collect_sentinels(&texts);
+    let found = sentinels.iter().any(|sentinel| match sentinel {
+        AuditSentinelKind::PlanSubmit {
+            plan_id,
+            epic_issue_id,
+            task_ids,
+            ..
+        } => {
+            plan_id == "P1"
+                && epic_issue_id == &subgraph.epic_id
+                && task_ids
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>()
+                    == expected_task_ids
+        }
+        _ => false,
     });
 
     assert!(
@@ -134,4 +141,63 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
         "PlanSubmit audit sentinel not found on epic {}; comments: {texts:?}",
         subgraph.epic_id
     );
+}
+
+#[tokio::test]
+async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
+    if !br_available() {
+        eprintln!(
+            "skipping plan_submit_audit_includes_merge_base_and_execution_mode: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+
+    let subgraph =
+        spur_mcp::build_epic_subgraph(&pm, "P2", "Audit Test Epic", None, &minimal_tasks())
+            .await
+            .expect("build_epic_subgraph must succeed");
+
+    let adv = pm
+        .advanced()
+        .expect("beads-backed PmService must return advanced()");
+    spur_mcp::emit_plan_submit_audit(
+        adv,
+        "P2",
+        &subgraph,
+        Some("refs/heads/main"),
+        Some("execute_epic"),
+    )
+    .await;
+
+    let list_out = run_br(dir.path(), &["comments", "list", &subgraph.epic_id])
+        .expect("br comments list failed");
+    let items: serde_json::Value =
+        serde_json::from_str(&list_out).expect("br comments list output must be valid JSON");
+    let texts: Vec<String> = items
+        .as_array()
+        .expect("comments list must be a JSON array")
+        .iter()
+        .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from))
+        .collect();
+    let sentinels = collect_sentinels(&texts);
+
+    assert!(sentinels.iter().any(|sentinel| matches!(
+        sentinel,
+        AuditSentinelKind::PlanSubmit {
+            plan_id,
+            base_snapshot_branch: Some(base_snapshot_branch),
+            execution_mode: Some(execution_mode),
+            ..
+        } if plan_id == "P2"
+            && base_snapshot_branch == "refs/heads/main"
+            && execution_mode == "execute_epic"
+    )));
 }

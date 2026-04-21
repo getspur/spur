@@ -12,14 +12,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use spur_acp::{BrainSessionId, SessionId};
 use spur_pm::{IssueFilter, PmService};
 use uuid::Uuid;
 
 use super::mutation_executor::apply_mutation;
 use super::proposers::{MutationProposer, MutationScorer};
 use super::signals::{parse_comment, SENTINEL_PREFIX};
-use super::PlanState;
 
 pub struct SignalWatcher<P: MutationProposer, S: MutationScorer> {
     pm: Arc<PmService>,
@@ -92,6 +90,20 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
             {
                 continue;
             }
+            if !issue
+                .labels
+                .iter()
+                .any(|label| label == crate::plan::labels::READY_FOR_REVIEW)
+            {
+                continue;
+            }
+            if issue
+                .labels
+                .iter()
+                .any(|label| label == crate::plan::labels::REVIEW_REJECTED)
+            {
+                continue;
+            }
             // Skip if the proposer already consumed this task's signal. The
             // spur:signal-processed:<mutation_id> label is written by
             // mutation_executor::apply_mutation on commit.
@@ -133,7 +145,16 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     continue;
                 }
 
-                let state = stub_plan_state();
+                let plan_id = issue
+                    .labels
+                    .iter()
+                    .find_map(|label| crate::plan::labels::parse_plan_id(label))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("signal task {} missing spur:plan-id label", issue.id)
+                    })?;
+                let state =
+                    crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id)
+                        .await?;
                 let mut scored_batches = Vec::new();
                 for batch in self.proposer.propose(&state, &signal, &issue.id).await {
                     let score = self.scorer.score(&state, &batch).await;
@@ -154,6 +175,7 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     Some((_score, batch)) => match apply_mutation(self.pm.clone(), &batch).await {
                         Ok(_) => {
                             self.seen.lock().insert(signal_id);
+                            break;
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -161,26 +183,17 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                                 %signal_id,
                                 "signal watcher failed to apply mutation; will retry next tick: {error}"
                             );
+                            break;
                         }
                     },
                     None => {
                         self.seen.lock().insert(signal_id);
+                        break;
                     }
                 }
             }
         }
 
         Ok(())
-    }
-}
-
-fn stub_plan_state() -> PlanState {
-    PlanState {
-        plan_id: "signal-watcher-stub".into(),
-        tasks: Vec::new(),
-        brain_session_id: BrainSessionId::new(SessionId("signal-watcher".into())),
-        base_snapshot_branch: None,
-        merge_state: crate::plan::PlanMergeState::NotStarted,
-        epic_id: None,
     }
 }

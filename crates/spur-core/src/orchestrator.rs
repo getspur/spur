@@ -37,6 +37,27 @@ use spur_worktree::WorktreeManager;
 use crate::lineage::ExecutorId;
 use crate::review_sink::{ReviewSink, ReviewSinkError};
 
+type McpGuarded<T> = (T, AbortOnDropHandle<()>);
+type BrainRunBootstrap = (
+    Box<dyn spur_acp::AgentConnection>,
+    JoinHandle<()>,
+    bool,
+    Option<String>,
+);
+type NewBrainSessionBootstrap = (
+    spur_acp::config::AgentConfig,
+    Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
+    agent_client_protocol::NewSessionResponse,
+);
+type LoadedBrainSessionBootstrap = (
+    spur_acp::config::AgentConfig,
+    Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
+    String,
+    Option<std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>>,
+    bool,
+    spur_acp::LoadOutcome,
+);
+
 // ─── Agent name normalization ─────────────────────────────────────────
 
 /// Normalize an agent name for equality comparison.
@@ -744,15 +765,9 @@ impl Orchestrator {
             );
         }
 
-        let ((mut connection, delegation_handle, success, pr_url), mcp_handle): (
-            (
-                Box<dyn spur_acp::AgentConnection>,
-                JoinHandle<()>,
-                bool,
-                Option<String>,
-            ),
-            AbortOnDropHandle<()>,
-        ) = cleanup_mcp_on_err(mcp_handle, async {
+        let ((mut connection, delegation_handle, success, pr_url), mcp_handle): McpGuarded<
+            BrainRunBootstrap,
+        > = cleanup_mcp_on_err(mcp_handle, async {
             // 6. Spawn brain agent via AgentConnection.
             let mut connection = self.create_connection(&brain_config, None);
 
@@ -1982,14 +1997,9 @@ impl Orchestrator {
             );
         }
 
-        let ((brain_cfg, presub_notif_rx, session_response), mcp_handle): (
-            (
-                spur_acp::config::AgentConfig,
-                Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
-                agent_client_protocol::NewSessionResponse,
-            ),
-            AbortOnDropHandle<()>,
-        ) = cleanup_mcp_on_err(mcp_handle, async {
+        let ((brain_cfg, presub_notif_rx, session_response), mcp_handle): McpGuarded<
+            NewBrainSessionBootstrap,
+        > = cleanup_mcp_on_err(mcp_handle, async {
             let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
@@ -2170,21 +2180,7 @@ impl Orchestrator {
                 load_outcome,
             ),
             mcp_handle,
-        ): (
-            (
-                spur_acp::config::AgentConfig,
-                Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
-                String,
-                Option<
-                    std::pin::Pin<
-                        Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>,
-                    >,
-                >,
-                bool,
-                spur_acp::LoadOutcome,
-            ),
-            AbortOnDropHandle<()>,
-        ) = cleanup_mcp_on_err(mcp_handle, async {
+        ): McpGuarded<LoadedBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
             let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {

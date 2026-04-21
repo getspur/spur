@@ -91,7 +91,7 @@ async fn reconciler_shutdown_on_cancel() {
         idle_ceiling: Duration::from_millis(50),
         backoff_factor: 2,
     };
-    let reconciler = Reconciler::new(cfg, pm, Arc::new(Notify::new()), None);
+    let reconciler = Reconciler::new(cfg, pm, Arc::new(Notify::new()), None, None);
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move { reconciler.run(cancel_rx).await });

@@ -164,3 +164,99 @@ async fn write_ahead_comment_persists_when_rewire_validation_fails() {
         parent_issue.labels
     );
 }
+
+#[tokio::test]
+async fn compensate_mutation_orphans_emits_violation_breadcrumb() {
+    if !br_available() {
+        eprintln!(
+            "skipping compensate_mutation_orphans_emits_violation_breadcrumb: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let parent =
+        br_id(&run_br(dir.path(), &["create", "Parent", "--silent", "-t", "task"]).unwrap());
+    let child = br_id(&run_br(dir.path(), &["create", "Child", "--silent", "-t", "task"]).unwrap());
+    let mutation_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixed uuid");
+
+    run_br(
+        dir.path(),
+        &[
+            "label",
+            "add",
+            &child,
+            &spur_mcp::plan::labels::mutation_id_label(&mutation_id),
+        ],
+    )
+    .expect("label child mutation");
+    run_br(
+        dir.path(),
+        &[
+            "label",
+            "add",
+            &parent,
+            &format!("spur:superseded-by:{child}"),
+        ],
+    )
+    .expect("label superseded parent");
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads-backed PmService"),
+    );
+    let adv = pm.advanced().expect("advanced surface");
+
+    pm.update_issue(
+        &parent,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close parent");
+
+    adv.add_comment(
+        &parent,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::MutationPlan {
+            mutation_id: mutation_id.to_string(),
+            op: "split".into(),
+            trigger_signal_id: Some("sig-1".into()),
+            trigger_task_id: parent.clone(),
+        }),
+    )
+    .await
+    .expect("write mutation plan breadcrumb");
+
+    spur_mcp::server::compensate_mutation_orphans(Arc::clone(&pm), &parent)
+        .await
+        .expect("compensate orphaned mutation");
+
+    let comments = adv.list_comments(&parent).await.expect("comments");
+    let audits = sentinels_from_comments(&comments);
+    assert!(audits.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::MutationInvariantViolation {
+            mutation_id: audit_mutation_id,
+            violation,
+            rollback_status,
+        } if audit_mutation_id == "11111111-1111-1111-1111-111111111111"
+            && violation == "restart-orphan"
+            && rollback_status == "compensated"
+    )));
+
+    let parent_issue = pm.get_issue(&parent).await.expect("load parent");
+    assert_eq!(parent_issue.status, "open");
+    assert!(!parent_issue
+        .labels
+        .iter()
+        .any(|label| label.starts_with("spur:superseded-by:")));
+
+    let child_issue = pm.get_issue(&child).await.expect("load child");
+    assert_eq!(child_issue.status, pm.closed_status());
+}

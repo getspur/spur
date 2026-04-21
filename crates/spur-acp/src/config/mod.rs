@@ -571,7 +571,7 @@ const SEED_TOML: &str = include_str!("../seed_agents.toml");
 /// that `spur init` discovers on $PATH.
 ///
 /// Errors are unreachable in production thanks to the compile-time
-/// parse test (`seed_template_parses_and_has_five_agents`). If a
+/// seed-template parse test below. If a
 /// maintainer skips tests and commits a bad edit, users see a clear
 /// diagnostic instead of a raw panic.
 pub fn load_seed_template() -> AgentsConfig {
@@ -665,22 +665,25 @@ mod tests {
     }
 
     #[test]
-    fn seed_template_parses_and_has_five_agents() {
+    fn seed_template_parses_and_covers_shipped_agents() {
         let seeds = load_seed_template();
-        assert!(
-            seeds.entries.len() >= 6,
-            "seed template must have ≥6 agents, got {}",
-            seeds.entries.len()
-        );
-        let names: Vec<_> = seeds.entries.iter().map(|a| a.name.as_str()).collect();
-        for expected in [
-            "kiro",
+        const EXPECTED_SEED_AGENTS: &[&str] = &[
             "claude-code",
+            "kiro",
             "claude-code-acp",
             "codex",
             "codex-acp",
-            "gemini",
-        ] {
+            "gemini-acp",
+            "opencode-acp",
+        ];
+        assert!(
+            seeds.entries.len() >= EXPECTED_SEED_AGENTS.len(),
+            "seed template must have ≥{} agents, got {}",
+            EXPECTED_SEED_AGENTS.len(),
+            seeds.entries.len()
+        );
+        let names: Vec<_> = seeds.entries.iter().map(|a| a.name.as_str()).collect();
+        for expected in EXPECTED_SEED_AGENTS {
             assert!(
                 names.contains(&expected),
                 "missing seed agent: {expected} (got {names:?})"

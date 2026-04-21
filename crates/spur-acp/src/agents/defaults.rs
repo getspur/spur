@@ -19,12 +19,14 @@ fn defaults() -> &'static HashMap<String, DelegationDescriptor> {
 }
 
 /// Look up the built-in descriptor for a known agent name.
-/// Returns `None` for unknown agents. `claude-code` aliases to
-/// `claude-code-acp` because the stream-json variant has the same
-/// semantics for delegation.
+/// Returns `None` for unknown agents. ACP-wrapped variants alias to the
+/// same descriptor as their direct-binary equivalents when delegation
+/// semantics match.
 pub fn builtin_descriptor(agent_name: &str) -> Option<DelegationDescriptor> {
     let key = match agent_name {
         "claude-code" => "claude-code-acp",
+        "codex-acp" => "codex",
+        "gemini-acp" => "gemini",
         other => other,
     };
     defaults().get(key).cloned()
@@ -33,7 +35,15 @@ pub fn builtin_descriptor(agent_name: &str) -> Option<DelegationDescriptor> {
 /// Names of agents with built-in descriptors, for testing and
 /// documentation generation.
 pub fn known_agents() -> &'static [&'static str] {
-    &["claude-code-acp", "claude-code", "kiro", "codex", "gemini"]
+    &[
+        "claude-code-acp",
+        "claude-code",
+        "kiro",
+        "codex",
+        "codex-acp",
+        "gemini",
+        "gemini-acp",
+    ]
 }
 
 /// Merge built-in descriptor into an `AgentConfig`'s delegation field.
@@ -307,6 +317,20 @@ transport = "acp""#,
     fn claude_code_aliases_to_claude_code_acp() {
         let a = builtin_descriptor("claude-code").unwrap();
         let b = builtin_descriptor("claude-code-acp").unwrap();
+        assert_eq!(a.description, b.description);
+    }
+
+    #[test]
+    fn codex_acp_aliases_to_codex() {
+        let a = builtin_descriptor("codex-acp").unwrap();
+        let b = builtin_descriptor("codex").unwrap();
+        assert_eq!(a.description, b.description);
+    }
+
+    #[test]
+    fn gemini_acp_aliases_to_gemini() {
+        let a = builtin_descriptor("gemini-acp").unwrap();
+        let b = builtin_descriptor("gemini").unwrap();
         assert_eq!(a.description, b.description);
     }
 

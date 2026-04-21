@@ -30,10 +30,8 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use spur_acp::{DelegationResult, DelegationStatus};
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
 use spur_mcp::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
-use spur_mcp::tools::DelegationRequest;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -65,14 +63,6 @@ fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn extract_id(json: &str) -> String {
-    let v: serde_json::Value = serde_json::from_str(json).expect("br create output must be JSON");
-    v.get("id")
-        .and_then(|id| id.as_str())
-        .expect("br create output missing id")
-        .to_string()
-}
-
 /// Parse comments from a `br comments list` JSON output and collect only those
 /// that are valid `[[spur-audit v1]]` sentinels.
 fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
@@ -88,38 +78,18 @@ fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
         .collect()
 }
 
-#[tokio::test]
-async fn persist_dispatch_intent_writes_label_before_send() {
-    if !br_available() {
-        eprintln!("skipping persist_dispatch_intent_writes_label_before_send: `br` not on PATH");
-        return;
+async fn add_labels_individually(pm: &spur_pm::PmService, issue_id: &str, labels: &[String]) {
+    for label in labels {
+        pm.update_issue(
+            issue_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![label.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed label");
     }
-
-    let dir = TempDir::new().expect("tempdir");
-    run_br(dir.path(), &["init"]).expect("br init failed");
-
-    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
-        .await
-        .expect("PmService::try_new failed")
-        .expect("expected beads pm");
-
-    let issue_id = extract_id(
-        &run_br(dir.path(), &["create", "Dispatch Target", "-t", "task"])
-            .expect("create issue"),
-    );
-
-    spur_mcp::plan::persist_dispatch_intent(&pm, &issue_id, "plan-1", "del-A", "codex", 1)
-        .await
-        .expect("persist dispatch intent");
-
-    let issue = pm.get_issue(&issue_id).await.expect("get issue");
-    assert!(
-        issue
-            .labels
-            .contains(&spur_mcp::plan::labels::delegation_id("del-A")),
-        "dispatch label must be present after persistence: {:?}",
-        issue.labels
-    );
 }
 
 #[tokio::test]
@@ -167,7 +137,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
 
     // ── 1. PlanSubmit — on epic issue ───────────────────────────────────────
     let adv = pm.advanced().expect("beads backend must have advanced()");
-    spur_mcp::emit_plan_submit_audit(adv, "audit-plan-1", &subgraph).await;
+    spur_mcp::emit_plan_submit_audit(adv, "audit-plan-1", &subgraph, None, None).await;
 
     // ── 2. Dispatch — on task issue ─────────────────────────────────────────
     let delegation_id = "del-audit-001".to_string();
@@ -190,6 +160,8 @@ async fn plan_audit_coverage_all_four_sentinels() {
         &issue_id_opt,
         "audit-plan-1",
         &delegation_id,
+        CompletionState::AwaitingReview,
+        false,
         Some("feat/worker-branch-1"),
         Some("3 files changed"),
     )
@@ -295,25 +267,273 @@ async fn plan_audit_coverage_all_four_sentinels() {
 }
 
 #[tokio::test]
-async fn rejection_emits_rejection_sentinel() {
+async fn persist_dispatch_intent_writes_label_before_send() {
     if !br_available() {
-        eprintln!("skipping rejection_emits_rejection_sentinel: `br` not on PATH");
+        eprintln!("skipping persist_dispatch_intent_writes_label_before_send: `br` not on PATH");
         return;
     }
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
-    let pm = spur_pm::PmService::try_new(
-        None,  // no github_repo
-        true,  // beads_enabled
-        false, // github_enabled
-        dir.path(),
-        None, // closed_status default
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+
+    let issue_id = pm
+        .create_issue(spur_pm::IssueCreate {
+            title: "Dispatch intent task".into(),
+            description: Some("body".into()),
+            issue_type: Some("task".into()),
+            labels: vec![
+                spur_mcp::plan::labels::READY_FOR_REVIEW.to_string(),
+                "ready-for-review".to_string(),
+                "delegation-id:old-del".to_string(),
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("create issue");
+
+    spur_mcp::plan::persist_dispatch_intent(&pm, &issue_id, "plan-1", "del-A", "codex", 1)
+        .await
+        .expect("persist dispatch intent");
+
+    let issue = pm.get_issue(&issue_id).await.expect("get issue");
+    assert!(issue
+        .labels
+        .contains(&spur_mcp::plan::labels::delegation_id("del-A")));
+    assert!(!issue
+        .labels
+        .contains(&spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()));
+    assert!(!issue.labels.contains(&"ready-for-review".to_string()));
+}
+
+#[tokio::test]
+async fn completion_success_writes_ready_for_review_and_completion_audit() {
+    if !br_available() {
+        eprintln!(
+            "skipping completion_success_writes_ready_for_review_and_completion_audit: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let issue_id = serde_json::from_str::<serde_json::Value>(
+        &run_br(dir.path(), &["create", "Task", "-t", "task"]).unwrap(),
+    )
+    .expect("create issue json")
+    .get("id")
+    .and_then(|value| value.as_str())
+    .expect("id field")
+    .to_string();
+
+    spur_mcp::plan::persist_completion_result(
+        &pm,
+        &issue_id,
+        "plan-1",
+        "del-A",
+        CompletionState::AwaitingReview,
+        Some("feat/task"),
+        Some("worker finished cleanly"),
     )
     .await
-    .expect("PmService::try_new failed")
-    .expect("expected Some(PmService)");
+    .expect("persist completion");
+
+    let issue = pm.get_issue(&issue_id).await.expect("get issue");
+    assert!(issue
+        .labels
+        .contains(&spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()));
+
+    let task_comments =
+        run_br(dir.path(), &["comments", "list", &issue_id]).expect("br comments list task");
+    let task_sentinels = collect_sentinels(&task_comments);
+    assert!(task_sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Completion {
+            completion_state: CompletionState::AwaitingReview,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn completion_failed_closes_issue_and_emits_completion_audit() {
+    if !br_available() {
+        eprintln!(
+            "skipping completion_failed_closes_issue_and_emits_completion_audit: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let issue_id = serde_json::from_str::<serde_json::Value>(
+        &run_br(dir.path(), &["create", "Task", "-t", "task"]).unwrap(),
+    )
+    .expect("create issue json")
+    .get("id")
+    .and_then(|value| value.as_str())
+    .expect("id field")
+    .to_string();
+
+    add_labels_individually(
+        &pm,
+        &issue_id,
+        &[
+            spur_mcp::plan::labels::READY_FOR_REVIEW.to_string(),
+            "ready-for-review".to_string(),
+            spur_mcp::plan::labels::delegation_id("del-fail"),
+            "delegation-id:del-fail".to_string(),
+        ],
+    )
+    .await;
+
+    spur_mcp::plan::persist_completion_result(
+        &pm,
+        &issue_id,
+        "plan-1",
+        "del-fail",
+        CompletionState::Failed,
+        None,
+        Some("worker failed"),
+    )
+    .await
+    .expect("persist completion");
+
+    let issue = pm.get_issue(&issue_id).await.expect("get issue");
+    assert_eq!(issue.status, "closed");
+    assert!(!issue
+        .labels
+        .contains(&spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()));
+    assert!(!issue.labels.contains(&"ready-for-review".to_string()));
+    assert!(!issue
+        .labels
+        .contains(&spur_mcp::plan::labels::delegation_id("del-fail")));
+    assert!(!issue.labels.contains(&"delegation-id:del-fail".to_string()));
+
+    let task_comments =
+        run_br(dir.path(), &["comments", "list", &issue_id]).expect("br comments list task");
+    let task_sentinels = collect_sentinels(&task_comments);
+    assert!(task_sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Completion {
+            completion_state: CompletionState::Failed,
+            delegation_id,
+            ..
+        } if delegation_id == "del-fail"
+    )));
+}
+
+#[tokio::test]
+async fn completion_cancelled_closes_issue_and_emits_completion_audit() {
+    if !br_available() {
+        eprintln!(
+            "skipping completion_cancelled_closes_issue_and_emits_completion_audit: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let issue_id = serde_json::from_str::<serde_json::Value>(
+        &run_br(dir.path(), &["create", "Task", "-t", "task"]).unwrap(),
+    )
+    .expect("create issue json")
+    .get("id")
+    .and_then(|value| value.as_str())
+    .expect("id field")
+    .to_string();
+
+    add_labels_individually(
+        &pm,
+        &issue_id,
+        &[
+            spur_mcp::plan::labels::READY_FOR_REVIEW.to_string(),
+            "ready-for-review".to_string(),
+            spur_mcp::plan::labels::delegation_id("del-cancel"),
+            "delegation-id:del-cancel".to_string(),
+        ],
+    )
+    .await;
+
+    spur_mcp::plan::persist_completion_result(
+        &pm,
+        &issue_id,
+        "plan-1",
+        "del-cancel",
+        CompletionState::Cancelled,
+        None,
+        Some("worker cancelled"),
+    )
+    .await
+    .expect("persist completion");
+
+    let issue = pm.get_issue(&issue_id).await.expect("get issue");
+    assert_eq!(issue.status, "closed");
+    assert!(!issue
+        .labels
+        .contains(&spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()));
+    assert!(!issue.labels.contains(&"ready-for-review".to_string()));
+    assert!(!issue
+        .labels
+        .contains(&spur_mcp::plan::labels::delegation_id("del-cancel")));
+    assert!(!issue
+        .labels
+        .contains(&"delegation-id:del-cancel".to_string()));
+
+    let task_comments =
+        run_br(dir.path(), &["comments", "list", &issue_id]).expect("br comments list task");
+    let task_sentinels = collect_sentinels(&task_comments);
+    assert!(task_sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Completion {
+            completion_state: CompletionState::Cancelled,
+            delegation_id,
+            ..
+        } if delegation_id == "del-cancel"
+    )));
+}
+
+#[tokio::test]
+async fn reject_closes_issue_and_adds_review_rejected_label() {
+    if !br_available() {
+        eprintln!("skipping reject_closes_issue_and_adds_review_rejected_label: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(
+            None,  // no github_repo
+            true,  // beads_enabled
+            false, // github_enabled
+            dir.path(),
+            None, // closed_status default
+        )
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)"),
+    );
 
     let tasks = vec![PlanTask {
         task_id: "t1".into(),
@@ -325,10 +545,15 @@ async fn rejection_emits_rejection_sentinel() {
     }];
 
     // Build epic subgraph — creates epic + child issue in beads.
-    let subgraph =
-        spur_mcp::build_epic_subgraph(&pm, "audit-reject-1", "Rejection Audit Epic", None, &tasks)
-            .await
-            .expect("build_epic_subgraph must succeed");
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        "audit-reject-1",
+        "Rejection Audit Epic",
+        None,
+        &tasks,
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
 
     let task_issue_id = subgraph
         .task_map
@@ -337,7 +562,17 @@ async fn rejection_emits_rejection_sentinel() {
         .clone();
 
     let delegation_id = "del-reject-001".to_string();
-    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = Arc::new(pm);
+    add_labels_individually(
+        pm.as_ref(),
+        &task_issue_id,
+        &[
+            spur_mcp::plan::labels::READY_FOR_REVIEW.to_string(),
+            "ready-for-review".to_string(),
+        ],
+    )
+    .await;
+
+    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = pm.clone();
 
     // Build task entry already in AwaitingReview state (as if a worker completed).
     let entry = PlanTaskEntry {
@@ -383,6 +618,16 @@ async fn rejection_emits_rejection_sentinel() {
     .await
     .expect("handle_review_task must succeed");
 
+    let issue = pm.get_issue(&task_issue_id).await.expect("get issue");
+    assert_eq!(issue.status, "closed");
+    assert!(issue
+        .labels
+        .contains(&spur_mcp::plan::labels::REVIEW_REJECTED.to_string()));
+    assert!(!issue
+        .labels
+        .contains(&spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()));
+    assert!(!issue.labels.contains(&"ready-for-review".to_string()));
+
     // Fetch comments and assert Rejection sentinel is present.
     let task_comments =
         run_br(dir.path(), &["comments", "list", &task_issue_id]).expect("br comments list task");
@@ -402,15 +647,11 @@ async fn rejection_emits_rejection_sentinel() {
     );
 }
 
-/// Bug 1 regression guard: request_changes → re-dispatch → completion must
-/// emit a Completion sentinel for the SECOND attempt. Before this fix,
-/// `spawn_completion_future` (the path used by every non-primary dispatcher)
-/// dropped the audit emission silently.
 #[tokio::test]
-async fn request_changes_redispatch_emits_completion_sentinel() {
+async fn request_changes_leaves_issue_open_and_not_review_ready() {
     if !br_available() {
         eprintln!(
-            "skipping request_changes_redispatch_emits_completion_sentinel: `br` not on PATH"
+            "skipping request_changes_leaves_issue_open_and_not_review_ready: `br` not on PATH"
         );
         return;
     }
@@ -418,307 +659,272 @@ async fn request_changes_redispatch_emits_completion_sentinel() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
-    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
-        .await
-        .expect("PmService::try_new failed")
-        .expect("expected Some(PmService)");
-
-    let tasks = vec![PlanTask {
-        task_id: "t1".into(),
-        agent: "codex".into(),
-        task: "Do the redispatch thing.".into(),
-        depends_on: vec![],
-        issue_id: None,
-        context_files: vec![],
-    }];
-
-    let subgraph =
-        spur_mcp::build_epic_subgraph(&pm, "audit-redis-1", "Redispatch Audit Epic", None, &tasks)
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
             .await
-            .expect("build_epic_subgraph must succeed");
+            .expect("PmService::try_new failed")
+            .expect("expected Some(PmService)"),
+    );
+    let task_issue_id = serde_json::from_str::<serde_json::Value>(
+        &run_br(dir.path(), &["create", "Task", "-t", "task"]).unwrap(),
+    )
+    .expect("create issue json")
+    .get("id")
+    .and_then(|value| value.as_str())
+    .expect("id field")
+    .to_string();
 
-    let task_issue_id = subgraph
-        .task_map
-        .get("t1")
-        .expect("t1 must be in task_map")
-        .clone();
+    add_labels_individually(
+        pm.as_ref(),
+        &task_issue_id,
+        &[
+            spur_mcp::plan::labels::READY_FOR_REVIEW.to_string(),
+            "ready-for-review".to_string(),
+        ],
+    )
+    .await;
 
-    let initial_delegation_id = "del-initial-001".to_string();
-    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = Arc::new(pm);
-
-    // Task already AwaitingReview on attempt 1 — as if a worker finished once.
-    let entry = PlanTaskEntry {
-        spec: PlanTask {
-            task_id: "t1".into(),
-            agent: "codex".into(),
-            task: "Do the redispatch thing.".into(),
-            depends_on: vec![],
-            issue_id: Some(task_issue_id.clone()),
-            context_files: vec![],
-        },
-        status: PlanTaskStatus::AwaitingReview {
-            summary: Some("first try narrative".into()),
-        },
-        result: None,
-        worker_branch: Some("feat/v1".into()),
-        attempt: 1,
-        history: vec![],
-        last_delegation_id: Some(initial_delegation_id.clone()),
-    };
-    let plan_state = PlanState {
-        plan_id: "audit-redis-1".into(),
-        tasks: vec![entry],
+    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = pm.clone();
+    let plan_arc_state = Arc::new(Mutex::new(PlanState {
+        plan_id: "audit-request-changes-1".into(),
+        tasks: vec![PlanTaskEntry {
+            spec: PlanTask {
+                task_id: "t1".into(),
+                agent: "codex".into(),
+                task: "Do the request changes thing.".into(),
+                depends_on: vec![],
+                issue_id: Some(task_issue_id.clone()),
+                context_files: vec![],
+            },
+            status: PlanTaskStatus::AwaitingReview {
+                summary: Some("request changes narrative".into()),
+            },
+            result: None,
+            worker_branch: Some("feat/request-changes".into()),
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: Some("del-request-001".into()),
+        }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
-        epic_id: Some(subgraph.epic_id.clone()),
-    };
-    let plan_arc_state = Arc::new(Mutex::new(plan_state));
-
-    // Capture the re-dispatched DelegationRequest so we can respond with Success.
-    let (del_tx, mut del_rx) = tokio::sync::mpsc::channel::<DelegationRequest>(4);
-    let tracker = tokio_util::task::TaskTracker::new();
-
-    // Background: when the re-dispatch fires, respond with Success and capture
-    // the new delegation_id.
-    let worker = tokio::spawn(async move {
-        let req = del_rx
-            .recv()
-            .await
-            .expect("re-dispatch must enqueue a DelegationRequest");
-        let new_id = req.id.to_string();
-        let _ = req.respond_to.send(DelegationResult {
-            status: DelegationStatus::Success,
-            diff: None,
-            diff_summary: None,
-            summary: Some("second attempt narrative".into()),
-            estimated_cost_usd: 0.0,
-            worker_branch: Some("feat/v2".into()),
-            artifact: None,
-        });
-        new_id
-    });
+        epic_id: Some("bd-epic".into()),
+    }));
 
     spur_mcp::plan::handle_review_task(
         plan_arc_state.clone(),
-        "audit-redis-1",
+        "audit-request-changes-1",
         "t1",
         "request_changes",
-        Some("please revise"),
+        Some("fix the edge case"),
         Some(pm_arc.clone()),
         None,
-        Some(&del_tx),
-        Some(&tracker),
+        None,
+        None,
     )
     .await
     .expect("handle_review_task must succeed");
 
-    let new_delegation_id = worker.await.expect("worker join");
+    let issue = pm.get_issue(&task_issue_id).await.expect("get issue");
+    assert_eq!(issue.status, "open");
+    assert!(
+        !issue
+            .labels
+            .contains(&spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()),
+        "request_changes must clear namespaced ready-for-review label"
+    );
+    assert!(
+        !issue.labels.contains(&"ready-for-review".to_string()),
+        "request_changes must clear legacy ready-for-review label"
+    );
+}
 
-    // Wait for the spawned completion future to finish emitting.
-    tracker.close();
-    tracker.wait().await;
+#[tokio::test]
+async fn request_changes_does_not_emit_dispatch_audit() {
+    if !br_available() {
+        eprintln!("skipping request_changes_does_not_emit_dispatch_audit: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected Some(PmService)"),
+    );
+    let task_issue_id = serde_json::from_str::<serde_json::Value>(
+        &run_br(dir.path(), &["create", "Task", "-t", "task"]).unwrap(),
+    )
+    .expect("create issue json")
+    .get("id")
+    .and_then(|value| value.as_str())
+    .expect("id field")
+    .to_string();
+
+    add_labels_individually(
+        pm.as_ref(),
+        &task_issue_id,
+        &[spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()],
+    )
+    .await;
+
+    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = pm.clone();
+    let plan_arc_state = Arc::new(Mutex::new(PlanState {
+        plan_id: "audit-request-changes-2".into(),
+        tasks: vec![PlanTaskEntry {
+            spec: PlanTask {
+                task_id: "t1".into(),
+                agent: "codex".into(),
+                task: "Do the request changes thing.".into(),
+                depends_on: vec![],
+                issue_id: Some(task_issue_id.clone()),
+                context_files: vec![],
+            },
+            status: PlanTaskStatus::AwaitingReview {
+                summary: Some("request changes narrative".into()),
+            },
+            result: None,
+            worker_branch: Some("feat/request-changes".into()),
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: Some("del-request-002".into()),
+        }],
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+        base_snapshot_branch: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
+        epic_id: Some("bd-epic".into()),
+    }));
+
+    spur_mcp::plan::handle_review_task(
+        plan_arc_state,
+        "audit-request-changes-2",
+        "t1",
+        "request_changes",
+        Some("fix the edge case"),
+        Some(pm_arc.clone()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("handle_review_task must succeed");
 
     let task_comments =
         run_br(dir.path(), &["comments", "list", &task_issue_id]).expect("br comments list task");
     let sentinels = collect_sentinels(&task_comments);
 
-    let completion_found = sentinels.iter().any(|k| {
-        matches!(
-            k,
-            AuditSentinelKind::Completion { delegation_id, result_summary, worker_branch, .. }
-                if delegation_id == &new_delegation_id
-                    && result_summary.as_deref() == Some("second attempt narrative")
-                    && worker_branch.as_deref() == Some("feat/v2")
-        )
-    });
     assert!(
-        completion_found,
-        "Completion sentinel for re-dispatched delegation_id={new_delegation_id} must be present \
-         on task {task_issue_id}; got: {sentinels:?}"
+        !sentinels
+            .iter()
+            .any(|sentinel| matches!(sentinel, AuditSentinelKind::Dispatch { .. })),
+        "review-driven request_changes must not emit Dispatch audit comments; got: {sentinels:?}"
     );
 }
 
-/// Approval-cascade regression: approving a task whose children are Pending
-/// triggers `dispatch_newly_ready` → `spawn_completion_future` for each newly
-/// unblocked task. When those cascade-dispatched tasks complete, the
-/// `spawn_completion_future` path must emit a Completion sentinel too.
-///
-/// Before Fix A (commit 8e759c0), spawn_completion_future dropped audit
-/// emission silently regardless of which dispatcher invoked it. This test
-/// exercises the approval-cascade dispatcher specifically, complementing
-/// `request_changes_redispatch_emits_completion_sentinel` which covers the
-/// rejection-re-dispatch dispatcher.
 #[tokio::test]
-async fn approval_cascade_dispatched_task_emits_completion_sentinel() {
+async fn approve_closes_issue_and_clears_ready_for_review() {
     if !br_available() {
-        eprintln!(
-            "skipping approval_cascade_dispatched_task_emits_completion_sentinel: `br` not on PATH"
-        );
+        eprintln!("skipping approve_closes_issue_and_clears_ready_for_review: `br` not on PATH");
         return;
     }
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
-    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
-        .await
-        .expect("PmService::try_new failed")
-        .expect("expected Some(PmService)");
-
-    let tasks = vec![
-        PlanTask {
-            task_id: "a".into(),
-            agent: "codex".into(),
-            task: "First task.".into(),
-            depends_on: vec![],
-            issue_id: None,
-            context_files: vec![],
-        },
-        PlanTask {
-            task_id: "b".into(),
-            agent: "codex".into(),
-            task: "Second task, depends on a.".into(),
-            depends_on: vec!["a".into()],
-            issue_id: None,
-            context_files: vec![],
-        },
-    ];
-
-    let subgraph =
-        spur_mcp::build_epic_subgraph(&pm, "audit-cascade-1", "Cascade Audit Epic", None, &tasks)
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
             .await
-            .expect("build_epic_subgraph must succeed");
+            .expect("PmService::try_new failed")
+            .expect("expected Some(PmService)"),
+    );
 
-    let task_a_id = subgraph.task_map.get("a").expect("a").clone();
-    let task_b_id = subgraph.task_map.get("b").expect("b").clone();
+    let task_issue_id = serde_json::from_str::<serde_json::Value>(
+        &run_br(dir.path(), &["create", "Task", "-t", "task"]).unwrap(),
+    )
+    .expect("create issue json")
+    .get("id")
+    .and_then(|value| value.as_str())
+    .expect("id field")
+    .to_string();
 
-    let a_delegation_id = "del-a-001".to_string();
-    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = Arc::new(pm);
+    add_labels_individually(
+        pm.as_ref(),
+        &task_issue_id,
+        &[
+            spur_mcp::plan::labels::READY_FOR_REVIEW.to_string(),
+            "ready-for-review".to_string(),
+        ],
+    )
+    .await;
 
-    // Stage: A is AwaitingReview (worker finished), B is still Pending blocked on A.
-    let entry_a = PlanTaskEntry {
-        spec: PlanTask {
-            task_id: "a".into(),
-            agent: "codex".into(),
-            task: "First task.".into(),
-            depends_on: vec![],
-            issue_id: Some(task_a_id.clone()),
-            context_files: vec![],
-        },
-        status: PlanTaskStatus::AwaitingReview {
-            summary: Some("a narrative".into()),
-        },
-        result: None,
-        worker_branch: Some("feat/a".into()),
-        attempt: 1,
-        history: vec![],
-        last_delegation_id: Some(a_delegation_id.clone()),
-    };
-    let entry_b = PlanTaskEntry {
-        spec: PlanTask {
-            task_id: "b".into(),
-            agent: "codex".into(),
-            task: "Second task, depends on a.".into(),
-            depends_on: vec!["a".into()],
-            issue_id: Some(task_b_id.clone()),
-            context_files: vec![],
-        },
-        status: PlanTaskStatus::Pending,
-        result: None,
-        worker_branch: None,
-        attempt: 1,
-        history: vec![],
-        last_delegation_id: None,
-    };
+    let delegation_id = "del-approve-001".to_string();
+    let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = pm.clone();
+
     let plan_state = PlanState {
-        plan_id: "audit-cascade-1".into(),
-        tasks: vec![entry_a, entry_b],
+        plan_id: "audit-approve-1".into(),
+        tasks: vec![PlanTaskEntry {
+            spec: PlanTask {
+                task_id: "t1".into(),
+                agent: "codex".into(),
+                task: "Approve the task.".into(),
+                depends_on: vec![],
+                issue_id: Some(task_issue_id.clone()),
+                context_files: vec![],
+            },
+            status: PlanTaskStatus::AwaitingReview {
+                summary: Some("approve narrative".into()),
+            },
+            result: None,
+            worker_branch: Some("feat/approve".into()),
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: Some(delegation_id.clone()),
+        }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
         merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
-        epic_id: Some(subgraph.epic_id.clone()),
+        epic_id: Some("bd-epic".into()),
     };
     let plan_arc_state = Arc::new(Mutex::new(plan_state));
 
-    // When the cascade dispatches B, respond Success on its oneshot.
-    let (del_tx, mut del_rx) = tokio::sync::mpsc::channel::<DelegationRequest>(4);
-    let tracker = tokio_util::task::TaskTracker::new();
-
-    let worker = tokio::spawn(async move {
-        let req = del_rx
-            .recv()
-            .await
-            .expect("approval cascade must enqueue a DelegationRequest for task b");
-        let b_new_id = req.id.to_string();
-        let _ = req.respond_to.send(DelegationResult {
-            status: DelegationStatus::Success,
-            diff: None,
-            diff_summary: None,
-            summary: Some("b narrative".into()),
-            estimated_cost_usd: 0.0,
-            worker_branch: Some("feat/b".into()),
-            artifact: None,
-        });
-        b_new_id
-    });
-
     spur_mcp::plan::handle_review_task(
         plan_arc_state.clone(),
-        "audit-cascade-1",
-        "a",
+        "audit-approve-1",
+        "t1",
         "approve",
         None,
         Some(pm_arc.clone()),
         None,
-        Some(&del_tx),
-        Some(&tracker),
+        None,
+        None,
     )
     .await
     .expect("handle_review_task approve must succeed");
 
-    let b_delegation_id = worker.await.expect("worker join");
-
-    tracker.close();
-    tracker.wait().await;
-
-    // Approval sentinel should be on task A.
-    let a_comments =
-        run_br(dir.path(), &["comments", "list", &task_a_id]).expect("br comments list a");
-    let a_sentinels = collect_sentinels(&a_comments);
+    let issue = pm.get_issue(&task_issue_id).await.expect("get issue");
+    assert_eq!(issue.status, "closed");
     assert!(
-        a_sentinels.iter().any(|k| matches!(
-            k,
-            AuditSentinelKind::Approval { delegation_id } if delegation_id == &a_delegation_id
-        )),
-        "Approval sentinel for a's delegation_id={a_delegation_id} must be on task {task_a_id}; got {a_sentinels:?}"
+        !issue
+            .labels
+            .contains(&spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()),
+        "approve must clear namespaced ready-for-review label"
+    );
+    assert!(
+        !issue.labels.contains(&"ready-for-review".to_string()),
+        "approve must clear legacy ready-for-review label"
     );
 
-    // Completion sentinel for B should be on task B — emitted via spawn_completion_future
-    // spawned from dispatch_newly_ready. This is the codex-acp REQUEST_CHANGES coverage gap.
-    let b_comments =
-        run_br(dir.path(), &["comments", "list", &task_b_id]).expect("br comments list b");
-    let b_sentinels = collect_sentinels(&b_comments);
+    let task_comments =
+        run_br(dir.path(), &["comments", "list", &task_issue_id]).expect("br comments list task");
+    let task_sentinels = collect_sentinels(&task_comments);
     assert!(
-        b_sentinels.iter().any(|k| matches!(
+        task_sentinels.iter().any(|k| matches!(
             k,
-            AuditSentinelKind::Completion { delegation_id, result_summary, worker_branch, .. }
-                if delegation_id == &b_delegation_id
-                    && result_summary.as_deref() == Some("b narrative")
-                    && worker_branch.as_deref() == Some("feat/b")
+            AuditSentinelKind::Approval { delegation_id: did } if did == &delegation_id
         )),
-        "Completion sentinel for cascade-dispatched b (delegation_id={b_delegation_id}) \
-         must be on task {task_b_id}; got {b_sentinels:?}"
-    );
-
-    // Also: Dispatch sentinel for B from the cascade path.
-    assert!(
-        b_sentinels.iter().any(|k| matches!(
-            k,
-            AuditSentinelKind::Dispatch { delegation_id, .. }
-                if delegation_id == &b_delegation_id
-        )),
-        "Dispatch sentinel for cascade-dispatched b (delegation_id={b_delegation_id}) \
-         must be on task {task_b_id}; got {b_sentinels:?}"
+        "Approval sentinel must be on task {task_issue_id}; got {task_sentinels:?}"
     );
 }

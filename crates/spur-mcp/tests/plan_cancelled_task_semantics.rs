@@ -19,9 +19,9 @@ impl McpEventSink for CaptureSink {
 }
 
 #[tokio::test]
-async fn test_non_cascade_on_dep() {
-    // Tests (a) Cancelled dep allows dispatch of dependent
-    // build a PlanState with task A in Cancelled state and task B depending on A in Pending state
+async fn approve_does_not_enqueue_new_dispatches() {
+    // Persisted-authority flip: approval must only persist the decision.
+    // The reconciler, not review_task, owns any follow-up dispatch.
     let state = PlanState {
         plan_id: "p1".into(),
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
@@ -84,11 +84,6 @@ async fn test_non_cascade_on_dep() {
     let tracker = tokio_util::task::TaskTracker::new();
     let plan = Arc::new(Mutex::new(state));
 
-    // Call handle_review_task which will call dispatch_newly_ready.
-    // Approving t0 will make it Approved.
-    // Then dispatch_newly_ready scans all Pending tasks.
-    // It sees t2, which depends on t1 (Cancelled) and t0 (now Approved).
-    // Because Cancelled is accepted as a satisfied dependency, t2 should be dispatched.
     let _ = spur_mcp::plan::handle_review_task(
         plan.clone(),
         "p1",
@@ -103,8 +98,19 @@ async fn test_non_cascade_on_dep() {
     .await
     .unwrap();
 
-    let req2 = drx.recv().await.expect("t2 should be dispatched");
-    assert_eq!(req2.task, "T2");
+    assert!(
+        matches!(
+            drx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "approve must not enqueue a follow-up dispatch"
+    );
+
+    let locked = plan.lock().await;
+    assert!(
+        matches!(locked.tasks[2].status, PlanTaskStatus::Ready),
+        "approve should leave newly-unblocked dependents ready for the reconciler"
+    );
 }
 
 #[tokio::test]
@@ -158,7 +164,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
     let plan_clone = plan.clone();
 
     let handle = tokio::spawn(async move {
-        run_plan(plan_clone, dtx, None, None).await;
+        run_plan(plan_clone, dtx, None, None, None).await;
     });
 
     // t1 should be dispatched immediately since it has no deps.
@@ -270,7 +276,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
     let (dtx, _drx) = mpsc::channel(8);
 
     // run_plan will immediately exit since both tasks are terminal
-    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None).await;
+    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None, None).await;
 
     let events = sink.events.lock().unwrap();
 
