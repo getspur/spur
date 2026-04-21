@@ -42,7 +42,7 @@ pub fn source_issue(issue_id: &str) -> String {
 }
 
 pub fn delegation_id(delegation_id: &str) -> String {
-    format!("delegation-id:{delegation_id}")
+    format!("{DELEGATION_ID_PREFIX}{delegation_id}")
 }
 
 pub fn signal_kind(kind: &str) -> String {
@@ -54,7 +54,9 @@ pub fn signal_kind_bucket(kind: &str, bucket: &str) -> String {
 }
 
 pub const SIGNAL_LATE_ARRIVAL: &str = "signal:late-arrival";
-pub const READY_FOR_REVIEW: &str = "ready-for-review";
+pub const DELEGATION_ID_PREFIX: &str = "spur:delegation-id:";
+pub const READY_FOR_REVIEW: &str = "spur:ready-for-review";
+pub const REVIEW_REJECTED: &str = "spur:review-rejected";
 /// Marker applied to an epic after `build_epic_subgraph` successfully creates
 /// ALL children + dependency edges. The v0a.2 reconciler filters on this label
 /// to avoid observing partially-persisted plan graphs as ready work.
@@ -85,6 +87,11 @@ pub fn parse_agent(label: &str) -> Option<&str> {
 /// Returns `Some(issue_id)` if the given label is a `spur:source-issue:<id>` label.
 pub fn parse_source_issue(label: &str) -> Option<&str> {
     label.strip_prefix(SOURCE_ISSUE_PREFIX)
+}
+
+/// Returns `Some(delegation_id)` if the given label is a `spur:delegation-id:<id>` label.
+pub fn parse_delegation_id(label: &str) -> Option<&str> {
+    label.strip_prefix(DELEGATION_ID_PREFIX)
 }
 
 /// Returns `Some(kind)` if the given label is a `signal:<kind>` label
@@ -160,8 +167,17 @@ mod tests {
         assert_eq!(parse_plan_id(&plan_id("P1")), Some("P1"));
         assert_eq!(parse_agent(&agent("codex")), Some("codex"));
         assert_eq!(parse_source_issue(&source_issue("bd-42")), Some("bd-42"));
+        assert_eq!(parse_delegation_id(&delegation_id("del-A")), Some("del-A"));
         assert_eq!(parse_signal_kind("signal:scope-drift"), Some("scope-drift"));
         assert_eq!(parse_signal_kind("signal:scope-drift:high"), None);
+    }
+
+    #[test]
+    fn delegation_and_review_labels_use_spur_namespace() {
+        assert_eq!(delegation_id("del-A"), "spur:delegation-id:del-A");
+        assert_eq!(parse_delegation_id("spur:delegation-id:del-A"), Some("del-A"));
+        assert_eq!(READY_FOR_REVIEW, "spur:ready-for-review");
+        assert_eq!(REVIEW_REJECTED, "spur:review-rejected");
     }
 
     /// `br 0.1.14` label grammar, verified empirically via

@@ -12,6 +12,15 @@ use serde::{Deserialize, Serialize};
 
 pub const SENTINEL_PREFIX: &str = "[[spur-audit v1]]";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionState {
+    AwaitingReview,
+    Failed,
+    Cancelled,
+    Superseded,
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -20,14 +29,25 @@ pub enum AuditSentinelKind {
         plan_id: String,
         epic_issue_id: String,
         task_ids: Vec<String>,
+        #[serde(default)]
+        base_snapshot_branch: Option<String>,
+        #[serde(default)]
+        execution_mode: Option<String>,
     },
     Dispatch {
         delegation_id: String,
         worker: String,
         attempt: u32,
     },
+    DispatchOrphanCleared {
+        delegation_id: String,
+        reason: String,
+    },
     Completion {
         delegation_id: String,
+        completion_state: CompletionState,
+        #[serde(default)]
+        superseded: bool,
         #[serde(default)]
         worker_branch: Option<String>,
         #[serde(default)]
@@ -82,6 +102,7 @@ impl AuditSentinelKind {
         match self {
             Self::PlanSubmit { .. } => "plan-submit",
             Self::Dispatch { .. } => "dispatch",
+            Self::DispatchOrphanCleared { .. } => "dispatch-orphan-cleared",
             Self::Completion { .. } => "completion",
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
@@ -142,6 +163,8 @@ mod tests {
             plan_id: "P1".into(),
             epic_issue_id: "bd-1".into(),
             task_ids: vec!["bd-2".into(), "bd-3".into()],
+            base_snapshot_branch: Some("refs/heads/main".into()),
+            execution_mode: Some("submit_plan".into()),
         }
     }
 
@@ -156,8 +179,14 @@ mod tests {
             },
             AuditSentinelKind::Completion {
                 delegation_id: "del-A".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
                 worker_branch: Some("feat/x".into()),
                 result_summary: None,
+            },
+            AuditSentinelKind::DispatchOrphanCleared {
+                delegation_id: "del-A".into(),
+                reason: "restart-orphan-cleared".into(),
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-A".into(),
@@ -248,8 +277,14 @@ mod tests {
             },
             AuditSentinelKind::Completion {
                 delegation_id: "x".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
                 worker_branch: None,
                 result_summary: None,
+            },
+            AuditSentinelKind::DispatchOrphanCleared {
+                delegation_id: "x".into(),
+                reason: "cleanup".into(),
             },
             AuditSentinelKind::Approval {
                 delegation_id: "x".into(),
@@ -391,5 +426,16 @@ mod tests {
         };
         let parsed = parse_comment(&encode_comment(&kind)).unwrap().unwrap();
         assert_eq!(parsed, kind);
+    }
+
+    #[test]
+    fn dispatch_orphan_cleared_round_trips() {
+        let kind = AuditSentinelKind::DispatchOrphanCleared {
+            delegation_id: "del-A".into(),
+            reason: "restart-orphan-cleared".into(),
+        };
+        let parsed = parse_comment(&encode_comment(&kind)).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "dispatch-orphan-cleared");
     }
 }

@@ -65,6 +65,14 @@ fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+fn extract_id(json: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(json).expect("br create output must be JSON");
+    v.get("id")
+        .and_then(|id| id.as_str())
+        .expect("br create output missing id")
+        .to_string()
+}
+
 /// Parse comments from a `br comments list` JSON output and collect only those
 /// that are valid `[[spur-audit v1]]` sentinels.
 fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
@@ -78,6 +86,40 @@ fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
         .filter_map(audit_sentinel::parse_comment)
         .filter_map(|r| r.ok())
         .collect()
+}
+
+#[tokio::test]
+async fn persist_dispatch_intent_writes_label_before_send() {
+    if !br_available() {
+        eprintln!("skipping persist_dispatch_intent_writes_label_before_send: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+
+    let issue_id = extract_id(
+        &run_br(dir.path(), &["create", "Dispatch Target", "-t", "task"])
+            .expect("create issue"),
+    );
+
+    spur_mcp::plan::persist_dispatch_intent(&pm, &issue_id, "plan-1", "del-A", "codex", 1)
+        .await
+        .expect("persist dispatch intent");
+
+    let issue = pm.get_issue(&issue_id).await.expect("get issue");
+    assert!(
+        issue
+            .labels
+            .contains(&spur_mcp::plan::labels::delegation_id("del-A")),
+        "dispatch label must be present after persistence: {:?}",
+        issue.labels
+    );
 }
 
 #[tokio::test]
@@ -484,7 +526,7 @@ async fn request_changes_redispatch_emits_completion_sentinel() {
     let completion_found = sentinels.iter().any(|k| {
         matches!(
             k,
-            AuditSentinelKind::Completion { delegation_id, result_summary, worker_branch }
+            AuditSentinelKind::Completion { delegation_id, result_summary, worker_branch, .. }
                 if delegation_id == &new_delegation_id
                     && result_summary.as_deref() == Some("second attempt narrative")
                     && worker_branch.as_deref() == Some("feat/v2")
@@ -660,7 +702,7 @@ async fn approval_cascade_dispatched_task_emits_completion_sentinel() {
     assert!(
         b_sentinels.iter().any(|k| matches!(
             k,
-            AuditSentinelKind::Completion { delegation_id, result_summary, worker_branch }
+            AuditSentinelKind::Completion { delegation_id, result_summary, worker_branch, .. }
                 if delegation_id == &b_delegation_id
                     && result_summary.as_deref() == Some("b narrative")
                     && worker_branch.as_deref() == Some("feat/b")

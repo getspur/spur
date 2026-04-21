@@ -40,8 +40,20 @@ impl PidFileGuard {
             .truncate(false)
             .open(path)
             .with_context(|| format!("opening pidfile at {path:?}"))?;
-        file.try_lock_exclusive()
-            .map_err(|e| anyhow!("pidfile {:?} held by another brain session: {e}", path))?;
+        file.try_lock_exclusive().map_err(|e| {
+            let holder = std::fs::read_to_string(path)
+                .ok()
+                .map(|pid| pid.trim().to_string())
+                .filter(|pid| !pid.is_empty());
+            match holder {
+                Some(pid) => anyhow!(
+                    "pidfile {:?} held by another brain session (holder pid {}): {e}",
+                    path,
+                    pid
+                ),
+                None => anyhow!("pidfile {:?} held by another brain session: {e}", path),
+            }
+        })?;
         let mut f = &file;
         f.set_len(0)?;
         writeln!(f, "{}", std::process::id())?;
@@ -74,6 +86,19 @@ mod tests {
         let _g1 = PidFileGuard::acquire(&path).unwrap();
         let err = PidFileGuard::acquire(&path).unwrap_err();
         assert!(format!("{err}").contains("held by another"));
+    }
+
+    #[test]
+    fn second_acquire_reports_holder_pid() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".spur-brain.pid");
+        let _g1 = PidFileGuard::acquire(&path).unwrap();
+        let err = PidFileGuard::acquire(&path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&std::process::id().to_string()),
+            "expected pidfile lock error to report holder pid, got: {msg}"
+        );
     }
 
     #[test]

@@ -653,6 +653,8 @@ pub async fn emit_completion_audit(
     let Some(adv) = pm.advanced() else { return };
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::Completion {
         delegation_id: delegation_id.to_string(),
+        completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+        superseded: false,
         worker_branch: worker_branch.map(String::from),
         result_summary: result_summary.map(String::from),
     };
@@ -723,6 +725,71 @@ pub(crate) async fn emit_rejection_audit(
             "Rejection audit comment emission failed: {e}"
         );
     }
+}
+
+/// Build the issue update used to persist dispatch intent before work is sent.
+pub fn dispatch_intent_update(delegation_id: &str) -> spur_pm::IssueUpdate {
+    spur_pm::IssueUpdate {
+        add_labels: vec![labels::delegation_id(delegation_id)],
+        remove_labels: vec![
+            format!("delegation-id:{delegation_id}"),
+            "ready-for-review".to_string(),
+        ],
+        ..Default::default()
+    }
+}
+
+/// Build the compensating update used when the dispatch send fails immediately.
+pub fn dispatch_send_failure_update(delegation_id: &str) -> spur_pm::IssueUpdate {
+    spur_pm::IssueUpdate {
+        remove_labels: vec![labels::delegation_id(delegation_id)],
+        comment: Some("Dispatch send failed before worker ownership was established.".to_string()),
+        ..Default::default()
+    }
+}
+
+/// Build the issue update used to clear persisted dispatch ownership.
+pub fn clear_dispatch_intent_update(delegation_id: &str) -> spur_pm::IssueUpdate {
+    spur_pm::IssueUpdate {
+        remove_labels: vec![
+            labels::delegation_id(delegation_id),
+            format!("delegation-id:{delegation_id}"),
+        ],
+        ..Default::default()
+    }
+}
+
+/// Persist dispatch intent to beads before the worker request is considered live.
+pub async fn persist_dispatch_intent(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+    plan_id: &str,
+    delegation_id: &str,
+    worker: &str,
+    attempt: u32,
+) -> anyhow::Result<()> {
+    pm.update_issue(issue_id, dispatch_intent_update(delegation_id))
+        .await?;
+    emit_dispatch_audit(
+        Some(pm as &dyn PmLike),
+        &Some(issue_id.to_string()),
+        plan_id,
+        delegation_id,
+        worker,
+        attempt,
+    )
+    .await;
+    Ok(())
+}
+
+/// Clear persisted dispatch ownership from beads.
+pub async fn clear_dispatch_intent(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+    delegation_id: &str,
+) -> anyhow::Result<()> {
+    pm.update_issue(issue_id, clear_dispatch_intent_update(delegation_id))
+        .await
 }
 
 // ─── Executor ────────────────────────────────────────────────────────
@@ -3004,6 +3071,43 @@ mod tests {
         ];
         let kept = super::strip_spur_labels(&labels);
         assert_eq!(kept, vec!["area:auth".to_string(), "bug".to_string()]);
+    }
+
+    #[test]
+    fn dispatch_intent_update_removes_legacy_labels() {
+        let update = super::dispatch_intent_update("del-A");
+        assert!(update
+            .add_labels
+            .contains(&super::labels::delegation_id("del-A")));
+        assert!(update
+            .remove_labels
+            .contains(&"delegation-id:del-A".to_string()));
+        assert!(update
+            .remove_labels
+            .contains(&"ready-for-review".to_string()));
+    }
+
+    #[test]
+    fn immediate_send_failure_compensation_removes_dispatch_label() {
+        let update = super::dispatch_send_failure_update("del-A");
+        assert!(update
+            .remove_labels
+            .contains(&super::labels::delegation_id("del-A")));
+        assert_eq!(
+            update.comment.as_deref(),
+            Some("Dispatch send failed before worker ownership was established.")
+        );
+    }
+
+    #[test]
+    fn clear_dispatch_intent_removes_both_namespaced_and_legacy_labels() {
+        let update = super::clear_dispatch_intent_update("del-A");
+        assert!(update
+            .remove_labels
+            .contains(&super::labels::delegation_id("del-A")));
+        assert!(update
+            .remove_labels
+            .contains(&"delegation-id:del-A".to_string()));
     }
 
     // ─── PlanRegistry tests ───────────────────────────────────────────
