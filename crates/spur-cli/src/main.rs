@@ -450,7 +450,7 @@ async fn main() -> Result<()> {
             });
             let pm_arc = pm_service.map(std::sync::Arc::new);
 
-            let orch = Orchestrator::new(repo_root.clone(), config)?;
+            let orch = Orchestrator::new(repo_root.clone(), config, Some(license.feature_gate()))?;
             let mut orch = if let Some(pm) = pm_arc {
                 orch.with_pm_service(pm)
             } else {
@@ -658,7 +658,7 @@ async fn main() -> Result<()> {
 
 async fn cmd_agents(repo_root: PathBuf, command: Option<AgentsCommands>) -> Result<()> {
     let config = load_config()?;
-    let mut orch = Orchestrator::new(repo_root, config)?;
+    let mut orch = Orchestrator::new(repo_root, config, None)?;
 
     match command {
         None => {
@@ -745,5 +745,5 @@ fn load_config() -> Result<SpurConfig> {
 
 fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
     let config = load_config()?;
-    Orchestrator::new(repo_root, config)
+    Orchestrator::new(repo_root, config, None)
 }
