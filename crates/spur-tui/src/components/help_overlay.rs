@@ -55,6 +55,7 @@ impl HelpOverlay {
             Line::from("  j/k, Up/Down       Scroll activity log"),
             Line::from("  g / G              Jump to top / bottom"),
             Line::from("  Tab                Cycle panel focus"),
+            Line::from("  z                  Zoom / restore panels"),
             Line::from("  v                  Toggle verbose mode"),
             Line::from("  s                  Open session picker"),
             Line::from("  Ctrl-C             Quit (press twice to force)"),

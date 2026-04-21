@@ -11,7 +11,8 @@ use ratatui::{
 
 use spur_core::{ExecutorId, ExecutorLineage, ExecutorNode, LifecycleState, Role};
 
-use super::{focused_border_style, SPINNER_FRAMES};
+use super::focused_border_style;
+use crate::components::spinner;
 
 pub struct AgentsTree {
     focused: bool,
@@ -151,13 +152,13 @@ impl AgentsTree {
 
         let spinner = match node.phase {
             LifecycleState::Running | LifecycleState::Spawning => {
-                SPINNER_FRAMES[(self.tick_counter % 10) as usize]
+                spinner::frame(spinner::BRAILLE, self.tick_counter as u32)
             }
-            LifecycleState::AwaitingReview => '⚠',
-            LifecycleState::Succeeded => '●',
-            LifecycleState::Failed => '✗',
-            LifecycleState::Cancelled => '○',
-            LifecycleState::Resuming => '↻',
+            LifecycleState::AwaitingReview => "⚠",
+            LifecycleState::Succeeded => "●",
+            LifecycleState::Failed => "✗",
+            LifecycleState::Cancelled => "○",
+            LifecycleState::Resuming => "↻",
         };
 
         let status_color = match node.phase {

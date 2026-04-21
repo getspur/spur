@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -17,7 +17,7 @@ use crate::action::{Action, ViewId};
 use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
 use crate::components::detail_pane::{DetailPane, DetailTab};
-use crate::components::input_bar::{EditMode, HandleOutcome, InputBar};
+use crate::components::input_bar::{ActivityKind, EditMode, HandleOutcome, InputBar};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issues_panel::IssuesPanel;
 use crate::components::status_bar::{StatusBar, StatusBarProps};
@@ -69,6 +69,9 @@ pub struct DashboardView {
     issue_detail_pane: IssueDetailPane,
     issue_focus: IssueFocus,
     alert_summary: Option<(usize, usize, usize)>,
+    /// When true, agents tree and issues panel are collapsed to maximize
+    /// the log / detail viewport.
+    layout_zoomed: bool,
 }
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
@@ -162,6 +165,7 @@ impl DashboardView {
             issue_detail_pane: IssueDetailPane::new(),
             issue_focus: IssueFocus::None,
             alert_summary: None,
+            layout_zoomed: false,
         }
     }
 
@@ -169,10 +173,45 @@ impl DashboardView {
         &self.tracked_issues
     }
 
-    /// Current local time formatted as HH:MM:SS.
-    /// Render the one-line hint above the InputBar. Shows context-sensitive
-    /// hints when typing commands/mentions, or empty-state hints when idle.
-    fn render_input_hint(&self, frame: &mut Frame, area: Rect, input_bar_area: Rect) {
+    /// Build a context-sensitive hint string showing the active panel and
+    /// its available key bindings. This makes the invisible `j`/`k` routing
+    /// explicit to the user.
+    fn panel_context_hint(&self, lineage: &ExecutorLineage) -> String {
+        match &self.issue_focus {
+            IssueFocus::Loaded { .. } => {
+                "[Issue Detail] j/k scroll · o/w/b/d status · W work · Esc close".into()
+            }
+            IssueFocus::Loading { .. } => "[Issue Detail] Loading…".into(),
+            IssueFocus::None => match &self.focused_node {
+                Some(id) => {
+                    let agent = lineage.node(id).map(|n| n.agent.as_str()).unwrap_or("?");
+                    format!(
+                        "[Detail: {}] ←/→ tabs · j/k scroll · r review · Esc unfocus",
+                        agent
+                    )
+                }
+                None => match self.focused_panel {
+                    Panel::Agents => {
+                        "[Agents] j/k move · Enter focus · c collapse · Tab cycle".into()
+                    }
+                    Panel::Issues => {
+                        "[Issues] j/k select · Enter detail · W work · Tab cycle".into()
+                    }
+                    Panel::Log => "[Log] j/k scroll · g/G top/bottom · Tab cycle".into(),
+                },
+            },
+        }
+    }
+
+    /// Render the one-line hint above the InputBar.
+    /// Priority: command/mention hints when typing → panel context when idle.
+    fn render_input_hint(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        input_bar_area: Rect,
+        lineage: &ExecutorLineage,
+    ) {
         let hint_y = input_bar_area.y.saturating_sub(1);
         if hint_y < area.y {
             return;
@@ -185,13 +224,7 @@ impl DashboardView {
         };
 
         let text = self.input_bar.text();
-        let hint = if text.is_empty() && !self.session_attached {
-            // Empty state hint
-            Paragraph::new(Span::styled(
-                " [/] command \u{00b7} [@] mention \u{00b7} [!] interrupt \u{00b7} [Alt+I] vim \u{00b7} [Alt+Enter] newline \u{00b7} ? for help",
-                Style::default().fg(Color::DarkGray),
-            ))
-        } else if text.starts_with('/') && !text[1..].contains(char::is_whitespace) {
+        let hint = if text.starts_with('/') && !text[1..].contains(char::is_whitespace) {
             // Command hint
             Paragraph::new(Span::styled(
                 " Tab to select command \u{00b7} Esc to dismiss",
@@ -207,6 +240,13 @@ impl DashboardView {
             // Mention hint
             Paragraph::new(Span::styled(
                 " Tab to select file \u{00b7} Esc to dismiss",
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else if text.is_empty() {
+            // Panel context hint — always visible when idle so the user knows
+            // which panel is active and what j/k will do.
+            Paragraph::new(Span::styled(
+                self.panel_context_hint(lineage),
                 Style::default().fg(Color::DarkGray),
             ))
         } else {
@@ -304,44 +344,70 @@ impl DashboardView {
             String::new()
         };
 
-        let label = match (name, status) {
+        let (label, activity) = match (name, status) {
             (_, "idle") => {
                 if mention_count > 0 {
-                    Some(format!(
-                        "[{} mention{}]",
-                        mention_count,
-                        if mention_count > 1 { "s" } else { "" }
-                    ))
+                    (
+                        Some(format!(
+                            "[{} mention{}]",
+                            mention_count,
+                            if mention_count > 1 { "s" } else { "" }
+                        )),
+                        ActivityKind::Idle,
+                    )
                 } else {
-                    None
+                    (None, ActivityKind::Idle)
                 }
             }
-            (Some(n), "thinking") => Some(format!(
-                "[{} \u{00b7}\u{00b7}\u{00b7}{}]",
-                n, mention_suffix
-            )),
-            (Some(n), "connecting") => Some(format!("[{}: connecting{}]", n, mention_suffix)),
-            (Some(n), "connected") => Some(format!("[{}: connected{}]", n, mention_suffix)),
-            (Some(n), "streaming") => Some(format!(
-                "[{} \u{25b8}\u{25b8}\u{25b8}{}]",
-                n, mention_suffix
-            )),
-            (Some(n), "ready") => Some(format!("[{}: ready{}]", n, mention_suffix)),
-            (Some(n), "error") => Some(format!("[{}: error{}]", n, mention_suffix)),
+            (Some(n), "thinking") => (
+                Some(format!("[{} {{spinner}}{}]", n, mention_suffix)),
+                ActivityKind::Thinking,
+            ),
+            (Some(n), "connecting") => (
+                Some(format!("[{}: connecting {{spinner}}{}]", n, mention_suffix)),
+                ActivityKind::Connecting,
+            ),
+            (Some(n), "connected") => (
+                Some(format!("[{}: connected{}]", n, mention_suffix)),
+                ActivityKind::Idle,
+            ),
+            (Some(n), "streaming") => (
+                Some(format!("[{} {{spinner}}{}]", n, mention_suffix)),
+                ActivityKind::Streaming,
+            ),
+            (Some(n), "ready") => (
+                Some(format!("[{}: ready{}]", n, mention_suffix)),
+                ActivityKind::Idle,
+            ),
+            (Some(n), "error") => (
+                Some(format!("[{}: error{}]", n, mention_suffix)),
+                ActivityKind::Idle,
+            ),
             (None, _) => {
                 if mention_count > 0 {
-                    Some(format!(
-                        "[{} mention{}]",
-                        mention_count,
-                        if mention_count > 1 { "s" } else { "" }
-                    ))
+                    (
+                        Some(format!(
+                            "[{} mention{}]",
+                            mention_count,
+                            if mention_count > 1 { "s" } else { "" }
+                        )),
+                        ActivityKind::Idle,
+                    )
                 } else {
-                    None
+                    (None, ActivityKind::Idle)
                 }
             }
-            (Some(n), other) => Some(format!("[{}: {}{}]", n, other, mention_suffix)),
+            (Some(n), other) => (
+                Some(format!("[{}: {}{}]", n, other, mention_suffix)),
+                ActivityKind::Idle,
+            ),
         };
-        self.input_bar.set_status(label);
+        self.input_bar.set_status(label, activity);
+    }
+
+    /// True when the InputBar status label is in an animated activity state.
+    pub fn input_bar_has_active_animation(&self) -> bool {
+        self.input_bar.has_active_animation()
     }
 
     /// Render the dashboard with access to the current lineage projection.
@@ -418,7 +484,7 @@ impl DashboardView {
             };
             frame.render_widget(paragraph, content_area);
             let input_bar_area = chunks[1];
-            self.render_input_hint(frame, area, input_bar_area);
+            self.render_input_hint(frame, area, input_bar_area, lineage);
             self.input_bar.render(frame, input_bar_area);
             StatusBar::render(
                 frame,
@@ -442,19 +508,24 @@ impl DashboardView {
             return;
         }
 
-        let agents_height = (node_count as u16 + 2)
-            .clamp(4, area.height * 40 / 100)
-            .min(12);
-
         let input_height = self.input_bar.required_height(area.width);
 
-        let issues_height = if self.tracked_issues.is_empty() {
-            0
+        let (agents_height, issues_height) = if self.layout_zoomed {
+            // Zoomed mode: collapse agents to a header bar, hide issues.
+            (1u16, 0u16)
         } else {
-            crate::components::issues_panel::IssuesPanel::computed_height(
-                self.tracked_issues.len(),
-                area.height,
-            )
+            let agents = (node_count as u16 + 2)
+                .clamp(4, area.height * 40 / 100)
+                .min(12);
+            let issues = if self.tracked_issues.is_empty() {
+                0
+            } else {
+                crate::components::issues_panel::IssuesPanel::computed_height(
+                    self.tracked_issues.len(),
+                    area.height,
+                )
+            };
+            (agents, issues)
         };
 
         let mut constraints = vec![
@@ -479,7 +550,20 @@ impl DashboardView {
         let input_chunk = log_chunk + 1;
         let status_chunk = input_chunk + 1;
 
-        self.agents_tree.render(frame, chunks[0], lineage);
+        if self.layout_zoomed {
+            let block = Block::default()
+                .title(format!(
+                    " Lineage: {} agents · {} running · z restore ",
+                    node_count, running
+                ))
+                .borders(Borders::ALL)
+                .border_style(crate::components::focused_border_style(
+                    self.focused_panel == Panel::Agents,
+                ));
+            frame.render_widget(block, chunks[0]);
+        } else {
+            self.agents_tree.render(frame, chunks[0], lineage);
+        }
 
         if let Some(ic) = issues_chunk {
             self.issues_panel
@@ -519,7 +603,7 @@ impl DashboardView {
             },
         }
         let input_bar_area = chunks[input_chunk];
-        self.render_input_hint(frame, area, input_bar_area);
+        self.render_input_hint(frame, area, input_bar_area, lineage);
         self.input_bar.render(frame, input_bar_area);
         StatusBar::render(
             frame,
@@ -776,6 +860,10 @@ impl DashboardView {
                         'v' => {
                             self.verbose = !self.verbose;
                             Some(Action::ToggleVerbose)
+                        }
+                        'z' => {
+                            self.layout_zoomed = !self.layout_zoomed;
+                            None
                         }
                         '?' => Some(Action::ShowHelp),
                         's' => Some(Action::RequestSessions),
@@ -1621,7 +1709,14 @@ impl View for DashboardView {
         // directly so it can pass worker_streams. This fallback exists only to
         // satisfy the View trait (e.g., in tests that don't need stream traces).
         let mut empty_ws = crate::worker_streams::WorkerStreams::new();
-        self.render_with_lineage(frame, area, ctx.lineage, ctx.license_badge, &mut empty_ws, ctx.flag_summary);
+        self.render_with_lineage(
+            frame,
+            area,
+            ctx.lineage,
+            ctx.license_badge,
+            &mut empty_ws,
+            ctx.flag_summary,
+        );
     }
 }
 
@@ -1641,6 +1736,7 @@ impl DashboardView {
     /// Tick + flush batched text. Returns true iff at least one batch was
     /// flushed to the activity log (so the caller can mark the TUI dirty).
     pub fn tick_and_report_flush(&mut self) -> bool {
+        self.input_bar.tick();
         self.agents_tree.tick();
 
         // Flush text batches older than 500ms

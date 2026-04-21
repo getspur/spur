@@ -11,7 +11,7 @@ use crate::components::line_wrap::wrap_line_to_width;
 #[cfg(feature = "markdown")]
 use super::types::{RenderContext, Segment, VirtualRow};
 use super::ReactTrace;
-use super::SPINNER_FRAMES;
+use crate::components::spinner;
 
 /// Cached wrapped lines for the non-markdown render path.
 #[cfg(not(feature = "markdown"))]
@@ -296,8 +296,7 @@ impl ReactTrace {
                 .map(|c| c.generation == self.generation && c.width == effective_width)
                 .unwrap_or(false);
             if !hit {
-                let spinner_frame =
-                    SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+                let spinner_frame = spinner::frame(spinner::BRAILLE, self.tick_counter as u32);
                 let lines = self.build_display_lines(spinner_frame, lineage);
                 let built: Vec<Line<'static>> = lines
                     .into_iter()
@@ -316,8 +315,7 @@ impl ReactTrace {
         // VirtualRow cache. Build lines directly (this path is rarely hit).
         #[cfg(feature = "markdown")]
         let wrapped_owned: Vec<Line<'static>> = {
-            let spinner_frame =
-                SPINNER_FRAMES[(self.tick_counter as usize / 2) % SPINNER_FRAMES.len()];
+            let spinner_frame = spinner::frame(spinner::BRAILLE, self.tick_counter as u32);
             let lines = self.build_display_lines(spinner_frame, lineage);
             lines
                 .into_iter()

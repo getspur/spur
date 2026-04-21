@@ -5,6 +5,7 @@
 
 use super::ReactTrace;
 use crate::components::markdown_stream::StateLookup;
+use crate::components::spinner;
 
 /// TI.2 — the original ghost-text failing case.
 ///
@@ -1623,13 +1624,13 @@ fn build_display_lines_completed_shows_outcome_glyph() {
         timestamp: "10:00".into(),
         markdown: None,
     });
-    let lines = trace.build_display_lines_for_tests(super::SPINNER_FRAMES[0], None);
+    let lines = trace.build_display_lines_for_tests(spinner::BRAILLE[0], None);
     let joined: String = lines
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
         .collect();
     assert!(joined.contains("✓"), "expected success glyph: {joined}");
-    for f in super::SPINNER_FRAMES {
+    for f in spinner::BRAILLE {
         assert!(
             !joined.contains(f),
             "must not render spinner frame {f} for completed Act: {joined}"
@@ -1707,7 +1708,7 @@ fn build_display_lines_expanded_completed_renders_outcome_body() {
         timestamp: "10:00".into(),
         markdown: None,
     });
-    let lines = trace.build_display_lines_for_tests(super::SPINNER_FRAMES[0], None);
+    let lines = trace.build_display_lines_for_tests(spinner::BRAILLE[0], None);
     let joined: String = lines
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))

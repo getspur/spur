@@ -114,7 +114,7 @@ fn running_status_line(node: &ExecutorNode) -> Line<'static> {
     let spinner = if stale_secs.unwrap_or(u64::MAX) < 10 {
         spinner_glyph()
     } else {
-        ' '
+        " "
     };
 
     Line::from(vec![
@@ -278,14 +278,13 @@ fn stale_color_for(secs_since_last: Option<u64>) -> Color {
     }
 }
 
-fn spinner_glyph() -> char {
-    let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    let idx = (std::time::SystemTime::now()
+fn spinner_glyph() -> &'static str {
+    use crate::components::spinner;
+    let tick = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() / 80)
-        .unwrap_or(0)
-        % frames.len() as u128) as usize;
-    frames[idx]
+        .map(|d| d.as_millis() as u32 / 80)
+        .unwrap_or(0);
+    spinner::frame(spinner::BRAILLE, tick)
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -12,7 +12,7 @@ use ratatui::{
 use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 
 use crate::action::{Action, ViewId};
-use crate::components::input_bar::{EditMode, InputBar};
+use crate::components::input_bar::{ActivityKind, EditMode, InputBar};
 use crate::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 use crate::input_history::InputHistoryEntry;
@@ -537,8 +537,10 @@ impl SessionDetailView {
     /// Update the brain status label shown in the InputBar.
     pub fn set_brain_status(&mut self, status: &str) {
         if self.cancelling_in_flight {
-            self.input_bar
-                .set_status(Some(format!("[{}: cancelling\u{2026}]", self.agent_name)));
+            self.input_bar.set_status(
+                Some(format!("[{}: cancelling{{spinner}}]", self.agent_name)),
+                ActivityKind::Cancelling,
+            );
             return;
         }
         let mention_count = self.input_bar.protected_ranges().len();
@@ -552,42 +554,73 @@ impl SessionDetailView {
             String::new()
         };
 
-        let label = match status {
+        let (label, activity) = match status {
             "idle" => {
                 if mention_count > 0 {
-                    Some(format!(
-                        "[{} mention{}]",
-                        mention_count,
-                        if mention_count > 1 { "s" } else { "" }
-                    ))
+                    (
+                        Some(format!(
+                            "[{} mention{}]",
+                            mention_count,
+                            if mention_count > 1 { "s" } else { "" }
+                        )),
+                        ActivityKind::Idle,
+                    )
                 } else {
-                    None
+                    (None, ActivityKind::Idle)
                 }
             }
-            "thinking" => Some(format!(
-                "[{} \u{00b7}\u{00b7}\u{00b7}{}]",
-                self.agent_name, mention_suffix
-            )),
-            "connecting" => Some(format!(
-                "[{}: connecting{}]",
-                self.agent_name, mention_suffix
-            )),
-            "connected" => Some(format!(
-                "[{}: connected{}]",
-                self.agent_name, mention_suffix
-            )),
-            "streaming" => Some(format!(
-                "[{} \u{25b8}\u{25b8}\u{25b8}{}]",
-                self.agent_name, mention_suffix
-            )),
-            "ready" => Some(format!("[{}: ready{}]", self.agent_name, mention_suffix)),
-            "error" => Some(format!("[{}: error{}]", self.agent_name, mention_suffix)),
-            other => Some(format!(
-                "[{}: {}{}]",
-                self.agent_name, other, mention_suffix
-            )),
+            "thinking" => (
+                Some(format!(
+                    "[{} {{spinner}}{}]",
+                    self.agent_name, mention_suffix
+                )),
+                ActivityKind::Thinking,
+            ),
+            "connecting" => (
+                Some(format!(
+                    "[{}: connecting {{spinner}}{}]",
+                    self.agent_name, mention_suffix
+                )),
+                ActivityKind::Connecting,
+            ),
+            "connected" => (
+                Some(format!(
+                    "[{}: connected{}]",
+                    self.agent_name, mention_suffix
+                )),
+                ActivityKind::Idle,
+            ),
+            "streaming" => (
+                Some(format!(
+                    "[{} {{spinner}}{}]",
+                    self.agent_name, mention_suffix
+                )),
+                ActivityKind::Streaming,
+            ),
+            "ready" => (
+                Some(format!("[{}: ready{}]", self.agent_name, mention_suffix)),
+                ActivityKind::Idle,
+            ),
+            "error" => (
+                Some(format!("[{}: error{}]", self.agent_name, mention_suffix)),
+                ActivityKind::Idle,
+            ),
+            other if other.starts_with("delegat") => (
+                Some(format!(
+                    "[{}: {}{}]",
+                    self.agent_name, other, mention_suffix
+                )),
+                ActivityKind::Thinking,
+            ),
+            other => (
+                Some(format!(
+                    "[{}: {}{}]",
+                    self.agent_name, other, mention_suffix
+                )),
+                ActivityKind::Idle,
+            ),
         };
-        self.input_bar.set_status(label);
+        self.input_bar.set_status(label, activity);
     }
 
     pub fn scroll_up(&mut self) {
@@ -908,8 +941,10 @@ impl SessionDetailView {
         {
             self.cancelling_in_flight = true;
             self.push_cancel_note();
-            self.input_bar
-                .set_status(Some(format!("[{}: cancelling\u{2026}]", self.agent_name)));
+            self.input_bar.set_status(
+                Some(format!("[{}: cancelling{{spinner}}]", self.agent_name)),
+                ActivityKind::Cancelling,
+            );
             return Some(Action::CancelStream {
                 session: self.session_id.clone(),
             });
@@ -1555,6 +1590,7 @@ impl View for SessionDetailView {
 
     fn tick(&mut self) {
         self.react_trace.tick();
+        self.input_bar.tick();
         #[cfg(feature = "markdown")]
         {
             use crate::components::markdown_stream::StateLookup;
@@ -1583,7 +1619,13 @@ impl View for SessionDetailView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
-        self.render_inner(frame, area, Some(ctx.lineage), ctx.license_badge, ctx.flag_summary);
+        self.render_inner(
+            frame,
+            area,
+            Some(ctx.lineage),
+            ctx.license_badge,
+            ctx.flag_summary,
+        );
     }
 }
 impl SessionDetailView {
