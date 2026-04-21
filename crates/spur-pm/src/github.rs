@@ -209,6 +209,12 @@ impl From<GhIssueListItem> for IssueSummary {
     }
 }
 
+fn paginate_issue_summaries(issues: Vec<IssueSummary>, filter: &IssueFilter) -> Vec<IssueSummary> {
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    issues.into_iter().skip(offset).take(limit).collect()
+}
+
 // ─── IssueTracker implementation ──────────────────────────────────────
 
 #[async_trait]
@@ -236,7 +242,9 @@ impl IssueTracker for GitHubAdapter {
     async fn list_issues(&self, filter: IssueFilter) -> anyhow::Result<Vec<IssueSummary>> {
         let repo = self.repo()?;
 
-        let limit = filter.limit.unwrap_or(50).to_string();
+        let requested_limit = filter.limit.unwrap_or(50);
+        let offset = filter.offset.unwrap_or(0);
+        let fetch_limit = requested_limit.saturating_add(offset).to_string();
         let mut args: Vec<String> = vec![
             "issue".into(),
             "list".into(),
@@ -245,7 +253,7 @@ impl IssueTracker for GitHubAdapter {
             "--json".into(),
             "number,title,labels,state,url,updatedAt".into(),
             "--limit".into(),
-            limit,
+            fetch_limit,
         ];
 
         // Apply label filters
@@ -288,7 +296,7 @@ impl IssueTracker for GitHubAdapter {
             .map(IssueSummary::from)
             .collect();
 
-        Ok(summaries)
+        Ok(paginate_issue_summaries(summaries, &filter))
     }
 
     async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
@@ -471,5 +479,66 @@ impl PrService for GitHubAdapter {
         }
 
         Ok(url)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn summary(id: &str) -> crate::types::IssueSummary {
+        crate::types::IssueSummary {
+            id: id.to_string(),
+            source: crate::types::PmSource::GitHub,
+            title: format!("Issue {id}"),
+            status: "open".into(),
+            labels: Vec::new(),
+            url: format!("https://example.invalid/{id}"),
+            priority: None,
+            issue_type: None,
+            assignee: None,
+        }
+    }
+
+    #[test]
+    fn paginate_issue_summaries_without_offset_preserves_first_page() {
+        let issues = vec![summary("1"), summary("2"), summary("3")];
+        let page = super::paginate_issue_summaries(
+            issues,
+            &crate::types::IssueFilter {
+                limit: Some(2),
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(ids, vec!["1".to_string(), "2".to_string()]);
+    }
+
+    #[test]
+    fn paginate_issue_summaries_applies_offset() {
+        let issues = vec![summary("1"), summary("2"), summary("3")];
+        let page = super::paginate_issue_summaries(
+            issues,
+            &crate::types::IssueFilter {
+                offset: Some(1),
+                limit: Some(5),
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(ids, vec!["2".to_string(), "3".to_string()]);
+    }
+
+    #[test]
+    fn paginate_issue_summaries_caps_length_after_offset() {
+        let issues = vec![summary("1"), summary("2"), summary("3"), summary("4")];
+        let page = super::paginate_issue_summaries(
+            issues,
+            &crate::types::IssueFilter {
+                offset: Some(1),
+                limit: Some(2),
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(ids, vec!["2".to_string(), "3".to_string()]);
     }
 }
