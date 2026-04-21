@@ -436,7 +436,10 @@ async fn main() -> Result<()> {
                 spur_core::license_runtime::to_event_state(license.current_state());
 
             // Create PmService (optional — returns None if no backend available)
-            let pm_service = if license.feature_gate().has(spur_license::FeatureKey::PM_INTEGRATION) {
+            let pm_service = if license
+                .feature_gate()
+                .has(spur_license::FeatureKey::PM_INTEGRATION)
+            {
                 spur_pm::PmService::try_new(
                     config.pm.github.as_ref().and_then(|g| g.repo.clone()),
                     config.pm.beads.as_ref().is_none_or(|b| b.enabled),
