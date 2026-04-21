@@ -576,4 +576,32 @@ mod tests {
         assert_eq!(out.len(), ISSUE_SCAN_PAGE_SIZE);
         assert_eq!(next, Some(ISSUE_SCAN_PAGE_SIZE));
     }
+
+    #[test]
+    fn apply_issue_scan_page_stops_after_tail_page() {
+        let mut out = Vec::new();
+        let full_page = (0..ISSUE_SCAN_PAGE_SIZE)
+            .map(|idx| summary(&format!("bd-{idx}")))
+            .collect();
+        let tail_page = vec![summary("bd-tail-1"), summary("bd-tail-2")];
+
+        let next = apply_issue_scan_page(&mut out, 0, full_page);
+        assert_eq!(next, Some(ISSUE_SCAN_PAGE_SIZE));
+
+        let final_next = apply_issue_scan_page(&mut out, next.unwrap(), tail_page);
+
+        assert_eq!(final_next, None);
+        assert_eq!(out.len(), ISSUE_SCAN_PAGE_SIZE + 2);
+        assert_eq!(out.last().map(|id| id.as_str()), Some("bd-tail-2"));
+    }
+
+    #[test]
+    fn apply_issue_scan_page_handles_empty_page() {
+        let mut out = Vec::new();
+
+        let next = apply_issue_scan_page(&mut out, 0, Vec::new());
+
+        assert_eq!(next, None);
+        assert!(out.is_empty());
+    }
 }

@@ -964,4 +964,31 @@ mod tests {
         let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
         assert_eq!(ids, vec!["bd-2".to_string(), "bd-3".to_string()]);
     }
+
+    #[test]
+    fn paginate_issue_summaries_keeps_exact_page_length() {
+        let issues = vec![summary("bd-1"), summary("bd-2"), summary("bd-3")];
+        let page = super::paginate_issue_summaries(
+            issues,
+            &crate::types::IssueFilter {
+                limit: Some(3),
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = page.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "bd-1".to_string(),
+                "bd-2".to_string(),
+                "bd-3".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn paginate_issue_summaries_handles_empty_input() {
+        let page = super::paginate_issue_summaries(Vec::new(), &crate::types::IssueFilter::default());
+        assert!(page.is_empty());
+    }
 }
