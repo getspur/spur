@@ -44,7 +44,7 @@ impl WorkerStreams {
         let trace = self
             .traces
             .entry(executor_id.to_string())
-            .or_insert_with(|| ReactTrace::with_kind_compact(kind));
+            .or_insert_with(|| ReactTrace::with_kind(kind));
         let depths = self.depths.entry(executor_id.to_string()).or_default();
         let mut ctx = DispatchCtx {
             agent_name,
@@ -81,7 +81,7 @@ impl WorkerStreams {
         let trace = self
             .traces
             .entry(executor_id.to_string())
-            .or_insert_with(|| ReactTrace::with_kind_compact(kind));
+            .or_insert_with(|| ReactTrace::with_kind(kind));
         for e in entries {
             let (entry_kind, text) = match e.kind {
                 WorkerStreamKind::Thought => (TraceKind::Think, e.text.clone()),
@@ -141,7 +141,7 @@ impl WorkerStreams {
             .copied()
             .unwrap_or(AgentKind::Generic);
         if let Some(slot) = self.traces.get_mut(executor_id) {
-            *slot = ReactTrace::with_kind_compact(kind);
+            *slot = ReactTrace::with_kind(kind);
         }
     }
 }

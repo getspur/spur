@@ -13,6 +13,14 @@ use super::types::{RenderContext, Segment, VirtualRow};
 use super::ReactTrace;
 use crate::components::spinner;
 
+/// Cached wrapped body lines for the external pane render path
+/// (DetailPane Stream tab). Independent from the full-render caches.
+pub(in crate::components::react_trace) struct BodyCacheEntry {
+    pub(super) lines: Vec<Line<'static>>,
+    pub(super) width: u16,
+    pub(super) generation: u64,
+}
+
 /// Cached wrapped lines for the non-markdown render path.
 #[cfg(not(feature = "markdown"))]
 pub(in crate::components) struct LineCacheEntry {

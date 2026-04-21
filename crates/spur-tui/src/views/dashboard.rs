@@ -186,7 +186,7 @@ impl DashboardView {
                 Some(id) => {
                     let agent = lineage.node(id).map(|n| n.agent.as_str()).unwrap_or("?");
                     format!(
-                        "[Detail: {}] ←/→ tabs · j/k scroll · r review · Esc unfocus",
+                        "[Detail: {}] ←/→ tabs · j/k scroll · Ctrl+O toggle · r review · Esc unfocus",
                         agent
                     )
                 }
@@ -646,19 +646,11 @@ impl DashboardView {
         if self.input_bar.is_empty() && self.focused_node.is_some() {
             match key.code {
                 KeyCode::Right => {
-                    let trace = self
-                        .focused_node
-                        .as_ref()
-                        .and_then(|id| worker_streams.get_mut(&id.0));
-                    self.detail_pane.cycle_tab(true, trace);
+                    self.detail_pane.cycle_tab(true);
                     return None;
                 }
                 KeyCode::Left => {
-                    let trace = self
-                        .focused_node
-                        .as_ref()
-                        .and_then(|id| worker_streams.get_mut(&id.0));
-                    self.detail_pane.cycle_tab(false, trace);
+                    self.detail_pane.cycle_tab(false);
                     return None;
                 }
                 _ => {}
@@ -676,6 +668,16 @@ impl DashboardView {
         if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.input_bar.history_next();
             return None;
+        }
+
+        // Ctrl+O → toggle observe collapsed in the focused executor's trace.
+        if matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(ref id) = self.focused_node {
+                if let Some(trace) = worker_streams.get_mut(&id.0) {
+                    trace.toggle_observe_collapsed();
+                    return None;
+                }
+            }
         }
 
         // Alt+I → toggle vim/emacs input mode.
@@ -803,8 +805,8 @@ impl DashboardView {
                         'j' if self.focused_panel == Panel::Agents => Some(Action::SelectNext),
                         'j' => {
                             if let Some(ref id) = self.focused_node.clone() {
-                                let trace = worker_streams.get_mut(&id.0);
-                                self.detail_pane.scroll_down(trace);
+                                let _trace = worker_streams.get_mut(&id.0);
+                                self.detail_pane.scroll_down();
                             } else {
                                 self.activity_log.scroll_down(20);
                             }
@@ -813,8 +815,8 @@ impl DashboardView {
                         'k' if self.focused_panel == Panel::Agents => Some(Action::SelectPrev),
                         'k' => {
                             if let Some(ref id) = self.focused_node.clone() {
-                                let trace = worker_streams.get_mut(&id.0);
-                                self.detail_pane.scroll_up(trace);
+                                let _trace = worker_streams.get_mut(&id.0);
+                                self.detail_pane.scroll_up();
                             } else {
                                 self.activity_log.scroll_up();
                             }
@@ -841,8 +843,8 @@ impl DashboardView {
                         'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
                         'g' => {
                             if let Some(ref id) = self.focused_node.clone() {
-                                let trace = worker_streams.get_mut(&id.0);
-                                self.detail_pane.scroll_to_top(trace);
+                                let _trace = worker_streams.get_mut(&id.0);
+                                self.detail_pane.scroll_to_top();
                             } else {
                                 self.activity_log.scroll_to_top();
                             }
@@ -850,8 +852,8 @@ impl DashboardView {
                         }
                         'G' => {
                             if let Some(ref id) = self.focused_node.clone() {
-                                let trace = worker_streams.get_mut(&id.0);
-                                self.detail_pane.scroll_to_bottom(trace);
+                                let _trace = worker_streams.get_mut(&id.0);
+                                self.detail_pane.scroll_to_bottom();
                             } else {
                                 self.activity_log.scroll_to_bottom();
                             }
@@ -960,8 +962,8 @@ impl DashboardView {
                     'j' => {
                         self.input_bar.clear();
                         if let Some(ref id) = self.focused_node.clone() {
-                            let trace = worker_streams.get_mut(&id.0);
-                            self.detail_pane.scroll_down(trace);
+                            let _trace = worker_streams.get_mut(&id.0);
+                            self.detail_pane.scroll_down();
                         } else {
                             self.activity_log.scroll_down(20);
                         }
@@ -974,8 +976,8 @@ impl DashboardView {
                     'k' => {
                         self.input_bar.clear();
                         if let Some(ref id) = self.focused_node.clone() {
-                            let trace = worker_streams.get_mut(&id.0);
-                            self.detail_pane.scroll_up(trace);
+                            let _trace = worker_streams.get_mut(&id.0);
+                            self.detail_pane.scroll_up();
                         } else {
                             self.activity_log.scroll_up();
                         }
@@ -992,8 +994,8 @@ impl DashboardView {
                     'g' => {
                         self.input_bar.clear();
                         if let Some(ref id) = self.focused_node.clone() {
-                            let trace = worker_streams.get_mut(&id.0);
-                            self.detail_pane.scroll_to_top(trace);
+                            let _trace = worker_streams.get_mut(&id.0);
+                            self.detail_pane.scroll_to_top();
                         } else {
                             self.activity_log.scroll_to_top();
                         }
@@ -1002,8 +1004,8 @@ impl DashboardView {
                     'G' => {
                         self.input_bar.clear();
                         if let Some(ref id) = self.focused_node.clone() {
-                            let trace = worker_streams.get_mut(&id.0);
-                            self.detail_pane.scroll_to_bottom(trace);
+                            let _trace = worker_streams.get_mut(&id.0);
+                            self.detail_pane.scroll_to_bottom();
                         } else {
                             self.activity_log.scroll_to_bottom();
                         }
@@ -1054,8 +1056,8 @@ impl DashboardView {
                     if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
                         self.issue_detail_pane.scroll_up();
                     } else if let Some(ref id) = self.focused_node.clone() {
-                        let trace = worker_streams.get_mut(&id.0);
-                        self.detail_pane.scroll_up(trace);
+                        let _trace = worker_streams.get_mut(&id.0);
+                        self.detail_pane.scroll_up();
                     } else {
                         self.activity_log.scroll_up();
                     }
@@ -1065,8 +1067,8 @@ impl DashboardView {
                     if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
                         self.issue_detail_pane.scroll_down();
                     } else if let Some(ref id) = self.focused_node.clone() {
-                        let trace = worker_streams.get_mut(&id.0);
-                        self.detail_pane.scroll_down(trace);
+                        let _trace = worker_streams.get_mut(&id.0);
+                        self.detail_pane.scroll_down();
                     } else {
                         self.activity_log.scroll_down(20);
                     }
