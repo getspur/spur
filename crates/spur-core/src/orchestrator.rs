@@ -539,12 +539,6 @@ impl Orchestrator {
         self
     }
 
-    /// Attach a feature gate for dynamic quota enforcement.
-    pub fn with_feature_gate(mut self, gate: std::sync::Arc<spur_license::FeatureGate>) -> Self {
-        self.feature_gate = Some(gate);
-        self
-    }
-
     /// Wire in the sender half of the `run_interactive` ingress channel so
     /// the MCP server can route detached delegation completions back to the
     /// orchestrator. Call this before `run_interactive`.
@@ -2896,7 +2890,7 @@ impl Orchestrator {
         pm_service: Option<Arc<PmService>>,
         cancellation_control: CancellationControl,
     ) {
-        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
         // Debounce: skip post-delegation refresh if another completed <3s ago.
         // Initial value is in the past so the first refresh always runs.
         let last_refresh_at = Arc::new(tokio::sync::Mutex::new(

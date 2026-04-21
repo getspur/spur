@@ -753,5 +753,6 @@ fn load_config() -> Result<SpurConfig> {
 
 fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
     let config = load_config()?;
-    Orchestrator::new(repo_root, config, None)
+    let license = SpurLicense::from_env_or_disabled();
+    Orchestrator::new(repo_root, config, Some(license.feature_gate()))
 }

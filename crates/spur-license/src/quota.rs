@@ -17,6 +17,16 @@ impl QuotaKey {
             Self::MinSeats => "min_seats",
         }
     }
+
+    pub fn from_known(s: &str) -> Option<Self> {
+        match s {
+            "max_concurrent_workers" => Some(Self::MaxConcurrentWorkers),
+            "event_retention_bytes" => Some(Self::EventRetentionBytes),
+            "max_team_members" => Some(Self::MaxTeamMembers),
+            "min_seats" => Some(Self::MinSeats),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for QuotaKey {

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use spur_cli::commands::auth::{run_with_license, AuthCommands, OutputFormat};
-use spur_license::test_support::FakeProvider;
-use spur_license::{LicenseState, Plan, SpurLicense};
 use spur_license::policy::PolicyResolver;
+use spur_license::test_support::FakeProvider;
 use spur_license::FeatureGate;
+use spur_license::{LicenseState, Plan, SpurLicense};
 
 fn test_feature_gate() -> Arc<FeatureGate> {
     Arc::new(FeatureGate::new(PolicyResolver::embedded()))
