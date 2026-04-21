@@ -379,6 +379,17 @@ impl Reconciler {
             self.pm.update_issue(&epic.id, update).await?;
             crate::plan::emit_epic_completion_audit(adv, &epic.id, plan_id, outcome.audit_outcome)
                 .await;
+            if outcome.add_integration_pending {
+                if let Some(sink) = self
+                    .dispatch
+                    .as_ref()
+                    .and_then(|dispatch| dispatch.event_sink.as_ref())
+                {
+                    sink.emit(spur_acp::SpurEventBody::PlanReadyToMerge {
+                        plan_id: plan_id.to_string(),
+                    });
+                }
+            }
             did_work = true;
         }
 
