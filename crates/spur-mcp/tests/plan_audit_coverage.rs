@@ -267,6 +267,58 @@ async fn plan_audit_coverage_all_four_sentinels() {
 }
 
 #[tokio::test]
+async fn epic_completion_audit_round_trips_through_collect_sentinels() {
+    if !br_available() {
+        eprintln!(
+            "skipping epic_completion_audit_round_trips_through_collect_sentinels: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+
+    let epic_id = serde_json::from_str::<serde_json::Value>(
+        &run_br(
+            dir.path(),
+            &["create", "Epic completion epic", "-t", "epic"],
+        )
+        .expect("create epic"),
+    )
+    .expect("create epic json")
+    .get("id")
+    .and_then(|value| value.as_str())
+    .expect("id field")
+    .to_string();
+
+    let adv = pm.advanced().expect("beads backend must have advanced()");
+    spur_mcp::plan::emit_epic_completion_audit(
+        adv,
+        &epic_id,
+        "audit-plan-epic",
+        spur_mcp::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,
+    )
+    .await;
+
+    let epic_comments =
+        run_br(dir.path(), &["comments", "list", &epic_id]).expect("br comments list epic");
+    let epic_sentinels = collect_sentinels(&epic_comments);
+    assert!(epic_sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::EpicCompletion {
+            outcome: spur_mcp::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,
+            plan_id,
+            epic_id: found_epic_id,
+        } if plan_id == "audit-plan-epic" && found_epic_id == &epic_id
+    )));
+}
+
+#[tokio::test]
 async fn persist_dispatch_intent_writes_label_before_send() {
     if !br_available() {
         eprintln!("skipping persist_dispatch_intent_writes_label_before_send: `br` not on PATH");
