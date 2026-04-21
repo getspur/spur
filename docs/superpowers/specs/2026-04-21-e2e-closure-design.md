@@ -253,7 +253,7 @@ flowchart LR
     B[Brain]
     M[MCP Server]
     P[(beads issues + deps + labels)]
-    A[[[[spur-audit v1]] comments]]
+    A["[[spur-audit v1]] comments"]
     X[Plan Projector]
     C[active_plans cache<br/>projection only]
     R[Reconciler<br/>single persisted-plan dispatcher]
