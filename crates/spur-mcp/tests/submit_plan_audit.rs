@@ -100,7 +100,7 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
     let adv = pm
         .advanced()
         .expect("beads-backed PmService must return advanced()");
-    spur_mcp::emit_plan_submit_audit(adv, "P1", &subgraph, None, None).await;
+    spur_mcp::emit_plan_submit_audit(adv, "P1", &subgraph, None, None, None).await;
 
     // Read comments back via br and assert the PlanSubmit sentinel is present.
     let list_out = run_br(dir.path(), &["comments", "list", &subgraph.epic_id])
@@ -173,6 +173,7 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
         "P2",
         &subgraph,
         Some("refs/heads/main"),
+        None,
         Some("execute_epic"),
     )
     .await;

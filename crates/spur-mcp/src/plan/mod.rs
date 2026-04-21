@@ -162,6 +162,9 @@ pub struct PlanState {
     /// dedicated integration branch from this ref so merge results are
     /// reproducible and detached from later brain edits.
     pub base_snapshot_branch: Option<String>,
+    /// OID matching `base_snapshot_branch` when it was captured. Prefer this
+    /// over the branch name when reconstructing restart-time merge/diff state.
+    pub base_snapshot_oid: Option<String>,
     /// Latest integration attempt state. Reset to `NotStarted` whenever the
     /// plan changes through review decisions.
     pub merge_state: PlanMergeState,
@@ -3233,6 +3236,7 @@ mod tests {
                 .collect(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: super::PlanMergeState::NotStarted,
             epic_id: None,
         };
@@ -3484,6 +3488,7 @@ mod tests {
             plan_id: "persist-order".into(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: PlanMergeState::NotStarted,
             epic_id: None,
             tasks: vec![PlanTaskEntry {
@@ -3573,6 +3578,7 @@ mod tests {
             plan_id: "persist-failure".into(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: PlanMergeState::NotStarted,
             epic_id: None,
             tasks: vec![PlanTaskEntry {
@@ -3657,6 +3663,7 @@ mod tests {
             tasks: vec![entry],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("test-brain".into())),
             base_snapshot_branch: None,
+            base_snapshot_oid: None,
             merge_state: PlanMergeState::NotStarted,
             epic_id: None,
         };
@@ -3873,6 +3880,7 @@ mod tests {
             }],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
             merge_state: super::PlanMergeState::NotStarted,
             epic_id: None,
         };
@@ -3909,6 +3917,7 @@ mod tests {
             }],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
             merge_state: super::PlanMergeState::Succeeded {
                 merge_branch: "spur/plan-merge-1".into(),
                 merged_task_ids: vec!["a".into()],
