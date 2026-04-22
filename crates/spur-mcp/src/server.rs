@@ -251,6 +251,8 @@ pub struct McpCallbackServer {
     /// The guard is moved into the spawned task and kept alive there.
     #[allow(dead_code)]
     brain_pidfile: Option<spur_pm::pidfile::PidFileGuard>,
+    /// v0e: opt-in auto-merge/PR on durable epic completion.
+    auto_merge_approved_plans: bool,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -759,6 +761,55 @@ fn invert_label_update(update: &spur_pm::IssueUpdate) -> spur_pm::IssueUpdate {
         remove_labels: update.add_labels.clone(),
         ..Default::default()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyReclaimMode {
+    Skip,
+    DetectAndRun,
+}
+
+fn legacy_reclaim_needed(has_rev1_merge_base_metadata: bool) -> bool {
+    !has_rev1_merge_base_metadata
+}
+
+async fn any_open_epic_lacks_rev1_metadata(pm: &spur_pm::PmService) -> anyhow::Result<bool> {
+    let epics = pm
+        .list_issues(spur_pm::IssueFilter {
+            status: Some("open".to_string()),
+            issue_type: Some("epic".to_string()),
+            limit: Some(1_000),
+            ..Default::default()
+        })
+        .await?;
+
+    let Some(adv) = pm.advanced() else {
+        return Ok(false);
+    };
+
+    for epic in &epics {
+        if let Some(plan_id) = epic
+            .labels
+            .iter()
+            .find_map(|l| crate::plan::labels::parse_plan_id(l))
+        {
+            let comments = adv.list_comments(&epic.id).await?;
+            let audits = crate::plan::projector::collect_sorted_audits(comments);
+            let has_rev1_metadata = audits.iter().any(|audit| matches!(
+                audit,
+                crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                    plan_id: pid,
+                    base_snapshot_branch: Some(_),
+                    base_snapshot_oid: Some(_),
+                    ..
+                } if pid == plan_id
+            ));
+            if !has_rev1_metadata {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[doc(hidden)]
@@ -1354,6 +1405,7 @@ impl McpCallbackServer {
             reconciler_fast_forward: None,
             repo_root: None,
             brain_pidfile: None,
+            auto_merge_approved_plans: false,
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -1399,6 +1451,32 @@ impl McpCallbackServer {
     /// Set the repository root path. Required for pidfile acquisition.
     pub fn set_repo_root(&mut self, root: std::path::PathBuf) {
         self.repo_root = Some(root);
+    }
+
+    /// v0e: opt-in auto-merge/PR on durable epic completion.
+    pub fn set_auto_merge_approved_plans(&mut self, enabled: bool) {
+        self.auto_merge_approved_plans = enabled;
+    }
+
+    /// Spawn `run_plan` for an ephemeral plan (no epic_id). Persisted plans
+    /// must use the reconciler; this helper is ephemeral-only by construction.
+    fn spawn_ephemeral_plan_runner(
+        &self,
+        state: Arc<tokio::sync::Mutex<crate::plan::PlanState>>,
+    ) {
+        let delegation_tx = self.delegation_tx.clone();
+        let plan_sink = self.event_sink.clone();
+        let plan_pm = self
+            .pm_service
+            .clone()
+            .map(|p| p as Arc<dyn crate::plan::PmLike>);
+        self.task_tracker.spawn(crate::plan::run_plan(
+            state,
+            delegation_tx,
+            plan_sink,
+            plan_pm,
+            self.reconciler_fast_forward.as_ref().cloned(),
+        ));
     }
 
     /// Spawn a background task that awaits a delegation oneshot and stores
@@ -1714,9 +1792,17 @@ impl McpCallbackServer {
 
         if let Some(pm) = self.pm_service.as_ref() {
             if pm.advanced().is_some() {
-                self.reclaim_persisted_plans_on_startup(Arc::clone(pm))
-                    .await
-                    .context("failed to reclaim persisted plans before startup")?;
+                let has_rev1_metadata = !any_open_epic_lacks_rev1_metadata(pm).await?;
+                let mode = if legacy_reclaim_needed(has_rev1_metadata) {
+                    LegacyReclaimMode::DetectAndRun
+                } else {
+                    LegacyReclaimMode::Skip
+                };
+                if matches!(mode, LegacyReclaimMode::DetectAndRun) {
+                    self.reclaim_persisted_plans_on_startup(Arc::clone(pm))
+                        .await
+                        .context("failed to reclaim persisted plans before startup")?;
+                }
             }
         }
         let has_reclaimed_plans = !self.active_plans.lock().await.is_empty();
@@ -1753,15 +1839,34 @@ impl McpCallbackServer {
                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                     reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
+                    let auto_merge = self.auto_merge_approved_plans;
+                    let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> = Some(Arc::clone(&self) as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
+                    let repo_root = self.repo_root.clone();
+                    let journal_notify = Arc::new(tokio::sync::Notify::new());
+                    let journal_handle = repo_root.map(|root| {
+                        let path = crate::plan::reconciler::beads_journal_path(&root);
+                        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                            crate::plan::reconciler::monitor_journal_appends(path, Arc::clone(&journal_notify)),
+                        ))
+                    });
                     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-                        let reconciler = Reconciler::new(
+                        let mut reconciler = Reconciler::new(
                             ReconcilerConfig::default(),
                             pm,
                             fast,
                             Some(dispatch),
                             None, // plan_id: observe all plans when None
                         );
+                        reconciler.set_auto_merge_approved_plans(auto_merge);
+                        reconciler.set_journal_wake(journal_notify);
+                        if let Some(a) = automation {
+                            reconciler.set_automation(a);
+                        }
                         reconciler.run(cancel_rx).await;
+                        // journal_handle is AbortOnDropHandle: dropping aborts the
+                        // polling task, preventing graceful-shutdown hangs and
+                        // abort/drop leaks.
+                        drop(journal_handle);
                     }));
                     Some(handle)
                 } else {
@@ -2669,42 +2774,27 @@ impl McpCallbackServer {
         }
     }
 
-    async fn handle_merge_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
-        };
-
+    async fn merge_plan_impl(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState> {
         let repo_root = match self.repo_root.as_ref() {
             Some(root) => root.clone(),
-            None => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    "Repository root not configured; merge_plan is unavailable",
-                )
-            }
+            None => anyhow::bail!("Repository root not configured; merge_plan is unavailable"),
         };
 
-        let had_cached_entry = self.active_plans.lock().await.contains_key(&plan_id);
-        let plan_arc = match self.load_or_project_plan(&plan_id).await {
+        let had_cached_entry = self.active_plans.lock().await.contains_key(plan_id);
+        let plan_arc = match self.load_or_project_plan(plan_id).await {
             Ok(plan_arc) => plan_arc,
-            Err(_) => {
-                return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"))
-            }
+            Err(_) => anyhow::bail!("Unknown plan_id: '{plan_id}'"),
         };
 
         let (base_snapshot_branch, base_snapshot_oid, tasks, merge_state, epic_id) = {
             let state = plan_arc.lock().await;
-            let status = crate::plan::build_plan_status(&plan_id, &state);
+            let status = crate::plan::build_plan_status(plan_id, &state);
             let ready = status
                 .get("ready_to_merge")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if !ready {
-                return JsonRpcResponse::invalid_params(
-                    id,
-                    format!("plan '{plan_id}' is not fully approved yet"),
-                );
+                anyhow::bail!("plan '{plan_id}' is not fully approved yet");
             }
             (
                 state.base_snapshot_branch.clone(),
@@ -2716,21 +2806,15 @@ impl McpCallbackServer {
         };
 
         if !matches!(merge_state, crate::plan::PlanMergeState::NotStarted) {
-            let state = plan_arc.lock().await;
-            let status = crate::plan::build_plan_status(&plan_id, &state);
-            let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
-            return JsonRpcResponse::success(
-                id,
-                json!({ "content": [{ "type": "text", "text": text }] }),
-            );
+            return Ok(merge_state);
         }
 
         let persisted_bootstrap = if !had_cached_entry {
             match (self.pm_service.as_deref(), epic_id.as_deref()) {
                 (Some(pm), Some(epic_id)) => {
-                    match read_persisted_plan_bootstrap(pm, &plan_id, epic_id).await {
+                    match read_persisted_plan_bootstrap(pm, plan_id, epic_id).await {
                         Ok(bootstrap) => Some(bootstrap),
-                        Err(error) => return JsonRpcResponse::internal_error(id, error),
+                        Err(error) => anyhow::bail!(error),
                     }
                 }
                 _ => None,
@@ -2747,52 +2831,34 @@ impl McpCallbackServer {
             .or(base_snapshot_branch)
         {
             Some(reference) => reference,
-            None => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!(
-                        "plan '{plan_id}' has no captured base snapshot; resubmit the plan before calling merge_plan"
-                    ),
-                )
-            }
+            None => anyhow::bail!(
+                "plan '{plan_id}' has no captured base snapshot; resubmit the plan before calling merge_plan"
+            ),
         };
 
         let task_specs: Vec<crate::plan::PlanTask> =
             tasks.iter().map(|entry| entry.spec.clone()).collect();
-        let order = match topological_order(&task_specs) {
-            Ok(order) => order,
-            Err(e) => return JsonRpcResponse::internal_error(id, e),
-        };
+        let order = topological_order(&task_specs).map_err(|e| anyhow::anyhow!(e))?;
 
         let mut ordered_branches = Vec::with_capacity(order.len());
         for idx in order {
             let entry = &tasks[idx];
             if !matches!(entry.status, crate::plan::PlanTaskStatus::Approved { .. }) {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!(
-                        "plan '{plan_id}' became non-approved while merge_plan was preparing task '{}'",
-                        entry.spec.task_id
-                    ),
+                anyhow::bail!(
+                    "plan '{plan_id}' became non-approved while merge_plan was preparing task '{}'",
+                    entry.spec.task_id
                 );
             }
             let Some(worker_branch) = entry.worker_branch.clone() else {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!(
-                        "approved task '{}' has no worker_branch; cannot integrate plan",
-                        entry.spec.task_id
-                    ),
+                anyhow::bail!(
+                    "approved task '{}' has no worker_branch; cannot integrate plan",
+                    entry.spec.task_id
                 );
             };
             ordered_branches.push((entry.spec.task_id.clone(), worker_branch));
         }
 
-        let merge_branch = format!(
-            "spur/plan-merge-{}-{}",
-            plan_id,
-            uuid::Uuid::new_v4().simple()
-        );
+        let merge_branch = format!("spur/plan-merge-{plan_id}-{}", uuid::Uuid::new_v4().simple());
 
         let merge_state = match integrate_plan_branches(
             &repo_root,
@@ -2810,7 +2876,7 @@ impl McpCallbackServer {
 
         {
             let mut state = plan_arc.lock().await;
-            state.merge_state = merge_state;
+            state.merge_state = merge_state.clone();
         }
 
         if merged_successfully {
@@ -2825,20 +2891,58 @@ impl McpCallbackServer {
                 )
                 .await
                 {
-                    return JsonRpcResponse::internal_error(
-                        id,
-                        format!("failed to clear integration-pending on epic '{epic_id}': {error}"),
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        epic_id = %epic_id,
+                        "failed to clear integration-pending on epic after merge: {error}"
                     );
                 }
             }
         }
 
-        let status = {
-            let state = plan_arc.lock().await;
-            crate::plan::build_plan_status(&plan_id, &state)
+        Ok(merge_state)
+    }
+
+    async fn create_pr_impl(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
+        self.pm_service
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No PR service configured"))?
+            .create_pr(params)
+            .await
+    }
+
+    async fn handle_merge_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
         };
-        let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
-        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+
+        match self.merge_plan_impl(&plan_id).await {
+            Ok(_) => {
+                // Read from the cache directly to avoid load_or_project_plan re-projection
+                // wiping the merge_state we just wrote.
+                let plan_arc = self.active_plans.lock().await.get(&plan_id).cloned();
+                let plan_arc = match plan_arc {
+                    Some(p) => p,
+                    None => match self.load_or_project_plan(&plan_id).await {
+                        Ok(p) => p,
+                        Err(e) => return JsonRpcResponse::invalid_params(id, e),
+                    },
+                };
+                let state = plan_arc.lock().await;
+                let status = crate::plan::build_plan_status(&plan_id, &state);
+                let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+                JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("not fully approved yet") || msg.contains("Unknown plan_id") {
+                    JsonRpcResponse::invalid_params(id, msg)
+                } else {
+                    JsonRpcResponse::internal_error(id, msg)
+                }
+            }
+        }
     }
 
     // ─── Graph analysis handlers (bv robot protocol) ───────────────
@@ -3098,19 +3202,7 @@ impl McpCallbackServer {
         if epic_subgraph.is_some() {
             self.fast_forward_reconciler();
         } else {
-            let delegation_tx = self.delegation_tx.clone();
-            let plan_sink = self.event_sink.clone();
-            let plan_pm = self
-                .pm_service
-                .clone()
-                .map(|p| p as Arc<dyn crate::plan::PmLike>);
-            self.task_tracker.spawn(crate::plan::run_plan(
-                state,
-                delegation_tx,
-                plan_sink,
-                plan_pm,
-                self.reconciler_fast_forward.as_ref().cloned(),
-            ));
+            self.spawn_ephemeral_plan_runner(state);
         }
 
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
@@ -3808,6 +3900,17 @@ impl McpCallbackServer {
             .get(plan_id)
             .cloned()
             .ok_or_else(|| format!("unknown plan '{plan_id}'"))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::plan::reconciler::ReconcilerAutomation for McpCallbackServer {
+    async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState> {
+        self.merge_plan_impl(plan_id).await
+    }
+
+    async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
+        self.create_pr_impl(params).await
     }
 }
 
@@ -5033,5 +5136,99 @@ mod reconciler_fast_forward_tests {
             .cloned()
             .expect("cached");
         assert_eq!(cached.lock().await.tasks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn detector_skips_reclaim_when_all_epics_have_rev1_metadata() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let output = std::process::Command::new("br")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("br init");
+        assert!(output.status.success(), "br init failed: {:?}", output);
+
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected Some(PmService)"),
+        );
+        let tasks = vec![crate::plan::PlanTask {
+            task_id: "t1".into(),
+            agent: "codex".into(),
+            task: "Task".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        let sg = crate::build_epic_subgraph(pm.as_ref(), "plan-1", "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+
+        // Emit PlanSubmit audit so the epic carries rev1 bootstrap metadata.
+        let adv = pm.advanced().expect("advanced");
+        crate::emit_plan_submit_audit(adv, "plan-1", &sg, Some("main"), Some("abc123"), Some("test")).await;
+
+        // The detector must report that no legacy reclaim is needed.
+        let needs_reclaim = super::any_open_epic_lacks_rev1_metadata(pm.as_ref())
+            .await
+            .expect("detector query");
+        assert!(
+            !needs_reclaim,
+            "detector must skip reclaim when all epics have rev1 metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn detector_reclaims_when_plan_submit_lacks_bootstrap_metadata() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let output = std::process::Command::new("br")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("br init");
+        assert!(output.status.success(), "br init failed: {:?}", output);
+
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected Some(PmService)"),
+        );
+        let tasks = vec![crate::plan::PlanTask {
+            task_id: "t1".into(),
+            agent: "codex".into(),
+            task: "Task".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        let sg = crate::build_epic_subgraph(pm.as_ref(), "plan-1", "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+
+        // Emit PlanSubmit audit WITHOUT base snapshot metadata.
+        let adv = pm.advanced().expect("advanced");
+        crate::emit_plan_submit_audit(adv, "plan-1", &sg, None, None, None).await;
+
+        // The detector must report that legacy reclaim is still needed.
+        let needs_reclaim = super::any_open_epic_lacks_rev1_metadata(pm.as_ref())
+            .await
+            .expect("detector query");
+        assert!(
+            needs_reclaim,
+            "detector must reclaim when PlanSubmit lacks rev1 bootstrap metadata"
+        );
+    }
+
+    #[test]
+    fn legacy_reclaim_needed_when_rev1_bootstrap_metadata_is_missing() {
+        assert!(super::legacy_reclaim_needed(false));
+    }
+
+    #[test]
+    fn legacy_reclaim_skipped_when_rev1_bootstrap_metadata_exists() {
+        assert!(!super::legacy_reclaim_needed(true));
     }
 }

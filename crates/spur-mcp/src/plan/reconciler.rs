@@ -28,6 +28,27 @@ use tokio_util::task::TaskTracker;
 use crate::plan::audit_sentinel::AuditSentinelKind;
 use spur_pm::{IssueFilter, PmService, ReadyFilter};
 
+pub(crate) fn beads_journal_path(repo_root: &std::path::Path) -> std::path::PathBuf {
+    repo_root.join(".beads").join("journal")
+}
+
+pub(crate) async fn monitor_journal_appends(path: std::path::PathBuf, notify: Arc<Notify>) {
+    let mut last_len = tokio::fs::metadata(&path).await.ok().map(|m| m.len()).unwrap_or(0);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let next_len = match tokio::fs::metadata(&path).await {
+            Ok(meta) => meta.len(),
+            Err(_) => break,
+        };
+        if next_len > last_len {
+            last_len = next_len;
+            notify.notify_one();
+        } else {
+            last_len = next_len;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProjectedEpicCompletion {
     audit_outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
@@ -97,12 +118,38 @@ impl Default for ReconcilerConfig {
     }
 }
 
+#[async_trait::async_trait]
+pub trait ReconcilerAutomation: Send + Sync {
+    async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState>;
+    async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String>;
+}
+
+fn build_auto_pr_params(
+    plan_id: &str,
+    epic_title: &str,
+    outcome_summary: &str,
+    merge_branch: &str,
+) -> spur_pm::PrParams {
+    spur_pm::PrParams {
+        title: format!("[SPUR] {epic_title} ({plan_id})"),
+        body: format!(
+            "Auto-created for plan `{plan_id}`.\n\nOutcome: {outcome_summary}\nMerge branch: {merge_branch}"
+        ),
+        head_branch: merge_branch.to_string(),
+        base_branch: None,
+        repo: None,
+    }
+}
+
 pub struct Reconciler {
     config: ReconcilerConfig,
     pm: Arc<PmService>,
     fast_forward: Arc<Notify>,
     dispatch: Option<ReconcilerDispatchCtx>,
     plan_id: Option<String>,
+    auto_merge_approved_plans: bool,
+    automation: Option<Arc<dyn ReconcilerAutomation>>,
+    journal_wake: Option<Arc<Notify>>,
 }
 
 impl Reconciler {
@@ -119,13 +166,37 @@ impl Reconciler {
             fast_forward,
             dispatch,
             plan_id,
+            auto_merge_approved_plans: false,
+            automation: None,
+            journal_wake: None,
         }
+    }
+
+    pub fn set_journal_wake(&mut self, notify: Arc<Notify>) {
+        self.journal_wake = Some(notify);
+    }
+
+    pub fn set_auto_merge_approved_plans(&mut self, enabled: bool) {
+        self.auto_merge_approved_plans = enabled;
+    }
+
+    pub fn set_automation(&mut self, automation: Arc<dyn ReconcilerAutomation>) {
+        self.automation = Some(automation);
     }
 
     pub async fn run(self, cancel: tokio::sync::oneshot::Receiver<()>) {
         let mut interval = self.config.base_interval;
+        let journal_wake = self.journal_wake.clone();
         tokio::pin!(cancel);
         loop {
+            let journal_fut = async {
+                if let Some(ref n) = journal_wake {
+                    n.notified().await;
+                } else {
+                    std::future::pending().await
+                }
+            };
+            tokio::pin!(journal_fut);
             tokio::select! {
                 _ = &mut cancel => {
                     tracing::info!("reconciler received cancel");
@@ -133,6 +204,10 @@ impl Reconciler {
                 }
                 _ = self.fast_forward.notified() => {
                     tracing::debug!("reconciler fast-forward triggered");
+                    interval = self.config.base_interval;
+                }
+                _ = &mut journal_fut => {
+                    tracing::debug!("reconciler journal append triggered");
                     interval = self.config.base_interval;
                 }
                 _ = tokio::time::sleep(interval) => {}
@@ -370,30 +445,102 @@ impl Reconciler {
                 continue;
             };
 
-            let has_epic_completion =
-                crate::plan::projector::collect_sorted_audits(adv.list_comments(&epic.id).await?)
-                    .iter()
-                    .any(|audit| {
-                        matches!(
-                            audit,
-                            AuditSentinelKind::EpicCompletion {
-                                plan_id: audit_plan_id,
-                                epic_id: audit_epic_id,
-                                ..
-                            } if audit_plan_id == plan_id && audit_epic_id == &epic.id
-                        )
-                    });
+            let mut audits =
+                crate::plan::projector::collect_sorted_audits(adv.list_comments(&epic.id).await?);
+            let has_epic_completion = audits.iter().any(|audit| {
+                matches!(
+                    audit,
+                    AuditSentinelKind::EpicCompletion {
+                        plan_id: audit_plan_id,
+                        epic_id: audit_epic_id,
+                        ..
+                    } if audit_plan_id == plan_id && audit_epic_id == &epic.id
+                )
+            });
 
             if epic.status == closed_status {
                 if !has_epic_completion {
-                    crate::plan::emit_epic_completion_audit(
+                    let emitted = crate::plan::emit_epic_completion_audit(
                         adv,
                         &epic.id,
                         plan_id,
                         outcome.audit_outcome,
                     )
                     .await;
+                    if emitted.is_ok() {
+                        audits.push(AuditSentinelKind::EpicCompletion {
+                            outcome: outcome.audit_outcome,
+                            plan_id: plan_id.to_string(),
+                            epic_id: epic.id.clone(),
+                        });
+                    }
                     did_work = true;
+                }
+
+                // v0e: opt-in auto-merge / auto-PR on durable all-approved state.
+                if self.auto_merge_approved_plans
+                    && outcome.add_integration_pending
+                    && epic.labels.contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+                {
+                    if let Some(automation) = self.automation.as_ref() {
+                        if let Some(outcome_summary) =
+                            crate::plan::projector::epic_completion_outcome_summary(
+                                &audits,
+                                plan_id,
+                                &epic.id,
+                            )
+                        {
+                            let mut merge_succeeded = false;
+                            match automation.merge_plan(plan_id).await {
+                                Ok(crate::plan::PlanMergeState::Succeeded { merge_branch, .. }) => {
+                                    let params = build_auto_pr_params(
+                                        plan_id,
+                                        &epic.title,
+                                        outcome_summary,
+                                        &merge_branch,
+                                    );
+                                    if let Err(e) = automation.create_pr(params).await {
+                                        tracing::warn!(%plan_id, "auto-merge PR creation failed: {e}");
+                                    } else {
+                                        merge_succeeded = true;
+                                    }
+                                }
+                                Ok(crate::plan::PlanMergeState::Conflict { conflict_task_id, .. }) => {
+                                    tracing::warn!(%plan_id, %conflict_task_id, "auto-merge detected conflict");
+                                }
+                                Ok(crate::plan::PlanMergeState::Failed { error }) => {
+                                    tracing::warn!(%plan_id, "auto-merge failed: {error}");
+                                }
+                                Ok(crate::plan::PlanMergeState::NotStarted) => {
+                                    tracing::warn!(%plan_id, "auto-merge returned NotStarted unexpectedly");
+                                }
+                                Err(e) => {
+                                    tracing::warn!(%plan_id, "auto-merge error: {e}");
+                                }
+                            }
+                            if merge_succeeded {
+                                if let Err(e) = self
+                                    .pm
+                                    .update_issue(
+                                        &epic.id,
+                                        spur_pm::IssueUpdate {
+                                            remove_labels: vec![crate::plan::labels::INTEGRATION_PENDING
+                                                .to_string()],
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        %plan_id,
+                                        epic_id = %epic.id,
+                                        "failed to remove integration-pending label: {e}"
+                                    );
+                                }
+                            }
+                            did_work = true;
+                        }
+                    }
                 }
                 continue;
             }
@@ -422,13 +569,20 @@ impl Reconciler {
 
             self.pm.update_issue(&epic.id, update).await?;
             if !has_epic_completion {
-                crate::plan::emit_epic_completion_audit(
+                if let Err(error) = crate::plan::emit_epic_completion_audit(
                     adv,
                     &epic.id,
                     plan_id,
                     outcome.audit_outcome,
                 )
-                .await;
+                .await
+                {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        epic_id = %epic.id,
+                        "epic completion audit emission failed on close: {error}"
+                    );
+                }
             }
             if outcome.add_integration_pending {
                 if let Some(sink) = self
@@ -636,6 +790,324 @@ mod tests {
                 Duration::from_secs(8),
                 Duration::from_secs(8),
             ]
+        );
+    }
+
+    /// Regression: journal monitor must exit promptly when aborted so that
+    /// graceful shutdown does not hang forever awaiting the handle and so
+    /// that abort/drop does not leak a detached polling task.
+    #[tokio::test]
+    async fn journal_monitor_exits_on_abort_without_hang() {
+        use std::time::Duration;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("journal");
+        tokio::fs::write(&path, b"x").await.expect("write");
+        let notify = Arc::new(Notify::new());
+        let handle = tokio::spawn(monitor_journal_appends(path, notify));
+        handle.abort();
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("monitor must exit within 1s of abort");
+        assert!(
+            result.is_err() && result.unwrap_err().is_cancelled(),
+            "monitor must be cancelled, not panic"
+        );
+    }
+
+    #[test]
+    fn auto_pr_params_include_plan_id_and_summary() {
+        let params = super::build_auto_pr_params("plan-123", "Epic title", "All approved", "spur/merge-1");
+        assert!(params.title.contains("plan-123"), "title missing plan_id: {}", params.title);
+        assert!(params.body.contains("All approved"), "body missing outcome: {}", params.body);
+        assert_eq!(params.head_branch, "spur/merge-1");
+    }
+
+    struct MockAutomation {
+        actions: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::ReconcilerAutomation for MockAutomation {
+        async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState> {
+            self.actions.lock().await.push(format!("merge:{plan_id}"));
+            Ok(crate::plan::PlanMergeState::Succeeded {
+                merge_branch: "spur/merge-1".to_string(),
+                merged_task_ids: vec![],
+            })
+        }
+
+        async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
+            self.actions.lock().await.push(format!("pr:{}", params.title));
+            Ok("https://example.invalid/pr/1".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_merge_config_off_produces_zero_actions() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        fn br_available() -> bool {
+            Command::new("br")
+                .arg("--help")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+
+        if !br_available() {
+            eprintln!("skipping auto_merge_config_off_produces_zero_actions: `br` not on PATH");
+            return;
+        }
+
+        let dir = TempDir::new().expect("tempdir");
+        let repo = dir.path();
+
+        assert!(
+            Command::new("br").args(["init"]).current_dir(repo).output().expect("br init").status.success(),
+            "br init failed"
+        );
+
+        let epic_out = Command::new("br")
+            .args(["create", "--type", "epic", "--title", "Test Epic", "--json"])
+            .current_dir(repo)
+            .output()
+            .expect("br create epic");
+        let epic_json = String::from_utf8_lossy(&epic_out.stdout);
+        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for title in ["Task A", "Task B"] {
+            let task_out = Command::new("br")
+                .args(["create", "--type", "task", "--title", title, "--json"])
+                .current_dir(repo)
+                .output()
+                .expect("br create task");
+            let task_json = String::from_utf8_lossy(&task_out.stdout);
+            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            Command::new("br")
+                .args(["label", "add", &task_id, "spur:plan-id:P1"])
+                .current_dir(repo)
+                .output()
+                .expect("label task");
+            Command::new("br")
+                .args(["update", &task_id, "--status", "closed"])
+                .current_dir(repo)
+                .output()
+                .expect("close task");
+        }
+
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:plan-id:P1"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic");
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:plan-complete"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic plan-complete");
+        Command::new("br")
+            .args(["update", &epic_id, "--status", "closed"])
+            .current_dir(repo)
+            .output()
+            .expect("close epic");
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:integration-pending"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic integration-pending");
+
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads pm"),
+        );
+
+        let actions = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let automation = Arc::new(MockAutomation {
+            actions: Arc::clone(&actions),
+        });
+
+        let mut reconciler = Reconciler::new(
+            ReconcilerConfig::default(),
+            pm,
+            Arc::new(Notify::new()),
+            None,
+            Some("P1".into()),
+        );
+        reconciler.set_auto_merge_approved_plans(false);
+        reconciler.set_automation(automation);
+
+        reconciler.tick_once().await.unwrap();
+
+        let recorded = actions.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "config-off must produce zero automation actions, got: {:?}",
+            *recorded
+        );
+    }
+
+    /// Focused regression: when durable EpicCompletion audit emission fails
+    /// (e.g. disk-full / read-only database), the reconciler must suppress
+    /// merge_plan / create_pr even though the epic is closed and carries
+    /// integration-pending. Without this guard the old code would proceed
+    /// because it unconditionally appended a synthetic EpicCompletion to the
+    /// local audits vector.
+    #[tokio::test]
+    async fn failed_epic_completion_audit_suppresses_automation() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        fn br_available() -> bool {
+            Command::new("br")
+                .arg("--help")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+
+        if !br_available() {
+            eprintln!(
+                "skipping failed_epic_completion_audit_suppresses_automation: `br` not on PATH"
+            );
+            return;
+        }
+
+        let dir = TempDir::new().expect("tempdir");
+        let repo = dir.path();
+
+        assert!(
+            Command::new("br")
+                .args(["init"])
+                .current_dir(repo)
+                .output()
+                .expect("br init")
+                .status
+                .success(),
+            "br init failed"
+        );
+
+        let epic_out = Command::new("br")
+            .args(["create", "--type", "epic", "--title", "Test Epic", "--json"])
+            .current_dir(repo)
+            .output()
+            .expect("br create epic");
+        let epic_json = String::from_utf8_lossy(&epic_out.stdout);
+        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for title in ["Task A", "Task B"] {
+            let task_out = Command::new("br")
+                .args(["create", "--type", "task", "--title", title, "--json"])
+                .current_dir(repo)
+                .output()
+                .expect("br create task");
+            let task_json = String::from_utf8_lossy(&task_out.stdout);
+            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            Command::new("br")
+                .args(["label", "add", &task_id, "spur:plan-id:P1"])
+                .current_dir(repo)
+                .output()
+                .expect("label task");
+            Command::new("br")
+                .args(["update", &task_id, "--status", "closed"])
+                .current_dir(repo)
+                .output()
+                .expect("close task");
+        }
+
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:plan-id:P1"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic");
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:plan-complete"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic plan-complete");
+        Command::new("br")
+            .args(["update", &epic_id, "--status", "closed"])
+            .current_dir(repo)
+            .output()
+            .expect("close epic");
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:integration-pending"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic integration-pending");
+
+        // Make the beads database read-only so that add_comment (and therefore
+        // emit_epic_completion_audit) fails, while list_issues/list_comments
+        // continue to work because SQLite opens read-only for queries.
+        let db_path = repo.join(".beads").join("beads.db");
+        let mut perms = std::fs::metadata(&db_path).expect("db metadata").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&db_path, perms).expect("set readonly");
+
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads pm"),
+        );
+
+        let actions = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let automation = Arc::new(MockAutomation {
+            actions: Arc::clone(&actions),
+        });
+
+        let mut reconciler = Reconciler::new(
+            ReconcilerConfig::default(),
+            pm,
+            Arc::new(Notify::new()),
+            None,
+            Some("P1".into()),
+        );
+        reconciler.set_auto_merge_approved_plans(true);
+        reconciler.set_automation(automation);
+
+        reconciler.tick_once().await.unwrap();
+
+        let recorded = actions.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "failed epic-completion audit must suppress automation, got: {:?}",
+            *recorded
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_journal_probe_disables_itself_when_missing() {
+        let notify = Arc::new(Notify::new());
+        let path = std::path::PathBuf::from("/nonexistent/path/.beads/journal");
+        // The monitor must exit gracefully (not panic or hang) when the journal is absent.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::monitor_journal_appends(path, notify),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "journal monitor must exit when path is missing, not hang"
         );
     }
 }

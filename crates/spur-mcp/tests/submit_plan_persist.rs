@@ -507,3 +507,135 @@ fn build_entries_does_not_overwrite_existing_issue_id() {
         entries[0].spec.issue_id,
     );
 }
+
+// ─── Persisted submit direct-dispatch retirement regression ────────────────
+
+use std::path::Path;
+use std::process::Command;
+use std::sync::Arc;
+
+use serde_json::json;
+use spur_acp::{BrainSessionId, SessionId};
+use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
+use spur_pm::PmService;
+use tempfile::TempDir;
+
+fn br_available() -> bool {
+    Command::new("br")
+        .arg("--help")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
+    let output = Command::new("br")
+        .args(args)
+        .current_dir(repo)
+        .env("RUST_LOG", "error")
+        .output()
+        .expect("br invocation failed");
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        Err(format!(
+            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        ))
+    }
+}
+
+async fn beads_pm(repo: &Path) -> Arc<PmService> {
+    Arc::new(
+        PmService::try_new(None, true, false, repo, None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    )
+}
+
+fn continuation_ctx() -> DetachedContinuationCtx {
+    DetachedContinuationCtx {
+        on_complete: Arc::new(|_, _| Box::pin(async {})),
+    }
+}
+
+struct PersistedSubmitFixture {
+    #[allow(dead_code)]
+    _dir: TempDir,
+    server: McpCallbackServer,
+    channel: spur_mcp::tools::DelegationChannel,
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git invocation failed");
+    assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+async fn persisted_submit_fixture() -> PersistedSubmitFixture {
+    let dir = TempDir::new().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(dir.path(), &["config", "user.email", "test@spur"]);
+    run_git(dir.path(), &["config", "user.name", "spur-test"]);
+    std::fs::write(dir.path().join("seed.txt"), "seed\n").expect("write seed");
+    run_git(dir.path(), &["add", "seed.txt"]);
+    run_git(dir.path(), &["commit", "-q", "-m", "seed"]);
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let session_id = BrainSessionId::new(SessionId("brain".into()));
+    let (mut server, channel) =
+        McpCallbackServer::new(&session_id, Some(pm), None, continuation_ctx());
+    server.set_repo_root(dir.path().to_path_buf());
+    PersistedSubmitFixture {
+        _dir: dir,
+        server,
+        channel,
+    }
+}
+
+impl PersistedSubmitFixture {
+    async fn submit_persisted_plan(&self) {
+        let response = self
+            .server
+            .__test_call_submit_plan(json!({
+                "persist_as_epic": true,
+                "epic_title": "Persisted Submit Regression Epic",
+                "tasks": [{
+                    "task_id": "t1",
+                    "agent": "codex",
+                    "task": "Do something",
+                    "depends_on": [],
+                }]
+            }))
+            .await;
+        assert!(
+            response.get("error").is_none(),
+            "submit_plan should succeed: {response}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn persisted_submit_plan_does_not_enqueue_delegation_request() {
+    if !br_available() {
+        eprintln!("skipping persisted_submit_plan_does_not_enqueue_delegation_request: `br` not on PATH");
+        return;
+    }
+
+    let mut fixture = persisted_submit_fixture().await;
+    fixture.submit_persisted_plan().await;
+
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        fixture.channel.request_rx.recv(),
+    )
+    .await;
+
+    assert!(recv.is_err(), "persisted submit_plan must not dispatch directly");
+}
