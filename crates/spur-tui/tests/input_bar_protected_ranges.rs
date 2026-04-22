@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use spur_tui::components::input_bar::{HandleOutcome, InputBar};
+use spur_tui::components::input_bar::{EditMode, HandleOutcome, InputBar, VimMode};
 
 fn press(bar: &mut InputBar, code: KeyCode) {
     let _ = bar.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -233,4 +233,104 @@ fn deleting_multibyte_char_before_atom_rebases_by_utf8_width() {
     assert_eq!(ranges.len(), 1);
     assert_eq!(ranges[0].start, 1);
     assert_eq!(&b.text()[ranges[0].start..ranges[0].end], "@a.rs");
+}
+// ── Vim destructive edits must preserve unaffected atoms ──────────────────
+
+#[test]
+fn vim_d_preserves_atom_outside_deleted_span() {
+    let mut b = InputBar::new();
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " abc tail");
+    b.set_mode(EditMode::Vim(VimMode::Normal));
+
+    // Cursor after " abc " (byte 10), before "tail"
+    b.set_text_cursor_for_test(10);
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+
+    assert_eq!(b.text(), "@a.rs abc ");
+    assert_eq!(b.protected_ranges().len(), 1);
+    let r = &b.protected_ranges()[0];
+    assert_eq!(&b.text()[r.start..r.end], "@a.rs");
+}
+
+#[test]
+fn vim_c_preserves_atom_outside_changed_span() {
+    let mut b = InputBar::new();
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " abc tail");
+    b.set_mode(EditMode::Vim(VimMode::Normal));
+
+    b.set_text_cursor_for_test(10);
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE));
+
+    assert_eq!(b.text(), "@a.rs abc ");
+    assert_eq!(b.protected_ranges().len(), 1);
+    let r = &b.protected_ranges()[0];
+    assert_eq!(&b.text()[r.start..r.end], "@a.rs");
+    assert!(matches!(b.mode(), EditMode::Vim(VimMode::Insert)));
+}
+
+#[test]
+fn vim_p_rebases_existing_atom_instead_of_clearing_all_ranges() {
+    let mut b = InputBar::new();
+    // Build text with an atom
+    type_str(&mut b, "before ");
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " after");
+    b.set_mode(EditMode::Vim(VimMode::Normal));
+
+    // Yank "before " into the internal clipboard using visual mode + y
+    b.set_text_cursor_for_test(0);
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    for _ in 0..7 {
+        let _ = b.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    }
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+    // Move cursor to the end of the line and paste
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+    assert!(b.text().contains("@a.rs"));
+    assert_eq!(b.protected_ranges().len(), 1);
+    let r = &b.protected_ranges()[0];
+    assert_eq!(&b.text()[r.start..r.end], "@a.rs");
+}
+
+#[test]
+fn vim_visual_d_preserves_atom_outside_selection() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "abc ");
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " tail");
+    b.set_mode(EditMode::Vim(VimMode::Normal));
+
+    b.set_text_cursor_for_test(0);
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    for _ in 0..3 {
+        let _ = b.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    }
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+    assert_eq!(b.text(), "@a.rs tail");
+    assert_eq!(b.protected_ranges().len(), 1);
+    let r = &b.protected_ranges()[0];
+    assert_eq!(&b.text()[r.start..r.end], "@a.rs");
+}
+
+#[test]
+fn vim_dd_preserves_atom_on_other_line() {
+    let mut b = InputBar::new();
+    b.set_text("delete me\nkeep ".into(), "delete me\nkeep ".len());
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    b.set_mode(EditMode::Vim(VimMode::Normal));
+
+    b.set_text_cursor_for_test(0);
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+    assert_eq!(b.text(), "keep @a.rs");
+    assert_eq!(b.protected_ranges().len(), 1);
+    let r = &b.protected_ranges()[0];
+    assert_eq!(&b.text()[r.start..r.end], "@a.rs");
 }
