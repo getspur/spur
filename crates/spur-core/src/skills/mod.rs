@@ -58,6 +58,17 @@ fn bundled_raw() -> &'static HashMap<&'static str, &'static str> {
             "requesting-code-review",
             include_str!("requesting-code-review/SKILL.md"),
         );
+        m.insert("spur-way", include_str!("spur-way/SKILL.md"));
+        m.insert("beads-lifecycle", include_str!("beads-lifecycle/SKILL.md"));
+        m.insert("worker-signals", include_str!("worker-signals/SKILL.md"));
+        m.insert(
+            "brain-review-gate",
+            include_str!("brain-review-gate/SKILL.md"),
+        );
+        m.insert(
+            "plan-task-discipline",
+            include_str!("plan-task-discipline/SKILL.md"),
+        );
         m
     })
 }
@@ -237,6 +248,16 @@ mod tests {
             "brain-delegation-kiro",
             "brain-delegation-codex",
             "brain-delegation-gemini",
+            "test-driven-development",
+            "systematic-debugging",
+            "verification-before-completion",
+            "receiving-code-review",
+            "requesting-code-review",
+            "spur-way",
+            "beads-lifecycle",
+            "worker-signals",
+            "brain-review-gate",
+            "plan-task-discipline",
         ] {
             let body = map
                 .get(name)
@@ -354,6 +375,18 @@ mod tests {
         let ids: Vec<&str> = skills.iter().map(|s| s.id.as_str()).collect();
         assert!(ids.contains(&"test-driven-development"));
         assert!(ids.contains(&"brain-delegation"));
+        assert!(
+            ids.contains(&"spur-way"),
+            "spur-way skill should be bundled"
+        );
+        assert!(
+            ids.contains(&"beads-lifecycle"),
+            "beads-lifecycle skill should be bundled"
+        );
+        assert!(
+            ids.contains(&"worker-signals"),
+            "worker-signals skill should be bundled"
+        );
         // All bundled entries should have non-empty body.
         for s in &skills {
             assert!(!s.body.is_empty(), "{}: empty body", s.id);
@@ -394,5 +427,50 @@ mod tests {
 
         let err = list_active_skills(dir.path()).unwrap_err();
         assert!(err.to_string().contains("Bad_Name"));
+    }
+
+    #[test]
+    fn spur_way_skill_contains_beads_first_invariant() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("spur-way", &fake).unwrap();
+        assert!(body.contains("beads is the sole source of truth"));
+        assert!(body.contains("INTENT"));
+        assert!(body.contains("ACTION"));
+        assert!(body.contains("RECORD"));
+    }
+
+    #[test]
+    fn beads_lifecycle_skill_contains_status_fsm() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("beads-lifecycle", &fake).unwrap();
+        assert!(body.contains("open"));
+        assert!(body.contains("in_progress"));
+        assert!(body.contains("signal:"));
+    }
+
+    #[test]
+    fn worker_signals_skill_contains_exact_format() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("worker-signals", &fake).unwrap();
+        assert!(body.contains("[[spur-signal v1]]"));
+        assert!(body.contains("signal_id"));
+        assert!(body.contains("severity"));
+    }
+
+    #[test]
+    fn brain_review_gate_skill_contains_checklist() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("brain-review-gate", &fake).unwrap();
+        assert!(body.contains("NO APPROVAL WITHOUT BEADS VERIFICATION"));
+        assert!(body.contains("Audit Trail Check"));
+    }
+
+    #[test]
+    fn plan_task_discipline_skill_contains_dag_rules() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("plan-task-discipline", &fake).unwrap();
+        assert!(body.contains("DAG"));
+        assert!(body.contains("Pending"));
+        assert!(body.contains("Approved"));
     }
 }
