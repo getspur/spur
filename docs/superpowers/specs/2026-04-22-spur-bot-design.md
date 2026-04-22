@@ -203,6 +203,57 @@ Responsibilities:
 - `telegram/format.rs`
   Telegram-safe text splitting and formatting helpers.
 
+### Rust Telegram Framework Choice
+
+`spur-bot::telegram` should use **`teloxide`** as its Telegram transport
+framework.
+
+Why this is the best fit for the approved v1 scope:
+
+- it already supports both long polling and webhooks
+- it provides typed command parsing, callback-query handling, inline
+  keyboard helpers, dispatcher routing, and request throttling
+- it fits the current workspace well because SPUR already uses `tokio`,
+  and webhook support can later align with the existing Rust HTTP stack
+- its same-chat sequential update handling is a good match for the
+  single-operator DM model in v1
+
+The approved transport mode for v1 is **long polling**.
+
+This keeps deployment simple for the first bot transport while still
+allowing a later webhook mode if operational needs change.
+
+#### Framework Boundary
+
+`teloxide` should be used only for transport concerns:
+
+- receiving Telegram updates
+- parsing commands
+- handling callback queries
+- sending and editing Telegram messages
+- rate-limit-aware request execution
+
+`teloxide` must **not** own SPUR session state, prompt lifecycle, review
+state, permission state, or bot persistence.
+
+Those remain inside `spur-bot` runtime code so the bot behavior stays
+transport-neutral and can later support Discord without duplicating core
+logic.
+
+#### Explicit Non-Choice
+
+Do not build v1 on top of `teloxide` dialogue storage/state machines.
+
+The approved design already has a SPUR-owned runtime model:
+
+- sticky current session
+- persisted bot state under `.spur/bot/`
+- review and permission prompt lifecycle
+- restart-aware stale callback handling
+
+Replacing those with transport-owned dialogue state would split the source
+of truth and make future multi-transport support harder.
+
 ---
 
 ## Runtime Contract
