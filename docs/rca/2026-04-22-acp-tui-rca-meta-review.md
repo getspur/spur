@@ -19,7 +19,7 @@ The original RCA is **directionally correct** but contains three categories of d
 | **Underreach** | 3 | Real bugs found during validation that the original RCA missed |
 | **Imprecise root cause** | 1 | The "text-only protocol" thesis is too broad; only part of the bug set traces to it |
 
-**The original RCA is safe to act on** — no recommendation would cause harm. But priorities should shift: F11 is a false positive as written, a new duplicate-entry bug (F12) is the top correctness issue, a new tool-only stream-state gap (F14) outranks F1/F13, and F2's remediation should target `dispatch.rs` not `adapter/claude.rs`.
+**The original RCA is safe to act on** — no recommendation would cause harm. But priorities should shift: F11 is a false positive as written, a new stream-state gap at the tool-bearing prefix of a turn (F14) outranks F1/F13, F12 remains an immediate fix but should be framed as high severity with unproven reachability, and F2's remediation should target `dispatch.rs` not `adapter/claude.rs`.
 
 ---
 
@@ -205,6 +205,8 @@ ROOT CAUSE:     Defensive coding for known behavior (Claude) without
 - The FIRST entry (synthesized) becomes an **orphan** — never updated, forever in its initial state
 - User sees duplicate tool call lines in the trace
 
+**Reachability note:** This path is real but not yet demonstrated in current SPUR agents. The synthesis arm is explicitly defensive, and normal ACP ordering is `ToolCall` followed by `ToolCallUpdate(*)`. The fix is still worth taking because it is cheap and correctness-preserving, but priority should reflect the lack of observed frequency.
+
 **Root cause:** The synthesis path was added as a defensive fallback but the `ToolCall` arm was not updated to check for existing entries.
 
 **Fix:** In the `ToolCall` arm, check `find_act_by_id_mut` first. If found, merge instead of push.
@@ -263,7 +265,7 @@ If a `UserMessageChunk` contains `ContentBlock::ResourceLink` (e.g., agent echoi
 
 ---
 
-### F14: Tool-Only Turns Never Arm `stream_in_flight` (SEVERITY: Medium)
+### F14: Tool-Bearing Prefix Does Not Arm `stream_in_flight` (SEVERITY: Medium)
 
 **Location:** `crates/spur-tui/src/views/session_detail.rs:1365-1369`
 
@@ -278,16 +280,16 @@ match &notification.update {
 }
 ```
 
-If a turn emits `ToolCall` / `ToolCallUpdate` without any preceding `AgentThoughtChunk` or `AgentMessageChunk`, the TUI never marks the session as streaming. ACP does not require a text chunk before a tool call, so this is protocol-reachable even if agent frequency varies.
+If a turn begins with `ToolCall` / `ToolCallUpdate` before any `AgentThoughtChunk` or `AgentMessageChunk`, the TUI does not mark the session as streaming during that prefix window. ACP does not require a text chunk before a tool call, so this is protocol-reachable even if agent frequency varies.
 
 **Impact:**
 - `Esc` cancel never arms because the guard requires `stream_in_flight` (`session_detail.rs:950-963`)
 - The status bar omits the streaming hint for an actually-active turn
-- Tool-only or low-verbosity agents can appear idle while work is still running
+- Low-verbosity agents can appear idle during the tool-bearing prefix even while work is already running
 
 **Root cause:** Session lifecycle state is inferred from a subset of content-bearing updates rather than from "turn has started and not yet completed."
 
-**Fix:** Set `stream_in_flight = true` for tool-bearing progress as well, at minimum `ToolCall` / `ToolCallUpdate`, and add a regression test covering a tool-only turn.
+**Fix:** Set `stream_in_flight = true` for tool-bearing progress as well, at minimum `ToolCall` / `ToolCallUpdate`, and add a regression test covering a turn whose first live updates are tool-bearing rather than textual.
 
 ---
 
@@ -304,7 +306,7 @@ The original RCA proposed a single root cause:
 - F9 (markdown/text) → dual-source storage
 - F11 (stream timeout) → missing liveness timeout, not text-only
 - F12 (duplicate entries) → missing duplicate check
-- F14 (tool-only stream state) → lifecycle inferred from the wrong event subset
+- F14 (tool-bearing prefix stream state) → lifecycle inferred from the wrong event subset
 
 **Revised root cause taxonomy:**
 
@@ -347,11 +349,11 @@ The original RCA proposed a single root cause:
 
 | # | Finding | Change | Files | Lines | Priority shift |
 |---|---------|--------|-------|-------|----------------|
-| 1 | **F12** Duplicate entries | Add duplicate guard in `ToolCall` arm | `dispatch.rs` | ~8 | **NEW — P1** |
-| 2 | **F14** Tool-only stream gap | Set `stream_in_flight` on tool-bearing progress; add tool-only regression test | `session_detail.rs` | ~8 | **NEW — P1** |
-| 3 | F3 Delegation no-op | Push `Observe` on terminal status | `session_detail.rs` | ~8 | P1 |
-| 4 | F1 + F13 Content loss | Handle `ResourceLink` + placeholders for current non-text ACP variants | `dispatch.rs` | ~12 | P1 |
-| 5 | F9 text/markdown sync | `text = stream.raw_text().to_string()` on append | `mod.rs` | ~1 | P1 |
+| 1 | **F14** Tool-bearing prefix stream gap | Set `stream_in_flight` on tool-bearing progress; add prefix-window regression test | `session_detail.rs` | ~8 | **NEW — P1** |
+| 2 | F3 Delegation no-op | Push `Observe` on terminal status | `session_detail.rs` | ~8 | P1 |
+| 3 | F1 + F13 Content loss | Handle `ResourceLink` + placeholders for current non-text ACP variants | `dispatch.rs` | ~12 | P1 |
+| 4 | F9 text/markdown sync | `text = stream.raw_text().to_string()` on append | `mod.rs` | ~1 | P1 |
+| 5 | **F12** Duplicate entries | Add duplicate guard in `ToolCall` arm; note unproven reachability in current agents | `dispatch.rs` | ~8 | **NEW — P1** |
 
 ### Short-term (next sprint) — revised
 
@@ -389,7 +391,7 @@ The original RCA proposed a single root cause:
 ### Where the original RCA failed
 1. **Did not trace through `event_funnel.rs`** — led to F11 false positive
 2. **Missed the synthesis→duplicate causal chain** — F12 was invisible without reading both `ToolCall` and `ToolCallUpdate` arms together
-3. **Missed the tool-only stream-state gap** — active turns were inferred from message chunks rather than tool-bearing progress
+3. **Missed the tool-bearing prefix stream-state gap** — active turns were inferred from message chunks rather than tool-bearing progress
 4. **Overfit root cause to a single thesis** — "text-only protocol" is poetic but incomplete
 5. **Subjective star ratings without criteria** — MCTS scoring was impressionistic
 
