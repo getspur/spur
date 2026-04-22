@@ -87,7 +87,7 @@ L6: Audit completeness      → Every dispatch/completion/approval has a sentine
 self.active_plans.lock().await.insert(plan_id.clone(), Arc::clone(&state));
 ```
 
-There is **zero removal path** for ephemeral plans. The `run_plan` executor (plan/mod.rs:1069-1344) completes, emits lifecycle events, and returns. Nobody removes the plan from `active_plans`.
+There is **zero removal path** for ephemeral plans. The `run_plan` executor (plan/mod.rs:1052-1393) completes, emits lifecycle events, and returns. Nobody removes the plan from `active_plans`. Verification (`grep -n 'active_plans.*remove\|remove.*active_plans' crates/spur-mcp/src/server.rs`): the only removals are in test fixtures (`setup_persisted_merge_plan`, `setup_persisted_retried_plan`) and shutdown rollback (`execute_epic` task-tracker-closed path at server.rs:3522). No post-terminal cleanup exists.
 
 For persisted plans, `load_or_project_plan` has a reprojection path (cache miss → beads → reinstall). But ephemeral plans have no durable backing. That makes them the long-lived leak source **and** the authority for post-run inspection/merge, which is exactly why naive terminal eviction is unsafe.
 
@@ -246,7 +246,7 @@ if let Some(existing) = cached.clone() {
 Orphaned worktrees and snapshot branches accumulate on disk. Operators must manually clean them up. The retry cleanup warning (`"next attempt may fail at create_worktree"`) is misleading — each retry gets a fresh `SessionId`, so collision is impossible.
 
 #### Direct Cause (Waterline)
-The `WorktreeManager::cleanup_orphans` function (manager.rs:427) is **correctly implemented** but **never invoked** in the orchestrator.
+The `WorktreeManager::cleanup_orphans` function (manager.rs:427) is **correctly implemented** but **never invoked** anywhere in the workspace. Verification (`grep -rn 'cleanup_orphans' crates/`): exactly one hit — the definition in `manager.rs:427`; zero call sites exist across `spur-core`, `spur-mcp`, and `spur-worktree`.
 
 ```rust
 // manager.rs:427 — exists, tested, documented
@@ -464,7 +464,7 @@ for branch in branches_output.lines().map(|l| l.trim()) {
 }
 ```
 
-Worker branch `spur/worker-codex-abc` does NOT contain the string `spur/brain-snapshot-X`, so this check never protects snapshot branches. Snapshots are always eligible for deletion (correct — they're not needed after worktree creation) but the check also never *deliberately* reclaims them. They just accumulate as orphaned refs.
+The guard iterates `active_bases` (worker branches like `spur/worker-codex-abc`) and tests `b.contains(branch)` where `branch` is a snapshot name like `spur/brain-snapshot-X`. Since no worker branch contains a snapshot branch name, the check always falls through to deletion. This is *accidentally* correct for snapshots (they should be deleted), but because `cleanup_orphans` is never called, the accidental correctness is moot — snapshots still leak indefinitely.
 
 #### AFTER: Sequence Diagram — Immediate Snapshot Deletion (Preventive)
 
@@ -711,7 +711,7 @@ If that contract is not acceptable, the optimization remains deferred backend wo
 ### 3.5 LOW: Label Operations Are Unbatched
 
 #### Surface (Tip of Iceberg)
-`apply_issue_update` (plan/mod.rs:773-815) makes one `update_issue` call per label:
+`apply_issue_update` exists in two places with identical unbatched logic: `plan/mod.rs:773-815` (used by plan executor, dispatch intent, completion, and review paths) and `server.rs:625-667` (used by `compensate_mutation_orphans`, `resolve_dispatch_orphan`, and legacy reclaim). Both make one `update_issue` call per label:
 
 ```rust
 for label in update.add_labels {
@@ -992,10 +992,15 @@ if issue.labels.iter().any(|label| label.starts_with("spur:signal-processed:")) 
     continue;
 }
 
-// mutation_executor.rs
+// mutation_executor.rs:273
 IssueUpdate {
     add_labels: vec![signal_processed_label(&batch.mutation_id)],
     ..
+}
+
+// labels.rs:140-142 — the label is keyed by mutation_id, NOT signal_id
+pub fn signal_processed_label(mutation_id: &uuid::Uuid) -> String {
+    format!("spur:signal-processed:{}", mutation_id.simple())
 }
 ```
 
@@ -1172,12 +1177,12 @@ But this means the `active_plans` cache for persisted plans is **write-only** �
 
 The original journal-based invalidation idea is attractive but unsafe against the current write ordering.
 
-Why? Because persisted plans are sometimes mutated **in memory first** and synced to beads **afterward** on a best-effort basis. `handle_review_task` is the clearest example:
+Why? Because persisted plans are sometimes mutated **in memory first** and synced to beads **afterward** on a best-effort basis. `handle_review_task` (plan/mod.rs:2382-2447) is the clearest example:
 
-1. `apply_decision_and_extract` mutates `PlanState` under the lock
+1. `apply_decision_and_extract` mutates `PlanState` under the lock (plan/mod.rs:2397-2411)
 2. `handle_review_task` drops the lock
-3. only then does it call `apply_issue_update(...)`
-4. beads failures are logged as warnings, not rolled back
+3. only then does it call `apply_issue_update(...)` (plan/mod.rs:2415-2423)
+4. beads failures are logged as warnings (`warn!("handle_review_task: beads update failed...")`), not rolled back
 
 In that world, journal-based cache reuse can resurrect the exact stale-read problem the current code avoids:
 
@@ -1297,22 +1302,67 @@ Replacing comment-based event sourcing with a SQLite table would:
 
 The current architecture (event log in comments + in-memory projection + runtime cache) is event-sourcing best practice. The optimization opportunity is cache invalidation, not storage format.
 
+### Shell Verification Evidence
+
+The following commands were run against the codebase at the time of this RCA (2026-04-22) to ground the claims above.
+
+**Claim:** `cleanup_orphans` has zero call sites.
+```bash
+$ grep -rn 'cleanup_orphans' crates/
+crates/spur-worktree/src/manager.rs:427:    pub async fn cleanup_orphans(&self) -> Result<usize> {
+```
+Result: exactly one hit (definition), confirming the function is never invoked.
+
+**Claim:** `active_plans.remove` only exists in tests and shutdown rollback.
+```bash
+$ grep -n 'active_plans.*remove\|remove.*active_plans' crates/spur-mcp/src/server.rs
+3522:            // Roll back: remove the active_plans entry we just inserted.
+4231:            server.active_plans.lock().await.remove(plan_id);
+4418:            server.active_plans.lock().await.remove(plan_id);
+```
+Result: lines 4231 and 4418 are inside `setup_persisted_merge_plan` and `setup_persisted_retried_plan` test fixtures; line 3522 is the `execute_epic` shutdown-rollback path. No production cleanup path exists.
+
+**Claim:** Two identical `apply_issue_update` functions exist.
+```bash
+$ grep -n 'fn apply_issue_update' crates/spur-mcp/src/server.rs crates/spur-mcp/src/plan/mod.rs
+crates/spur-mcp/src/server.rs:625:async fn apply_issue_update(
+crates/spur-mcp/src/plan/mod.rs:773:async fn apply_issue_update(
+```
+Result: both files define the same unbatched label loop, doubling the blast radius of the anti-pattern.
+
+**Claim:** `signal_processed_label` is keyed by `mutation_id`.
+```bash
+$ grep -A2 'fn signal_processed_label' crates/spur-mcp/src/plan/labels.rs
+pub fn signal_processed_label(mutation_id: &uuid::Uuid) -> String {
+    format!("spur:signal-processed:{}", mutation_id.simple())
+}
+```
+Result: the parameter is `mutation_id`, confirming the durable dedup key is scoped to the mutation batch, not the individual signal instance.
+
+**Claim:** `handle_review_task` mutates memory before best-effort beads sync.
+```bash
+$ sed -n '2395,2423p' crates/spur-mcp/src/plan/mod.rs
+```
+Result: the lock is released at line 2411 (`}?;`), and `apply_issue_update` is called at line 2416 inside a `warn!`-on-failure loop with no rollback.
+
+---
+
 ### Diagram Verification Checklist
 
 | Diagram | Code Reference | Verified Against |
 |---------|---------------|------------------|
 | 3.1 Cache state diagrams | `server.rs:3875-3904` | `load_or_project_plan` logic |
 | 3.1 Ephemeral-plan retention correction | `server.rs:2777-2878`, `server.rs:3591-3780` | `merge_plan_impl` and `handle_get_task_diff` still depend on in-memory ephemeral state |
-| 3.2 cleanup_orphans race | `manager.rs:427` | `cleanup_orphans` implementation |
+| 3.2 cleanup_orphans race | `manager.rs:427` | `cleanup_orphans` implementation — **zero call sites verified** |
 | 3.2 Per-delegation manager | `orchestrator.rs:3296` | `WorktreeManager::new` call site |
 | 3.3 Snapshot leak | `manager.rs:80-154` | `snapshot_brain_state` creates branch |
-| 3.3 Snapshot deletion | `orchestrator.rs:4250-4257` | `snapshot_brain_state` → `create_worktree` flow |
+| 3.3 Snapshot deletion | `orchestrator.rs:4249-4257` | `snapshot_brain_state` → `create_worktree` flow — **no post-creation deletion exists** |
 | 3.4 N+1 | `plan/mod.rs:410-428` | `derive_epic_plan` loop |
-| 3.5 Unbatched labels | `plan/mod.rs:793-811` | `apply_issue_update` loops |
+| 3.5 Unbatched labels | `plan/mod.rs:793-811`, `server.rs:625-667` | `apply_issue_update` loops — **two identical copies verified** |
 | 3.6 Sequential subgraph | `server.rs:379-413` | `build_epic_subgraph` loop |
-| 3.7 Durable dedup bug | `signal_watcher.rs:108-116`, `mutation_executor.rs:273` | issue-wide `spur:signal-processed:*` skip + label written from `mutation_id` |
+| 3.7 Durable dedup bug | `signal_watcher.rs:110-116`, `mutation_executor.rs:273`, `labels.rs:140-142` | issue-wide `spur:signal-processed:*` skip + label written from `mutation_id` |
 | 3.8 Cache reprojection | `server.rs:3879-3887` | `persisted_cached` check |
-| 3.8 Durability-first constraint | `plan/mod.rs:2091-2260`, `plan/mod.rs:2382-2445` | persisted state mutates in memory before best-effort beads sync |
+| 3.8 Durability-first constraint | `plan/mod.rs:2091-2260`, `plan/mod.rs:2382-2447` | persisted state mutates in memory before best-effort beads sync |
 
 ---
 
