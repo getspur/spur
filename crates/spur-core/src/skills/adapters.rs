@@ -22,10 +22,11 @@ pub enum Adapter {
     Kiro,
     OpenCode,
     Cursor,
+    Kimi,
 }
 
 impl Adapter {
-    /// All 7 adapters in deterministic iteration order.
+    /// All 8 adapters in deterministic iteration order.
     pub fn all() -> &'static [Adapter] {
         &[
             Adapter::SpurHermetic,
@@ -35,6 +36,7 @@ impl Adapter {
             Adapter::Kiro,
             Adapter::OpenCode,
             Adapter::Cursor,
+            Adapter::Kimi,
         ]
     }
 
@@ -56,6 +58,27 @@ impl Adapter {
                 render_agentskills(skill, &repo_root.join(".opencode/skills"), "spurpower-")
             }
             Adapter::Cursor => render_cursor(skill, repo_root),
+            Adapter::Kimi => {
+                render_agentskills(skill, &repo_root.join(".kimi/skills"), "spurpower-")
+            }
+        }
+    }
+
+    /// Whether this adapter targets worker agents (as opposed to the brain).
+    /// Used for role-gated rendering: brain-only skills skip worker adapters.
+    pub fn targets_workers(&self) -> bool {
+        match self {
+            // SpurHermetic is the override directory used by SPUR itself;
+            // it serves both roles depending on context.
+            Adapter::SpurHermetic => true,
+            // All external agent adapters target workers.
+            Adapter::ClaudeCode
+            | Adapter::Codex
+            | Adapter::Gemini
+            | Adapter::Kiro
+            | Adapter::OpenCode
+            | Adapter::Cursor
+            | Adapter::Kimi => true,
         }
     }
 }
@@ -152,13 +175,14 @@ mod tests {
             description: "Use for TDD".to_string(),
             body: "Write the test first.\n".to_string(),
             source: crate::skills::SkillSource::Bundled,
+            role: crate::skills::SkillRole::Both,
         }
     }
 
     #[test]
-    fn adapter_all_has_seven_unique() {
+    fn adapter_all_has_eight_unique() {
         let all = Adapter::all();
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         let mut seen = std::collections::HashSet::new();
         for a in all {
             assert!(seen.insert(*a), "{a:?} appears twice");
@@ -269,6 +293,7 @@ mod tests {
                 "/tmp/repo/.opencode/skills/spurpower-tdd/",
             ),
             (Adapter::Cursor, "/tmp/repo/.cursor/rules/"),
+            (Adapter::Kimi, "/tmp/repo/.kimi/skills/spurpower-tdd/"),
         ];
         for (a, prefix) in expected_prefixes {
             let rf = a.render(&skill, &root);

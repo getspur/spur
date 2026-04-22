@@ -1,7 +1,7 @@
 ---
 name: plan-task-discipline
 description: Use when working within a submitted plan — enforces DAG order, dependency awareness, task isolation, and the lifecycle that keeps parallel workers from colliding.
-role: brain
+role: both
 agent: all
 activation: on-dispatch
 ---
