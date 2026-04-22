@@ -140,7 +140,8 @@ async fn split_task_happy_path_rewires_downstream_and_commits() {
             parent_issue.labels
         );
     }
-    let processed_label = signal_processed_label(&batch.mutation_id);
+    let processed_label =
+        signal_processed_label(&batch.trigger_signal_id.expect("trigger_signal_id"));
     assert!(
         parent_issue
             .labels

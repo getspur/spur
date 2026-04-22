@@ -3694,6 +3694,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_issue_update_batches_label_changes_in_single_call() {
+        use tokio::sync::Mutex;
+
+        struct RecordingPm {
+            calls: Mutex<Vec<(String, spur_pm::IssueUpdate)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl PmLike for RecordingPm {
+            async fn update_issue(
+                &self,
+                id: &str,
+                update: spur_pm::IssueUpdate,
+            ) -> anyhow::Result<()> {
+                self.calls.lock().await.push((id.to_string(), update));
+                Ok(())
+            }
+
+            fn closed_status(&self) -> &str {
+                "closed"
+            }
+        }
+
+        let pm = RecordingPm {
+            calls: Mutex::new(Vec::new()),
+        };
+
+        super::apply_issue_update(
+            &pm,
+            "bd-1",
+            spur_pm::IssueUpdate {
+                status: Some("open".to_string()),
+                add_labels: vec!["label-a".to_string(), "label-b".to_string()],
+                remove_labels: vec!["label-c".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("apply_issue_update must succeed");
+
+        let calls = pm.calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            2,
+            "expected one core call + one batched label call, got {calls:?}"
+        );
+
+        assert_eq!(calls[0].0, "bd-1");
+        assert_eq!(calls[0].1.status, Some("open".to_string()));
+        assert!(calls[0].1.add_labels.is_empty());
+        assert!(calls[0].1.remove_labels.is_empty());
+
+        assert_eq!(calls[1].0, "bd-1");
+        assert_eq!(calls[1].1.status, None);
+        assert_eq!(calls[1].1.add_labels, vec!["label-a", "label-b"]);
+        assert_eq!(calls[1].1.remove_labels, vec!["label-c"]);
+    }
+
+    #[tokio::test]
     async fn request_changes_at_max_attempts_auto_rejects() {
         use super::*;
         let task_spec = task("T1", &[]);

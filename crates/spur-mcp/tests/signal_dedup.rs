@@ -676,3 +676,70 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
         "each failed retry should leave an invariant-violation breadcrumb: {audits:?}"
     );
 }
+
+#[tokio::test]
+async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
+    if !br_available() {
+        eprintln!(
+            "skipping distinct_signal_on_task_with_prior_processed_label_is_not_skipped: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = beads_pm(dir.path()).await;
+    let task_id = build_single_task_plan(pm.as_ref(), "signal-exact-dedup-1").await;
+    add_labels_individually(
+        pm.as_ref(),
+        &task_id,
+        &[
+            labels::READY_FOR_REVIEW.to_string(),
+            labels::signal_kind("scope-drift"),
+        ],
+    )
+    .await;
+
+    let old_signal_id = Uuid::new_v4();
+    pm.update_issue(
+        &task_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::signal_processed_label(&old_signal_id)],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add old processed label");
+
+    let new_signal = scope_drift_signal(Uuid::new_v4());
+    pm.advanced()
+        .expect("advanced beads surface")
+        .add_comment(&task_id, &signals::encode_comment(&new_signal))
+        .await
+        .expect("new signal comment");
+
+    let watcher = SignalWatcher::new(
+        Arc::clone(&pm),
+        ScopeDriftSplitProposer::default(),
+        TrivialScorer,
+    );
+    watcher.tick_once().await.expect("tick_once");
+
+    let comments = pm
+        .advanced()
+        .expect("advanced beads surface")
+        .list_comments(&task_id)
+        .await
+        .expect("list comments after watcher tick");
+    let audits = audit_sentinels(&comments);
+    let mutation_plan_count = audits
+        .iter()
+        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::MutationPlan { .. }))
+        .count();
+
+    assert_eq!(
+        mutation_plan_count, 1,
+        "a distinct signal must be processed even when the task already carries a different signal-processed label; audits={audits:?}"
+    );
+}
