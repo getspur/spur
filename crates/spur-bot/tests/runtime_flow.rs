@@ -6,8 +6,7 @@ use spur_bot::runtime::{BotRuntime, RuntimeRender};
 use spur_bot::state::BotStateStore;
 use spur_interactive::InteractiveFrontendHost;
 
-fn mk_permission_request(
-) -> (
+fn mk_permission_request() -> (
     spur_acp::types::PermissionRequest,
     tokio::sync::oneshot::Receiver<spur_acp::types::PermissionResponse>,
 ) {
@@ -62,10 +61,9 @@ async fn first_plain_message_starts_new_session() {
         user_rx.recv().await.unwrap(),
         spur_core::InteractiveInput::NewSessionWithMessage { .. }
     ));
-    assert!(renders.iter().any(|item| matches!(
-        item,
-        RuntimeRender::WorkingStatus { .. }
-    )));
+    assert!(renders
+        .iter()
+        .any(|item| matches!(item, RuntimeRender::WorkingStatus { .. })));
 }
 
 #[tokio::test]
@@ -145,9 +143,7 @@ async fn permission_callback_returns_exact_option_id() {
     let token = renders
         .iter()
         .find_map(|item| match item {
-            RuntimeRender::PermissionPrompt { buttons, .. } => {
-                Some(buttons[0].token.clone())
-            }
+            RuntimeRender::PermissionPrompt { buttons, .. } => Some(buttons[0].token.clone()),
             _ => None,
         })
         .unwrap();
@@ -238,7 +234,9 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
     )));
 
     // No second review decision was enqueued.
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), review_rx.recv())
-        .await
-        .is_err());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), review_rx.recv())
+            .await
+            .is_err()
+    );
 }
