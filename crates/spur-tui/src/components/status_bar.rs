@@ -54,7 +54,10 @@ impl LicenseBadge {
 /// stream is idle it shows `[Esc]back`.  The caller is responsible for
 /// AND-ing with `!cancelling_in_flight` before passing the flag so the
 /// misleading `[Esc]stop` disappears once a cancel is already in progress.
-pub(crate) fn hint_for_session_detail(stream_in_flight: bool) -> &'static str {
+pub(crate) fn hint_for_session_detail(
+    stream_in_flight: bool,
+    _esc_consumed_by_composer: bool,
+) -> &'static str {
     if stream_in_flight {
         " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-w]workers [Ctrl-r]history [?]help"
     } else {
@@ -76,6 +79,10 @@ pub struct StatusBarProps<'a> {
     /// True when the SessionDetail view has an in-flight stream; toggles
     /// the status-bar hint between `[Esc]back` (idle) and `[Esc]stop` (live).
     pub stream_in_flight: bool,
+    /// True when the composer (InputBar) will consume the next Esc key
+    /// (e.g. Vim Insert/Visual/Operator mode). Used to show `[Esc]back`
+    /// instead of the misleading `[Esc]stop` when Esc cannot cancel.
+    pub esc_consumed_by_composer: bool,
     /// Number of tracked issues (from IssuesLoaded); 0 means not shown.
     pub issue_count: usize,
     /// Graph alert summary from bv: (total, critical, warning). None if bv unavailable.
@@ -92,7 +99,10 @@ impl StatusBar {
             ViewId::Dashboard => {
                 " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
             }
-            ViewId::SessionDetail(_) => hint_for_session_detail(props.stream_in_flight),
+            ViewId::SessionDetail(_) => hint_for_session_detail(
+                props.stream_in_flight,
+                props.esc_consumed_by_composer,
+            ),
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => " [Esc]close",
@@ -287,15 +297,22 @@ mod status_bar_hint_tests {
     use super::hint_for_session_detail;
 
     #[test]
-    fn hint_shows_stop_when_stream_in_flight() {
-        let hint = hint_for_session_detail(true);
+    fn hint_shows_stop_when_streaming_and_esc_can_cancel() {
+        let hint = hint_for_session_detail(true, false);
         assert!(hint.contains("[Esc]stop"), "got: {hint}");
         assert!(!hint.contains("[Esc]back"));
     }
 
     #[test]
+    fn hint_shows_back_when_streaming_but_esc_is_consumed_by_vim_mode() {
+        let hint = hint_for_session_detail(true, true);
+        assert!(hint.contains("[Esc]back"), "got: {hint}");
+        assert!(!hint.contains("[Esc]stop"));
+    }
+
+    #[test]
     fn hint_shows_back_when_idle() {
-        let hint = hint_for_session_detail(false);
+        let hint = hint_for_session_detail(false, false);
         assert!(hint.contains("[Esc]back"), "got: {hint}");
         assert!(!hint.contains("[Esc]stop"));
     }
