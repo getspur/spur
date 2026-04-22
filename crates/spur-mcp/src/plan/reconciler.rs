@@ -405,19 +405,18 @@ impl Reconciler {
                 continue;
             };
 
-            let has_epic_completion =
-                crate::plan::projector::collect_sorted_audits(adv.list_comments(&epic.id).await?)
-                    .iter()
-                    .any(|audit| {
-                        matches!(
-                            audit,
-                            AuditSentinelKind::EpicCompletion {
-                                plan_id: audit_plan_id,
-                                epic_id: audit_epic_id,
-                                ..
-                            } if audit_plan_id == plan_id && audit_epic_id == &epic.id
-                        )
-                    });
+            let mut audits =
+                crate::plan::projector::collect_sorted_audits(adv.list_comments(&epic.id).await?);
+            let has_epic_completion = audits.iter().any(|audit| {
+                matches!(
+                    audit,
+                    AuditSentinelKind::EpicCompletion {
+                        plan_id: audit_plan_id,
+                        epic_id: audit_epic_id,
+                        ..
+                    } if audit_plan_id == plan_id && audit_epic_id == &epic.id
+                )
+            });
 
             if epic.status == closed_status {
                 if !has_epic_completion {
@@ -428,6 +427,11 @@ impl Reconciler {
                         outcome.audit_outcome,
                     )
                     .await;
+                    audits.push(AuditSentinelKind::EpicCompletion {
+                        outcome: outcome.audit_outcome,
+                        plan_id: plan_id.to_string(),
+                        epic_id: epic.id.clone(),
+                    });
                     did_work = true;
                 }
 
@@ -437,12 +441,12 @@ impl Reconciler {
                     && epic.labels.contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
                 {
                     if let Some(automation) = self.automation.as_ref() {
-                        let outcome_summary = match outcome.audit_outcome {
-                            crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved => "All approved",
-                            crate::plan::audit_sentinel::EpicCompletionOutcome::TerminalWithFailures => {
-                                "Terminal with failures"
-                            }
-                        };
+                        let outcome_summary = crate::plan::projector::epic_completion_outcome_summary(
+                            &audits,
+                            plan_id,
+                            &epic.id,
+                        )
+                        .expect("epic completion audit must be present");
                         match automation.merge_plan(plan_id).await {
                             Ok(crate::plan::PlanMergeState::Succeeded { merge_branch, .. }) => {
                                 let params = build_auto_pr_params(

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use spur_acp::{BrainSessionId, SessionId};
 
 use super::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
-use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState};
+use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState, EpicCompletionOutcome};
 
 const LEGACY_DELEGATION_ID_PREFIX: &str = "delegation-id:";
 const LEGACY_READY_FOR_REVIEW: &str = "ready-for-review";
@@ -86,6 +86,35 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<(String, Vec<Str
         }
     }
 
+    None
+}
+
+/// Derive the human-readable outcome summary string from the most recent
+/// `EpicCompletion` audit matching the given `plan_id` and `epic_id`.
+///
+/// This is the durable source of truth for PR body text in the auto-merge
+/// hook; callers must not use live-projected `ProjectedEpicCompletion`
+/// directly.
+pub fn epic_completion_outcome_summary(
+    audits: &[AuditSentinelKind],
+    plan_id: &str,
+    epic_id: &str,
+) -> Option<&'static str> {
+    for audit in audits.iter().rev() {
+        if let AuditSentinelKind::EpicCompletion {
+            outcome,
+            plan_id: pid,
+            epic_id: eid,
+        } = audit
+        {
+            if pid == plan_id && eid == epic_id {
+                return Some(match outcome {
+                    EpicCompletionOutcome::AllApproved => "All approved",
+                    EpicCompletionOutcome::TerminalWithFailures => "Terminal with failures",
+                });
+            }
+        }
+    }
     None
 }
 
@@ -429,6 +458,7 @@ mod tests {
     use spur_pm::Comment;
 
     use super::{AuditSentinelKind, CompletionState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+    use crate::plan::audit_sentinel::EpicCompletionOutcome;
 
     #[test]
     fn sort_projection_comments_orders_by_created_at_then_id() {
@@ -676,5 +706,62 @@ mod tests {
 
         let base_snapshot_branch = super::plan_submit_base_snapshot(&audits);
         assert_eq!(base_snapshot_branch.as_deref(), Some("refs/heads/main"));
+    }
+
+    #[test]
+    fn epic_completion_outcome_summary_derives_all_approved_from_durable_audit() {
+        let audits = vec![AuditSentinelKind::EpicCompletion {
+            outcome: EpicCompletionOutcome::AllApproved,
+            plan_id: "P1".into(),
+            epic_id: "bd-epic-1".into(),
+        }];
+        assert_eq!(
+            super::epic_completion_outcome_summary(&audits, "P1", "bd-epic-1"),
+            Some("All approved")
+        );
+    }
+
+    #[test]
+    fn epic_completion_outcome_summary_derives_terminal_with_failures_from_durable_audit() {
+        let audits = vec![AuditSentinelKind::EpicCompletion {
+            outcome: EpicCompletionOutcome::TerminalWithFailures,
+            plan_id: "P1".into(),
+            epic_id: "bd-epic-1".into(),
+        }];
+        assert_eq!(
+            super::epic_completion_outcome_summary(&audits, "P1", "bd-epic-1"),
+            Some("Terminal with failures")
+        );
+    }
+
+    #[test]
+    fn epic_completion_outcome_summary_returns_none_when_missing() {
+        let audits = vec![AuditSentinelKind::Approval {
+            delegation_id: "del-A".into(),
+        }];
+        assert_eq!(
+            super::epic_completion_outcome_summary(&audits, "P1", "bd-epic-1"),
+            None
+        );
+    }
+
+    #[test]
+    fn epic_completion_outcome_summary_uses_latest_matching_audit() {
+        let audits = vec![
+            AuditSentinelKind::EpicCompletion {
+                outcome: EpicCompletionOutcome::AllApproved,
+                plan_id: "P1".into(),
+                epic_id: "bd-epic-1".into(),
+            },
+            AuditSentinelKind::EpicCompletion {
+                outcome: EpicCompletionOutcome::TerminalWithFailures,
+                plan_id: "P1".into(),
+                epic_id: "bd-epic-1".into(),
+            },
+        ];
+        assert_eq!(
+            super::epic_completion_outcome_summary(&audits, "P1", "bd-epic-1"),
+            Some("Terminal with failures")
+        );
     }
 }
