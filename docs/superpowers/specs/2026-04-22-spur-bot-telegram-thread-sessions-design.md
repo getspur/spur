@@ -87,6 +87,14 @@ Primary sources:
 - [User](https://core.telegram.org/bots/api#user)
 - [sendMessageDraft](https://core.telegram.org/bots/api#sendmessagedraft)
 
+Two Bot API rules are particularly important for implementation correctness:
+
+- topic-capable operation must be gated by bot capability checks, especially
+  `getMe().has_topics_enabled`
+- the General topic is special; `message_thread_id = 1` should be treated as
+  the lobby / General surface on inbound updates, while outbound sends to the
+  lobby must omit `message_thread_id`
+
 One implementation constraint should be made explicit:
 
 - the Bot API surface does not provide a good bot-level “list all topics”
@@ -237,6 +245,12 @@ Interpretation:
 - `message_thread_id = None` means the lobby
 - `message_thread_id = Some(id)` means a topic-backed session surface
 
+Normalization rule:
+
+- inbound `message_thread_id = 1` must be normalized to `None`
+- outbound sends to the lobby must omit `message_thread_id` rather than sending
+  `1`
+
 The lobby is a first-class routing surface, but it does not own a live brain
 session binding.
 
@@ -315,7 +329,9 @@ Inside a topic:
 - `/current`
 - `/cancel`
 
-`/new` is invalid inside a topic.
+`/new` is invalid inside a topic and should return:
+
+- `Use /new in the lobby to create a topic.`
 
 Plain text behavior:
 
@@ -393,6 +409,17 @@ fan-out and hidden cross-thread switching.
 
 The current single-binding file should become a registry-shaped file.
 
+This requires an explicit state migration rule from the current flat
+`PersistedBotState`:
+
+- a legacy file with one `current_acp_session_id` and one `current_brain`
+  should be loaded into the new schema without data loss
+- if no topic registry exists yet, the legacy binding should be treated as a
+  detached archived session record or as a lobby-only legacy binding that
+  requires explicit rebinding before topic-local chat begins
+- the implementation plan must choose one of those migration paths explicitly;
+  it may not silently drop the old single-session state
+
 Persist:
 
 - `version`
@@ -441,6 +468,13 @@ Atomicity requirements:
 - inbound text messages
 - inbound callback queries
 
+Callback routing must read the thread identity from
+`callback_query.message.message_thread_id`.
+
+The router should also treat `is_topic_message` as defensive context when that
+field is present, but `message_thread_id` remains the authoritative routing
+input.
+
 This is what turns the runtime from global-session routing into topic-local
 routing.
 
@@ -459,13 +493,28 @@ must all target the correct thread.
 
 The lobby uses `message_thread_id = None`.
 
+Outbound rule:
+
+- if the render target is the lobby / General topic, omit `message_thread_id`
+- if the render target is a real topic, include the exact topic
+  `message_thread_id`
+
 ### Topic Creation
 
 `/new` requires Telegram `createForumTopic`.
 
-Startup should verify topic capability before thread-native mode is used. At a
-minimum, the bot should fail clearly if the configured bot does not support
-topics in private chats.
+Startup should verify topic capability before thread-native mode is used.
+
+At minimum:
+
+- call `getMe`
+- require `has_topics_enabled = true`
+- fail fast with a clear configuration error if the bot does not support topics
+  in private chats
+
+The implementation should treat `400`-class topic-creation failures such as
+“chat is not a forum” or equivalent private-topic capability failures as
+configuration errors, not as recoverable per-command runtime errors.
 
 ---
 
