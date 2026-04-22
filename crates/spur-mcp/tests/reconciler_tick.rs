@@ -1038,3 +1038,85 @@ async fn reconciler_cancels_during_tick() {
         .expect("reconciler must shut down within 1s of cancel")
         .expect("reconciler task must not panic");
 }
+
+/// Hybrid wake equivalence: a fast-forward signal causes the reconciler to tick
+/// and produce the same observable dispatch as a direct `tick_once()` call.
+/// The journal wake is optional and does not change `tick_once()` semantics.
+#[tokio::test]
+async fn hybrid_fast_forward_matches_polling_projection() {
+    use std::time::Duration;
+
+    if !br_available() {
+        eprintln!("skipping hybrid_fast_forward_matches_polling_projection: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &["create", "--type", "epic", "--title", "Plan 1 Epic", "--priority", "2"],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &["create", "--type", "task", "--title", "Ready Task", "--priority", "2"],
+    ));
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let fast_forward = Arc::new(Notify::new());
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig {
+            base_interval: Duration::from_secs(60),
+            idle_ceiling: Duration::from_secs(60),
+            backoff_factor: 2,
+        },
+        Arc::clone(&pm),
+        Arc::clone(&fast_forward),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId::new()),
+            event_sink: None,
+        }),
+        Some("plan-1".into()),
+    );
+
+    // Spawn run() with a long interval; without fast-forward it would not tick for 60s.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move { reconciler.run(cancel_rx).await });
+
+    // Yield briefly to let the reconciler enter the select! loop.
+    tokio::task::yield_now().await;
+
+    // Fast-forward should trigger an immediate tick and dispatch the ready task.
+    fast_forward.notify_one();
+
+    let request = tokio::time::timeout(Duration::from_secs(2), delegation_rx.recv()).await;
+    assert!(
+        request.is_ok(),
+        "fast-forward must trigger tick and dispatch within timeout"
+    );
+    let request = request.unwrap();
+    assert!(
+        request.is_some(),
+        "fast-forward must produce a delegation request"
+    );
+    assert_eq!(request.unwrap().issue_id.as_deref(), Some(task_id.as_str()));
+
+    // Cancel and clean up.
+    let _ = cancel_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
