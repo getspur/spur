@@ -1782,14 +1782,20 @@ impl McpCallbackServer {
                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                     reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
+                    let auto_merge = self.auto_merge_approved_plans;
+                    let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> = Some(Arc::clone(&self) as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
                     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-                        let reconciler = Reconciler::new(
+                        let mut reconciler = Reconciler::new(
                             ReconcilerConfig::default(),
                             pm,
                             fast,
                             Some(dispatch),
                             None, // plan_id: observe all plans when None
                         );
+                        reconciler.set_auto_merge_approved_plans(auto_merge);
+                        if let Some(a) = automation {
+                            reconciler.set_automation(a);
+                        }
                         reconciler.run(cancel_rx).await;
                     }));
                     Some(handle)
@@ -2698,42 +2704,27 @@ impl McpCallbackServer {
         }
     }
 
-    async fn handle_merge_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
-        };
-
+    async fn merge_plan_impl(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState> {
         let repo_root = match self.repo_root.as_ref() {
             Some(root) => root.clone(),
-            None => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    "Repository root not configured; merge_plan is unavailable",
-                )
-            }
+            None => anyhow::bail!("Repository root not configured; merge_plan is unavailable"),
         };
 
-        let had_cached_entry = self.active_plans.lock().await.contains_key(&plan_id);
-        let plan_arc = match self.load_or_project_plan(&plan_id).await {
+        let had_cached_entry = self.active_plans.lock().await.contains_key(plan_id);
+        let plan_arc = match self.load_or_project_plan(plan_id).await {
             Ok(plan_arc) => plan_arc,
-            Err(_) => {
-                return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"))
-            }
+            Err(_) => anyhow::bail!("Unknown plan_id: '{plan_id}'"),
         };
 
         let (base_snapshot_branch, base_snapshot_oid, tasks, merge_state, epic_id) = {
             let state = plan_arc.lock().await;
-            let status = crate::plan::build_plan_status(&plan_id, &state);
+            let status = crate::plan::build_plan_status(plan_id, &state);
             let ready = status
                 .get("ready_to_merge")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if !ready {
-                return JsonRpcResponse::invalid_params(
-                    id,
-                    format!("plan '{plan_id}' is not fully approved yet"),
-                );
+                anyhow::bail!("plan '{plan_id}' is not fully approved yet");
             }
             (
                 state.base_snapshot_branch.clone(),
@@ -2745,21 +2736,15 @@ impl McpCallbackServer {
         };
 
         if !matches!(merge_state, crate::plan::PlanMergeState::NotStarted) {
-            let state = plan_arc.lock().await;
-            let status = crate::plan::build_plan_status(&plan_id, &state);
-            let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
-            return JsonRpcResponse::success(
-                id,
-                json!({ "content": [{ "type": "text", "text": text }] }),
-            );
+            return Ok(merge_state);
         }
 
         let persisted_bootstrap = if !had_cached_entry {
             match (self.pm_service.as_deref(), epic_id.as_deref()) {
                 (Some(pm), Some(epic_id)) => {
-                    match read_persisted_plan_bootstrap(pm, &plan_id, epic_id).await {
+                    match read_persisted_plan_bootstrap(pm, plan_id, epic_id).await {
                         Ok(bootstrap) => Some(bootstrap),
-                        Err(error) => return JsonRpcResponse::internal_error(id, error),
+                        Err(error) => anyhow::bail!(error),
                     }
                 }
                 _ => None,
@@ -2776,52 +2761,34 @@ impl McpCallbackServer {
             .or(base_snapshot_branch)
         {
             Some(reference) => reference,
-            None => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!(
-                        "plan '{plan_id}' has no captured base snapshot; resubmit the plan before calling merge_plan"
-                    ),
-                )
-            }
+            None => anyhow::bail!(
+                "plan '{plan_id}' has no captured base snapshot; resubmit the plan before calling merge_plan"
+            ),
         };
 
         let task_specs: Vec<crate::plan::PlanTask> =
             tasks.iter().map(|entry| entry.spec.clone()).collect();
-        let order = match topological_order(&task_specs) {
-            Ok(order) => order,
-            Err(e) => return JsonRpcResponse::internal_error(id, e),
-        };
+        let order = topological_order(&task_specs).map_err(|e| anyhow::anyhow!(e))?;
 
         let mut ordered_branches = Vec::with_capacity(order.len());
         for idx in order {
             let entry = &tasks[idx];
             if !matches!(entry.status, crate::plan::PlanTaskStatus::Approved { .. }) {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!(
-                        "plan '{plan_id}' became non-approved while merge_plan was preparing task '{}'",
-                        entry.spec.task_id
-                    ),
+                anyhow::bail!(
+                    "plan '{plan_id}' became non-approved while merge_plan was preparing task '{}'",
+                    entry.spec.task_id
                 );
             }
             let Some(worker_branch) = entry.worker_branch.clone() else {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!(
-                        "approved task '{}' has no worker_branch; cannot integrate plan",
-                        entry.spec.task_id
-                    ),
+                anyhow::bail!(
+                    "approved task '{}' has no worker_branch; cannot integrate plan",
+                    entry.spec.task_id
                 );
             };
             ordered_branches.push((entry.spec.task_id.clone(), worker_branch));
         }
 
-        let merge_branch = format!(
-            "spur/plan-merge-{}-{}",
-            plan_id,
-            uuid::Uuid::new_v4().simple()
-        );
+        let merge_branch = format!("spur/plan-merge-{plan_id}-{}", uuid::Uuid::new_v4().simple());
 
         let merge_state = match integrate_plan_branches(
             &repo_root,
@@ -2839,7 +2806,7 @@ impl McpCallbackServer {
 
         {
             let mut state = plan_arc.lock().await;
-            state.merge_state = merge_state;
+            state.merge_state = merge_state.clone();
         }
 
         if merged_successfully {
@@ -2854,20 +2821,58 @@ impl McpCallbackServer {
                 )
                 .await
                 {
-                    return JsonRpcResponse::internal_error(
-                        id,
-                        format!("failed to clear integration-pending on epic '{epic_id}': {error}"),
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        epic_id = %epic_id,
+                        "failed to clear integration-pending on epic after merge: {error}"
                     );
                 }
             }
         }
 
-        let status = {
-            let state = plan_arc.lock().await;
-            crate::plan::build_plan_status(&plan_id, &state)
+        Ok(merge_state)
+    }
+
+    async fn create_pr_impl(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
+        self.pm_service
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No PR service configured"))?
+            .create_pr(params)
+            .await
+    }
+
+    async fn handle_merge_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
         };
-        let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
-        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+
+        match self.merge_plan_impl(&plan_id).await {
+            Ok(_) => {
+                // Read from the cache directly to avoid load_or_project_plan re-projection
+                // wiping the merge_state we just wrote.
+                let plan_arc = self.active_plans.lock().await.get(&plan_id).cloned();
+                let plan_arc = match plan_arc {
+                    Some(p) => p,
+                    None => match self.load_or_project_plan(&plan_id).await {
+                        Ok(p) => p,
+                        Err(e) => return JsonRpcResponse::invalid_params(id, e),
+                    },
+                };
+                let state = plan_arc.lock().await;
+                let status = crate::plan::build_plan_status(&plan_id, &state);
+                let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+                JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("not fully approved yet") || msg.contains("Unknown plan_id") {
+                    JsonRpcResponse::invalid_params(id, msg)
+                } else {
+                    JsonRpcResponse::internal_error(id, msg)
+                }
+            }
+        }
     }
 
     // ─── Graph analysis handlers (bv robot protocol) ───────────────
@@ -3825,6 +3830,17 @@ impl McpCallbackServer {
             .get(plan_id)
             .cloned()
             .ok_or_else(|| format!("unknown plan '{plan_id}'"))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::plan::reconciler::ReconcilerAutomation for McpCallbackServer {
+    async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState> {
+        self.merge_plan_impl(plan_id).await
+    }
+
+    async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
+        self.create_pr_impl(params).await
     }
 }
 
