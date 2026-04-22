@@ -20,7 +20,7 @@ pub enum PickerAction {
     None,
     /// User accepted a row; dispatch this and close the shell.
     Accept(RetrievalAccept),
-    /// User cancelled (Esc/Ctrl+C); close the shell without mutation.
+    /// User cancelled (Esc); close the shell without mutation.
     Cancel,
 }
 
