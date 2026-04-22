@@ -349,6 +349,32 @@ Semantics:
 Plain text remains the primary interaction model. Commands are control
 operations, not the default way to chat.
 
+### Command Response Style
+
+Control commands should return short, self-identifying responses.
+
+Rules:
+
+- every command response should clearly say whether a current session is
+  now set, cleared, restored, or unchanged
+- `/new` should explicitly say that the next plain message starts a fresh
+  session
+- `/resume <id>` should confirm the bound session and brain on success
+- `/current` should produce a useful response even when no current session
+  exists
+- `/cancel` should distinguish between “cancel requested” and “no turn is
+  currently running”
+
+`/sessions` needs special treatment because it is the operator's only
+session-switching browser in v1.
+
+The list should:
+
+- mark the current session explicitly
+- show only a compact top slice of resumable sessions
+- present enough metadata to choose safely without flooding the chat
+- end with a concrete resume hint such as `/resume <full-id>`
+
 ---
 
 ## Rendering Model
@@ -374,12 +400,58 @@ Meaningful v1 milestones include:
 - turn cancelled
 - error
 
+### Message Hierarchy
+
+The DM should have a clear hierarchy so operators can skim it safely.
+
+1. **Durable answer messages**
+   The assistant's final answer for a turn. These are the most important
+   messages and should read cleanly when revisited later.
+
+2. **Ephemeral status messages**
+   Working, restoring, cancelling, and lightweight progress state. These
+   should be edited in place when possible instead of creating a trail of
+   near-duplicate updates.
+
+3. **Action cards**
+   Review and permission prompts. These should be visually self-contained,
+   include the minimum context needed for a safe decision, and become
+   terminal after one action.
+
+4. **Control responses**
+   `/new`, `/current`, `/sessions`, `/resume`, `/cancel`, `/help`. These
+   should be concise and should always make the next likely action obvious.
+
+The key rule is:
+
+- **final answers accumulate**
+- **status updates collapse**
+- **action cards terminate cleanly**
+
+This prevents the DM from turning into a noisy event log.
+
+### Interaction Flow
+
+The v1 DM flow should feel like a disciplined operator console:
+
+- idle state teaches the operator that plain text is the default way to
+  talk to SPUR
+- once a current session exists, command responses and action cards should
+  mention that session compactly
+- there should be at most one active “working” status per turn
+- review and permission prompts should interrupt the flow clearly, but
+  they should not drown the chat in surrounding status noise
+- when an action card resolves, the terminal state should remain visible
+  in the message history without leaving live buttons behind
+
 ### Review Prompts
 
 When `ExecutorReviewRequested` arrives:
 
 - create a short-lived prompt record keyed by an opaque bot token
 - render a concise summary in DM
+- include enough executor context for a safe decision:
+  executor/task label, short summary, and diff stats when available
 - show buttons for `Approve`, `Reject`, `Retry`
 - on click, route the exact review decision through
   `InteractiveInput::SubmitReview`
@@ -394,6 +466,8 @@ When ACP emits a permission request:
 
 - store the exact ACP option ids in a short-lived prompt record
 - render one button per option
+- include the tool or operation name prominently so the operator knows
+  what is being approved
 - visible labels may be shortened for readability
 - callback payloads must use compact opaque bot tokens
 - clicking a button resolves the stored `reply_tx` with the exact ACP
@@ -401,6 +475,138 @@ When ACP emits a permission request:
 
 This preserves ACP correctness while keeping Telegram callback payloads
 small and transport-safe.
+
+### ASCII Wireframes
+
+The spec should define the canonical v1 chat states up front so transport
+rendering has something concrete to target.
+
+#### 1. Fresh DM, No Current Session
+
+```text
++--------------------------------------------------+
+| SPUR Bot                                         |
+| No current session                               |
+|                                                  |
+| Send a plain message to start a new session.     |
+|                                                  |
+| Commands                                          |
+| /new      clear current session                  |
+| /sessions list resumable sessions                |
+| /resume   bind an existing session               |
+| /current  show active session                    |
+| /cancel   cancel in-flight turn                  |
++--------------------------------------------------+
+| You: Investigate why the review loop stalled     |
++--------------------------------------------------+
+```
+
+Purpose:
+
+- teaches the operator that plain text is the primary interaction
+- makes the “no current session” state explicit
+
+#### 2. Active Session, Turn In Progress
+
+```text
++--------------------------------------------------+
+| Current: claude-code-acp · acp_7f31c2ab          |
+| Status: Working                                  |
+|                                                  |
+| Investigating review loop stall...               |
+| Tool running: get_plan_status                    |
+|                                                  |
+| /cancel                                          |
++--------------------------------------------------+
+| You: Investigate why the review loop stalled     |
+| Bot: I found two likely causes...                |
++--------------------------------------------------+
+```
+
+Purpose:
+
+- keeps one visible current-session anchor
+- shows lightweight progress without raw trace spam
+- exposes the interrupt path in the same visual frame
+
+#### 3. Session Browser in Chat
+
+```text
++--------------------------------------------------+
+| Sessions                                         |
+|                                                  |
+| * acp_7f31c2ab  claude-code-acp  current         |
+|   acp_1d992e10  claude-code-acp  "auth fix"      |
+|   acp_0c44bb83  kiro             "spec pass"     |
+|                                                  |
+| Use: /resume <full-session-id>                   |
++--------------------------------------------------+
+```
+
+Purpose:
+
+- makes the current session easy to spot
+- keeps the list compact enough for DM use
+
+#### 4. Review Request Card
+
+```text
++--------------------------------------------------+
+| Review Required                                  |
+| Session: acp_7f31c2ab                            |
+| Executor: exec_42 · claude-code                  |
+| Summary: tighten retry guard in review loop      |
+| Diff: 3 files, +42 -11                           |
+|                                                  |
+| [ Approve ]  [ Reject ]  [ Retry ]               |
++--------------------------------------------------+
+```
+
+Terminal state after click:
+
+```text
++--------------------------------------------------+
+| Review Required                                  |
+| Session: acp_7f31c2ab                            |
+| Executor: exec_42 · claude-code                  |
+| Decision: Approved                               |
++--------------------------------------------------+
+```
+
+Purpose:
+
+- makes approval context explicit
+- leaves a clean audit trail in chat after action
+
+#### 5. Permission Prompt Card
+
+```text
++--------------------------------------------------+
+| Permission Request                               |
+| Session: acp_7f31c2ab                            |
+| Tool: exec_command                               |
+| Action: run `git commit -m ...`                  |
+|                                                  |
+| [ allow_once ] [ allow_always ] [ deny ]         |
++--------------------------------------------------+
+```
+
+Terminal state after click:
+
+```text
++--------------------------------------------------+
+| Permission Request                               |
+| Session: acp_7f31c2ab                            |
+| Tool: exec_command                               |
+| Selected: allow_once                             |
++--------------------------------------------------+
+```
+
+Purpose:
+
+- keeps the tool name and action visible at decision time
+- preserves the exact ACP option mapping internally while presenting a
+  readable control surface
 
 ---
 
