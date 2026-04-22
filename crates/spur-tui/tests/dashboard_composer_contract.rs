@@ -56,10 +56,7 @@ fn non_empty_multiline_up_reaches_input_bar() {
         .set_text("line1\nline2".into(), "line1\nline2".len());
 
     let before = dashboard.input_bar_mut_for_test().cursor();
-    let action = dashboard.handle_key(
-        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     let after = dashboard.input_bar_mut_for_test().cursor();
 
     assert!(
@@ -140,10 +137,7 @@ fn non_empty_tab_does_not_cycle_focus() {
     dashboard.handle_paste("hello");
     let before = dashboard.input_bar_text_for_test();
 
-    let action = dashboard.handle_key(
-        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &test_ctx());
 
     assert!(
         action.is_none(),
@@ -164,10 +158,7 @@ fn non_empty_esc_emacs_does_not_unfocus_or_navigate_back() {
     dashboard.handle_paste("hello");
     let before = dashboard.input_bar_text_for_test();
 
-    let action = dashboard.handle_key(
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
 
     assert!(
         action.is_none(),
@@ -190,10 +181,7 @@ fn non_empty_esc_vim_normal_does_not_unfocus_or_navigate_back() {
     dashboard.handle_paste("hello");
     let before = dashboard.input_bar_text_for_test();
 
-    let action = dashboard.handle_key(
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
 
     assert!(
         action.is_none(),
