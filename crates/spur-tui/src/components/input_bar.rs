@@ -480,9 +480,13 @@ impl InputBar {
                 key: Key::Char('D'),
                 ..
             } if mode == VimMode::Normal => {
-                self.textarea.delete_line_by_end();
-                self.rebuild_line_cache();
-                self.protected_ranges.clear();
+                let start = self.cursor_to_byte();
+                let text = self.text();
+                let end = text[start..]
+                    .find('\n')
+                    .map(|i| start + i)
+                    .unwrap_or(text.len());
+                self.delete_span(start, end);
                 self.set_mode(EditMode::Vim(VimMode::Normal));
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
@@ -490,9 +494,13 @@ impl InputBar {
                 key: Key::Char('C'),
                 ..
             } if mode == VimMode::Normal => {
-                self.textarea.delete_line_by_end();
-                self.rebuild_line_cache();
-                self.protected_ranges.clear();
+                let start = self.cursor_to_byte();
+                let text = self.text();
+                let end = text[start..]
+                    .find('\n')
+                    .map(|i| start + i)
+                    .unwrap_or(text.len());
+                self.delete_span(start, end);
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
@@ -507,9 +515,14 @@ impl InputBar {
                 key: Key::Char('p'),
                 ..
             } if mode == VimMode::Normal => {
+                let before = self.cursor_to_byte();
                 self.textarea.paste();
                 self.rebuild_line_cache();
-                self.protected_ranges.clear();
+                let after = self.cursor_to_byte();
+                let delta = after as isize - before as isize;
+                if delta != 0 {
+                    self.shift_ranges(before, delta);
+                }
                 return HandleOutcome::Key(IntentEvent::Pasted);
             }
 
@@ -633,9 +646,15 @@ impl InputBar {
                 ..
             } if mode == VimMode::Visual => {
                 self.textarea.move_cursor(CursorMove::Forward);
-                self.textarea.cut();
-                self.rebuild_line_cache();
-                self.protected_ranges.clear();
+                if let Some(sel) = self.textarea.selection_range() {
+                    let (start, end) = self.selection_to_byte_span(sel);
+                    self.textarea.cut();
+                    self.rebuild_line_cache();
+                    self.apply_deleted_span(start, end);
+                } else {
+                    self.textarea.cut();
+                    self.rebuild_line_cache();
+                }
                 self.set_mode(EditMode::Vim(VimMode::Normal));
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
@@ -645,9 +664,15 @@ impl InputBar {
                 ..
             } if mode == VimMode::Visual => {
                 self.textarea.move_cursor(CursorMove::Forward);
-                self.textarea.cut();
-                self.rebuild_line_cache();
-                self.protected_ranges.clear();
+                if let Some(sel) = self.textarea.selection_range() {
+                    let (start, end) = self.selection_to_byte_span(sel);
+                    self.textarea.cut();
+                    self.rebuild_line_cache();
+                    self.apply_deleted_span(start, end);
+                } else {
+                    self.textarea.cut();
+                    self.rebuild_line_cache();
+                }
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
@@ -758,15 +783,27 @@ impl InputBar {
                 self.set_mode(EditMode::Vim(VimMode::Normal));
             }
             VimMode::Operator('d') => {
-                self.textarea.cut();
-                self.rebuild_line_cache();
-                self.protected_ranges.clear();
+                if let Some(sel) = self.textarea.selection_range() {
+                    let (start, end) = self.selection_to_byte_span(sel);
+                    self.textarea.cut();
+                    self.rebuild_line_cache();
+                    self.apply_deleted_span(start, end);
+                } else {
+                    self.textarea.cut();
+                    self.rebuild_line_cache();
+                }
                 self.set_mode(EditMode::Vim(VimMode::Normal));
             }
             VimMode::Operator('c') => {
-                self.textarea.cut();
-                self.rebuild_line_cache();
-                self.protected_ranges.clear();
+                if let Some(sel) = self.textarea.selection_range() {
+                    let (start, end) = self.selection_to_byte_span(sel);
+                    self.textarea.cut();
+                    self.rebuild_line_cache();
+                    self.apply_deleted_span(start, end);
+                } else {
+                    self.textarea.cut();
+                    self.rebuild_line_cache();
+                }
                 self.set_mode(EditMode::Vim(VimMode::Insert));
             }
             _ => {}
@@ -876,6 +913,14 @@ impl InputBar {
             .nth(char_col)
             .map(|(i, _)| i)
             .unwrap_or(line.len())
+    }
+
+    /// Convert a `tui_textarea` selection range to an absolute byte span.
+    fn selection_to_byte_span(&self, sel: ((usize, usize), (usize, usize))) -> (usize, usize) {
+        let ((sr, sc), (er, ec)) = sel;
+        let start = self.line_cache.get(sr).copied().unwrap_or(0) + self.char_col_to_byte(sr, sc);
+        let end = self.line_cache.get(er).copied().unwrap_or(0) + self.char_col_to_byte(er, ec);
+        (start, end)
     }
 
     /// Rebuild the line cache after text modification.
