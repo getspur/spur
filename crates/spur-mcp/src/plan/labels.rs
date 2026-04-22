@@ -64,7 +64,6 @@ pub const REVIEW_REJECTED: &str = "spur:review-rejected";
 /// If creation fails mid-loop, the epic will NOT carry this label.
 pub const PLAN_COMPLETE: &str = "spur:plan-complete";
 pub const INTEGRATION_PENDING: &str = "spur:integration-pending";
-pub const AUTO_MERGE_ATTEMPTED: &str = "spur:auto-merge-attempted";
 
 /// Prefix strings for parsing. Use these with `label_value()` or `strip_prefix()`.
 pub const PLAN_ID_PREFIX: &str = "spur:plan-id:";
@@ -163,7 +162,6 @@ mod tests {
         assert_eq!(REVIEW_REJECTED, "spur:review-rejected");
         assert_eq!(PLAN_COMPLETE, "spur:plan-complete");
         assert_eq!(INTEGRATION_PENDING, "spur:integration-pending");
-        assert_eq!(AUTO_MERGE_ATTEMPTED, "spur:auto-merge-attempted");
     }
 
     #[test]
@@ -214,7 +212,6 @@ mod tests {
             READY_FOR_REVIEW.to_string(),
             REVIEW_REJECTED.to_string(),
             INTEGRATION_PENDING.to_string(),
-            AUTO_MERGE_ATTEMPTED.to_string(),
         ] {
             assert!(is_br_legal(&s), "constructor emitted br-illegal label: {s}");
         }
