@@ -155,10 +155,7 @@ fn issue_ids_for_label(repo: &Path, label: &str) -> Result<Vec<String>, String> 
     Ok(ids)
 }
 
-async fn inject_partial_rollback_failure(
-    repo: PathBuf,
-    mutation_id: Uuid,
-) -> Result<(), String> {
+async fn inject_partial_rollback_failure(repo: PathBuf, mutation_id: Uuid) -> Result<(), String> {
     let label = mutation_id_label(&mutation_id);
     for _ in 0..2_000 {
         let mut child_ids = issue_ids_for_label(&repo, &label)?;

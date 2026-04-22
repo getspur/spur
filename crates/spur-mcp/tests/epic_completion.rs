@@ -268,6 +268,15 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
     )));
 
     let events = sink.events.lock().unwrap();
+    let completed_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.body,
+                SpurEventBody::PlanCompleted { plan_id, .. } if plan_id == "P1"
+            )
+        })
+        .count();
     let ready_events = events
         .iter()
         .filter(|event| {
@@ -277,6 +286,7 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
             )
         })
         .count();
+    assert_eq!(completed_events, 1, "expected one PlanCompleted event");
     assert_eq!(ready_events, 1, "expected one PlanReadyToMerge event");
 }
 
