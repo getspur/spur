@@ -763,6 +763,52 @@ fn invert_label_update(update: &spur_pm::IssueUpdate) -> spur_pm::IssueUpdate {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyReclaimMode {
+    Skip,
+    DetectAndRun,
+}
+
+fn legacy_reclaim_needed(has_rev1_merge_base_metadata: bool) -> bool {
+    !has_rev1_merge_base_metadata
+}
+
+async fn any_open_epic_lacks_rev1_metadata(pm: &spur_pm::PmService) -> anyhow::Result<bool> {
+    let epics = pm
+        .list_issues(spur_pm::IssueFilter {
+            status: Some("open".to_string()),
+            issue_type: Some("epic".to_string()),
+            limit: Some(1_000),
+            ..Default::default()
+        })
+        .await?;
+
+    let Some(adv) = pm.advanced() else {
+        return Ok(false);
+    };
+
+    for epic in &epics {
+        if let Some(plan_id) = epic
+            .labels
+            .iter()
+            .find_map(|l| crate::plan::labels::parse_plan_id(l))
+        {
+            let comments = adv.list_comments(&epic.id).await?;
+            let audits = crate::plan::projector::collect_sorted_audits(comments);
+            let has_plan_submit = audits.iter().any(|audit| matches!(
+                audit,
+                crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                    plan_id: pid, ..
+                } if pid == plan_id
+            ));
+            if !has_plan_submit {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[doc(hidden)]
 pub async fn compensate_mutation_orphans(
     pm: Arc<spur_pm::PmService>,
@@ -1743,9 +1789,17 @@ impl McpCallbackServer {
 
         if let Some(pm) = self.pm_service.as_ref() {
             if pm.advanced().is_some() {
-                self.reclaim_persisted_plans_on_startup(Arc::clone(pm))
-                    .await
-                    .context("failed to reclaim persisted plans before startup")?;
+                let has_rev1_metadata = !any_open_epic_lacks_rev1_metadata(pm).await?;
+                let mode = if legacy_reclaim_needed(has_rev1_metadata) {
+                    LegacyReclaimMode::DetectAndRun
+                } else {
+                    LegacyReclaimMode::Skip
+                };
+                if matches!(mode, LegacyReclaimMode::DetectAndRun) {
+                    self.reclaim_persisted_plans_on_startup(Arc::clone(pm))
+                        .await
+                        .context("failed to reclaim persisted plans before startup")?;
+                }
             }
         }
         let has_reclaimed_plans = !self.active_plans.lock().await.is_empty();
@@ -1784,6 +1838,12 @@ impl McpCallbackServer {
                     info!("spawning plan reconciler (beads backend detected)");
                     let auto_merge = self.auto_merge_approved_plans;
                     let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> = Some(Arc::clone(&self) as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
+                    let repo_root = self.repo_root.clone();
+                    let journal_notify = Arc::new(tokio::sync::Notify::new());
+                    let journal_handle = repo_root.map(|root| {
+                        let path = crate::plan::reconciler::beads_journal_path(&root);
+                        tokio::spawn(crate::plan::reconciler::monitor_journal_appends(path, Arc::clone(&journal_notify)))
+                    });
                     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
                         let mut reconciler = Reconciler::new(
                             ReconcilerConfig::default(),
@@ -1793,10 +1853,14 @@ impl McpCallbackServer {
                             None, // plan_id: observe all plans when None
                         );
                         reconciler.set_auto_merge_approved_plans(auto_merge);
+                        reconciler.set_journal_wake(journal_notify);
                         if let Some(a) = automation {
                             reconciler.set_automation(a);
                         }
                         reconciler.run(cancel_rx).await;
+                        if let Some(jh) = journal_handle {
+                            let _ = jh.await;
+                        }
                     }));
                     Some(handle)
                 } else {
@@ -5066,5 +5130,57 @@ mod reconciler_fast_forward_tests {
             .cloned()
             .expect("cached");
         assert_eq!(cached.lock().await.tasks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn detector_skips_reclaim_when_all_epics_have_rev1_metadata() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let output = std::process::Command::new("br")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("br init");
+        assert!(output.status.success(), "br init failed: {:?}", output);
+
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected Some(PmService)"),
+        );
+        let tasks = vec![crate::plan::PlanTask {
+            task_id: "t1".into(),
+            agent: "codex".into(),
+            task: "Task".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        }];
+        let sg = crate::build_epic_subgraph(pm.as_ref(), "plan-1", "Epic", None, &tasks)
+            .await
+            .expect("build epic subgraph");
+
+        // Emit PlanSubmit audit so the epic carries rev1 bootstrap metadata.
+        let adv = pm.advanced().expect("advanced");
+        crate::emit_plan_submit_audit(adv, "plan-1", &sg, Some("main"), Some("abc123"), Some("test")).await;
+
+        // The detector must report that no legacy reclaim is needed.
+        let needs_reclaim = super::any_open_epic_lacks_rev1_metadata(pm.as_ref())
+            .await
+            .expect("detector query");
+        assert!(
+            !needs_reclaim,
+            "detector must skip reclaim when all epics have rev1 metadata"
+        );
+    }
+
+    #[test]
+    fn legacy_reclaim_needed_when_rev1_bootstrap_metadata_is_missing() {
+        assert!(super::legacy_reclaim_needed(false));
+    }
+
+    #[test]
+    fn legacy_reclaim_skipped_when_rev1_bootstrap_metadata_exists() {
+        assert!(!super::legacy_reclaim_needed(true));
     }
 }

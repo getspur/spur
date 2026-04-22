@@ -28,6 +28,27 @@ use tokio_util::task::TaskTracker;
 use crate::plan::audit_sentinel::AuditSentinelKind;
 use spur_pm::{IssueFilter, PmService, ReadyFilter};
 
+pub(crate) fn beads_journal_path(repo_root: &std::path::Path) -> std::path::PathBuf {
+    repo_root.join(".beads").join("journal")
+}
+
+pub(crate) async fn monitor_journal_appends(path: std::path::PathBuf, notify: Arc<Notify>) {
+    let mut last_len = tokio::fs::metadata(&path).await.ok().map(|m| m.len()).unwrap_or(0);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let next_len = match tokio::fs::metadata(&path).await {
+            Ok(meta) => meta.len(),
+            Err(_) => break,
+        };
+        if next_len > last_len {
+            last_len = next_len;
+            notify.notify_one();
+        } else {
+            last_len = next_len;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProjectedEpicCompletion {
     audit_outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
@@ -128,6 +149,7 @@ pub struct Reconciler {
     plan_id: Option<String>,
     auto_merge_approved_plans: bool,
     automation: Option<Arc<dyn ReconcilerAutomation>>,
+    journal_wake: Option<Arc<Notify>>,
 }
 
 impl Reconciler {
@@ -146,7 +168,12 @@ impl Reconciler {
             plan_id,
             auto_merge_approved_plans: false,
             automation: None,
+            journal_wake: None,
         }
+    }
+
+    pub fn set_journal_wake(&mut self, notify: Arc<Notify>) {
+        self.journal_wake = Some(notify);
     }
 
     pub fn set_auto_merge_approved_plans(&mut self, enabled: bool) {
@@ -159,8 +186,17 @@ impl Reconciler {
 
     pub async fn run(self, cancel: tokio::sync::oneshot::Receiver<()>) {
         let mut interval = self.config.base_interval;
+        let journal_wake = self.journal_wake.clone();
         tokio::pin!(cancel);
         loop {
+            let journal_fut = async {
+                if let Some(ref n) = journal_wake {
+                    n.notified().await;
+                } else {
+                    std::future::pending().await
+                }
+            };
+            tokio::pin!(journal_fut);
             tokio::select! {
                 _ = &mut cancel => {
                     tracing::info!("reconciler received cancel");
@@ -168,6 +204,10 @@ impl Reconciler {
                 }
                 _ = self.fast_forward.notified() => {
                     tracing::debug!("reconciler fast-forward triggered");
+                    interval = self.config.base_interval;
+                }
+                _ = &mut journal_fut => {
+                    tracing::debug!("reconciler journal append triggered");
                     interval = self.config.base_interval;
                 }
                 _ = tokio::time::sleep(interval) => {}
@@ -1030,6 +1070,22 @@ mod tests {
             recorded.is_empty(),
             "failed epic-completion audit must suppress automation, got: {:?}",
             *recorded
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_journal_probe_disables_itself_when_missing() {
+        let notify = Arc::new(Notify::new());
+        let path = std::path::PathBuf::from("/nonexistent/path/.beads/journal");
+        // The monitor must exit gracefully (not panic or hang) when the journal is absent.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::monitor_journal_appends(path, notify),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "journal monitor must exit when path is missing, not hang"
         );
     }
 }
