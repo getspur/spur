@@ -172,6 +172,31 @@ pub enum SkillSource {
     Override,
 }
 
+/// Which agent role a skill targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillRole {
+    /// Injected into brain prompts; not rendered to worker agent adapters.
+    Brain,
+    /// Rendered to worker agent adapters; not injected into brain prompts.
+    Worker,
+    /// Both brain and worker contexts.
+    #[default]
+    Both,
+}
+
+impl std::str::FromStr for SkillRole {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "brain" => Ok(SkillRole::Brain),
+            "worker" => Ok(SkillRole::Worker),
+            "both" => Ok(SkillRole::Both),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A resolved skill ready for rendering across adapters.
 #[derive(Debug, Clone)]
 pub struct SkillPayload {
@@ -179,6 +204,7 @@ pub struct SkillPayload {
     pub description: String,
     pub body: String,
     pub source: SkillSource,
+    pub role: SkillRole,
 }
 
 /// Resolve the active skill set: bundled corpus merged with
@@ -200,6 +226,7 @@ pub fn list_active_skills(repo_root: &Path) -> Result<Vec<SkillPayload>, Invalid
                 description: parsed.description.unwrap_or("").to_string(),
                 body: parsed.body.to_string(),
                 source: SkillSource::Bundled,
+                role: parsed.role.unwrap_or(SkillRole::Both),
             },
         );
     }
@@ -230,6 +257,7 @@ pub fn list_active_skills(repo_root: &Path) -> Result<Vec<SkillPayload>, Invalid
                     description: parsed.description.unwrap_or("").to_string(),
                     body: parsed.body.to_string(),
                     source: SkillSource::Override,
+                    role: parsed.role.unwrap_or(SkillRole::Both),
                 },
             );
         }

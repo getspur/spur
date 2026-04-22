@@ -13,6 +13,7 @@ pub(crate) struct ParsedSource<'a> {
     pub name: Option<&'a str>,
     pub description: Option<&'a str>,
     pub body: &'a str,
+    pub role: Option<super::SkillRole>,
 }
 
 pub(crate) fn parse_source(raw: &str) -> ParsedSource<'_> {
@@ -36,12 +37,17 @@ pub(crate) fn parse_source(raw: &str) -> ParsedSource<'_> {
 
     let mut name = None;
     let mut description = None;
+    let mut role = None;
     if let Some(fm) = frontmatter {
         for line in fm.lines() {
             if let Some(v) = line.strip_prefix("name:") {
                 name = Some(v.trim());
             } else if let Some(v) = line.strip_prefix("description:") {
                 description = Some(v.trim());
+            } else if let Some(v) = line.strip_prefix("role:") {
+                if let Ok(r) = v.trim().parse::<super::SkillRole>() {
+                    role = Some(r);
+                }
             }
         }
     }
@@ -50,6 +56,7 @@ pub(crate) fn parse_source(raw: &str) -> ParsedSource<'_> {
         name,
         description,
         body,
+        role,
     }
 }
 
@@ -64,6 +71,28 @@ mod tests {
         assert_eq!(p.name, Some("tdd"));
         assert_eq!(p.description, Some("Use for TDD"));
         assert_eq!(p.body, "Body here\n");
+        assert_eq!(p.role, None);
+    }
+
+    #[test]
+    fn parses_role_frontmatter() {
+        let raw = "---\nname: tdd\ndescription: Use for TDD\nrole: brain\n---\nBody\n";
+        let p = parse_source(raw);
+        assert_eq!(p.role, Some(super::super::SkillRole::Brain));
+    }
+
+    #[test]
+    fn parses_worker_role() {
+        let raw = "---\nname: debug\ndescription: Debug\nrole: worker\n---\nBody\n";
+        let p = parse_source(raw);
+        assert_eq!(p.role, Some(super::super::SkillRole::Worker));
+    }
+
+    #[test]
+    fn ignores_unknown_role() {
+        let raw = "---\nname: x\ndescription: X\nrole: alien\n---\nBody\n";
+        let p = parse_source(raw);
+        assert_eq!(p.role, None);
     }
 
     #[test]

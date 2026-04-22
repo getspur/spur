@@ -1,7 +1,7 @@
 ---
 name: spur-way
 description: Use when acting as any agent in the SPUR system — brain, worker, or reviewer. Establishes beads as the single source of truth for all collaboration state and mandates the three primitives of every transaction.
-role: brain
+role: both
 agent: all
 activation: always
 ---

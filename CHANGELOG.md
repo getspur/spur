@@ -9,6 +9,13 @@
   overrides algorithmic selection). All compile into `spur-core` via
   `include_str!` and render across the seven agent adapters. See
   `docs/superpowers/specs/2026-04-22-superpower-skill-hardening-spur-way.md`.
+- **Role-gated skill rendering + Kimi adapter.** Skills now carry a `role`
+  field (`brain | worker | both`). Brain-only skills (`brain-review-gate`,
+  `brain-delegation`) no longer leak into worker agent directories. Worker
+  skills (`test-driven-development`, `systematic-debugging`) are tagged
+  explicitly. New `Adapter::Kimi` renders to `.kimi/skills/`, closing the
+  gap where Kimi workers accidentally relied on `.claude/skills/` fallback.
+  See `docs/superpowers/specs/2026-04-22-multi-agent-skill-embedding-research.md`.
 
 ## v0.4.5 — 2026-04-19
 

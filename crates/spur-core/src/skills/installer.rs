@@ -234,13 +234,24 @@ pub(crate) fn decide(rf: &RenderedFile) -> Result<Decision, InstallError> {
 /// Render the active skill set into every known agent directory under
 /// `repo_root`. Returns a structured Summary of what was written, what
 /// was unchanged, and what was skipped.
+///
+/// Role-gated rendering:
+/// - `Brain` skills render only to `SpurHermetic` (`.spur/skills/`) for
+///   brain prompt injection. They are NOT sent to worker agent adapters.
+/// - `Worker` and `Both` skills render to all adapters.
 pub fn run(repo_root: &Path) -> Result<Summary, InstallError> {
+    use super::SkillRole;
+
     let skills = list_active_skills(repo_root)?;
     let mut summary = Summary::default();
 
     // Per-skill × per-adapter fanout.
     for skill in &skills {
         for adapter in Adapter::all() {
+            // Role gating: brain-only skills skip worker adapters.
+            if skill.role == SkillRole::Brain && *adapter != Adapter::SpurHermetic {
+                continue;
+            }
             let rf = adapter.render(skill, repo_root);
             apply(&rf, &mut summary)?;
         }
@@ -427,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn run_creates_all_seven_adapter_files_for_one_skill() {
+    fn run_creates_all_eight_adapter_files_for_one_skill() {
         let dir = tempfile::tempdir().unwrap();
         let override_dir = dir.path().join(".spur/skills/my-skill");
         std::fs::create_dir_all(&override_dir).unwrap();
@@ -439,7 +450,7 @@ mod tests {
         // Clear bundled set by not relying on it — bundled skills will also
         // be written, but we only assert our override landed.
         let summary = run(dir.path()).unwrap();
-        // Expected paths for `my-skill` (override) across 7 adapters + Kiro pointer.
+        // Expected paths for `my-skill` (override) across 8 adapters + Kiro pointer.
         for expected in [
             ".spur/skills/my-skill/SKILL.md",
             ".claude/skills/spurpower-my-skill/SKILL.md",
@@ -448,6 +459,7 @@ mod tests {
             ".kiro/skills/spurpower-my-skill/SKILL.md",
             ".opencode/skills/spurpower-my-skill/SKILL.md",
             ".cursor/rules/spurpower-my-skill.mdc",
+            ".kimi/skills/spurpower-my-skill/SKILL.md",
             ".kiro/steering/spurpower-pointer.md",
         ] {
             let p = dir.path().join(expected);
@@ -455,6 +467,44 @@ mod tests {
             assert!(
                 summary.written.contains(&p),
                 "not in summary.written: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_skips_worker_adapters_for_brain_only_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let override_dir = dir.path().join(".spur/skills/brain-only");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("SKILL.md"),
+            "---\nname: brain-only\ndescription: test\nrole: brain\n---\nMy body\n",
+        )
+        .unwrap();
+        let summary = run(dir.path()).unwrap();
+
+        // Should render to SpurHermetic (.spur/skills/) for brain prompt injection.
+        let spur_path = dir.path().join(".spur/skills/brain-only/SKILL.md");
+        assert!(
+            spur_path.exists(),
+            "brain skill should render to .spur/skills/"
+        );
+
+        // Should NOT render to any worker adapter.
+        let worker_paths = [
+            ".claude/skills/spurpower-brain-only/SKILL.md",
+            ".codex/skills/spurpower-brain-only/SKILL.md",
+            ".gemini/skills/spurpower-brain-only/SKILL.md",
+            ".kiro/skills/spurpower-brain-only/SKILL.md",
+            ".opencode/skills/spurpower-brain-only/SKILL.md",
+            ".cursor/rules/spurpower-brain-only.mdc",
+            ".kimi/skills/spurpower-brain-only/SKILL.md",
+        ];
+        for expected in &worker_paths {
+            let p = dir.path().join(expected);
+            assert!(
+                !p.exists(),
+                "brain-only skill should NOT render to {expected}"
             );
         }
     }
