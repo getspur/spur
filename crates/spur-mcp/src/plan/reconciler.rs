@@ -97,12 +97,36 @@ impl Default for ReconcilerConfig {
     }
 }
 
+#[async_trait::async_trait]
+pub trait ReconcilerAutomation: Send + Sync {
+    async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState>;
+    async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String>;
+}
+
+fn build_auto_pr_params(
+    plan_id: &str,
+    epic_title: &str,
+    outcome_summary: &str,
+    merge_branch: &str,
+) -> spur_pm::PrParams {
+    // Stub: fully implemented in Task 8.
+    spur_pm::PrParams {
+        title: String::new(),
+        body: String::new(),
+        head_branch: String::new(),
+        base_branch: None,
+        repo: None,
+    }
+}
+
 pub struct Reconciler {
     config: ReconcilerConfig,
     pm: Arc<PmService>,
     fast_forward: Arc<Notify>,
     dispatch: Option<ReconcilerDispatchCtx>,
     plan_id: Option<String>,
+    auto_merge_approved_plans: bool,
+    automation: Option<Arc<dyn ReconcilerAutomation>>,
 }
 
 impl Reconciler {
@@ -119,7 +143,17 @@ impl Reconciler {
             fast_forward,
             dispatch,
             plan_id,
+            auto_merge_approved_plans: false,
+            automation: None,
         }
+    }
+
+    pub fn set_auto_merge_approved_plans(&mut self, enabled: bool) {
+        self.auto_merge_approved_plans = enabled;
+    }
+
+    pub fn set_automation(&mut self, automation: Arc<dyn ReconcilerAutomation>) {
+        self.automation = Some(automation);
     }
 
     pub async fn run(self, cancel: tokio::sync::oneshot::Receiver<()>) {
@@ -636,6 +670,149 @@ mod tests {
                 Duration::from_secs(8),
                 Duration::from_secs(8),
             ]
+        );
+    }
+
+    #[test]
+    fn auto_pr_params_include_plan_id_and_summary() {
+        let params = super::build_auto_pr_params("plan-123", "Epic title", "All approved", "spur/merge-1");
+        assert!(params.title.contains("plan-123"), "title missing plan_id: {}", params.title);
+        assert!(params.body.contains("All approved"), "body missing outcome: {}", params.body);
+        assert_eq!(params.head_branch, "spur/merge-1");
+    }
+
+    struct MockAutomation {
+        actions: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::ReconcilerAutomation for MockAutomation {
+        async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState> {
+            self.actions.lock().await.push(format!("merge:{plan_id}"));
+            Ok(crate::plan::PlanMergeState::Succeeded {
+                merge_branch: "spur/merge-1".to_string(),
+                merged_task_ids: vec![],
+            })
+        }
+
+        async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
+            self.actions.lock().await.push(format!("pr:{}", params.title));
+            Ok("https://example.invalid/pr/1".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_merge_config_off_produces_zero_actions() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        fn br_available() -> bool {
+            Command::new("br")
+                .arg("--help")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+
+        if !br_available() {
+            eprintln!("skipping auto_merge_config_off_produces_zero_actions: `br` not on PATH");
+            return;
+        }
+
+        let dir = TempDir::new().expect("tempdir");
+        let repo = dir.path();
+
+        assert!(
+            Command::new("br").args(["init"]).current_dir(repo).output().expect("br init").status.success(),
+            "br init failed"
+        );
+
+        let epic_out = Command::new("br")
+            .args(["create", "--type", "epic", "--title", "Test Epic", "--json"])
+            .current_dir(repo)
+            .output()
+            .expect("br create epic");
+        let epic_json = String::from_utf8_lossy(&epic_out.stdout);
+        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for title in ["Task A", "Task B"] {
+            let task_out = Command::new("br")
+                .args(["create", "--type", "task", "--title", title, "--json"])
+                .current_dir(repo)
+                .output()
+                .expect("br create task");
+            let task_json = String::from_utf8_lossy(&task_out.stdout);
+            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            Command::new("br")
+                .args(["label", "add", &task_id, "spur:plan-id:P1"])
+                .current_dir(repo)
+                .output()
+                .expect("label task");
+            Command::new("br")
+                .args(["update", &task_id, "--status", "closed"])
+                .current_dir(repo)
+                .output()
+                .expect("close task");
+        }
+
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:plan-id:P1"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic");
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:plan-complete"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic plan-complete");
+        Command::new("br")
+            .args(["update", &epic_id, "--status", "closed"])
+            .current_dir(repo)
+            .output()
+            .expect("close epic");
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:integration-pending"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic integration-pending");
+
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads pm"),
+        );
+
+        let actions = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let automation = Arc::new(MockAutomation {
+            actions: Arc::clone(&actions),
+        });
+
+        let mut reconciler = Reconciler::new(
+            ReconcilerConfig::default(),
+            pm,
+            Arc::new(Notify::new()),
+            None,
+            Some("P1".into()),
+        );
+        reconciler.set_auto_merge_approved_plans(false);
+        reconciler.set_automation(automation);
+
+        reconciler.tick_once().await.unwrap();
+
+        let recorded = actions.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "config-off must produce zero automation actions, got: {:?}",
+            *recorded
         );
     }
 }
