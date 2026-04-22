@@ -1019,10 +1019,16 @@ impl SessionDetailView {
                     && key.modifiers.contains(KeyModifiers::CONTROL))
                     || (matches!(key.code, KeyCode::Char('v'))
                         && key.modifiers.contains(KeyModifiers::ALT));
-                if is_view_shortcut {
+                // Ctrl+P / Ctrl+N drive SessionDetail history when no picker owns them.
+                let is_history_nav = matches!(key.code, KeyCode::Char('p' | 'n'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                if is_view_shortcut || is_history_nav {
                     KeyOwner::View
                 } else {
-                    let is_composer_editing = matches!(
+                    // Pending permission keys are never Composer-owned.
+                    let is_permission_key = self.react_trace.has_pending_permission()
+                        && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'));
+                    let is_composer_editing = (matches!(
                         key.code,
                         KeyCode::Char(_)
                             | KeyCode::Backspace
@@ -1034,7 +1040,8 @@ impl SessionDetailView {
                             | KeyCode::Enter
                             | KeyCode::Up
                             | KeyCode::Down
-                    ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc());
+                    ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc()))
+                        && !is_permission_key;
 
                     if is_composer_editing {
                         // Empty-bar nav chars (j/k/g/G) and Up/Down/Esc are
