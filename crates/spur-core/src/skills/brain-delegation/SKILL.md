@@ -1,11 +1,7 @@
 ---
 name: brain-delegation
-description: >
-  Core delegation framework for SPUR brain agents. Injected into every
-  brain session. Handles dispatch decisions, delegation plan structure,
-  task prompt formatting, and worker routing.
+description: Core delegation framework for SPUR brain agents. Injected into every brain session. Handles dispatch decisions, delegation plan structure, task prompt formatting, and worker routing.
 role: brain
-activation: always
 ---
 
 # Brain Delegation Framework

@@ -1,11 +1,7 @@
 ---
 name: brain-delegation-gemini
-description: >
-  Brain role guidance for Gemini. Injected when Gemini acts as SPUR
-  brain. Handles multi-modal strengths and routing self-awareness.
+description: Brain role guidance for Gemini. Injected when Gemini acts as SPUR brain. Handles multi-modal strengths and routing self-awareness.
 role: brain
-agent: gemini
-activation: always
 ---
 
 # Gemini — Brain Role

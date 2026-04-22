@@ -1,11 +1,7 @@
 ---
 name: brain-delegation-kiro
-description: >
-  Brain role guidance for Kiro. Injected when Kiro acts as SPUR brain.
-  Handles delegation tool mapping and native behavior suppression.
+description: Brain role guidance for Kiro. Injected when Kiro acts as SPUR brain. Handles delegation tool mapping and native behavior suppression.
 role: brain
-agent: kiro
-activation: always
 ---
 
 # Kiro — Brain Role

@@ -1,11 +1,7 @@
 ---
 name: brain-delegation-claude-code-acp
-description: >
-  Brain role guidance for Claude Code. Injected when Claude Code acts
-  as SPUR brain. Handles tool mapping and routing self-awareness.
+description: Brain role guidance for Claude Code. Injected when Claude Code acts as SPUR brain. Handles tool mapping and routing self-awareness.
 role: brain
-agent: claude-code-acp
-activation: always
 ---
 
 # Claude Code — Brain Role

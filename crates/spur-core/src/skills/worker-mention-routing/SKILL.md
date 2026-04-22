@@ -1,12 +1,7 @@
 ---
 name: worker-mention-routing
-description: >
-  How the brain handles explicit worker @-mentions from the user.
-  User intent outranks algorithmic routing. Covers validation,
-  override conditions, ambiguity resolution, and plan-engine
-  interaction.
+description: How the brain handles explicit worker @-mentions from the user. User intent outranks algorithmic routing. Covers validation, override conditions, ambiguity resolution, and plan-engine interaction.
 role: brain
-activation: always
 ---
 
 # Worker Mention Routing

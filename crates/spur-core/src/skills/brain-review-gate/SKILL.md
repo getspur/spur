@@ -2,8 +2,6 @@
 name: brain-review-gate
 description: Use when reviewing worker output before approving — verifies beads state matches claimed completion and enforces the review checklist that prevents invisible work from merging.
 role: brain
-agent: all
-activation: always
 ---
 
 # Brain Review Gate

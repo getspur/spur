@@ -109,10 +109,11 @@ These remain out of scope for the immediate remediation but should be captured s
 - `Esc`-cancel and the session-detail status hint both key off `stream_in_flight`.
 
 **Design**
-- Treat `ToolCall` and `ToolCallUpdate` as stream-bearing progress for session lifecycle purposes.
+- Treat `ToolCall`, `ToolCallUpdate`, and `Plan` as stream-bearing progress for session lifecycle purposes.
 - Arm `stream_in_flight` on the first tool-bearing update exactly as we already arm it on text/thought chunks.
+- Arm on `Plan` for the same reason: it is already rendered into the primary trace and may precede the first text chunk in plan-oriented turns.
 - Keep `TurnComplete` as the terminal clear point.
-- Do not expand this fix to `Plan`, `UsageUpdate`, or `CurrentModeUpdate` until there is concrete evidence those should also imply active work.
+- Continue to exclude `UsageUpdate` and `CurrentModeUpdate`; they update mirrored session state but do not by themselves prove visible turn progress.
 
 **Why first**
 - This is the highest-priority reachable bug because it affects user control and observability of a live turn.
@@ -131,6 +132,8 @@ These remain out of scope for the immediate remediation but should be captured s
 
 **Design**
 - When a terminal delegation status arrives for the current session, push a concise terminal note into the main trace.
+- Correlate the terminal note to the most recent matching `Delegate` entry when possible by matching `DelegationCompleted.worker_session` against the `executor_id` attached by `DelegationDispatched`.
+- If no matching `Delegate` entry exists, still emit the terminal note as a session-level observation. This preserves setup-failure and pre-spawn cancel visibility without pretending correlation we do not have.
 - The trace entry should be written as an informational/observational note, not as a fabricated agent message.
 - The wording should summarize only the terminal outcome needed to preserve user understanding:
   - failed
@@ -143,6 +146,8 @@ These remain out of scope for the immediate remediation but should be captured s
 
 **Regression coverage**
 - Add tests for terminal delegation states with workers collapsed and expanded.
+- Add one test where `DelegationDispatched` established an `executor_id` and verify the terminal note lands next to the correlated delegate flow.
+- Add one test where no `executor_id` exists yet and verify the terminal note still appears as an uncorrelated session-level observation.
 - Assert that the trace gets a terminal note regardless of panel visibility.
 
 ### F1 + F13. Non-text ACP `ContentBlock` variants are silently dropped
@@ -200,6 +205,7 @@ These remain out of scope for the immediate remediation but should be captured s
 - Treat synthesis as provisional identity creation.
 - In the `ToolCall` arm, first check for an existing `Act` with the same `tool_call_id`.
 - If found, merge the canonical metadata into the existing entry rather than pushing another one.
+- The merge contract should preserve identity (`tool_call_id`) and existing timestamp ordering, fill canonical fields (`tool`, `family`, `input`, status), and only replace fallback text when the synthetic entry did not already accumulate better content.
 - Keep the synthesis path because it is cheap defensive correctness, but document its reachability as unproven in current agents.
 
 **Why fifth**
@@ -221,8 +227,10 @@ These remain out of scope for the immediate remediation but should be captured s
 **Design**
 - Keep event ordering logic unchanged.
 - Add a bounded liveness timeout/heartbeat policy on the TUI side for an armed stream.
+- Use a fixed 60-second local timeout for the first implementation; keep it internal to the TUI rather than exposing a new configuration surface.
 - The timeout should:
   - clear `stream_in_flight`
+  - clear `cancelling_in_flight`
   - remove the stale cancel hint
   - emit a visible note that the stream appears stalled or expired
 - The timeout must not synthesize `TurnComplete`; it should only repair stale local UI state.
@@ -232,7 +240,7 @@ These remain out of scope for the immediate remediation but should be captured s
 
 **Regression coverage**
 - Add tests for a stream that arms and then receives no further events past the timeout threshold.
-- Assert the local flag clears and a visible note is emitted.
+- Assert the local flags clear (`stream_in_flight`, `cancelling_in_flight`) and a visible note is emitted.
 
 ### F2. `dispatch.rs::format_diff_truncated` produces misleading fake diffs
 
@@ -263,6 +271,7 @@ These remain out of scope for the immediate remediation but should be captured s
 **Design**
 - Extend non-markdown `LineCacheEntry` with `entry_row_starts`.
 - Make the non-markdown full-render path return the same scroll metadata shape used by compact and markdown/full modes.
+- Verify the existing generation/dirty invalidation path still rebuilds the non-markdown cache when entry content changes, so the new row-start metadata cannot drift from rendered rows.
 - Keep the existing scroll-anchor contract; this is metadata parity, not a new scroll model.
 
 **Why eighth**
@@ -301,6 +310,7 @@ The stream-state fixes must keep three responsibilities separate:
 1. **Arm state on observable progress.**
    - Text/thought chunks arm the stream.
    - Tool-bearing progress also arms the stream.
+   - `Plan` updates also arm the stream because they are already rendered as primary-trace progress and can precede text in plan-oriented turns.
 
 2. **Clear state on authoritative terminal events.**
    - `TurnComplete` remains the canonical end-of-turn signal.
@@ -332,7 +342,7 @@ This separation avoids reintroducing the disproven F11 race while still fixing t
   - markdown `entry.text` synchronization
   - non-markdown scroll metadata parity
 - `session_detail.rs`
-  - tool-bearing prefix arms `stream_in_flight`
+  - tool-bearing or plan-bearing prefix arms `stream_in_flight`
   - `Esc` cancel path works after a tool-bearing first update
   - delegation terminal note emission
   - timeout clears stale local stream state
@@ -341,6 +351,7 @@ This separation avoids reintroducing the disproven F11 race while still fixing t
 ### Integration tests
 
 - A session whose first visible activity is a tool call rather than a text chunk.
+- A session whose first visible activity is a `Plan` update rather than a text chunk.
 - A failed delegation with the workers panel collapsed.
 - A user message containing `ResourceLink` content.
 - A long-running stream that times out locally without `TurnComplete`.
@@ -348,6 +359,7 @@ This separation avoids reintroducing the disproven F11 race while still fixing t
 ### Manual verification
 
 - Launch a session and reproduce a tool-first turn; verify the status hint and `Esc` cancel appear immediately.
+- Reproduce a plan-first turn; verify the same status hint and cancel behavior appear before the first text chunk.
 - Collapse the workers panel, force a failed delegation, and confirm a visible terminal note appears in the main trace.
 - Send a message containing a mention/resource and confirm the trace shows a placeholder rather than dropping the content.
 - Use a diff-producing tool output and confirm the rendered diff is line-aware and bounded.
@@ -415,21 +427,28 @@ Mitigation:
 Mitigation:
 - Treat the timeout as a UI repair, not a completion.
 - Emit a visible “stalled” note rather than silently clearing.
+- Start with a fixed 60-second threshold.
 - Keep the threshold configurable only if evidence demands it; do not introduce premature configuration.
 
-### R4. Diff dependency choice can expand binary size or maintenance surface
+### R4. Phase 1a improves control before full fidelity lands
+
+Mitigation:
+- Accept the temporary intermediate state where tool-first and plan-first turns become visible/cancellable before non-text placeholders land.
+- Keep Phase 1a and Phase 1b adjacent in rollout and avoid a long-lived release boundary between them.
+
+### R5. Diff dependency choice can expand binary size or maintenance surface
 
 Mitigation:
 - Prefer a minimal line-diff crate with default features disabled.
 - Keep the interface isolated inside `dispatch.rs`.
 
-### R5. Scroll metadata parity may expose previously-untested assumptions
+### R6. Scroll metadata parity may expose previously-untested assumptions
 
 Mitigation:
 - Add focused non-markdown full-render tests before changing user-facing behavior.
 - Keep the existing anchor contract intact.
 
-### R6. F4 may be tempting to over-engineer
+### R7. F4 may be tempting to over-engineer
 
 Mitigation:
 - Limit the change to targeted eviction plus a cap.
@@ -438,7 +457,6 @@ Mitigation:
 ### Open questions
 
 1. Should successful `DelegationCompleted` states always emit a trace note, or only non-success terminal states?
-2. Should `Plan` updates also arm `stream_in_flight`, or is restricting arming to text/thought/tool-bearing progress the cleaner contract for now?
 
 ## 11. Acceptance Criteria
 
