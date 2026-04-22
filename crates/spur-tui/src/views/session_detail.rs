@@ -2558,6 +2558,31 @@ mod composer_routing_tests {
         );
         assert!(act.is_none(), "history nav must not emit an action");
     }
+
+    #[test]
+    fn alt_v_without_render_picker_reaches_composer() {
+        let mut v = make_view();
+        v.input_bar_mut_for_test().set_text("x".into(), 1);
+        let act = press_mod(&mut v, KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(
+            v.input_bar_text_for_test(),
+            "xv",
+            "Alt+V must reach composer when render_picker is None"
+        );
+        assert!(act.is_none(), "composer typing must not emit action");
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn alt_v_with_render_picker_navigates_to_overlay() {
+        let mut v = make_view();
+        v.set_render_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+        let act = press_mod(&mut v, KeyCode::Char('v'), KeyModifiers::ALT);
+        match act {
+            Some(Action::NavigateTo(ViewId::MermaidOverlay(_))) => {}
+            other => panic!("expected NavigateTo(MermaidOverlay), got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
