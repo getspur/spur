@@ -98,9 +98,6 @@ impl PickerShell {
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
         match key.code {
             KeyCode::Esc => PickerAction::Cancel,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                PickerAction::Cancel
-            }
             KeyCode::Up => {
                 self.select_prev();
                 PickerAction::None
@@ -371,10 +368,6 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-    }
-
     #[test]
     fn open_populates_with_empty_query_rows() {
         let src = HistoryQuerySource::new(vec![mk("alpha"), mk("beta")]);
@@ -448,14 +441,6 @@ mod tests {
         let src = HistoryQuerySource::new(vec![mk("x")]);
         let mut shell = PickerShell::open(Box::new(src));
         let act = shell.handle_key(key(KeyCode::Esc));
-        assert!(matches!(act, PickerAction::Cancel));
-    }
-
-    #[test]
-    fn ctrl_c_returns_cancel_action() {
-        let src = HistoryQuerySource::new(vec![mk("x")]);
-        let mut shell = PickerShell::open(Box::new(src));
-        let act = shell.handle_key(ctrl('c'));
         assert!(matches!(act, PickerAction::Cancel));
     }
 
