@@ -278,6 +278,10 @@ On startup:
 This preserves chat continuity across bot restarts without persisting
 ephemeral UI artifacts.
 
+Restore notifications should be explicit service messages, not silent state
+changes. The operator should always be able to tell whether startup resumed
+the prior session or fell back to “no current session”.
+
 ---
 
 ## Persistent and Ephemeral State
@@ -314,6 +318,10 @@ After restart, old inline buttons must be treated as stale.
 - callback tokens are regenerated per process lifetime
 - old button clicks return a clean “expired after restart” response
 - no attempt is made to rehydrate old review or permission prompts
+
+Stale callbacks should always acknowledge the button press. They may emit
+one compact service message in chat when needed, but repeated stale clicks
+must not create repeated chat noise.
 
 ---
 
@@ -387,7 +395,15 @@ For each turn:
 
 - show a compact working/progress state
 - emit lightweight milestone updates only when useful
-- replace or follow that status with the final answer
+- emit a durable final answer after the working state completes
+
+The turn-level rendering policy should be explicit:
+
+- each turn gets at most one active working status message
+- milestone updates edit that working message in place
+- the final answer is emitted as a new durable answer message
+- the working message is then removed or collapsed into a compact terminal
+  status, but it is not reused as the final answer body
 
 Meaningful v1 milestones include:
 
@@ -453,6 +469,7 @@ When `ExecutorReviewRequested` arrives:
 - include enough executor context for a safe decision:
   executor/task label, short summary, and diff stats when available
 - show buttons for `Approve`, `Reject`, `Retry`
+- keep button labels short and action-first
 - on click, route the exact review decision through
   `InteractiveInput::SubmitReview`
 - once terminal, edit the message and remove the keyboard
@@ -469,6 +486,7 @@ When ACP emits a permission request:
 - include the tool or operation name prominently so the operator knows
   what is being approved
 - visible labels may be shortened for readability
+- do not truncate the action verb out of a visible option label
 - callback payloads must use compact opaque bot tokens
 - clicking a button resolves the stored `reply_tx` with the exact ACP
   `option_id`
