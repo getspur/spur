@@ -793,6 +793,28 @@ mod tests {
         );
     }
 
+    /// Regression: journal monitor must exit promptly when aborted so that
+    /// graceful shutdown does not hang forever awaiting the handle and so
+    /// that abort/drop does not leak a detached polling task.
+    #[tokio::test]
+    async fn journal_monitor_exits_on_abort_without_hang() {
+        use std::time::Duration;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("journal");
+        tokio::fs::write(&path, b"x").await.expect("write");
+        let notify = Arc::new(Notify::new());
+        let handle = tokio::spawn(monitor_journal_appends(path, notify));
+        handle.abort();
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("monitor must exit within 1s of abort");
+        assert!(
+            result.is_err() && result.unwrap_err().is_cancelled(),
+            "monitor must be cancelled, not panic"
+        );
+    }
+
     #[test]
     fn auto_pr_params_include_plan_id_and_summary() {
         let params = super::build_auto_pr_params("plan-123", "Epic title", "All approved", "spur/merge-1");
