@@ -283,6 +283,163 @@ async fn review_callback_becomes_stale_after_topic_rebind() {
 }
 
 #[tokio::test]
+async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_id() {
+    // Keep review_rx alive so that a regression (non-stale path) would surface
+    // as a failed stale-assertion rather than a closed-channel panic.
+    let dir = tempfile::tempdir().unwrap();
+    let store = BotStateStore::new(dir.path().join(".spur/bot/state.json"));
+    let (user_tx, mut user_rx) = tokio::sync::mpsc::channel(4);
+    let (review_tx, _review_rx) = tokio::sync::mpsc::channel(4);
+    let (_event_tx, event_rx) = tokio::sync::broadcast::channel(4);
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let host = InteractiveFrontendHost::from_parts_for_test(
+        user_tx,
+        review_tx,
+        event_rx,
+        perm_rx,
+        tokio::spawn(async {}),
+    );
+    let handle = host.handle();
+    let mut runtime = BotRuntime::new(store);
+    // Topic A owns acp-shared and has a live session spur_acp-shared.
+    runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
+    // Topic B will take over acp-shared via /resume, forcing Topic A to archive.
+    runtime.ensure_topic_record(42, 88, "Topic B".into()).unwrap();
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::ExecutorSpawned {
+                id: "exec-1".into(),
+                parent_id: None,
+                session_id: spur_acp::SessionId("spur_acp-shared".into()),
+                agent: "kimi".into(),
+                role: spur_acp::Role::Executor,
+                task_spec: String::new(),
+            },
+        ))
+        .unwrap();
+    let (_key, renders) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::ExecutorReviewRequested {
+                id: "exec-1".into(),
+                attempt_n: 1,
+                kind: spur_acp::ReviewKind::Completion,
+                payload: spur_acp::ReviewPayload {
+                    summary: "Review needed".into(),
+                    diff_summary: None,
+                    pr_url: None,
+                    error: None,
+                    delegation_plan: None,
+                    chosen_matches_dispatched: None,
+                },
+            },
+        ))
+        .unwrap();
+    let token = renders
+        .iter()
+        .find_map(|item| match item {
+            RuntimeRender::ReviewPrompt { buttons, .. } => Some(buttons[0].token.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    // Topic B takes over acp-shared; Topic A becomes ArchivedDetached while its
+    // record still retains `acp_session_id = "acp-shared"` for /sessions history.
+    runtime
+        .handle_chat_text(&handle, 42, Some(88), "/resume acp-shared")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await; // drain ResumeSession
+
+    let a = runtime.thread_record(77).expect("topic A");
+    assert!(matches!(a.binding, BindingState::ArchivedDetached));
+    assert_eq!(
+        a.acp_session_id.as_deref(),
+        Some("acp-shared"),
+        "archived topic must retain its acp_session_id for history",
+    );
+
+    let key = spur_bot::state::ThreadKey {
+        chat_id: 42,
+        message_thread_id: Some(77),
+    };
+    let renders = runtime
+        .handle_callback(&handle, &key, "cbq-late", &token)
+        .await
+        .unwrap();
+    assert!(
+        renders.iter().any(|item| matches!(
+            item,
+            RuntimeRender::AnswerCallback { text, .. } if text.contains("expired")
+        )),
+        "old button in archived topic must go stale; got: {:?}",
+        renders
+    );
+}
+
+#[tokio::test]
+async fn permission_callback_becomes_stale_after_topic_archived_with_preserved_acp_id() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
+    runtime.ensure_topic_record(42, 88, "Topic B".into()).unwrap();
+
+    // Permission request whose session_id matches Topic A's live session,
+    // so the prompt is routed into Topic A.
+    let tool_call = ToolCallUpdate::new("tool-1", ToolCallUpdateFields::new());
+    let args = RequestPermissionRequest::new(
+        "spur_acp-shared",
+        tool_call,
+        vec![
+            PermissionOption::new(
+                PermissionOptionId::new("allow_once"),
+                "Allow Once",
+                PermissionOptionKind::AllowOnce,
+            ),
+            PermissionOption::new(
+                PermissionOptionId::new("deny"),
+                "Deny",
+                PermissionOptionKind::RejectOnce,
+            ),
+        ],
+    );
+    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+    let request = spur_acp::types::PermissionRequest { args, reply_tx };
+
+    let (_key, renders) = runtime.handle_permission_request(request).unwrap();
+    let token = renders
+        .iter()
+        .find_map(|item| match item {
+            RuntimeRender::PermissionPrompt { buttons, .. } => Some(buttons[0].token.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    // /resume acp-shared on Topic B archives Topic A but keeps its acp_session_id.
+    runtime
+        .handle_chat_text(&handle, 42, Some(88), "/resume acp-shared")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await;
+
+    let key = spur_bot::state::ThreadKey {
+        chat_id: 42,
+        message_thread_id: Some(77),
+    };
+    let renders = runtime
+        .handle_callback(&handle, &key, "cbq-late", &token)
+        .await
+        .unwrap();
+    assert!(
+        renders.iter().any(|item| matches!(
+            item,
+            RuntimeRender::AnswerCallback { text, .. } if text.contains("expired")
+        )),
+        "permission button in archived topic must go stale; got: {:?}",
+        renders
+    );
+}
+
+#[tokio::test]
 async fn resume_detaches_other_topic_owning_same_session() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());

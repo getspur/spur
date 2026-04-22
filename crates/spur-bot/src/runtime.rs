@@ -43,10 +43,13 @@ pub enum RuntimeRender {
 
 struct PendingPrompt {
     thread_key: ThreadKey,
-    /// ACP session id captured at prompt creation time. If the topic is later
-    /// rebound to a different session, this prompt is stale even though the
-    /// `ThreadKey` still matches.
-    acp_session_id: Option<String>,
+    /// The topic's live runtime session binding at prompt creation time. Using
+    /// the live `SessionId` (rather than the persisted `acp_session_id`) makes
+    /// callbacks stale whenever the topic's binding identity changes — whether
+    /// by `/resume` rebinding to a different session, or by archive/detach that
+    /// drops the live session while the record still retains `acp_session_id`
+    /// for `/sessions` history.
+    live_session: Option<spur_acp::SessionId>,
     kind: PromptKind,
 }
 
@@ -625,10 +628,10 @@ impl BotRuntime {
                     .unwrap_or_else(|| {
                         ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
                     });
-                let prompt_acp_session_id = self
+                let prompt_live_session = self
                     .threads
                     .get(&key)
-                    .and_then(|r| r.acp_session_id.clone());
+                    .and_then(|r| r.live_session.clone());
 
                 let group = PromptGroup::Review {
                     executor_id: id.clone(),
@@ -656,7 +659,7 @@ impl BotRuntime {
                         token.clone(),
                         PendingPrompt {
                             thread_key: key.clone(),
-                            acp_session_id: prompt_acp_session_id.clone(),
+                            live_session: prompt_live_session.clone(),
                             kind: PromptKind::Review {
                                 executor_id: id.clone(),
                                 attempt_n,
@@ -712,10 +715,10 @@ impl BotRuntime {
             .get(&session_id)
             .cloned()
             .unwrap_or_else(|| ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0)));
-        let prompt_acp_session_id = self
+        let prompt_live_session = self
             .threads
             .get(&key)
-            .and_then(|r| r.acp_session_id.clone());
+            .and_then(|r| r.live_session.clone());
 
         let prompt_id = uuid::Uuid::new_v4().simple().to_string();
         self.permission_reply_txs
@@ -728,7 +731,7 @@ impl BotRuntime {
                 token.clone(),
                 PendingPrompt {
                     thread_key: key.clone(),
-                    acp_session_id: prompt_acp_session_id.clone(),
+                    live_session: prompt_live_session.clone(),
                     kind: PromptKind::Permission {
                         prompt_id: prompt_id.clone(),
                         option_id: opt.option_id.to_string(),
@@ -780,14 +783,21 @@ impl BotRuntime {
             }]);
         }
 
-        // Even when the ThreadKey still matches, the topic may have been
-        // rebound to a different ACP session (e.g. via `/resume <id>`). Reject
-        // prompts that were issued under an earlier binding.
-        let current_acp = self
-            .threads
-            .get(thread_key)
-            .and_then(|r| r.acp_session_id.clone());
-        if prompt.acp_session_id != current_acp {
+        // Even when the `ThreadKey` still matches, the prompt is stale if the
+        // topic's live runtime binding has changed — either because the topic
+        // was rebound by `/resume` (live_session swapped), or because it was
+        // archived/detached (live_session cleared, even if `acp_session_id` is
+        // preserved for `/sessions` history). A missing record (e.g. the
+        // implicit lobby) is treated as neutral so lobby-fallback prompts still
+        // work — their captured `live_session` is `None` to match.
+        let (is_archived, current_live) = match self.threads.get(thread_key) {
+            Some(r) => (
+                matches!(r.binding, BindingState::ArchivedDetached),
+                r.live_session.clone(),
+            ),
+            None => (false, None),
+        };
+        if is_archived || prompt.live_session != current_live {
             // Also clear prompt-group siblings so that Approve/Reject/Retry
             // triplet doesn't leave orphan tokens behind.
             let group = match &prompt.kind {
