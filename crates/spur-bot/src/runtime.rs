@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::commands::{parse_chat_input, BotCommand, ParsedChatInput};
 use crate::state::{BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord, ThreadKey};
@@ -106,6 +106,14 @@ pub struct BotRuntime {
     /// returns; preserving arrival order is the only way to bind each session
     /// to the right topic.
     pending_new_session_keys: VecDeque<ThreadKey>,
+    /// Per-topic guard that mirrors `pending_new_session_keys`. A topic is
+    /// in the guard exactly when it has one `NewSessionWithMessage` in
+    /// flight and is still waiting to be bound. The guard blocks a second
+    /// `NewSessionWithMessage` from the same topic, and — because
+    /// `/resume`/archive paths evict from the guard — lets late fresh
+    /// `AgentSessionReady` events skip stale FIFO entries without
+    /// resurrecting rebound or archived topics.
+    pending_new_session_guard: HashSet<ThreadKey>,
     /// Threads waiting for a resumed session to become ready, keyed by acp_session_id.
     pending_resume: HashMap<String, ThreadKey>,
     /// Executor ID -> session mapping so that reviews can be routed.
@@ -158,6 +166,7 @@ impl BotRuntime {
             pending_inputs: HashMap::new(),
             session_threads: HashMap::new(),
             pending_new_session_keys: VecDeque::new(),
+            pending_new_session_guard: HashSet::new(),
             pending_resume: HashMap::new(),
             executor_sessions: HashMap::new(),
         }
@@ -326,6 +335,23 @@ impl BotRuntime {
                 let record = self.threads.get_mut(&key).ok_or_else(|| anyhow::anyhow!("unknown topic"))?;
                 match &record.binding {
                     BindingState::Unbound => {
+                        if self.pending_new_session_guard.contains(&key) {
+                            // A fresh `NewSessionWithMessage` is already in
+                            // flight for this topic. Emitting another would
+                            // spawn a second brain session that nothing is
+                            // waiting to bind, so queue the latest message
+                            // for flush after the first ready binds.
+                            self.pending_inputs.insert(
+                                key.clone(),
+                                spur_core::InteractiveInput::Message {
+                                    blocks,
+                                    interrupt: false,
+                                },
+                            );
+                            return Ok(vec![RuntimeRender::WorkingStatus {
+                                text: "Working…".into(),
+                            }]);
+                        }
                         handle
                             .send_command(spur_core::InteractiveInput::NewSessionWithMessage {
                                 blocks,
@@ -333,6 +359,7 @@ impl BotRuntime {
                             })
                             .await?;
                         self.pending_new_session_keys.push_back(key.clone());
+                        self.pending_new_session_guard.insert(key.clone());
                     }
                     BindingState::RestorePending { acp_session_id, .. } => {
                         if !self.pending_inputs.contains_key(&key) {
@@ -432,6 +459,7 @@ impl BotRuntime {
                         other.archived = true;
                     }
                     self.pending_inputs.remove(&conflict);
+                    self.evict_pending_new(&conflict);
                 }
 
                 let record = self
@@ -455,6 +483,7 @@ impl BotRuntime {
                 record.acp_session_id = Some(session_id.clone());
                 record.brain = Some(brain);
                 self.pending_inputs.remove(&key);
+                self.evict_pending_new(&key);
 
                 handle
                     .send_command(spur_core::InteractiveInput::ResumeSession {
@@ -534,7 +563,20 @@ impl BotRuntime {
                         .remove(&acp_session_id)
                         .or_else(|| self.session_threads.get(&session).cloned())
                 } else {
-                    self.pending_new_session_keys.pop_front()
+                    // Pop FIFO until we find a topic still eligible for a
+                    // fresh bind. Eviction on `/resume` or archive leaves
+                    // stale FIFO entries whose guard membership has been
+                    // cleared; skipping them here is what prevents an
+                    // in-flight `NewSessionWithMessage` from resurrecting a
+                    // rebound or archived topic.
+                    let mut chosen = None;
+                    while let Some(candidate) = self.pending_new_session_keys.pop_front() {
+                        if self.pending_new_session_guard.remove(&candidate) {
+                            chosen = Some(candidate);
+                            break;
+                        }
+                    }
+                    chosen
                 };
 
                 let key = key.unwrap_or_else(|| {
@@ -684,6 +726,16 @@ impl BotRuntime {
             }
             _ => Ok((None, vec![])),
         }
+    }
+
+    /// Remove a topic from every pending-new bookkeeping structure. Called
+    /// from any path that turns an `Unbound` topic into something else
+    /// (`/resume` on the topic itself, or `/resume` on another topic that
+    /// archives this one) so that a late fresh `AgentSessionReady` cannot
+    /// resurrect the topic via its stale FIFO entry.
+    fn evict_pending_new(&mut self, key: &ThreadKey) {
+        self.pending_new_session_guard.remove(key);
+        self.pending_new_session_keys.retain(|k| k != key);
     }
 
     /// Send any input that was queued while waiting for a persisted session to

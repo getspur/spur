@@ -464,6 +464,135 @@ async fn resume_detaches_other_topic_owning_same_session() {
 }
 
 #[tokio::test]
+async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime
+        .ensure_topic_record(42, 77, "Topic A".into())
+        .unwrap();
+
+    // First plain text in Unbound: NewSessionWithMessage.
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello 1")
+        .await
+        .unwrap();
+    let first = user_rx.recv().await.unwrap();
+    assert!(
+        matches!(first, spur_core::InteractiveInput::NewSessionWithMessage { .. }),
+        "first plain text must kick off NewSessionWithMessage; got {:?}",
+        first
+    );
+
+    // Second plain text BEFORE AgentSessionReady returns must not emit a
+    // second NewSessionWithMessage. The latest message must be queued
+    // instead so the topic still binds exactly once.
+    let renders = runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello 2")
+        .await
+        .unwrap();
+    assert!(
+        renders
+            .iter()
+            .any(|r| matches!(r, RuntimeRender::WorkingStatus { .. })),
+        "second plain text must render a working status, got {:?}",
+        renders
+    );
+    assert!(
+        user_rx.try_recv().is_err(),
+        "same topic must not emit a second NewSessionWithMessage before the first ready"
+    );
+
+    // When the fresh ready finally arrives, the queued message flushes.
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_a".into()),
+                acp_session_id: "acp-a".into(),
+                brain: "kimi".into(),
+                resumed: false,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    let key = spur_bot::state::ThreadKey {
+        chat_id: 42,
+        message_thread_id: Some(77),
+    };
+    runtime.flush_pending(&handle, &key).await.unwrap();
+
+    let queued = user_rx.recv().await.unwrap();
+    assert!(
+        matches!(&queued, spur_core::InteractiveInput::Message { .. }),
+        "queued message must flush as a regular Message after bind; got {:?}",
+        queued
+    );
+
+    let record = runtime.thread_record(77).unwrap();
+    assert!(
+        matches!(&record.binding, BindingState::Active { acp_session_id, .. } if acp_session_id == "acp-a"),
+        "topic must be Active with acp-a; got {:?}",
+        record.acp_session_id
+    );
+}
+
+#[tokio::test]
+async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime
+        .ensure_topic_record(42, 77, "Topic A".into())
+        .unwrap();
+
+    // Topic 77 kicks off a fresh session.
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    // Before the fresh AgentSessionReady returns, the same topic is rebound
+    // via /resume to an existing ACP session.
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "/resume acp-existing")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    // A late AgentSessionReady { resumed: false } arrives from the in-flight
+    // new-session call. It must not reactivate topic 77 because the topic
+    // was evicted from the pending-new guard on /resume.
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_fresh".into()),
+                acp_session_id: "acp-fresh".into(),
+                brain: "kimi".into(),
+                resumed: false,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    let record = runtime.thread_record(77).expect("topic 77 present");
+    assert!(
+        matches!(
+            &record.binding,
+            BindingState::RestorePending { acp_session_id, .. } if acp_session_id == "acp-existing"
+        ),
+        "stale fresh ready must not overwrite the /resume target; binding was {:?}",
+        record.binding
+    );
+    assert_eq!(
+        record.acp_session_id.as_deref(),
+        Some("acp-existing"),
+        "stale fresh ready must not overwrite the /resume acp_session_id"
+    );
+    assert!(
+        record.live_session.is_none(),
+        "topic 77 must not gain a live session from the stale fresh ready"
+    );
+}
+
+#[tokio::test]
 async fn multiple_pending_new_sessions_bind_in_fifo_order() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.ensure_topic_record(42, 77, "Topic A".into()).unwrap();
