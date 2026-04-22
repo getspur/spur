@@ -133,3 +133,76 @@ fn empty_review_tab_decision_routes_pre_key() {
     // InputBar must remain untouched.
     assert_eq!(dashboard.input_bar_text_for_test(), "");
 }
+
+#[test]
+fn non_empty_tab_does_not_cycle_focus() {
+    let mut dashboard = DashboardView::new();
+    dashboard.handle_paste("hello");
+    let before = dashboard.input_bar_text_for_test();
+
+    let action = dashboard.handle_key(
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+
+    assert!(
+        action.is_none(),
+        "non-empty input bar: Tab must not cycle focus, got {:?}",
+        action
+    );
+    assert_eq!(
+        dashboard.input_bar_text_for_test(),
+        before,
+        "non-empty input bar: Tab must not mutate composer text"
+    );
+}
+
+#[test]
+fn non_empty_esc_emacs_does_not_unfocus_or_navigate_back() {
+    let mut dashboard = DashboardView::new();
+    // Default mode is Emacs; Esc is not consumed by the composer.
+    dashboard.handle_paste("hello");
+    let before = dashboard.input_bar_text_for_test();
+
+    let action = dashboard.handle_key(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+
+    assert!(
+        action.is_none(),
+        "non-empty Emacs: Esc must be a no-op, got {:?}",
+        action
+    );
+    assert_eq!(
+        dashboard.input_bar_text_for_test(),
+        before,
+        "non-empty Emacs: Esc must not mutate composer text"
+    );
+}
+
+#[test]
+fn non_empty_esc_vim_normal_does_not_unfocus_or_navigate_back() {
+    use spur_tui::components::input_bar::{EditMode, VimMode};
+
+    let mut dashboard = DashboardView::new();
+    dashboard.set_edit_mode(EditMode::Vim(VimMode::Normal));
+    dashboard.handle_paste("hello");
+    let before = dashboard.input_bar_text_for_test();
+
+    let action = dashboard.handle_key(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+
+    assert!(
+        action.is_none(),
+        "non-empty Vim Normal: Esc must be a no-op, got {:?}",
+        action
+    );
+    assert_eq!(
+        dashboard.input_bar_text_for_test(),
+        before,
+        "non-empty Vim Normal: Esc must not mutate composer text"
+    );
+}
