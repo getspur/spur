@@ -444,6 +444,7 @@ impl Reconciler {
                 .pm
                 .list_issues(IssueFilter {
                     labels: vec![crate::plan::labels::plan_id(plan_id)],
+                    issue_type: Some("task".into()),
                     limit: Some(10_000),
                     ..Default::default()
                 })
@@ -453,6 +454,7 @@ impl Reconciler {
                 .list_issues(IssueFilter {
                     labels: vec![crate::plan::labels::plan_id(plan_id)],
                     status: Some(closed_status.clone()),
+                    issue_type: Some("task".into()),
                     limit: Some(10_000),
                     ..Default::default()
                 })
@@ -489,6 +491,24 @@ impl Reconciler {
             });
 
             if epic.status == closed_status {
+                if !outcome.add_integration_pending
+                    && epic
+                        .labels
+                        .contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+                {
+                    self.pm
+                        .update_issue(
+                            &epic.id,
+                            spur_pm::IssueUpdate {
+                                remove_labels: vec![
+                                    crate::plan::labels::INTEGRATION_PENDING.to_string()
+                                ],
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    did_work = true;
+                }
                 if !has_epic_completion {
                     let emitted = crate::plan::emit_epic_completion_audit(
                         adv,
@@ -502,6 +522,19 @@ impl Reconciler {
                             outcome: outcome.audit_outcome,
                             plan_id: plan_id.to_string(),
                             epic_id: epic.id.clone(),
+                        });
+                    }
+                    if let Some(sink) = self
+                        .dispatch
+                        .as_ref()
+                        .and_then(|dispatch| dispatch.event_sink.as_ref())
+                    {
+                        sink.emit(spur_acp::SpurEventBody::PlanCompleted {
+                            plan_id: plan_id.to_string(),
+                            approved: outcome.approved_count,
+                            rejected: outcome.rejected_count,
+                            failed: outcome.failed_count,
+                            cancelled: outcome.cancelled_count,
                         });
                     }
                     did_work = true;
