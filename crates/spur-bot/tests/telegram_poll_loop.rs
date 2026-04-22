@@ -9,22 +9,22 @@ fn offset_advances_only_after_accepted_batch() {
 
 #[test]
 fn try_send_on_full_channel_preserves_offset_and_does_not_panic() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<TelegramInput>(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<TelegramInput>>(1);
 
-    // Fill the channel
-    tx.try_send(TelegramInput::Text {
+    // Fill the channel with one batch
+    tx.try_send(vec![TelegramInput::Text {
         user_id: 1,
         chat_id: 1,
         text: "first".into(),
-    })
+    }])
     .unwrap();
 
-    // Attempting to send a second item should fail (not panic)
-    let result = tx.try_send(TelegramInput::Text {
+    // Attempting to send a second batch should fail (not panic)
+    let result = tx.try_send(vec![TelegramInput::Text {
         user_id: 1,
         chat_id: 1,
         text: "second".into(),
-    });
+    }]);
     assert!(result.is_err(), "try_send should fail on a full channel");
 
     // When batch enqueue fails, offset must not advance
@@ -32,4 +32,48 @@ fn try_send_on_full_channel_preserves_offset_and_does_not_panic() {
 
     // Clean up
     let _ = rx.try_recv();
+}
+
+#[test]
+fn batch_forward_is_atomic_under_channel_pressure() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<TelegramInput>>(1);
+
+    // First batch occupies the only slot.
+    let batch_a = vec![
+        TelegramInput::Text {
+            user_id: 1,
+            chat_id: 1,
+            text: "a".into(),
+        },
+        TelegramInput::Text {
+            user_id: 1,
+            chat_id: 1,
+            text: "b".into(),
+        },
+    ];
+    tx.try_send(batch_a).unwrap();
+
+    // Second batch must fail atomically: either all items are accepted or none.
+    let batch_b = vec![
+        TelegramInput::Text {
+            user_id: 1,
+            chat_id: 1,
+            text: "c".into(),
+        },
+        TelegramInput::Text {
+            user_id: 1,
+            chat_id: 1,
+            text: "d".into(),
+        },
+    ];
+    let result = tx.try_send(batch_b);
+    assert!(
+        result.is_err(),
+        "try_send of a full batch must fail atomically"
+    );
+
+    // Only batch_a was enqueued.
+    let received = rx.try_recv().unwrap();
+    assert_eq!(received.len(), 2);
+    assert!(rx.try_recv().is_err());
 }
