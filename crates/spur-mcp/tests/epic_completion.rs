@@ -353,3 +353,209 @@ async fn epic_completion_backfills_missing_audit_for_closed_terminal_epic() {
         } if plan_id == "P1" && found_epic_id == &epic_id
     )));
 }
+
+#[tokio::test]
+async fn closed_epic_backfill_emits_plan_completed_event() {
+    if !br_available() {
+        eprintln!("skipping closed_epic_backfill_emits_plan_completed_event: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P2").await;
+
+    for task_id in [&task_a_id, &task_b_id] {
+        pm.update_issue(
+            task_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close child task");
+    }
+    pm.update_issue(
+        &task_b_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::REVIEW_REJECTED.to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("mark task B terminal failure");
+    pm.update_issue(
+        &epic_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close epic without audit");
+
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+            event_sink: Some(sink_ref),
+        }),
+        Some("P2".into()),
+    );
+
+    reconciler.tick_once().await.expect("tick_once");
+
+    let events = sink.events.lock().unwrap();
+    let completed_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.body,
+                SpurEventBody::PlanCompleted {
+                    plan_id,
+                    approved,
+                    rejected,
+                    failed,
+                    cancelled,
+                } if plan_id == "P2"
+                    && *approved == 1
+                    && *rejected == 1
+                    && *failed == 0
+                    && *cancelled == 0
+            )
+        })
+        .count();
+    assert_eq!(
+        completed_events, 1,
+        "expected one backfilled PlanCompleted event"
+    );
+}
+
+#[tokio::test]
+async fn closed_epic_backfill_clears_stale_integration_pending_on_failure() {
+    if !br_available() {
+        eprintln!(
+            "skipping closed_epic_backfill_clears_stale_integration_pending_on_failure: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P3").await;
+
+    for task_id in [&task_a_id, &task_b_id] {
+        pm.update_issue(
+            task_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close child task");
+    }
+    pm.update_issue(
+        &epic_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            add_labels: vec![labels::INTEGRATION_PENDING.to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close epic with stale integration-pending");
+    pm.update_issue(
+        &task_b_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::REVIEW_REJECTED.to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("mark task B terminal failure");
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        Some("P3".into()),
+    );
+
+    reconciler.tick_once().await.expect("tick_once");
+
+    let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert!(
+        !epic
+            .labels
+            .iter()
+            .any(|label| label == labels::INTEGRATION_PENDING),
+        "closed epic with terminal failures must not keep integration-pending: {:?}",
+        epic.labels
+    );
+}
+
+#[tokio::test]
+async fn epic_closure_ignores_non_task_plan_scoped_issues() {
+    if !br_available() {
+        eprintln!("skipping epic_closure_ignores_non_task_plan_scoped_issues: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P4").await;
+    let noise_epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Unrelated Scoped Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &noise_epic_id, &labels::plan_id("P4"));
+
+    for task_id in [&task_a_id, &task_b_id] {
+        pm.update_issue(
+            task_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close approved child task");
+    }
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        Some("P4".into()),
+    );
+
+    reconciler.tick_once().await.expect("tick_once");
+
+    let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert_eq!(
+        epic.status,
+        pm.closed_status(),
+        "non-task issues sharing spur:plan-id must not block epic closure"
+    );
+}
