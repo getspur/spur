@@ -795,15 +795,17 @@ async fn any_open_epic_lacks_rev1_metadata(pm: &spur_pm::PmService) -> anyhow::R
         {
             let comments = adv.list_comments(&epic.id).await?;
             let audits = crate::plan::projector::collect_sorted_audits(comments);
-            let has_rev1_metadata = audits.iter().any(|audit| matches!(
-                audit,
-                crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
-                    plan_id: pid,
-                    base_snapshot_branch: Some(_),
-                    base_snapshot_oid: Some(_),
-                    ..
-                } if pid == plan_id
-            ));
+            let has_rev1_metadata = audits.iter().any(|audit| {
+                matches!(
+                    audit,
+                    crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                        plan_id: pid,
+                        base_snapshot_branch: Some(_),
+                        base_snapshot_oid: Some(_),
+                        ..
+                    } if pid == plan_id
+                )
+            });
             if !has_rev1_metadata {
                 return Ok(true);
             }
@@ -887,11 +889,7 @@ pub async fn resolve_dispatch_orphan(
     }) else {
         return Ok(false);
     };
-    if issue
-        .labels
-        .iter()
-        .any(|label| label == crate::plan::labels::READY_FOR_REVIEW)
-    {
+    if crate::plan::projector::has_ready_for_review_label_compat(&issue.labels) {
         return Ok(false);
     }
 
@@ -1460,10 +1458,7 @@ impl McpCallbackServer {
 
     /// Spawn `run_plan` for an ephemeral plan (no epic_id). Persisted plans
     /// must use the reconciler; this helper is ephemeral-only by construction.
-    fn spawn_ephemeral_plan_runner(
-        &self,
-        state: Arc<tokio::sync::Mutex<crate::plan::PlanState>>,
-    ) {
+    fn spawn_ephemeral_plan_runner(&self, state: Arc<tokio::sync::Mutex<crate::plan::PlanState>>) {
         let delegation_tx = self.delegation_tx.clone();
         let plan_sink = self.event_sink.clone();
         let plan_pm = self
@@ -1840,13 +1835,18 @@ impl McpCallbackServer {
                     reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
                     let auto_merge = self.auto_merge_approved_plans;
-                    let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> = Some(Arc::clone(&self) as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
+                    let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
+                        Some(Arc::clone(&self)
+                            as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
                     let repo_root = self.repo_root.clone();
                     let journal_notify = Arc::new(tokio::sync::Notify::new());
                     let journal_handle = repo_root.map(|root| {
                         let path = crate::plan::reconciler::beads_journal_path(&root);
                         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
-                            crate::plan::reconciler::monitor_journal_appends(path, Arc::clone(&journal_notify)),
+                            crate::plan::reconciler::monitor_journal_appends(
+                                path,
+                                Arc::clone(&journal_notify),
+                            ),
                         ))
                     });
                     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -2858,7 +2858,10 @@ impl McpCallbackServer {
             ordered_branches.push((entry.spec.task_id.clone(), worker_branch));
         }
 
-        let merge_branch = format!("spur/plan-merge-{plan_id}-{}", uuid::Uuid::new_v4().simple());
+        let merge_branch = format!(
+            "spur/plan-merge-{plan_id}-{}",
+            uuid::Uuid::new_v4().simple()
+        );
 
         let merge_state = match integrate_plan_branches(
             &repo_root,
@@ -2918,21 +2921,23 @@ impl McpCallbackServer {
         };
 
         match self.merge_plan_impl(&plan_id).await {
-            Ok(_) => {
-                // Read from the cache directly to avoid load_or_project_plan re-projection
-                // wiping the merge_state we just wrote.
-                let plan_arc = self.active_plans.lock().await.get(&plan_id).cloned();
-                let plan_arc = match plan_arc {
-                    Some(p) => p,
-                    None => match self.load_or_project_plan(&plan_id).await {
-                        Ok(p) => p,
-                        Err(e) => return JsonRpcResponse::invalid_params(id, e),
-                    },
+            Ok(merge_state) => {
+                let plan_arc = match self.load_or_project_plan(&plan_id).await {
+                    Ok(p) => p,
+                    Err(e) => return JsonRpcResponse::invalid_params(id, e),
                 };
+                {
+                    let mut state = plan_arc.lock().await;
+                    state.merge_state = merge_state;
+                }
                 let state = plan_arc.lock().await;
                 let status = crate::plan::build_plan_status(&plan_id, &state);
-                let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
-                JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+                let text =
+                    serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -3288,14 +3293,10 @@ impl McpCallbackServer {
                 }
                 Some(existing_plan_id) => {
                     // Check if the existing plan is still non-terminal.
-                    // Release the registry lock before acquiring active_plans
-                    // to maintain consistent lock ordering (active_plans is
-                    // never acquired while holding plan_registry).
+                    // Persisted plans must be reprojected here so stale cache
+                    // state cannot block a legitimate rerun.
                     drop(registry);
-                    let plan_arc = {
-                        let plans = self.active_plans.lock().await;
-                        plans.get(&existing_plan_id).cloned()
-                    };
+                    let plan_arc = self.load_or_project_plan(&existing_plan_id).await.ok();
                     if let Some(arc) = plan_arc {
                         let state = arc.lock().await;
                         let status_val = crate::plan::build_plan_status(&existing_plan_id, &state);
@@ -5168,7 +5169,15 @@ mod reconciler_fast_forward_tests {
 
         // Emit PlanSubmit audit so the epic carries rev1 bootstrap metadata.
         let adv = pm.advanced().expect("advanced");
-        crate::emit_plan_submit_audit(adv, "plan-1", &sg, Some("main"), Some("abc123"), Some("test")).await;
+        crate::emit_plan_submit_audit(
+            adv,
+            "plan-1",
+            &sg,
+            Some("main"),
+            Some("abc123"),
+            Some("test"),
+        )
+        .await;
 
         // The detector must report that no legacy reclaim is needed.
         let needs_reclaim = super::any_open_epic_lacks_rev1_metadata(pm.as_ref())
