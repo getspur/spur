@@ -118,10 +118,13 @@ impl InteractiveFrontendHost {
         self.event_rx.take();
         self.permission_rx.take();
         drop(self.handle);
-        let handle = self.orch_handle;
-        match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+        let mut handle = self.orch_handle;
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
             Ok(_) => Ok(()),
-            Err(_) => anyhow::bail!("interactive host shutdown timed out"),
+            Err(_) => {
+                handle.abort();
+                anyhow::bail!("interactive host shutdown timed out")
+            }
         }
     }
 }
