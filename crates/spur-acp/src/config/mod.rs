@@ -305,6 +305,15 @@ mod duration_secs_serde {
     }
 }
 
+/// Runtime-level SPUR configuration knobs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpurRuntimeConfig {
+    /// When true, automatically merge approved plans and create PRs.
+    /// Default: false (opt-in).
+    pub auto_merge_approved_plans: bool,
+}
+
 /// Global SPUR configuration (from ~/.spur/config.toml + .spur/config.toml).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpurConfig {
@@ -325,6 +334,9 @@ pub struct SpurConfig {
     /// Delegation dispatch tuning (Phase 1c async-first migration).
     #[serde(default)]
     pub delegation: DelegationConfig,
+    /// Runtime SPUR knobs (v0e+).
+    #[serde(default)]
+    pub spur: SpurRuntimeConfig,
 }
 
 /// Runtime knobs for `delegate_to_worker` / `delegate_parallel` dispatch.
@@ -749,5 +761,23 @@ mod tests {
                 agent.name
             );
         }
+    }
+
+    #[test]
+    fn spur_runtime_defaults_auto_merge_to_false() {
+        let cfg: SpurConfig = toml::from_str("").unwrap();
+        assert!(!cfg.spur.auto_merge_approved_plans);
+    }
+
+    #[test]
+    fn spur_runtime_parses_auto_merge_true() {
+        let cfg: SpurConfig = toml::from_str(
+            r#"
+            [spur]
+            auto_merge_approved_plans = true
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.spur.auto_merge_approved_plans);
     }
 }

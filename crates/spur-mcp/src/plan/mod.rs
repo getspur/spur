@@ -721,14 +721,14 @@ pub async fn emit_epic_completion_audit(
     epic_id: &str,
     plan_id: &str,
     outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
-) {
+) -> anyhow::Result<()> {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::EpicCompletion {
         outcome,
         plan_id: plan_id.to_string(),
         epic_id: epic_id.to_string(),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
-    if let Err(error) = adv.add_comment(epic_id, &body).await {
+    adv.add_comment(epic_id, &body).await.map_err(|error| {
         warn!(
             target: "spur.audit.emit_failure",
             kind = "epic_completion",
@@ -736,7 +736,8 @@ pub async fn emit_epic_completion_audit(
             plan_id = %plan_id,
             "EpicCompletion audit comment emission failed: {error}"
         );
-    }
+        error
+    }).map(|_comment_id| ())
 }
 
 /// Emit a `[[spur-audit v1]] Approval` sentinel comment on the task issue.
@@ -1052,6 +1053,11 @@ pub async fn run_plan(
     pm: Option<Arc<dyn PmLike>>,
     fast_forward: Option<Arc<tokio::sync::Notify>>,
 ) {
+    if plan.lock().await.epic_id.is_some() {
+        tracing::warn!("run_plan is ephemeral-only in v0e; persisted plans must use the reconciler");
+        return;
+    }
+
     let plan_id = plan.lock().await.plan_id.clone();
     info!(plan_id = %plan_id, "Plan executor started");
 
@@ -2588,6 +2594,7 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spur_acp::SessionId;
 
     fn task(id: &str, deps: &[&str]) -> PlanTask {
         PlanTask {
@@ -2744,6 +2751,73 @@ mod tests {
     #[test]
     fn max_attempts_is_three() {
         assert_eq!(super::MAX_ATTEMPTS, 3);
+    }
+
+    // ─── run_plan ephemeral-only contract ────────────────────────────────
+
+    fn build_run_plan_fixture(
+        epic_id: Option<String>,
+    ) -> (
+        Arc<Mutex<PlanState>>,
+        mpsc::Sender<DelegationRequest>,
+        mpsc::Receiver<DelegationRequest>,
+    ) {
+        let state = PlanState {
+            plan_id: "p1".into(),
+            tasks: vec![PlanTaskEntry {
+                spec: PlanTask {
+                    task_id: "t1".into(),
+                    agent: "a".into(),
+                    task: "T".into(),
+                    depends_on: vec![],
+                    issue_id: None,
+                    context_files: vec![],
+                },
+                status: PlanTaskStatus::Pending,
+                result: None,
+                worker_branch: None,
+                attempt: 1,
+                history: vec![],
+                last_delegation_id: None,
+            }],
+            brain_session_id: BrainSessionId::new(SessionId("b".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id,
+        };
+        let (tx, rx) = mpsc::channel(8);
+        (Arc::new(Mutex::new(state)), tx, rx)
+    }
+
+    #[tokio::test]
+    async fn run_plan_with_epic_id_does_not_dispatch() {
+        let (plan, tx, mut rx) = build_run_plan_fixture(Some("bd-epic".into()));
+        tokio::spawn(async move { run_plan(plan, tx, None, None, None).await });
+        let recv = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            rx.recv(),
+        )
+        .await;
+        assert!(
+            matches!(recv, Ok(None) | Err(_)),
+            "run_plan must not dispatch when epic_id is present; got {recv:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_plan_without_epic_id_still_dispatches() {
+        let (plan, tx, mut rx) = build_run_plan_fixture(None);
+        tokio::spawn(async move { run_plan(plan, tx, None, None, None).await });
+        let recv = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            rx.recv(),
+        )
+        .await;
+        assert!(
+            matches!(recv, Ok(Some(_))),
+            "run_plan must dispatch when epic_id is None; got {recv:?}"
+        );
     }
 
     #[test]
@@ -3926,5 +4000,55 @@ mod tests {
             .unwrap_or_default()
             .contains("create_pr"));
         assert_eq!(status["merge"]["merge_branch"], "spur/plan-merge-1");
+    }
+
+    // ─── emit_epic_completion_audit durable-state contract ───────────────
+
+    struct FailingAddCommentAdvanced;
+
+    #[async_trait::async_trait]
+    impl spur_pm::BeadsAdvanced for FailingAddCommentAdvanced {
+        async fn list_ready(
+            &self,
+            _filter: spur_pm::ReadyFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            Ok(vec![])
+        }
+
+        async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+            Ok(vec![])
+        }
+
+        async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<String> {
+            anyhow::bail!("disk full")
+        }
+
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_epic_completion_audit_returns_err_when_add_comment_fails() {
+        let advanced = FailingAddCommentAdvanced;
+        let result = super::emit_epic_completion_audit(
+            &advanced,
+            "bd-epic",
+            "plan-1",
+            crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "emit_epic_completion_audit must return Err when add_comment fails"
+        );
     }
 }
