@@ -32,17 +32,47 @@ impl TelegramClient {
         Ok(response.result)
     }
 
+    pub async fn get_me(&self) -> anyhow::Result<frankenstein::types::User> {
+        Ok(self.inner.get_me().await?.result)
+    }
+
+    pub async fn create_forum_topic(
+        &self,
+        chat_id: i64,
+        name: String,
+    ) -> anyhow::Result<frankenstein::types::ForumTopic> {
+        let params = frankenstein::methods::CreateForumTopicParams::builder()
+            .chat_id(chat_id)
+            .name(name)
+            .build();
+        Ok(self.inner.create_forum_topic(&params).await?.result)
+    }
+
     pub async fn send_message_draft(
         &self,
         chat_id: i64,
         draft_id: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        let payload = serde_json::json!({
+        self.send_message_draft_to_thread(chat_id, None, draft_id, text)
+            .await
+    }
+
+    pub async fn send_message_draft_to_thread(
+        &self,
+        chat_id: i64,
+        message_thread_id: Option<i32>,
+        draft_id: &str,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let mut payload = serde_json::json!({
             "chat_id": chat_id,
             "draft_id": encode_draft_id(draft_id),
             "text": text,
         });
+        if let Some(thread_id) = normalize_outbound_thread_id(message_thread_id) {
+            payload["message_thread_id"] = serde_json::json!(thread_id);
+        }
         let _: frankenstein::response::MethodResponse<bool> = self
             .inner
             .request("sendMessageDraft", Some(payload))
@@ -51,13 +81,17 @@ impl TelegramClient {
     }
 
     pub async fn send_text(&self, chat_id: i64, text: String) -> anyhow::Result<()> {
+        self.send_text_to_thread(chat_id, None, text).await
+    }
+
+    pub async fn send_text_to_thread(
+        &self,
+        chat_id: i64,
+        message_thread_id: Option<i32>,
+        text: String,
+    ) -> anyhow::Result<()> {
         self.inner
-            .send_message(
-                &frankenstein::methods::SendMessageParams::builder()
-                    .chat_id(chat_id)
-                    .text(text)
-                    .build(),
-            )
+            .send_message(&build_send_text_params(chat_id, message_thread_id, text))
             .await?;
         Ok(())
     }
@@ -80,6 +114,17 @@ impl TelegramClient {
         text: String,
         buttons: &[crate::runtime::PromptButton],
     ) -> anyhow::Result<()> {
+        self.send_buttons_to_thread(chat_id, None, text, buttons)
+            .await
+    }
+
+    pub async fn send_buttons_to_thread(
+        &self,
+        chat_id: i64,
+        message_thread_id: Option<i32>,
+        text: String,
+        buttons: &[crate::runtime::PromptButton],
+    ) -> anyhow::Result<()> {
         let row = buttons
             .iter()
             .map(|button| {
@@ -92,18 +137,42 @@ impl TelegramClient {
         let markup = frankenstein::types::InlineKeyboardMarkup::builder()
             .inline_keyboard(vec![row])
             .build();
-        self.inner
-            .send_message(
-                &frankenstein::methods::SendMessageParams::builder()
-                    .chat_id(chat_id)
-                    .text(text)
-                    .reply_markup(frankenstein::types::ReplyMarkup::InlineKeyboardMarkup(
-                        markup,
-                    ))
-                    .build(),
-            )
-            .await?;
+
+        let builder = frankenstein::methods::SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text(text)
+            .reply_markup(frankenstein::types::ReplyMarkup::InlineKeyboardMarkup(
+                markup,
+            ));
+        let params = if let Some(thread_id) = normalize_outbound_thread_id(message_thread_id) {
+            builder.message_thread_id(thread_id).build()
+        } else {
+            builder.build()
+        };
+        self.inner.send_message(&params).await?;
         Ok(())
+    }
+}
+
+pub fn normalize_outbound_thread_id(message_thread_id: Option<i32>) -> Option<i32> {
+    match message_thread_id {
+        Some(1) | None => None,
+        Some(other) => Some(other),
+    }
+}
+
+pub fn build_send_text_params(
+    chat_id: i64,
+    message_thread_id: Option<i32>,
+    text: String,
+) -> frankenstein::methods::SendMessageParams {
+    let builder = frankenstein::methods::SendMessageParams::builder()
+        .chat_id(chat_id)
+        .text(text);
+    if let Some(thread_id) = normalize_outbound_thread_id(message_thread_id) {
+        builder.message_thread_id(thread_id).build()
+    } else {
+        builder.build()
     }
 }
 
@@ -150,7 +219,6 @@ mod tests {
     fn draft_id_encoding_fits_positive_i32() {
         let id = encode_draft_id("working-10001");
         assert!(id > 0, "draft id must be positive");
-        assert!(id <= i32::MAX, "draft id must fit in i32");
     }
 
     #[test]
