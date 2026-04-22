@@ -689,24 +689,29 @@ impl IssueTracker for BeadsAdapter {
             .await?;
         }
 
-        // Step 3: add labels if non-empty (br label add <id> -l <label> ...)
-        if !update.add_labels.is_empty() {
-            let mut args = vec!["label".into(), "add".into(), id.to_string()];
-            for label in &update.add_labels {
-                args.push("-l".into());
-                args.push(label.clone());
-            }
-            self.run_br(args).await?;
+        // Step 3: add labels one at a time. The current br CLI rejects
+        // repeated `-l` flags in a single invocation.
+        for label in &update.add_labels {
+            self.run_br(vec![
+                "label".into(),
+                "add".into(),
+                id.to_string(),
+                "-l".into(),
+                label.clone(),
+            ])
+            .await?;
         }
 
-        // Step 4: remove labels if non-empty (br label remove <id> -l <label> ...)
-        if !update.remove_labels.is_empty() {
-            let mut args = vec!["label".into(), "remove".into(), id.to_string()];
-            for label in &update.remove_labels {
-                args.push("-l".into());
-                args.push(label.clone());
-            }
-            self.run_br(args).await?;
+        // Step 4: remove labels one at a time for the same CLI reason.
+        for label in &update.remove_labels {
+            self.run_br(vec![
+                "label".into(),
+                "remove".into(),
+                id.to_string(),
+                "-l".into(),
+                label.clone(),
+            ])
+            .await?;
         }
 
         Ok(())

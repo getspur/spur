@@ -3688,15 +3688,14 @@ impl Orchestrator {
                     // the next attempt. No commit (intermediate diff is
                     // moot once the retry produces its own diff).
                     //
-                    // Log (don't swallow) failures: a leftover directory
-                    // will cause the next create_worktree to fail with
-                    // a misleading "WorktreeFailed" — this warn lets the
-                    // operator correlate cause and effect.
+                    // Log (don't swallow) failures: retries use a fresh
+                    // SessionId, so collision is impossible, but disk space
+                    // may leak until manual cleanup or cleanup_orphans runs.
                     if let Err(e) = worktrees.remove_worktree(&outcome.worker_session).await {
                         tracing::warn!(
                             session = %outcome.worker_session,
                             error = %e,
-                            "failed to remove retry-attempt worktree; next attempt may fail at create_worktree"
+                            "failed to remove retry-attempt worktree; retry will use a fresh session ID, but disk space may leak"
                         );
                     }
 
@@ -4255,6 +4254,16 @@ async fn run_one_worker_attempt(
         .create_worktree(&worker_session, ctx.agent, &snapshot_branch)
         .await
         .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
+
+    // The snapshot branch is only needed as a base ref for worktree creation.
+    // Once the worktree exists, delete it immediately to prevent ref leaks.
+    if let Err(e) = worktrees.delete_snapshot_branch(&snapshot_branch).await {
+        tracing::debug!(
+            snapshot_branch = %snapshot_branch,
+            error = %e,
+            "failed to delete snapshot branch after worktree creation; will leak until cleanup_orphans runs"
+        );
+    }
 
     // 2. Spawn worker agent in worktree via AgentConnection.
     // Workers never receive a permission_tx, so L2 auto-approve is

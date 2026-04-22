@@ -104,17 +104,6 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
             {
                 continue;
             }
-            // Skip if the proposer already consumed this task's signal. The
-            // spur:signal-processed:<mutation_id> label is written by
-            // mutation_executor::apply_mutation on commit.
-            if issue
-                .labels
-                .iter()
-                .any(|label| label.starts_with("spur:signal-processed:"))
-            {
-                continue;
-            }
-
             let mut comments = adv.list_comments(&issue.id).await?;
             comments.sort_by(|left, right| {
                 left.created_at
@@ -141,6 +130,10 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                 };
 
                 let signal_id = signal.signal_id();
+                let processed_label = crate::plan::labels::signal_processed_label(&signal_id);
+                if issue.labels.iter().any(|label| label == &processed_label) {
+                    continue;
+                }
                 if self.seen.lock().contains(&signal_id) {
                     continue;
                 }
