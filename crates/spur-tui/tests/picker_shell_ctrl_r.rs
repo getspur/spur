@@ -4,7 +4,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
-use spur_tui::action::Action;
+use spur_tui::action::{Action, PermissionChoice};
 use spur_tui::components::input_bar::ProtectedRange;
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 use spur_tui::views::{session_detail::SessionDetailView, View};
@@ -122,4 +122,68 @@ fn ctrl_r_on_empty_history_opens_empty_shell_and_esc_closes() {
     // regular empty-composer Enter (no action).
     let act = press(&mut v, KeyCode::Enter);
     assert!(act.is_none() || act.is_some()); // any behavior OK so long as no panic
+}
+
+#[test]
+fn ctrl_p_does_not_mutate_hidden_input_bar_while_history_picker_open() {
+    let mut v = mk_view();
+    seed_history(
+        &mut v,
+        vec![
+            InputHistoryEntry::new(InputStateSnapshot::from_text("refactor the walker")),
+            InputHistoryEntry::new(InputStateSnapshot::from_text("fix the panic")),
+        ],
+    );
+
+    // Start with a draft in the InputBar.
+    type_str(&mut v, "my draft");
+    assert_eq!(v.input_bar_text_for_test(), "my draft");
+
+    // Open history picker.
+    press_mod(&mut v, KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+    // Press Ctrl+P — must NOT replace the hidden input bar text.
+    press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+    assert_eq!(
+        v.input_bar_text_for_test(),
+        "my draft",
+        "Ctrl+P must not mutate hidden input bar while history picker is open"
+    );
+}
+
+#[test]
+fn pending_permission_y_outranks_history_picker() {
+    let mut v = mk_view();
+    seed_history(
+        &mut v,
+        vec![
+            InputHistoryEntry::new(InputStateSnapshot::from_text("refactor the walker")),
+            InputHistoryEntry::new(InputStateSnapshot::from_text("fix the panic")),
+        ],
+    );
+
+    // Start with non-empty composer text.
+    type_str(&mut v, "my draft");
+    assert_eq!(v.input_bar_text_for_test(), "my draft");
+
+    // Open history picker.
+    press_mod(&mut v, KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+    // Push a pending permission while the picker is open.
+    v.push_permission("allow file write?", 60);
+
+    // Press plain 'y' — must emit PermissionGrant(Allow), not reach picker.
+    let act = press(&mut v, KeyCode::Char('y'));
+
+    assert_eq!(
+        v.input_bar_text_for_test(),
+        "my draft",
+        "permission key must not type into bar"
+    );
+    assert!(
+        matches!(act, Some(Action::PermissionGrant(PermissionChoice::Allow))),
+        "expected PermissionGrant(Allow) while picker is open, got {:?}",
+        act
+    );
 }

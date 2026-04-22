@@ -234,7 +234,6 @@ fn deleting_multibyte_char_before_atom_rebases_by_utf8_width() {
     assert_eq!(ranges[0].start, 1);
     assert_eq!(&b.text()[ranges[0].start..ranges[0].end], "@a.rs");
 }
-
 // ── Vim destructive edits must preserve unaffected atoms ──────────────────
 
 #[test]

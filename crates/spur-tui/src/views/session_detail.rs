@@ -438,6 +438,19 @@ impl SessionDetailView {
         self.react_trace.set_mermaid_enabled(enabled);
     }
 
+    /// Whether a graphics picker is installed (and therefore Alt+V should
+    /// open the mermaid overlay instead of falling through to the composer).
+    #[cfg(feature = "markdown")]
+    fn has_render_picker(&self) -> bool {
+        self.render_picker.is_some()
+    }
+
+    /// No-op fallback when markdown feature is disabled.
+    #[cfg(not(feature = "markdown"))]
+    fn has_render_picker(&self) -> bool {
+        false
+    }
+
     /// Drop every cached inline `StatefulProtocol` so they are rebuilt at
     /// the new Rect size on the next render. Called on terminal resize.
     #[cfg(feature = "markdown")]
@@ -982,116 +995,110 @@ impl SessionDetailView {
             return Some(Action::ToggleVimMode);
         }
 
-        // Vim Normal + empty InputBar: handle nav keys directly.
-        // In Vim Normal mode, chars are consumed as commands (not inserted),
-        // so the single-char-nav pattern (insert → check len==1) doesn't work.
-        // Mode-entry keys (i/a/A/I/o/O) fall through to InputBar.
-        if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
-            if let KeyCode::Char(ch) = key.code {
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                {
-                    let action = match ch {
-                        'j' => {
-                            self.react_trace.scroll_down();
-                            Some(Action::ScrollDown)
+        // ── Key ownership is decided from pre-key state ─────────────────
+        // This replaces the former post-edit rescue block for j/k/g/G and
+        // ensures picker-shell ownership runs before history prev/next.
+        enum KeyOwner {
+            Composer,
+            Picker,
+            View,
+        }
+
+        let owner = {
+            // Pending permission keys outrank even an open picker shell.
+            if self.react_trace.has_pending_permission()
+                && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'))
+            {
+                KeyOwner::View
+            } else if let Some(ref shell) = self.picker_shell {
+                use crate::components::query_source::QueryMode;
+                let is_trigger_driven = shell.query_mode() == QueryMode::ReadFromInputBar;
+                let shell_consumes = if is_trigger_driven {
+                    matches!(
+                        key.code,
+                        KeyCode::Up | KeyCode::Down | KeyCode::Esc | KeyCode::Tab | KeyCode::Enter
+                    ) || ((key.code == KeyCode::Char('c')
+                        || key.code == KeyCode::Char('p')
+                        || key.code == KeyCode::Char('n'))
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                } else {
+                    true
+                };
+                if shell_consumes {
+                    KeyOwner::Picker
+                } else {
+                    // Trigger-driven shell doesn't consume this editing key;
+                    // fall through to Composer so input_bar receives it and
+                    // dispatch_intent syncs the shell query.
+                    KeyOwner::Composer
+                }
+            } else {
+                // View-level shortcuts are never Composer-owned.
+                let is_view_shortcut = (matches!(key.code, KeyCode::Char('o' | 'r'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+                    || (matches!(key.code, KeyCode::Char('v'))
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                        && self.has_render_picker());
+                // Ctrl+P / Ctrl+N drive SessionDetail history when no picker owns them.
+                let is_history_nav = matches!(key.code, KeyCode::Char('p' | 'n'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                if is_view_shortcut || is_history_nav {
+                    KeyOwner::View
+                } else {
+                    // Pending permission keys are never Composer-owned.
+                    let is_permission_key = self.react_trace.has_pending_permission()
+                        && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'));
+                    let is_composer_editing = (matches!(
+                        key.code,
+                        KeyCode::Char(_)
+                            | KeyCode::Backspace
+                            | KeyCode::Delete
+                            | KeyCode::Left
+                            | KeyCode::Right
+                            | KeyCode::Home
+                            | KeyCode::End
+                            | KeyCode::Enter
+                            | KeyCode::Up
+                            | KeyCode::Down
+                    ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc()))
+                        && !is_permission_key;
+
+                    if is_composer_editing {
+                        // Empty-bar nav chars (j/k/g/G) and Up/Down/Esc are
+                        // View-owned scroll/nav keys — no rescue block needed.
+                        if self.input_bar.is_empty()
+                            && (matches!(key.code, KeyCode::Char('j' | 'k' | 'g' | 'G'))
+                                || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Esc))
+                        {
+                            KeyOwner::View
                         }
-                        'k' => {
-                            self.react_trace.scroll_up();
-                            Some(Action::ScrollUp)
+                        // Vim Normal mode-entry keys (i/a/A/I/o/O) fall through
+                        // to Composer even when the bar is empty.
+                        else if self.input_bar.is_empty()
+                            && self.input_bar.is_vim_normal()
+                            && matches!(key.code, KeyCode::Char('i' | 'a' | 'A' | 'I' | 'o' | 'O'))
+                        {
+                            KeyOwner::Composer
                         }
-                        'g' => {
-                            self.react_trace.scroll_to_top();
-                            Some(Action::ScrollToTop)
+                        // Unrecognized Vim Normal chars are no-ops when empty.
+                        else if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
+                            KeyOwner::View
                         }
-                        'G' => {
-                            self.react_trace.scroll_to_bottom();
-                            Some(Action::ScrollToBottom)
+                        else {
+                            KeyOwner::Composer
                         }
-                        // Mode-entry keys fall through to InputBar
-                        'i' | 'a' | 'A' | 'I' | 'o' | 'O' => None,
-                        _ => return None, // Unrecognized: no-op
-                    };
-                    if let Some(a) = action {
-                        return Some(a);
+                    } else {
+                        KeyOwner::View
                     }
                 }
             }
-        }
+        };
 
-        // Ctrl+O → toggle collapse/expand on Observe (tool-result) entries.
-        if matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.react_trace.toggle_observe_collapsed();
-            return None;
-        }
-
-        // Ctrl+P / Ctrl+N → input history navigation.
-        if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.input_bar.history_prev();
-            self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
-            return None;
-        }
-        if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.input_bar.history_next();
-            self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
-            return None;
-        }
-
-        #[cfg(feature = "markdown")]
-        if matches!(key.code, KeyCode::Char('v'))
-            && key.modifiers.contains(KeyModifiers::ALT)
-            && self.render_picker.is_some()
-        {
-            return Some(Action::NavigateTo(ViewId::MermaidOverlay(
-                self.session_id.clone(),
-            )));
-        }
-
-        // Priority 1: Permission handling when a permission is pending.
-        if self.react_trace.has_pending_permission() {
-            use crate::action::PermissionChoice;
-            match key.code {
-                KeyCode::Char('y') => {
-                    return Some(Action::PermissionGrant(PermissionChoice::Allow));
-                }
-                KeyCode::Char('n') => {
-                    return Some(Action::PermissionGrant(PermissionChoice::Deny));
-                }
-                KeyCode::Char('a') => {
-                    return Some(Action::PermissionGrant(PermissionChoice::AlwaysAllow));
-                }
-                _ => {}
-            }
-        }
-
-        // Priority 1.4: picker shell (history via Ctrl+R, or trigger-driven
-        // @mention / /slash). Trigger-driven shells (ReadFromInputBar) read
-        // their query from the InputBar, so editing keys must fall through
-        // to input_bar; only navigation/accept/cancel keys are consumed
-        // here. History shells (OwnedByShell) own their own MiniInput and
-        // receive ALL keys.
-        if self.picker_shell.is_some() {
-            use crate::components::query_source::QueryMode;
-            let shell_mode = self
-                .picker_shell
-                .as_ref()
-                .map(|s| s.query_mode())
-                .expect("is_some checked");
-            let is_trigger_driven = shell_mode == QueryMode::ReadFromInputBar;
-            let shell_consumes = if is_trigger_driven {
-                matches!(
-                    key.code,
-                    KeyCode::Up | KeyCode::Down | KeyCode::Esc | KeyCode::Tab | KeyCode::Enter
-                ) || (key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL))
-            } else {
-                true
-            };
-            if shell_consumes {
+        match owner {
+            KeyOwner::Picker => {
                 use crate::components::picker_shell::PickerAction;
                 use crate::components::query_source::RetrievalAccept;
-                let shell = self.picker_shell.as_mut().expect("is_some checked");
+                let shell = self.picker_shell.as_mut().expect("owner=Picker implies Some");
                 let act = shell.handle_key(key);
                 match act {
                     PickerAction::None => {}
@@ -1137,164 +1144,174 @@ impl SessionDetailView {
                         self.picker_shell = None;
                     }
                 }
-                return None;
+                None
             }
-            // else: editing key on a trigger-driven shell; fall through so
-            // input_bar receives it, then dispatch_intent syncs the shell query.
-        }
 
-        // Ctrl+R / Alt+R → open history PickerShell. Rejected while a
-        // completion_trigger popup is active (user must Esc first).
-        if matches!(key.code, KeyCode::Char('r'))
-            && (key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::ALT))
-            && self.picker_shell.is_none()
-        {
-            use crate::components::picker_shell::PickerShell;
-            use crate::components::query_source::HistoryQuerySource;
-            let history = self.input_bar.history().to_vec();
-            self.picker_shell = Some(PickerShell::open(Box::new(HistoryQuerySource::new(
-                history,
-            ))));
-            return None;
-        }
-
-        // Priority 2: If the key is a printable char or an editing key, route to input_bar.
-        let is_editing_key = matches!(
-            key.code,
-            KeyCode::Char(_)
-                | KeyCode::Backspace
-                | KeyCode::Delete
-                | KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Home
-                | KeyCode::End
-                | KeyCode::Enter
-        ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc());
-
-        if is_editing_key {
-            use crate::components::completion_trigger::IntentEvent;
-            use crate::components::input_bar::HandleOutcome;
-            match self.input_bar.handle_key(key) {
-                HandleOutcome::Submit(_, _) => {
-                    // Notify detector before processing submit (the detector doesn't
-                    // care about the text; this just retires any open composition).
-                    self.dispatch_intent(IntentEvent::Submitted);
-                    if let Some((text, ranges, interrupt)) = self.input_bar.take_submit_capture() {
-                        use crate::commands::submit_router::{route, SubmitDecision};
-                        let dec = route(&text, &ranges, &self.command_registry, interrupt);
-                        return match dec {
-                            SubmitDecision::Empty => None,
-                            SubmitDecision::Send {
-                                mut blocks,
-                                interrupt,
-                            } => {
-                                if self.role == "brain" {
-                                    let _ = crate::mentions::hint::prepend_worker_hint(
-                                        &mut blocks,
-                                        &ranges,
-                                        &self.known_worker_names,
-                                    );
-                                }
-                                Some(Action::SendMessage {
-                                    session: self.session_id.clone(),
-                                    blocks,
+            KeyOwner::Composer => {
+                use crate::components::completion_trigger::IntentEvent;
+                use crate::components::input_bar::HandleOutcome;
+                match self.input_bar.handle_key(key) {
+                    HandleOutcome::Submit(_, _) => {
+                        self.dispatch_intent(IntentEvent::Submitted);
+                        if let Some((text, ranges, interrupt)) = self.input_bar.take_submit_capture()
+                        {
+                            use crate::commands::submit_router::{route, SubmitDecision};
+                            let dec = route(&text, &ranges, &self.command_registry, interrupt);
+                            return match dec {
+                                SubmitDecision::Empty => None,
+                                SubmitDecision::Send {
+                                    mut blocks,
                                     interrupt,
-                                })
-                            }
-                            SubmitDecision::Local { action } => Some(action),
-                            SubmitDecision::VendorExec { method, params } => {
-                                Some(Action::VendorExec {
-                                    session: self.session_id.clone(),
-                                    method,
-                                    params,
-                                })
-                            }
-                        };
+                                } => {
+                                    if self.role == "brain" {
+                                        let _ = crate::mentions::hint::prepend_worker_hint(
+                                            &mut blocks,
+                                            &ranges,
+                                            &self.known_worker_names,
+                                        );
+                                    }
+                                    Some(Action::SendMessage {
+                                        session: self.session_id.clone(),
+                                        blocks,
+                                        interrupt,
+                                    })
+                                }
+                                SubmitDecision::Local { action } => Some(action),
+                                SubmitDecision::VendorExec { method, params } => {
+                                    Some(Action::VendorExec {
+                                        session: self.session_id.clone(),
+                                        method,
+                                        params,
+                                    })
+                                }
+                            };
+                        }
+                        None
                     }
+                    HandleOutcome::Key(intent) => {
+                        self.dispatch_intent(intent);
+                        None
+                    }
+                }
+            }
+
+            KeyOwner::View => {
+                // Ctrl+O → toggle collapse/expand on Observe entries.
+                if matches!(key.code, KeyCode::Char('o'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    self.react_trace.toggle_observe_collapsed();
                     return None;
                 }
-                HandleOutcome::Key(intent) => {
-                    self.dispatch_intent(intent);
-                }
-            }
 
-            // If the input_bar is empty and the key was a navigation key (j/k/g/G),
-            // we want scroll behavior instead. But since we already routed to
-            // input_bar above, we only fall through for non-char keys when empty.
-            // Actually, chars always go to input_bar first. The spec says:
-            // "If input_bar is empty: j/k/Up/Down → scroll, g/G → jump, Esc → back"
-            // But chars are "printable" so they go to input_bar which will insert them.
-            // We need to check: if input was empty BEFORE this key and the key is
-            // a scroll key, we should scroll instead. Let's re-check the spec:
-            //
-            // The spec says route printable/editing keys to input_bar. But it also
-            // says when input_bar is empty, j/k/g/G should scroll. The resolution:
-            // j/k/g/G when input is empty should scroll, not type.
-            //
-            // We already inserted the char though. Let's undo if it was a scroll
-            // key and the bar was previously empty (now has exactly 1 char).
-            if self.input_bar.text().len() == 1 {
-                let ch = self.input_bar.text().chars().next().unwrap();
-                if matches!(ch, 'j' | 'k' | 'g' | 'G') {
-                    self.input_bar.clear();
-                    return match ch {
-                        'j' => {
+                // Ctrl+P / Ctrl+N → input history navigation.
+                if matches!(key.code, KeyCode::Char('p'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    self.input_bar.history_prev();
+                    self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
+                    return None;
+                }
+                if matches!(key.code, KeyCode::Char('n'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    self.input_bar.history_next();
+                    self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
+                    return None;
+                }
+
+                #[cfg(feature = "markdown")]
+                if matches!(key.code, KeyCode::Char('v'))
+                    && key.modifiers.contains(KeyModifiers::ALT)
+                    && self.render_picker.is_some()
+                {
+                    return Some(Action::NavigateTo(ViewId::MermaidOverlay(
+                        self.session_id.clone(),
+                    )));
+                }
+
+                // Permission handling when a permission is pending.
+                if self.react_trace.has_pending_permission() {
+                    use crate::action::PermissionChoice;
+                    match key.code {
+                        KeyCode::Char('y') => {
+                            return Some(Action::PermissionGrant(PermissionChoice::Allow));
+                        }
+                        KeyCode::Char('n') => {
+                            return Some(Action::PermissionGrant(PermissionChoice::Deny));
+                        }
+                        KeyCode::Char('a') => {
+                            return Some(Action::PermissionGrant(PermissionChoice::AlwaysAllow));
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Ctrl+R / Alt+R → open history PickerShell.
+                if matches!(key.code, KeyCode::Char('r'))
+                    && (key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.modifiers.contains(KeyModifiers::ALT))
+                    && self.picker_shell.is_none()
+                {
+                    use crate::components::picker_shell::PickerShell;
+                    use crate::components::query_source::HistoryQuerySource;
+                    let history = self.input_bar.history().to_vec();
+                    self.picker_shell = Some(PickerShell::open(Box::new(HistoryQuerySource::new(
+                        history,
+                    ))));
+                    return None;
+                }
+
+                // PageUp/PageDown work regardless of input bar state.
+                match key.code {
+                    KeyCode::PageUp => {
+                        self.react_trace.page_up();
+                        return Some(Action::ScrollUp);
+                    }
+                    KeyCode::PageDown => {
+                        self.react_trace.page_down();
+                        return Some(Action::ScrollDown);
+                    }
+                    _ => {}
+                }
+
+                // Empty-bar nav: j/k/Up/Down scroll, g/G jump, Esc back.
+                if self.input_bar.is_empty() {
+                    match key.code {
+                        KeyCode::Char('j') => {
                             self.react_trace.scroll_down();
-                            Some(Action::ScrollDown)
+                            return Some(Action::ScrollDown);
                         }
-                        'k' => {
+                        KeyCode::Char('k') => {
                             self.react_trace.scroll_up();
-                            Some(Action::ScrollUp)
+                            return Some(Action::ScrollUp);
                         }
-                        'g' => {
+                        KeyCode::Char('g') => {
                             self.react_trace.scroll_to_top();
-                            Some(Action::ScrollToTop)
+                            return Some(Action::ScrollToTop);
                         }
-                        'G' => {
+                        KeyCode::Char('G') => {
                             self.react_trace.scroll_to_bottom();
-                            Some(Action::ScrollToBottom)
+                            return Some(Action::ScrollToBottom);
                         }
-                        _ => None,
-                    };
+                        KeyCode::Up => {
+                            self.react_trace.scroll_up();
+                            return Some(Action::ScrollUp);
+                        }
+                        KeyCode::Down => {
+                            self.react_trace.scroll_down();
+                            return Some(Action::ScrollDown);
+                        }
+                        KeyCode::Esc => {
+                            return Some(Action::NavigateBack);
+                        }
+                        _ => {}
+                    }
                 }
-            }
 
-            return None;
-        }
-
-        // Priority 3: Non-editing keys → scroll/navigate.
-        // PageUp/PageDown work regardless of input bar state.
-        match key.code {
-            KeyCode::PageUp => {
-                self.react_trace.page_up();
-                return Some(Action::ScrollUp);
-            }
-            KeyCode::PageDown => {
-                self.react_trace.page_down();
-                return Some(Action::ScrollDown);
-            }
-            _ => {}
-        }
-
-        if self.input_bar.is_empty() {
-            match key.code {
-                KeyCode::Up => {
-                    self.react_trace.scroll_up();
-                    return Some(Action::ScrollUp);
-                }
-                KeyCode::Down => {
-                    self.react_trace.scroll_down();
-                    return Some(Action::ScrollDown);
-                }
-                KeyCode::Esc => {
-                    return Some(Action::NavigateBack);
-                }
-                _ => {}
+                None
             }
         }
-
-        None
     }
 }
 
@@ -2433,6 +2450,159 @@ mod extract_tool_call_text_tests {
     fn extract_tool_call_text_returns_none_for_empty_content() {
         let content: Vec<spur_acp::ToolCallContent> = vec![];
         assert!(extract_tool_call_text(&content).is_none());
+    }
+}
+
+#[cfg(test)]
+mod composer_routing_tests {
+    use super::*;
+    use crate::action::Action;
+    use crate::views::View;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn test_ctx() -> crate::views::ViewContext<'static> {
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+            std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        crate::views::ViewContext {
+            lineage: &LINEAGE,
+            brain_status: &crate::app::BrainStatus::Idle,
+            license_badge: None,
+            flag_summary: None,
+        }
+    }
+
+    fn make_view() -> SessionDetailView {
+        use spur_acp::AgentConfig;
+        use std::sync::Arc;
+        SessionDetailView::new(
+            spur_acp::SessionId("s".to_string()),
+            "claude".to_string(),
+            "brain".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(AgentConfig::with_defaults("claude")),
+            Vec::new(),
+        )
+    }
+
+    fn press(v: &mut SessionDetailView, code: KeyCode) -> Option<Action> {
+        v.handle_key(KeyEvent::new(code, KeyModifiers::NONE), &test_ctx())
+    }
+
+    fn press_mod(v: &mut SessionDetailView, code: KeyCode, m: KeyModifiers) -> Option<Action> {
+        v.handle_key(KeyEvent::new(code, m), &test_ctx())
+    }
+
+    #[test]
+    fn empty_emacs_j_scrolls_without_typing() {
+        let mut v = make_view();
+        assert!(v.input_bar_text_for_test().is_empty());
+        let act = press(&mut v, KeyCode::Char('j'));
+        assert!(
+            v.input_bar_text_for_test().is_empty(),
+            "empty bar must not type 'j'"
+        );
+        assert!(matches!(act, Some(Action::ScrollDown)), "expected ScrollDown, got {:?}", act);
+    }
+
+    #[test]
+    fn non_empty_emacs_j_stays_in_composer() {
+        let mut v = make_view();
+        v.input_bar_mut_for_test().set_text("hello".into(), 5);
+        let anchor_before = v.react_trace().anchor_for_tests();
+
+        let act = press(&mut v, KeyCode::Char('j'));
+
+        assert_eq!(v.input_bar_text_for_test(), "helloj");
+        assert_eq!(v.react_trace().anchor_for_tests(), anchor_before);
+        assert!(act.is_none());
+    }
+
+    #[test]
+    fn non_empty_up_moves_composer_cursor() {
+        let mut v = make_view();
+        let text = "line1\nline2";
+        v.input_bar_mut_for_test().set_text(text.into(), text.len());
+        let cursor_before = v.input_bar_mut_for_test().cursor();
+        assert_eq!(cursor_before, text.len());
+        let anchor_before = v.react_trace().anchor_for_tests();
+
+        let act = press(&mut v, KeyCode::Up);
+
+        assert_eq!(
+            v.react_trace().anchor_for_tests(),
+            anchor_before,
+            "trace must not scroll when composer has text"
+        );
+        let cursor_after = v.input_bar_mut_for_test().cursor();
+        assert!(
+            cursor_after < cursor_before,
+            "cursor should move up in multiline composer, before={cursor_before}, after={cursor_after}"
+        );
+        assert!(act.is_none());
+    }
+
+    #[test]
+    fn pending_permission_with_non_empty_composer_emits_grant() {
+        let mut v = make_view();
+        v.input_bar_mut_for_test().set_text("hello".into(), 5);
+        v.push_permission("allow file write?", 60);
+
+        let act = press(&mut v, KeyCode::Char('y'));
+
+        assert_eq!(v.input_bar_text_for_test(), "hello", "permission key must not type into bar");
+        assert!(
+            matches!(act, Some(Action::PermissionGrant(crate::action::PermissionChoice::Allow))),
+            "expected PermissionGrant(Allow), got {:?}",
+            act
+        );
+    }
+
+    #[test]
+    fn non_empty_vim_normal_ctrl_p_recalls_history_not_paste() {
+        let mut v = make_view();
+        v.set_edit_mode(crate::components::input_bar::EditMode::Vim(
+            crate::components::input_bar::VimMode::Normal,
+        ));
+        v.seed_input_history(vec![
+            crate::input_history::InputHistoryEntry::new(
+                crate::input_history::InputStateSnapshot::from_text("refactor the walker"),
+            ),
+        ]);
+        v.input_bar_mut_for_test().set_text("current draft".into(), 13);
+
+        let act = press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            v.input_bar_text_for_test(),
+            "refactor the walker",
+            "Ctrl+P must recall history in Vim Normal, not paste"
+        );
+        assert!(act.is_none(), "history nav must not emit an action");
+    }
+
+    #[test]
+    fn alt_v_without_render_picker_reaches_composer() {
+        let mut v = make_view();
+        v.input_bar_mut_for_test().set_text("x".into(), 1);
+        let act = press_mod(&mut v, KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(
+            v.input_bar_text_for_test(),
+            "xv",
+            "Alt+V must reach composer when render_picker is None"
+        );
+        assert!(act.is_none(), "composer typing must not emit action");
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn alt_v_with_render_picker_navigates_to_overlay() {
+        let mut v = make_view();
+        v.set_render_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+        let act = press_mod(&mut v, KeyCode::Char('v'), KeyModifiers::ALT);
+        match act {
+            Some(Action::NavigateTo(ViewId::MermaidOverlay(_))) => {}
+            other => panic!("expected NavigateTo(MermaidOverlay), got {other:?}"),
+        }
     }
 }
 

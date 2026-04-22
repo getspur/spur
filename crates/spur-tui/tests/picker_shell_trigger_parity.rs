@@ -40,6 +40,13 @@ fn type_str(v: &mut SessionDetailView, s: &str) {
     }
 }
 
+fn ctrl_press(v: &mut SessionDetailView, c: char) -> Option<Action> {
+    v.handle_key(
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
+        &test_ctx(),
+    )
+}
+
 #[test]
 fn slash_help_via_picker_shell_dispatches_show_help() {
     let tmp = tempfile::tempdir().unwrap();
@@ -142,6 +149,66 @@ fn typing_space_after_at_closes_mention_shell() {
                 })
                 .collect();
             assert!(text_concat.contains("@NOT "), "got {:?}", text_concat);
+        }
+        other => panic!("expected SendMessage, got {:?}", other),
+    }
+}
+
+#[test]
+fn trigger_picker_blocks_ctrl_p_ctrl_n_from_reaching_input_bar_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("NOTES.md"), "x").unwrap();
+    let mut v = mk_view_in_cwd(tmp.path().to_path_buf());
+
+    // Seed input history so history_prev() would mutate the bar if reached.
+    v.seed_input_history(vec![spur_tui::input_history::InputHistoryEntry::from_text(
+        "previous history entry",
+    )]);
+
+    // Open a trigger-driven mention picker.
+    type_str(&mut v, "@NOT");
+    assert_eq!(v.input_bar_text(), "@NOT", "draft before Ctrl+P");
+
+    // Ctrl+P must NOT reach InputBar history navigation.
+    let _ = ctrl_press(&mut v, 'p');
+    assert_eq!(
+        v.input_bar_text(),
+        "@NOT",
+        "Ctrl+P must not mutate the hidden composer while a trigger-driven picker is open"
+    );
+
+    // Also verify Ctrl+N is blocked.
+    let _ = ctrl_press(&mut v, 'n');
+    assert_eq!(
+        v.input_bar_text(),
+        "@NOT",
+        "Ctrl+N must not mutate the hidden composer while a trigger-driven picker is open"
+    );
+
+    // Dismiss the picker so we can submit the untouched trigger text.
+    let _ = press(&mut v, KeyCode::Esc);
+
+    // Submit should still carry the original trigger text, not history.
+    let act = press(&mut v, KeyCode::Enter).expect("submit action");
+    match act {
+        Action::SendMessage { blocks, .. } => {
+            let text_concat: String = blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                text_concat.contains("@NOT"),
+                "expected '@NOT' literal in outbound text, got {:?}",
+                text_concat
+            );
+            assert!(
+                !text_concat.contains("previous history entry"),
+                "history must not leak into submission, got {:?}",
+                text_concat
+            );
         }
         other => panic!("expected SendMessage, got {:?}", other),
     }

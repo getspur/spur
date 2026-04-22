@@ -629,75 +629,106 @@ impl DashboardView {
     }
 }
 
+/// Who owns the next keystroke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyOwner {
+    Composer,
+    View,
+}
+
 impl DashboardView {
-    fn handle_key_inner(
+    /// Decide ownership from pre-key state.  No mutation.
+    fn key_owner(&self, key: KeyEvent) -> KeyOwner {
+        if !self.input_bar.is_empty() {
+            let is_composer = matches!(
+                key.code,
+                KeyCode::Char(_)
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::Enter
+                    | KeyCode::Up
+                    | KeyCode::Down
+            ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc());
+            return if is_composer {
+                KeyOwner::Composer
+            } else {
+                KeyOwner::View
+            };
+        }
+
+        // Empty input bar.
+        match key.code {
+            KeyCode::Left | KeyCode::Right if self.focused_node.is_some() => KeyOwner::View,
+            KeyCode::Up | KeyCode::Down => KeyOwner::View,
+            KeyCode::Tab => KeyOwner::View,
+            KeyCode::Esc => KeyOwner::View,
+            KeyCode::Enter => KeyOwner::View,
+            KeyCode::Char(c) if self.input_bar.is_vim_normal() => {
+                // Vim Normal mode: review decisions take precedence over mode-entry.
+                if self.focused_node.is_some()
+                    && self.detail_pane.current_tab == DetailTab::Review
+                    && matches!(c, 'a' | 'd' | 'm' | 'R')
+                {
+                    KeyOwner::View
+                } else if matches!(c, 'i' | 'a' | 'A' | 'I' | 'o' | 'O') {
+                    KeyOwner::Composer
+                } else {
+                    KeyOwner::View
+                }
+            }
+            KeyCode::Char(c) if self.is_view_action_char(c) => KeyOwner::View,
+            KeyCode::Char(_) => KeyOwner::Composer,
+            KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End => KeyOwner::Composer,
+            _ => KeyOwner::View,
+        }
+    }
+
+    /// Whether `ch` is a known view-action key when the input bar is empty
+    /// in Insert mode.  Must stay in sync with the Insert-mode view-char
+    /// arm in [`Self::handle_view_key`].
+    fn is_view_action_char(&self, ch: char) -> bool {
+        if self.focused_node.is_some()
+            && self.detail_pane.current_tab == DetailTab::Review
+            && matches!(ch, 'a' | 'd' | 'm' | 'R')
+        {
+            return true;
+        }
+        matches!(ch, 'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's')
+            || (ch == 'c' && self.focused_panel == Panel::Agents)
+    }
+
+    /// Handle a key that belongs to the view (navigation / actions).
+    fn handle_view_key(
         &mut self,
         key: KeyEvent,
         lineage: Option<&ExecutorLineage>,
         worker_streams: &mut crate::worker_streams::WorkerStreams,
     ) -> Option<Action> {
-        let key = super::normalize_macos_option(key);
-
-        // Priority 0: Tab-cycling in detail pane when a node is focused and
-        // the input bar is empty. Must be checked before the editing-key block
-        // so that Left/Right are not consumed by InputBar cursor movement.
-        //
-        // Thread the focused executor's trace into `cycle_tab` so entering
-        // the Stream tab snaps the trace to Following, and so leaving Stream
-        // doesn't strand the viewport mid-history on re-entry.
-        if self.input_bar.is_empty() && self.focused_node.is_some() {
-            match key.code {
-                KeyCode::Right => {
-                    self.detail_pane.cycle_tab(true);
-                    return None;
-                }
-                KeyCode::Left => {
-                    self.detail_pane.cycle_tab(false);
-                    return None;
-                }
-                _ => {}
+        match key.code {
+            KeyCode::Left if self.focused_node.is_some() => {
+                self.detail_pane.cycle_tab(false);
+                None
             }
-        }
-
-        // Priority 1: If key is printable or editing, route to InputBar
-        //
-        // Ctrl+P / Ctrl+N → input history navigation (intercept before
-        // the editing-key block so they don't get routed to InputBar).
-        if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.input_bar.history_prev();
-            return None;
-        }
-        if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.input_bar.history_next();
-            return None;
-        }
-
-        // Ctrl+O → toggle observe collapsed in the focused executor's trace.
-        if matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(ref id) = self.focused_node {
-                if let Some(trace) = worker_streams.get_mut(&id.0) {
-                    trace.toggle_observe_collapsed();
-                    return None;
-                }
+            KeyCode::Right if self.focused_node.is_some() => {
+                self.detail_pane.cycle_tab(true);
+                None
             }
-        }
-
-        // Alt+I → toggle vim/emacs input mode.
-        if matches!(key.code, KeyCode::Char('i')) && key.modifiers.contains(KeyModifiers::ALT) {
-            return Some(Action::ToggleVimMode);
-        }
-
-        // Vim Normal + empty InputBar: handle nav keys directly.
-        // In Vim Normal mode, chars are consumed as commands (not inserted),
-        // so the single-char-nav pattern (insert → check len==1) doesn't work.
-        // Mode-entry keys (i/a/A/I/o/O) fall through to InputBar.
-        if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
-            if let KeyCode::Char(ch) = key.code {
+            KeyCode::Char(ch)
                 if !key
                     .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                {
-                    // Review decision keys when in Review tab
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if self.input_bar.is_vim_normal() {
+                    // Vim Normal mode view chars (empty bar).
                     if self.focused_node.is_some()
                         && self.detail_pane.current_tab == DetailTab::Review
                     {
@@ -718,7 +749,6 @@ impl DashboardView {
                         }
                     }
                     let action = match ch {
-                        // Quick status keys when issue detail is loaded
                         'o' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
                             if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
                                 return Some(Action::Issue(
@@ -763,7 +793,6 @@ impl DashboardView {
                             }
                             return None;
                         }
-                        // I hotkey: open issue detail for focused executor
                         'I' if self.focused_node.is_some() => {
                             if let Some(ref exec_id) = self.focused_node {
                                 if let Some(node) = lineage.and_then(|l| l.node(exec_id)) {
@@ -787,7 +816,6 @@ impl DashboardView {
                             }
                             return None;
                         }
-                        // j/k scroll issue detail body when loaded
                         'j' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
                             self.issue_detail_pane.scroll_down();
                             Some(Action::ScrollDown)
@@ -871,59 +899,18 @@ impl DashboardView {
                         }
                         '?' => Some(Action::ShowHelp),
                         's' => Some(Action::RequestSessions),
-                        // Mode-entry keys fall through to InputBar
                         'i' | 'a' | 'A' | 'I' | 'o' | 'O' => None,
-                        _ => return None, // Unrecognized: no-op
+                        _ => return None,
                     };
                     if let Some(a) = action {
                         return Some(a);
                     }
+                    return None;
                 }
-            }
-        }
 
-        let is_editing_key = matches!(
-            key.code,
-            KeyCode::Char(_)
-                | KeyCode::Backspace
-                | KeyCode::Delete
-                | KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Home
-                | KeyCode::End
-                | KeyCode::Enter
-        ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc());
-
-        if is_editing_key {
-            // Check if InputBar handles it (Enter on non-empty submits)
-            if let HandleOutcome::Submit(text, interrupt) = self.input_bar.handle_key(key) {
-                let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
-                    text,
-                ))];
-                // Routing: only an attached session can use the SendMessage
-                // path. A warm "connected, no session yet" state still needs
-                // NewSessionWithMessage so the first prompt spawns lazily.
-                if self.session_attached {
-                    return Some(Action::SendMessage {
-                        // Placeholder — App replaces with active session id.
-                        session: spur_acp::SessionId(String::new()),
-                        blocks,
-                        interrupt,
-                    });
-                } else {
-                    return Some(Action::NewSessionWithMessage { blocks, interrupt });
-                }
-            }
-
-            // If InputBar has exactly one char and we're in the Review tab,
-            // intercept review decision keys before general navigation.
-            if self.input_bar.text().len() == 1
-                && self.focused_node.is_some()
-                && self.detail_pane.current_tab == DetailTab::Review
-            {
-                let ch = self.input_bar.text().chars().next().unwrap();
-                if let ch @ ('a' | 'd' | 'm' | 'R') = ch {
-                    self.input_bar.clear();
+                // Insert mode view chars (empty bar).
+                if self.focused_node.is_some() && self.detail_pane.current_tab == DetailTab::Review
+                {
                     if let Some(decision) =
                         crate::components::review_card::decision_for_key(ch, None)
                     {
@@ -939,178 +926,182 @@ impl DashboardView {
                             });
                         }
                     }
-                    return None;
                 }
-            }
-
-            // If InputBar was empty and user typed a navigation char, treat as nav
-            if self.input_bar.text().len() == 1 {
-                let ch = self.input_bar.text().chars().next().unwrap();
                 match ch {
                     'j' if self.focused_panel == Panel::Issues => {
-                        self.input_bar.clear();
                         self.issues_panel.select_next(1, self.tracked_issues.len());
-                        return Some(Action::SelectNext);
+                        Some(Action::SelectNext)
                     }
                     'k' if self.focused_panel == Panel::Issues => {
-                        self.input_bar.clear();
                         self.issues_panel.select_prev(1, self.tracked_issues.len());
-                        return Some(Action::SelectPrev);
+                        Some(Action::SelectPrev)
                     }
-                    'j' if self.focused_panel == Panel::Agents => {
-                        self.input_bar.clear();
-                        return Some(Action::SelectNext);
-                    }
+                    'j' if self.focused_panel == Panel::Agents => Some(Action::SelectNext),
                     'j' => {
-                        self.input_bar.clear();
                         if let Some(ref id) = self.focused_node.clone() {
                             let _trace = worker_streams.get_mut(&id.0);
                             self.detail_pane.scroll_down();
                         } else {
                             self.activity_log.scroll_down(20);
                         }
-                        return Some(Action::ScrollDown);
+                        Some(Action::ScrollDown)
                     }
-                    'k' if self.focused_panel == Panel::Agents => {
-                        self.input_bar.clear();
-                        return Some(Action::SelectPrev);
-                    }
+                    'k' if self.focused_panel == Panel::Agents => Some(Action::SelectPrev),
                     'k' => {
-                        self.input_bar.clear();
                         if let Some(ref id) = self.focused_node.clone() {
                             let _trace = worker_streams.get_mut(&id.0);
                             self.detail_pane.scroll_up();
                         } else {
                             self.activity_log.scroll_up();
                         }
-                        return Some(Action::ScrollUp);
+                        Some(Action::ScrollUp)
                     }
-                    'r' => {
-                        self.input_bar.clear();
-                        return Some(Action::JumpToReview);
-                    }
-                    'c' if self.focused_panel == Panel::Agents => {
-                        self.input_bar.clear();
-                        return Some(Action::ToggleCollapse);
-                    }
+                    'r' => Some(Action::JumpToReview),
+                    'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
                     'g' => {
-                        self.input_bar.clear();
                         if let Some(ref id) = self.focused_node.clone() {
                             let _trace = worker_streams.get_mut(&id.0);
                             self.detail_pane.scroll_to_top();
                         } else {
                             self.activity_log.scroll_to_top();
                         }
-                        return Some(Action::ScrollToTop);
+                        Some(Action::ScrollToTop)
                     }
                     'G' => {
-                        self.input_bar.clear();
                         if let Some(ref id) = self.focused_node.clone() {
                             let _trace = worker_streams.get_mut(&id.0);
                             self.detail_pane.scroll_to_bottom();
                         } else {
                             self.activity_log.scroll_to_bottom();
                         }
-                        return Some(Action::ScrollToBottom);
+                        Some(Action::ScrollToBottom)
                     }
                     'v' => {
-                        self.input_bar.clear();
                         self.verbose = !self.verbose;
-                        return Some(Action::ToggleVerbose);
+                        Some(Action::ToggleVerbose)
                     }
-                    '?' => {
-                        self.input_bar.clear();
-                        return Some(Action::ShowHelp);
-                    }
-                    's' => {
-                        self.input_bar.clear();
-                        return Some(Action::RequestSessions);
-                    }
-                    _ => {}
+                    '?' => Some(Action::ShowHelp),
+                    's' => Some(Action::RequestSessions),
+                    _ => None,
                 }
             }
-
-            // Enter on empty InputBar: FocusNode if agents panel is focused, else no-op
-            if key.code == KeyCode::Enter && self.input_bar.is_empty() {
-                if self.focused_panel == Panel::Issues {
-                    if let Some(id) = self.issues_panel.selected_id(&self.tracked_issues) {
-                        self.issue_focus = IssueFocus::Loading { id: id.to_string() };
-                        self.issue_detail_pane.reset();
-                        return Some(Action::Issue(crate::action::IssueAction::ViewDetail {
-                            id: id.to_string(),
-                        }));
-                    }
-                    return None;
+            KeyCode::Up => {
+                if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
+                    self.issue_detail_pane.scroll_up();
+                } else if let Some(ref id) = self.focused_node.clone() {
+                    let _trace = worker_streams.get_mut(&id.0);
+                    self.detail_pane.scroll_up();
+                } else {
+                    self.activity_log.scroll_up();
                 }
-                if self.focused_panel == Panel::Agents {
-                    return Some(Action::FocusNode);
-                }
-                return None;
+                Some(Action::ScrollUp)
             }
+            KeyCode::Down => {
+                if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
+                    self.issue_detail_pane.scroll_down();
+                } else if let Some(ref id) = self.focused_node.clone() {
+                    let _trace = worker_streams.get_mut(&id.0);
+                    self.detail_pane.scroll_down();
+                } else {
+                    self.activity_log.scroll_down(20);
+                }
+                Some(Action::ScrollDown)
+            }
+            KeyCode::Tab if matches!(self.issue_focus, IssueFocus::None) => {
+                self.focused_panel = match self.focused_panel {
+                    Panel::Agents => {
+                        if !self.tracked_issues.is_empty() {
+                            Panel::Issues
+                        } else {
+                            Panel::Log
+                        }
+                    }
+                    Panel::Issues => Panel::Log,
+                    Panel::Log => Panel::Agents,
+                };
+                self.agents_tree
+                    .set_focused(self.focused_panel == Panel::Agents);
+                self.issues_panel
+                    .set_focused(self.focused_panel == Panel::Issues);
+                self.activity_log
+                    .set_focused(self.focused_panel == Panel::Log);
+                Some(Action::CycleFocus)
+            }
+            KeyCode::Esc if !matches!(self.issue_focus, IssueFocus::None) => {
+                self.issue_focus = IssueFocus::None;
+                Some(Action::UnfocusNode)
+            }
+            KeyCode::Esc if self.focused_node.is_some() => Some(Action::UnfocusNode),
+            KeyCode::Esc => Some(Action::NavigateBack),
+            KeyCode::Enter if self.focused_panel == Panel::Issues => {
+                if let Some(id) = self.issues_panel.selected_id(&self.tracked_issues) {
+                    self.issue_focus = IssueFocus::Loading { id: id.to_string() };
+                    self.issue_detail_pane.reset();
+                    return Some(Action::Issue(crate::action::IssueAction::ViewDetail {
+                        id: id.to_string(),
+                    }));
+                }
+                None
+            }
+            KeyCode::Enter if self.focused_panel == Panel::Agents => Some(Action::FocusNode),
+            _ => None,
+        }
+    }
 
+    fn handle_key_inner(
+        &mut self,
+        key: KeyEvent,
+        lineage: Option<&ExecutorLineage>,
+        worker_streams: &mut crate::worker_streams::WorkerStreams,
+    ) -> Option<Action> {
+        let key = super::normalize_macos_option(key);
+
+        // Global shortcuts that bypass ownership.
+        if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.input_bar.history_prev();
             return None;
         }
-
-        // Priority 2: Non-editing keys when InputBar is empty
-        if self.input_bar.is_empty() {
-            match key.code {
-                KeyCode::Up => {
-                    if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
-                        self.issue_detail_pane.scroll_up();
-                    } else if let Some(ref id) = self.focused_node.clone() {
-                        let _trace = worker_streams.get_mut(&id.0);
-                        self.detail_pane.scroll_up();
-                    } else {
-                        self.activity_log.scroll_up();
-                    }
-                    return Some(Action::ScrollUp);
+        if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.input_bar.history_next();
+            return None;
+        }
+        if matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(ref id) = self.focused_node {
+                if let Some(trace) = worker_streams.get_mut(&id.0) {
+                    trace.toggle_observe_collapsed();
+                    return None;
                 }
-                KeyCode::Down => {
-                    if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
-                        self.issue_detail_pane.scroll_down();
-                    } else if let Some(ref id) = self.focused_node.clone() {
-                        let _trace = worker_streams.get_mut(&id.0);
-                        self.detail_pane.scroll_down();
-                    } else {
-                        self.activity_log.scroll_down(20);
-                    }
-                    return Some(Action::ScrollDown);
-                }
-                KeyCode::Tab if matches!(self.issue_focus, IssueFocus::None) => {
-                    self.focused_panel = match self.focused_panel {
-                        Panel::Agents => {
-                            if !self.tracked_issues.is_empty() {
-                                Panel::Issues
-                            } else {
-                                Panel::Log
-                            }
-                        }
-                        Panel::Issues => Panel::Log,
-                        Panel::Log => Panel::Agents,
-                    };
-                    self.agents_tree
-                        .set_focused(self.focused_panel == Panel::Agents);
-                    self.issues_panel
-                        .set_focused(self.focused_panel == Panel::Issues);
-                    self.activity_log
-                        .set_focused(self.focused_panel == Panel::Log);
-                    return Some(Action::CycleFocus);
-                }
-                KeyCode::Esc if !matches!(self.issue_focus, IssueFocus::None) => {
-                    self.issue_focus = IssueFocus::None;
-                    return Some(Action::UnfocusNode);
-                }
-                KeyCode::Esc if self.focused_node.is_some() => {
-                    return Some(Action::UnfocusNode);
-                }
-                // Esc is the universal "back" key. App decides whether that
-                // returns to the active SessionDetail or becomes a no-op.
-                KeyCode::Esc => return Some(Action::NavigateBack),
-                _ => {}
             }
         }
+        if matches!(key.code, KeyCode::Char('i')) && key.modifiers.contains(KeyModifiers::ALT) {
+            return Some(Action::ToggleVimMode);
+        }
 
-        None
+        let owner = self.key_owner(key);
+
+        match owner {
+            KeyOwner::Composer => match self.input_bar.handle_key(key) {
+                HandleOutcome::Submit(text, interrupt) => {
+                    let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
+                        text,
+                    ))];
+                    if self.session_attached {
+                        Some(Action::SendMessage {
+                            session: spur_acp::SessionId(String::new()),
+                            blocks,
+                            interrupt,
+                        })
+                    } else {
+                        Some(Action::NewSessionWithMessage { blocks, interrupt })
+                    }
+                }
+                _ => None,
+            },
+            KeyOwner::View if self.input_bar.is_empty() => {
+                self.handle_view_key(key, lineage, worker_streams)
+            }
+            KeyOwner::View => None,
+        }
     }
 }
 
@@ -1777,5 +1768,19 @@ impl DashboardView {
         }
 
         flushed_any
+    }
+
+    /// Test-only: read current InputBar text.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn input_bar_text_for_test(&self) -> String {
+        self.input_bar.text()
+    }
+
+    /// Test-only: mutable InputBar access for seeding text in tests.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn input_bar_mut_for_test(&mut self) -> &mut crate::components::input_bar::InputBar {
+        &mut self.input_bar
     }
 }
