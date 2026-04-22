@@ -2,8 +2,6 @@
 name: worker-signals
 description: Use when encountering unexpected complexity, blockers, or scope changes during a delegated task — teaches exact signal emission protocol so the brain sees problems in time to re-plan.
 role: worker
-agent: all
-activation: on-dispatch
 ---
 
 # Worker Signals

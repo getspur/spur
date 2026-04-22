@@ -2,8 +2,6 @@
 name: beads-lifecycle
 description: Use when creating, updating, or transitioning beads issues — enforces the status state machine, label semantics, and transition rules that keep brain-worker collaboration consistent.
 role: both
-agent: all
-activation: always
 ---
 
 # beads Lifecycle

@@ -310,6 +310,20 @@ impl BotRuntime {
         self.threads.get(&key)
     }
 
+    fn ensure_known_topic(&mut self, key: &ThreadKey) -> anyhow::Result<()> {
+        let Some(message_thread_id) = key.message_thread_id else {
+            return Ok(());
+        };
+        if self.threads.contains_key(key) {
+            return Ok(());
+        }
+        self.ensure_topic_record(
+            key.chat_id,
+            message_thread_id,
+            format!("Topic {message_thread_id}"),
+        )
+    }
+
     pub async fn handle_chat_text(
         &mut self,
         handle: &spur_interactive::InteractiveFrontendHandle,
@@ -331,6 +345,7 @@ impl BotRuntime {
                 }])
             }
             ParsedChatInput::PlainText(body) => {
+                self.ensure_known_topic(&key)?;
                 let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(body))];
                 let record = self.threads.get_mut(&key).ok_or_else(|| anyhow::anyhow!("unknown topic"))?;
                 match &record.binding {
@@ -430,9 +445,7 @@ impl BotRuntime {
                         text: "Use /resume inside a topic.".into(),
                     }]);
                 }
-                if !self.threads.contains_key(&key) {
-                    return Err(anyhow::anyhow!("unknown topic"));
-                }
+                self.ensure_known_topic(&key)?;
 
                 // Archive any OTHER topic that currently owns the requested
                 // ACP session. This is the atomicity rule from the spec: no

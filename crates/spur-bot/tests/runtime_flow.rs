@@ -107,6 +107,49 @@ async fn unbound_topic_plain_text_starts_new_session() {
 }
 
 #[tokio::test]
+async fn unknown_topic_plain_text_auto_registers_and_starts_new_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".spur/bot/state.json");
+    let store = BotStateStore::new(path.clone());
+    let (user_tx, mut user_rx) = tokio::sync::mpsc::channel(1);
+    let (review_tx, _review_rx) = tokio::sync::mpsc::channel(1);
+    let (_event_tx, event_rx) = tokio::sync::broadcast::channel(4);
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let host = InteractiveFrontendHost::from_parts_for_test(
+        user_tx,
+        review_tx,
+        event_rx,
+        perm_rx,
+        tokio::spawn(async {}),
+    );
+    let handle = host.handle();
+    let mut runtime = BotRuntime::new(store);
+
+    let renders = runtime
+        .handle_chat_text(&handle, 42, Some(777), "hello from a manual topic")
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        user_rx.recv().await.unwrap(),
+        spur_core::InteractiveInput::NewSessionWithMessage { .. }
+    ));
+    assert!(matches!(
+        renders.as_slice(),
+        [RuntimeRender::WorkingStatus { .. }]
+    ));
+
+    let persisted = BotStateStore::new(path).load().unwrap();
+    let record = persisted
+        .threads
+        .get(&777)
+        .expect("unknown topic should be lazily registered and persisted");
+    assert_eq!(record.topic_name, "Topic 777");
+    assert!(!record.archived);
+    assert!(matches!(record.binding_state, BindingState::Unbound));
+}
+
+#[tokio::test]
 async fn restore_pending_topic_queues_resume_then_flushes_message() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.restore_topic_binding(42, 77, "Session 1".into(), "acp-77".into(), "kimi".into());
@@ -155,6 +198,52 @@ async fn topic_resume_archives_previous_binding() {
         .archived_previous
         .contains(&"acp-old".to_string()));
     assert!(matches!(renders.as_slice(), [RuntimeRender::WorkingStatus { .. }]));
+}
+
+#[tokio::test]
+async fn unknown_topic_resume_auto_registers_and_enters_restore_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".spur/bot/state.json");
+    let store = BotStateStore::new(path.clone());
+    let (user_tx, mut user_rx) = tokio::sync::mpsc::channel(1);
+    let (review_tx, _review_rx) = tokio::sync::mpsc::channel(1);
+    let (_event_tx, event_rx) = tokio::sync::broadcast::channel(4);
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let host = InteractiveFrontendHost::from_parts_for_test(
+        user_tx,
+        review_tx,
+        event_rx,
+        perm_rx,
+        tokio::spawn(async {}),
+    );
+    let handle = host.handle();
+    let mut runtime = BotRuntime::new(store);
+
+    let renders = runtime
+        .handle_chat_text(&handle, 42, Some(888), "/resume acp-rebound")
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        user_rx.recv().await.unwrap(),
+        spur_core::InteractiveInput::ResumeSession { session_id } if session_id == "acp-rebound"
+    ));
+    assert!(matches!(renders.as_slice(), [RuntimeRender::WorkingStatus { .. }]));
+
+    let persisted = BotStateStore::new(path).load().unwrap();
+    let record = persisted
+        .threads
+        .get(&888)
+        .expect("unknown topic should be lazily registered for /resume");
+    assert_eq!(record.topic_name, "Topic 888");
+    assert!(!record.archived);
+    assert!(matches!(
+        record.binding_state,
+        BindingState::RestorePending {
+            ref acp_session_id,
+            ref brain,
+        } if acp_session_id == "acp-rebound" && brain == "kimi"
+    ));
 }
 
 #[tokio::test]
