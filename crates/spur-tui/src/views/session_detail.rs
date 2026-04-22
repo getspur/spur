@@ -1005,8 +1005,12 @@ impl SessionDetailView {
         }
 
         let owner = {
-            // Picker shell takes precedence when open.
-            if let Some(ref shell) = self.picker_shell {
+            // Pending permission keys outrank even an open picker shell.
+            if self.react_trace.has_pending_permission()
+                && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'))
+            {
+                KeyOwner::View
+            } else if let Some(ref shell) = self.picker_shell {
                 use crate::components::query_source::QueryMode;
                 let is_trigger_driven = shell.query_mode() == QueryMode::ReadFromInputBar;
                 let shell_consumes = if is_trigger_driven {
