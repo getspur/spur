@@ -1,4 +1,6 @@
-use spur_bot::state::{BotStateStore, PersistedBotState};
+use spur_bot::state::{
+    BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord,
+};
 
 #[test]
 fn persisted_state_round_trips() {
@@ -6,12 +8,18 @@ fn persisted_state_round_trips() {
     let path = dir.path().join("state.json");
     let store = BotStateStore::new(path.clone());
 
-    let expected = PersistedBotState {
-        version: 1,
-        operator_chat_id: Some(10_001),
-        current_acp_session_id: Some("acp_77".into()),
-        current_brain: Some("claude-code".into()),
-    };
+    let mut expected = PersistedBotState::default();
+    expected.operator_chat_id = Some(10_001);
+    expected.threads.insert(
+        1,
+        PersistedThreadRecord {
+            topic_name: "Session 1".into(),
+            archived: false,
+            acp_session_id: Some("acp_77".into()),
+            brain: Some("claude-code".into()),
+            binding_state: BindingState::Unbound,
+        },
+    );
 
     store.save(&expected).unwrap();
     let loaded = store.load().unwrap();
@@ -25,6 +33,73 @@ fn missing_state_file_defaults_cleanly() {
     let store = BotStateStore::new(dir.path().join("missing.json"));
 
     let loaded = store.load().unwrap();
-    assert_eq!(loaded.current_acp_session_id, None);
-    assert_eq!(loaded.current_brain, None);
+    assert_eq!(loaded.operator_chat_id, None);
+    assert_eq!(loaded.threads.len(), 0);
+}
+
+#[test]
+fn legacy_single_binding_loads_without_data_loss() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("state.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "version": 1,
+            "operator_chat_id": 42,
+            "current_acp_session_id": "acp-1",
+            "current_brain": "kimi"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let store = BotStateStore::new(path);
+    let state = store.load().unwrap();
+
+    assert_eq!(state.operator_chat_id, Some(42));
+    assert_eq!(state.next_topic_seq, 1);
+    assert_eq!(state.threads.len(), 1);
+    let only = state.threads.values().next().unwrap();
+    assert!(only.archived);
+    assert_eq!(only.acp_session_id.as_deref(), Some("acp-1"));
+    assert_eq!(only.brain.as_deref(), Some("kimi"));
+}
+
+#[test]
+fn registry_round_trips_archived_and_live_threads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("state.json");
+    let store = BotStateStore::new(path.clone());
+
+    let mut state = PersistedBotState::default();
+    state.operator_chat_id = Some(42);
+    state.next_topic_seq = 3;
+    state.threads.insert(
+        11,
+        PersistedThreadRecord {
+            topic_name: "Session 1".into(),
+            archived: false,
+            acp_session_id: Some("acp-11".into()),
+            brain: Some("kimi".into()),
+            binding_state: BindingState::RestorePending {
+                acp_session_id: "acp-11".into(),
+                brain: "kimi".into(),
+            },
+        },
+    );
+    state.threads.insert(
+        12,
+        PersistedThreadRecord {
+            topic_name: "Session 2".into(),
+            archived: true,
+            acp_session_id: Some("acp-12".into()),
+            brain: Some("kimi".into()),
+            binding_state: BindingState::ArchivedDetached,
+        },
+    );
+
+    store.save(&state).unwrap();
+    let loaded = store.load().unwrap();
+
+    assert_eq!(loaded, state);
 }
