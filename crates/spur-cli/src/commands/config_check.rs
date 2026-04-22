@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use spur_acp::{validate_agent_config, SpurConfig};
+use spur_bot::telegram::config::validate as validate_telegram_config;
 
 /// Returns the exit code: 0 on success, 1 on any fatal error.
 pub fn run(repo_root: &Path) -> anyhow::Result<i32> {
@@ -39,6 +40,11 @@ pub fn run(repo_root: &Path) -> anyhow::Result<i32> {
                 }
             }
         }
+    }
+
+    if let Err(error) = validate_telegram_config(&cfg.bot.telegram) {
+        eprintln!("\u{2717} {error}");
+        fatal_count += 1;
     }
 
     if fatal_count > 0 {

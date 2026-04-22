@@ -73,3 +73,32 @@ dispatch = "vendor_exec"
         "expected broken-kiro/exec_method in stderr; got: {stderr}"
     );
 }
+
+#[test]
+fn config_check_fails_when_bot_enabled_without_operator_user() {
+    let dir = write_config(
+        r#"
+[[agents.entries]]
+name = "claude-code-acp"
+command = "npx"
+args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
+transport = "acp"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[bot.telegram]
+enabled = true
+bot_token = "123:ABC"
+"#,
+    );
+
+    let out = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args(["config", "check"])
+        .output()
+        .expect("spawn");
+
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("operator_user_id"));
+}
