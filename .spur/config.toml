@@ -245,6 +245,30 @@ strengths = []
 limitations = []
 inherit_defaults = true
 
+
+[[agents.entries]]
+name = "kimi"
+command = "kimi"
+args = ["acp"]
+transport = "acp"
+kind = "generic"
+role = "both"
+capabilities = []
+cost_tier = "low"
+skip_permissions = false
+skip_permissions_args = []
+
+[agents.entries.review]
+review_required = false
+review_timeout_secs = 1800
+max_review_retries = 3
+
+[agents.entries.review.review_timeout_default.Reject]
+reason = "review timeout"
+
+[agents.entries.display]
+handle = "kimi"
+
 [[agents.entries]]
 name = "opencode-acp"
 command = "opencode"
