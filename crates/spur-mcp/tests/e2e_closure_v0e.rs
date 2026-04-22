@@ -6,9 +6,14 @@ use std::sync::Arc;
 
 use spur_mcp::plan::audit_sentinel::{AuditSentinelKind, EpicCompletionOutcome};
 use spur_mcp::plan::labels;
-use spur_mcp::plan::reconciler::{Reconciler, ReconcilerAutomation, ReconcilerConfig};
+use serde_json::json;
+use spur_acp::{BrainSessionId, SessionId};
+use spur_mcp::plan::reconciler::{Reconciler, ReconcilerAutomation, ReconcilerConfig, ReconcilerDispatchCtx};
+use spur_mcp::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
 use tokio::sync::Notify;
+use tokio_util::task::TaskTracker;
 
 fn br_available() -> bool {
     Command::new("br")
@@ -267,4 +272,334 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
             epic_id: found_epic_id,
         } if plan_id == "P1" && found_epic_id == &epic_id
     )));
+}
+
+// ── Helpers for t_v0e_1 and t_v0e_3 ─────────────────────────────────────
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git invocation failed");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn continuation_ctx() -> DetachedContinuationCtx {
+    DetachedContinuationCtx {
+        on_complete: Arc::new(|_cont, _worker| Box::pin(async {})),
+    }
+}
+
+fn seed_ready_task(repo: &Path, plan_id: &str) -> (String, String) {
+    let epic_id = parse_id_from_create(&run_br_json(
+        repo,
+        &["create", "--type", "epic", "--title", "Wake Epic", "--priority", "2"],
+    ));
+    let task_id = parse_id_from_create(&run_br_json(
+        repo,
+        &["create", "--type", "task", "--title", "Ready Task", "--priority", "2"],
+    ));
+    label_issue(repo, &epic_id, &labels::plan_id(plan_id));
+    label_issue(repo, &task_id, &labels::plan_id(plan_id));
+    label_issue(repo, &task_id, &labels::plan_task_id("t1"));
+    label_issue(repo, &task_id, &labels::agent("codex"));
+    label_issue(repo, &epic_id, labels::PLAN_COMPLETE);
+    (epic_id, task_id)
+}
+
+// ── T-v0e-1: persisted direct-dispatch retirement ───────────────────────
+
+#[tokio::test]
+async fn t_v0e_1_no_persisted_direct_dispatch() {
+    if !br_available() {
+        eprintln!("skipping t_v0e_1_no_persisted_direct_dispatch: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(dir.path(), &["config", "user.email", "test@spur"]);
+    run_git(dir.path(), &["config", "user.name", "spur-test"]);
+    std::fs::write(dir.path().join("seed.txt"), "seed\n").expect("write seed");
+    run_git(dir.path(), &["add", "seed.txt"]);
+    run_git(dir.path(), &["commit", "-q", "-m", "seed"]);
+    run_br(dir.path(), &["init"]);
+
+    let pm = beads_pm(dir.path()).await;
+    let session_id = BrainSessionId::new(SessionId("brain".into()));
+    let (mut server, mut channel) =
+        McpCallbackServer::new(&session_id, Some(pm), None, continuation_ctx());
+    server.set_repo_root(dir.path().to_path_buf());
+
+    // 1. submit_plan(persist_as_epic=true) must not dispatch directly
+    let response = server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "epic_title": "Persisted Dispatch Retirement Epic",
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "codex",
+                "task": "Do something",
+                "depends_on": [],
+            }]
+        }))
+        .await;
+    assert!(response.get("error").is_none(), "submit_plan should succeed: {response}");
+
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        channel.request_rx.recv(),
+    )
+    .await;
+    assert!(
+        recv.is_err(),
+        "persisted submit_plan must not dispatch directly"
+    );
+
+    // 2. execute_epic must not dispatch directly
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &["create", "--type", "epic", "--title", "Exec Epic", "--priority", "2"],
+    ));
+    let task_a_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &["create", "--type", "task", "--title", "Task A", "--priority", "2"],
+    ));
+    run_br(dir.path(), &["dep", "add", &task_a_id, &epic_id]);
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+    let response = server.__test_call_execute_epic(&epic_id, Some("codex")).await;
+    assert!(
+        response.get("error").is_none(),
+        "execute_epic should succeed: {response}"
+    );
+
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        channel.request_rx.recv(),
+    )
+    .await;
+    assert!(
+        recv.is_err(),
+        "execute_epic must not dispatch directly"
+    );
+
+    // 3. persisted review approve must not dispatch directly
+    let state = PlanState {
+        plan_id: "p-review".into(),
+        brain_session_id: session_id.clone(),
+        base_snapshot_branch: None,
+        base_snapshot_oid: None,
+        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
+        epic_id: Some(epic_id.clone()),
+        tasks: vec![PlanTaskEntry {
+            spec: PlanTask {
+                task_id: "t-review".into(),
+                agent: "codex".into(),
+                task: "Review task".into(),
+                depends_on: vec![],
+                issue_id: Some(task_a_id.clone()),
+                context_files: vec![],
+            },
+            status: PlanTaskStatus::AwaitingReview { summary: None },
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: None,
+        }],
+    };
+    let plan_arc = Arc::new(tokio::sync::Mutex::new(state));
+    let (dtx, mut drx) = tokio::sync::mpsc::channel(1);
+    let _ = spur_mcp::plan::handle_review_task(
+        plan_arc,
+        "p-review",
+        "t-review",
+        "approve",
+        None,
+        None,
+        None,
+        Some(&dtx),
+        None,
+    )
+    .await
+    .expect("review_task approve should succeed");
+    assert!(
+        matches!(drx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+        "persisted review approve must not enqueue a follow-up dispatch"
+    );
+}
+
+// ── T-v0e-3: wakeup equivalence ─────────────────────────────────────────
+
+#[tokio::test]
+async fn t_v0e_3_fast_forward_matches_polling() {
+    if !br_available() {
+        eprintln!("skipping t_v0e_3_fast_forward_matches_polling: `br` not on PATH");
+        return;
+    }
+
+    let plan_id = "P-wake";
+
+    // ── 1. Ready-task progression equivalence ─────────────────────────
+    let dir_poll = TempDir::new().expect("tempdir");
+    run_br(dir_poll.path(), &["init"]);
+    let (_epic_poll, task_poll) = seed_ready_task(dir_poll.path(), plan_id);
+    let pm_poll = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir_poll.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    let (poll_tx, mut poll_rx) = tokio::sync::mpsc::channel(1);
+    let poll_reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm_poll),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx: poll_tx,
+            task_tracker: TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+            event_sink: None,
+        }),
+        Some(plan_id.into()),
+    );
+    let poll_did_work = poll_reconciler.tick_once().await.expect("poll tick");
+    assert!(poll_did_work, "polling tick must observe ready task");
+    let poll_req = poll_rx.recv().await;
+    assert!(poll_req.is_some(), "polling tick must dispatch ready task");
+    assert_eq!(poll_req.unwrap().issue_id.as_deref(), Some(task_poll.as_str()));
+
+    let dir_ff = TempDir::new().expect("tempdir");
+    run_br(dir_ff.path(), &["init"]);
+    let (_epic_ff, task_ff) = seed_ready_task(dir_ff.path(), plan_id);
+    let pm_ff = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir_ff.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    let (ff_tx, mut ff_rx) = tokio::sync::mpsc::channel(1);
+    let fast_forward = Arc::new(Notify::new());
+    let ff_reconciler = Reconciler::new(
+        ReconcilerConfig {
+            base_interval: std::time::Duration::from_secs(60),
+            idle_ceiling: std::time::Duration::from_secs(60),
+            backoff_factor: 2,
+        },
+        Arc::clone(&pm_ff),
+        Arc::clone(&fast_forward),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx: ff_tx,
+            task_tracker: TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+            event_sink: None,
+        }),
+        Some(plan_id.into()),
+    );
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move { ff_reconciler.run(cancel_rx).await });
+    tokio::task::yield_now().await;
+    fast_forward.notify_one();
+    let ff_req = tokio::time::timeout(std::time::Duration::from_secs(2), ff_rx.recv()).await;
+    assert!(
+        ff_req.is_ok(),
+        "fast-forward must trigger dispatch within timeout"
+    );
+    let ff_req = ff_req.unwrap();
+    assert!(
+        ff_req.is_some(),
+        "fast-forward must produce a delegation request"
+    );
+    assert_eq!(ff_req.unwrap().issue_id.as_deref(), Some(task_ff.as_str()));
+    let _ = cancel_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+
+    // ── 2. Terminal outcome equivalence ───────────────────────────────
+    let dir_term_poll = TempDir::new().expect("tempdir");
+    run_br(dir_term_poll.path(), &["init"]);
+    let (pm_term_poll, epic_term_poll, task_a_poll, task_b_poll) =
+        seed_all_approved_epic(dir_term_poll.path(), plan_id).await;
+    for task_id in [&task_a_poll, &task_b_poll] {
+        pm_term_poll
+            .update_issue(
+                task_id,
+                spur_pm::IssueUpdate {
+                    status: Some(pm_term_poll.closed_status().to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("close task");
+    }
+    let term_poll_reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm_term_poll),
+        Arc::new(Notify::new()),
+        None,
+        Some(plan_id.into()),
+    );
+    let term_poll_did_work = term_poll_reconciler.tick_once().await.expect("term poll tick");
+    assert!(term_poll_did_work, "polling tick must close epic");
+    let epic = pm_term_poll
+        .get_issue(&epic_term_poll)
+        .await
+        .expect("get epic");
+    assert_eq!(epic.status, pm_term_poll.closed_status());
+    assert!(
+        epic.labels.iter().any(|l| l == labels::INTEGRATION_PENDING),
+        "polling path must add integration-pending"
+    );
+
+    let dir_term_ff = TempDir::new().expect("tempdir");
+    run_br(dir_term_ff.path(), &["init"]);
+    let (pm_term_ff, epic_term_ff, task_a_ff, task_b_ff) =
+        seed_all_approved_epic(dir_term_ff.path(), plan_id).await;
+    for task_id in [&task_a_ff, &task_b_ff] {
+        pm_term_ff
+            .update_issue(
+                task_id,
+                spur_pm::IssueUpdate {
+                    status: Some(pm_term_ff.closed_status().to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("close task");
+    }
+    let term_fast_forward = Arc::new(Notify::new());
+    let term_ff_reconciler = Reconciler::new(
+        ReconcilerConfig {
+            base_interval: std::time::Duration::from_secs(60),
+            idle_ceiling: std::time::Duration::from_secs(60),
+            backoff_factor: 2,
+        },
+        Arc::clone(&pm_term_ff),
+        Arc::clone(&term_fast_forward),
+        None,
+        Some(plan_id.into()),
+    );
+    let (cancel_tx2, cancel_rx2) = tokio::sync::oneshot::channel();
+    let handle2 = tokio::spawn(async move { term_ff_reconciler.run(cancel_rx2).await });
+    tokio::task::yield_now().await;
+    term_fast_forward.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let epic = pm_term_ff
+        .get_issue(&epic_term_ff)
+        .await
+        .expect("get epic");
+    assert_eq!(epic.status, pm_term_ff.closed_status());
+    assert!(
+        epic.labels.iter().any(|l| l == labels::INTEGRATION_PENDING),
+        "fast-forward path must add integration-pending"
+    );
+    let _ = cancel_tx2.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle2).await;
 }
