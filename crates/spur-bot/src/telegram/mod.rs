@@ -16,24 +16,18 @@ pub async fn run_telegram_bot(
     let mut event_rx = host.take_event_stream().expect("event stream");
     let mut perm_rx = host.take_permission_stream().expect("permission stream");
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(64);
-    let mut runtime =
-        crate::runtime::BotRuntime::new(crate::state::BotStateStore::new(state_path));
+    let mut runtime = crate::runtime::BotRuntime::new(crate::state::BotStateStore::new(state_path));
     let client = client::TelegramClient::new(cfg.bot_token.as_deref().expect("validated"));
-    let sender = crate::telegram::sender::TelegramSender::new(
-        client.clone(),
-        cfg.max_requests_per_second,
-    );
+    let sender =
+        crate::telegram::sender::TelegramSender::new(client.clone(), cfg.max_requests_per_second);
     let cancellation = tokio_util::sync::CancellationToken::new();
 
     let poll_cancellation = cancellation.clone();
     let cfg_poll_timeout = cfg.poll_timeout_secs;
     let poll_client = client.clone();
     tokio::spawn(async move {
-        let _ = poll_loop::run_poll_loop(
-            &poll_client,
-            cfg_poll_timeout,
-            poll_cancellation,
-            |batch| {
+        let _ =
+            poll_loop::run_poll_loop(&poll_client, cfg_poll_timeout, poll_cancellation, |batch| {
                 let mut inputs = Vec::new();
                 for update in batch {
                     if let Some(input) = router::normalize_update(&update, operator_user_id) {
@@ -44,9 +38,8 @@ pub async fn run_telegram_bot(
                     update_tx.try_send(inputs)?;
                 }
                 Ok(())
-            },
-        )
-        .await;
+            })
+            .await;
     });
 
     loop {

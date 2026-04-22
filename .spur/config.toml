@@ -2,10 +2,10 @@
 default = "claude-code"
 fallback = [
     "kiro",
-    "claude-code-acp",
-    "codex-acp",
-    "opencode-acp",
-    "gemini-acp",
+    "claude-code",
+    "codex",
+    "opencode",
+    "gemini",
 ]
 
 [brain.prompt]
@@ -14,7 +14,7 @@ fallback = [
 framework = "v1"
 
 [[agents.entries]]
-name = "claude-code"
+name = "claude-code-sj"
 command = "claude"
 args = [
     "-p",
@@ -109,7 +109,7 @@ limitations = []
 inherit_defaults = true
 
 [[agents.entries]]
-name = "claude-code-acp"
+name = "claude-code"
 command = "npx"
 args = [
     "--yes",
@@ -154,7 +154,7 @@ limitations = []
 inherit_defaults = true
 
 [[agents.entries]]
-name = "codex-acp"
+name = "codex"
 command = "npx"
 args = [
     "--yes",
@@ -199,7 +199,7 @@ limitations = []
 inherit_defaults = true
 
 [[agents.entries]]
-name = "gemini-acp"
+name = "gemini"
 command = "gemini"
 args = [
     "--acp",
@@ -224,7 +224,7 @@ max_review_retries = 3
 reason = "review timeout"
 
 [agents.entries.display]
-handle = "gemini-acp"
+handle = "gemini"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
@@ -270,7 +270,7 @@ reason = "review timeout"
 handle = "kimi"
 
 [[agents.entries]]
-name = "opencode-acp"
+name = "opencode"
 command = "opencode"
 args = [
     "acp"

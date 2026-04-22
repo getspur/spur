@@ -490,9 +490,7 @@ impl BotRuntime {
     }
 }
 
-fn extract_agent_text(
-    notification: &agent_client_protocol::SessionNotification,
-) -> Option<String> {
+fn extract_agent_text(notification: &agent_client_protocol::SessionNotification) -> Option<String> {
     match &notification.update {
         spur_acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
             spur_acp::ContentBlock::Text(tc) => Some(tc.text.clone()),

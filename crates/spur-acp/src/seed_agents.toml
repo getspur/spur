@@ -10,9 +10,9 @@
 # To add a new seed agent: append an [[agents.entries]] block below. No
 # Rust changes are required. See docs/spur/agent-onboarding-cookbook.md.
 
-# ── claude-code (stream-json fallback) ────────────────────────────
+# ── claude-code-sj (stream-json fallback) ─────────────────────────
 [[agents.entries]]
-name = "claude-code"
+name = "claude-code-sj"
 command = "claude"
 args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"]
 transport = "stream-json"
@@ -54,9 +54,9 @@ item_schema = "acp_available_command"
 [agents.entries.permissions]
 args = ["--trust-all-tools"]
 
-# ── claude-code-acp ───────────────────────────────────────────────
+# ── claude-code ───────────────────────────────────────────────────
 [[agents.entries]]
-name = "claude-code-acp"
+name = "claude-code"
 command = "npx"
 args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
 transport = "acp"
@@ -73,14 +73,36 @@ dispatch = "prompt_text"
 [agents.entries.permissions]
 session_mode = "bypassPermissions"
 
-# ── codex (via zed-industries/codex-acp, direct binary) ───────────
+# ── codex-bin (via zed-industries/codex-acp, direct binary) ───────────
 # Rust binary that bridges OpenAI Codex runtime with ACP over stdio.
 # Install: https://github.com/zed-industries/codex-acp/releases
-# Or: npx @zed-industries/codex-acp (see codex-acp entry below).
+# Or: npx @zed-industries/codex-acp (see codex entry below).
 [[agents.entries]]
-name = "codex"
+name = "codex-bin"
 command = "codex-acp"
 args = []
+transport = "acp"
+kind = "codex-acp"
+role = "both"
+cost_tier = "low"
+
+[agents.entries.display]
+handle = "codex"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+
+[agents.entries.permissions]
+session_mode = "full-auto"
+
+# ── codex (npx wrapper, version-pinned) ──────────────────────
+# Same agent as above but via npx — no pre-installed binary needed.
+# Pinned version is critical: @latest would silently pull breaking
+# changes mid-session. Bump deliberately and retest after each bump.
+[[agents.entries]]
+name = "codex"
+command = "npx"
+args = ["--yes", "@zed-industries/codex-acp@0.11.1"]
 transport = "acp"
 kind = "codex-acp"
 role = "both"
@@ -126,31 +148,9 @@ description = "Logout of Codex"
 [agents.entries.permissions]
 session_mode = "full-auto"
 
-# ── codex-acp (npx wrapper, version-pinned) ──────────────────────
-# Same agent as above but via npx — no pre-installed binary needed.
-# Pinned version is critical: @latest would silently pull breaking
-# changes mid-session. Bump deliberately and retest after each bump.
+# ── gemini ────────────────────────────────────────────────────────
 [[agents.entries]]
-name = "codex-acp"
-command = "npx"
-args = ["--yes", "@zed-industries/codex-acp@0.11.1"]
-transport = "acp"
-kind = "codex-acp"
-role = "both"
-cost_tier = "low"
-
-[agents.entries.display]
-handle = "codex"
-
-[agents.entries.commands]
-dispatch = "prompt_text"
-
-[agents.entries.permissions]
-session_mode = "full-auto"
-
-# ── gemini-acp ────────────────────────────────────────────────────
-[[agents.entries]]
-name = "gemini-acp"
+name = "gemini"
 command = "gemini"
 args = ["--acp", "-y", "-m", "deep-thinker"]
 transport = "acp"
@@ -159,7 +159,7 @@ role = "both"
 cost_tier = "low"
 
 [agents.entries.display]
-handle = "gemini-acp"
+handle = "gemini"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
@@ -167,9 +167,9 @@ dispatch = "prompt_text"
 [agents.entries.permissions]
 session_mode = "full-auto"
 
-# ── opencode-acp ──────────────────────────────────────────────────
+# ── opencode ──────────────────────────────────────────────────────
 [[agents.entries]]
-name = "opencode-acp"
+name = "opencode"
 command = "opencode"
 args = ["-m", "openrouter/z-ai/glm-5.1", "acp"]
 transport = "acp"

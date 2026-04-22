@@ -14,9 +14,7 @@ impl TelegramClient {
 
     pub async fn delete_webhook(&self) -> anyhow::Result<()> {
         self.inner
-            .delete_webhook(
-                &frankenstein::methods::DeleteWebhookParams::builder().build(),
-            )
+            .delete_webhook(&frankenstein::methods::DeleteWebhookParams::builder().build())
             .await?;
         Ok(())
     }
@@ -64,11 +62,7 @@ impl TelegramClient {
         Ok(())
     }
 
-    pub async fn answer_callback(
-        &self,
-        query_id: String,
-        text: String,
-    ) -> anyhow::Result<()> {
+    pub async fn answer_callback(&self, query_id: String, text: String) -> anyhow::Result<()> {
         self.inner
             .answer_callback_query(
                 &frankenstein::methods::AnswerCallbackQueryParams::builder()
@@ -130,7 +124,10 @@ mod tests {
 
     #[test]
     fn draft_id_encoding_is_deterministic() {
-        assert_eq!(encode_draft_id("working-10001"), encode_draft_id("working-10001"));
+        assert_eq!(
+            encode_draft_id("working-10001"),
+            encode_draft_id("working-10001")
+        );
     }
 
     #[test]
@@ -143,7 +140,10 @@ mod tests {
     fn distinct_draft_ids_do_not_collapse() {
         let a = encode_draft_id("draft-a");
         let b = encode_draft_id("draft-b");
-        assert_ne!(a, b, "distinct local draft ids should not map to the same telegram draft id");
+        assert_ne!(
+            a, b,
+            "distinct local draft ids should not map to the same telegram draft id"
+        );
     }
 
     #[test]
@@ -161,7 +161,10 @@ mod tests {
             "text": "hello",
         });
         let draft_id = payload.get("draft_id").and_then(|v| v.as_i64());
-        assert!(draft_id.is_some(), "payload must contain a numeric draft_id");
+        assert!(
+            draft_id.is_some(),
+            "payload must contain a numeric draft_id"
+        );
         assert_ne!(draft_id.unwrap(), 0, "draft_id must be non-zero");
     }
 }

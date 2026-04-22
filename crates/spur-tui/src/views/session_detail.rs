@@ -1060,7 +1060,8 @@ impl SessionDetailView {
                             | KeyCode::Enter
                             | KeyCode::Up
                             | KeyCode::Down
-                    ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc()))
+                    ) || (key.code == KeyCode::Esc
+                        && self.input_bar.wants_esc()))
                         && !is_permission_key;
 
                     if is_composer_editing {
@@ -1083,8 +1084,7 @@ impl SessionDetailView {
                         // Unrecognized Vim Normal chars are no-ops when empty.
                         else if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
                             KeyOwner::View
-                        }
-                        else {
+                        } else {
                             KeyOwner::Composer
                         }
                     } else {
@@ -1098,7 +1098,10 @@ impl SessionDetailView {
             KeyOwner::Picker => {
                 use crate::components::picker_shell::PickerAction;
                 use crate::components::query_source::RetrievalAccept;
-                let shell = self.picker_shell.as_mut().expect("owner=Picker implies Some");
+                let shell = self
+                    .picker_shell
+                    .as_mut()
+                    .expect("owner=Picker implies Some");
                 let act = shell.handle_key(key);
                 match act {
                     PickerAction::None => {}
@@ -1153,7 +1156,8 @@ impl SessionDetailView {
                 match self.input_bar.handle_key(key) {
                     HandleOutcome::Submit(_, _) => {
                         self.dispatch_intent(IntentEvent::Submitted);
-                        if let Some((text, ranges, interrupt)) = self.input_bar.take_submit_capture()
+                        if let Some((text, ranges, interrupt)) =
+                            self.input_bar.take_submit_capture()
                         {
                             use crate::commands::submit_router::{route, SubmitDecision};
                             let dec = route(&text, &ranges, &self.command_registry, interrupt);
@@ -1209,14 +1213,18 @@ impl SessionDetailView {
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     self.input_bar.history_prev();
-                    self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
+                    self.dispatch_intent(
+                        crate::components::completion_trigger::IntentEvent::SetText,
+                    );
                     return None;
                 }
                 if matches!(key.code, KeyCode::Char('n'))
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     self.input_bar.history_next();
-                    self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
+                    self.dispatch_intent(
+                        crate::components::completion_trigger::IntentEvent::SetText,
+                    );
                     return None;
                 }
 
@@ -2501,7 +2509,11 @@ mod composer_routing_tests {
             v.input_bar_text_for_test().is_empty(),
             "empty bar must not type 'j'"
         );
-        assert!(matches!(act, Some(Action::ScrollDown)), "expected ScrollDown, got {:?}", act);
+        assert!(
+            matches!(act, Some(Action::ScrollDown)),
+            "expected ScrollDown, got {:?}",
+            act
+        );
     }
 
     #[test]
@@ -2549,9 +2561,18 @@ mod composer_routing_tests {
 
         let act = press(&mut v, KeyCode::Char('y'));
 
-        assert_eq!(v.input_bar_text_for_test(), "hello", "permission key must not type into bar");
+        assert_eq!(
+            v.input_bar_text_for_test(),
+            "hello",
+            "permission key must not type into bar"
+        );
         assert!(
-            matches!(act, Some(Action::PermissionGrant(crate::action::PermissionChoice::Allow))),
+            matches!(
+                act,
+                Some(Action::PermissionGrant(
+                    crate::action::PermissionChoice::Allow
+                ))
+            ),
             "expected PermissionGrant(Allow), got {:?}",
             act
         );
@@ -2563,12 +2584,11 @@ mod composer_routing_tests {
         v.set_edit_mode(crate::components::input_bar::EditMode::Vim(
             crate::components::input_bar::VimMode::Normal,
         ));
-        v.seed_input_history(vec![
-            crate::input_history::InputHistoryEntry::new(
-                crate::input_history::InputStateSnapshot::from_text("refactor the walker"),
-            ),
-        ]);
-        v.input_bar_mut_for_test().set_text("current draft".into(), 13);
+        v.seed_input_history(vec![crate::input_history::InputHistoryEntry::new(
+            crate::input_history::InputStateSnapshot::from_text("refactor the walker"),
+        )]);
+        v.input_bar_mut_for_test()
+            .set_text("current draft".into(), 13);
 
         let act = press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
 

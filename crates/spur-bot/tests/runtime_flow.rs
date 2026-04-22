@@ -375,7 +375,9 @@ async fn restore_pending_plain_text_queues_resume_then_message() {
         .handle_chat_text(&handle, 10_001, "hello after restart")
         .await
         .unwrap();
-    assert!(renders.iter().any(|r| matches!(r, RuntimeRender::WorkingStatus { .. })));
+    assert!(renders
+        .iter()
+        .any(|r| matches!(r, RuntimeRender::WorkingStatus { .. })));
 
     let input = user_rx.recv().await.unwrap();
     assert!(

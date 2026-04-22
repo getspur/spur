@@ -16,13 +16,13 @@ fn install_hints_cover_all_seed_agents() {
     // would be cleaner, but spur-cli is a binary-only crate and adding
     // a lib target just for this is overkill. Keep the parallel list.
     let expected_names: &[&str] = &[
-        "claude-code",
+        "claude-code-sj",
         "kiro",
-        "claude-code-acp",
+        "claude-code",
+        "codex-bin",
         "codex",
-        "codex-acp",
-        "gemini-acp",
-        "opencode-acp",
+        "gemini",
+        "opencode",
     ];
     let seeds = spur_acp::config::load_seed_template();
     for agent in &seeds.entries {
@@ -89,11 +89,20 @@ fn init_with_zero_agents_writes_no_config() {
 }
 
 #[test]
-fn init_with_existing_config_requires_force() {
+fn init_with_existing_config_merges_agents() {
     let _g = LOCK.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".spur")).unwrap();
-    let existing = "# pre-existing, must not be touched\n";
+
+    // Pre-existing config with custom brain and bot settings.
+    let existing = r#"
+[brain]
+default = "kiro"
+
+[bot.telegram]
+enabled = true
+operator_user_id = 12345
+"#;
     fs::write(tmp.path().join(".spur/config.toml"), existing).unwrap();
     stub_binary(tmp.path(), "claude");
 
@@ -104,27 +113,56 @@ fn init_with_existing_config_requires_force() {
         .status()
         .expect("spawn spur init");
 
-    assert!(
-        status.success(),
-        "overwrite refusal should exit 0, not error"
-    );
+    assert!(status.success(), "merge init should exit 0");
     let after = fs::read_to_string(tmp.path().join(".spur/config.toml")).unwrap();
-    assert_eq!(
-        after, existing,
-        "config must NOT be modified without --force"
+
+    // Should merge the discovered claude agent.
+    assert!(
+        after.contains(r#"name = "claude-code-sj""#),
+        "should merge discovered agent; got:\n{after}"
+    );
+
+    // Should preserve existing bot config.
+    assert!(
+        after.contains("enabled = true"),
+        "should preserve bot config; got:\n{after}"
+    );
+    assert!(
+        after.contains("operator_user_id = 12345"),
+        "should preserve bot operator; got:\n{after}"
+    );
+
+    // Brain should be recomputed (kiro is not on PATH here, claude-code-sj is).
+    assert!(
+        after.contains(r#"default = "claude-code-sj""#),
+        "should recompute brain to discovered agent; got:\n{after}"
     );
 }
 
 #[test]
-fn init_with_force_overwrites_and_sets_adaptive_brain() {
+fn init_with_force_resets_agents_preserves_non_agent_config() {
     let _g = LOCK.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".spur")).unwrap();
-    fs::write(tmp.path().join(".spur/config.toml"), "# stale\n").unwrap();
 
-    // Stub only kiro. Post-Spec-3 baseline brain.default is hardcoded
-    // to claude-code — adaptive selection must pick kiro instead
-    // (because claude-code isn't on PATH in this test).
+    // Config with a manually-added agent and bot settings.
+    let existing = r#"
+[[agents.entries]]
+name = "custom-agent"
+command = "custom"
+transport = "acp"
+role = "both"
+
+[brain]
+default = "custom-agent"
+
+[bot.telegram]
+enabled = true
+operator_user_id = 99999
+"#;
+    fs::write(tmp.path().join(".spur/config.toml"), existing).unwrap();
+
+    // Only kiro-cli is on PATH.
     stub_binary(tmp.path(), "kiro-cli");
 
     let status = spur()
@@ -134,21 +172,28 @@ fn init_with_force_overwrites_and_sets_adaptive_brain() {
         .status()
         .expect("spawn spur init --force");
 
-    assert!(status.success());
+    assert!(status.success(), "force init should exit 0");
     let after = fs::read_to_string(tmp.path().join(".spur/config.toml")).unwrap();
 
+    // --force should drop the custom agent.
     assert!(
-        !after.contains("# stale"),
-        "--force must overwrite the old file"
+        !after.contains("custom-agent"),
+        "--force should reset to discovered-only; got:\n{after}"
+    );
+
+    // Should preserve bot config.
+    assert!(
+        after.contains("enabled = true"),
+        "should preserve bot config; got:\n{after}"
     );
     assert!(
-        after.contains("name = \"kiro\""),
-        "new config must contain the registered agent; got:\n{after}"
+        after.contains("operator_user_id = 99999"),
+        "should preserve bot operator; got:\n{after}"
     );
-    // Adaptive-brain assertion: brain.default must point at the
-    // REGISTERED agent (kiro), not the hardcoded claude-code.
+
+    // Brain should adapt to the discovered agent.
     assert!(
-        after.contains("default = \"kiro\""),
-        "brain.default must adapt to installed agents (kiro here); got:\n{after}"
+        after.contains(r#"default = "kiro""#),
+        "brain should adapt to kiro; got:\n{after}"
     );
 }

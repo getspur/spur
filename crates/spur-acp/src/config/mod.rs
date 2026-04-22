@@ -712,13 +712,13 @@ mod tests {
     fn seed_template_parses_and_covers_shipped_agents() {
         let seeds = load_seed_template();
         const EXPECTED_SEED_AGENTS: &[&str] = &[
-            "claude-code",
+            "claude-code-sj",
             "kiro",
-            "claude-code-acp",
+            "claude-code",
+            "codex-bin",
             "codex",
-            "codex-acp",
-            "gemini-acp",
-            "opencode-acp",
+            "gemini",
+            "opencode",
         ];
         assert!(
             seeds.entries.len() >= EXPECTED_SEED_AGENTS.len(),
@@ -754,7 +754,7 @@ mod tests {
         // Empty [brain.delegation] block → build-aware default.
         let toml = r#"
             [brain]
-            default = "claude-code-acp"
+            default = "claude-code"
         "#;
         let cfg: BrainConfig = toml::from_str(toml).unwrap();
         let expected = if cfg!(debug_assertions) {
@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn brain_delegation_framework_explicit_v1() {
         let toml = r#"
-            default = "claude-code-acp"
+            default = "claude-code"
             [delegation]
             framework = "v1"
         "#;
