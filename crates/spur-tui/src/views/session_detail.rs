@@ -1017,7 +1017,9 @@ impl SessionDetailView {
                     matches!(
                         key.code,
                         KeyCode::Up | KeyCode::Down | KeyCode::Esc | KeyCode::Tab | KeyCode::Enter
-                    ) || (key.code == KeyCode::Char('c')
+                    ) || ((key.code == KeyCode::Char('c')
+                        || key.code == KeyCode::Char('p')
+                        || key.code == KeyCode::Char('n'))
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                 } else {
                     true
