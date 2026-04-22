@@ -9,6 +9,8 @@ members = [
     "crates/spur-cost",
     "crates/spur-license",
     "crates/spur-tui",
+    "crates/spur-interactive",
+    "crates/spur-bot",
     "crates/spur-cli",
 ]
 
@@ -81,6 +83,8 @@ spur-worktree = { path = "crates/spur-worktree" }
 spur-cost = { path = "crates/spur-cost" }
 spur-license = { path = "crates/spur-license" }
 spur-tui = { path = "crates/spur-tui" }
+spur-interactive = { path = "crates/spur-interactive" }
+spur-bot = { path = "crates/spur-bot" }
 
 # The profile that 'dist' will build with
 [profile.dist]
