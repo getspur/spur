@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftUpdate {
     pub chat_id: i64,
+    pub message_thread_id: Option<i32>,
     pub draft_id: String,
     pub text: String,
 }
@@ -20,7 +21,12 @@ impl TelegramSender {
                 let client = client.clone();
                 tokio::spawn(async move {
                     let _ = client
-                        .send_message_draft(update.chat_id, &update.draft_id, &update.text)
+                        .send_message_draft_to_thread(
+                            update.chat_id,
+                            update.message_thread_id,
+                            &update.draft_id,
+                            &update.text,
+                        )
                         .await;
                 });
             })
@@ -57,7 +63,10 @@ impl TelegramSender {
         loop {
             tokio::select! {
                 maybe = rx.recv() => match maybe {
-                    Some(update) => { pending.insert(update.draft_id.clone(), update); }
+                    Some(update) => {
+                        let key = format!("{}:{}:{:?}", update.chat_id, update.draft_id, update.message_thread_id);
+                        pending.insert(key, update);
+                    }
                     None => break,
                 },
                 _ = ticker.tick() => {
