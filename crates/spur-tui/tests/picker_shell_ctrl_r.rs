@@ -123,3 +123,31 @@ fn ctrl_r_on_empty_history_opens_empty_shell_and_esc_closes() {
     let act = press(&mut v, KeyCode::Enter);
     assert!(act.is_none() || act.is_some()); // any behavior OK so long as no panic
 }
+
+#[test]
+fn ctrl_p_does_not_mutate_hidden_input_bar_while_history_picker_open() {
+    let mut v = mk_view();
+    seed_history(
+        &mut v,
+        vec![
+            InputHistoryEntry::new(InputStateSnapshot::from_text("refactor the walker")),
+            InputHistoryEntry::new(InputStateSnapshot::from_text("fix the panic")),
+        ],
+    );
+
+    // Start with a draft in the InputBar.
+    type_str(&mut v, "my draft");
+    assert_eq!(v.input_bar_text_for_test(), "my draft");
+
+    // Open history picker.
+    press_mod(&mut v, KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+    // Press Ctrl+P — must NOT replace the hidden input bar text.
+    press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+    assert_eq!(
+        v.input_bar_text_for_test(),
+        "my draft",
+        "Ctrl+P must not mutate hidden input bar while history picker is open"
+    );
+}
