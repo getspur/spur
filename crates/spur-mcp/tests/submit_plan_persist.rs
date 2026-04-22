@@ -575,7 +575,11 @@ fn run_git(repo: &Path, args: &[&str]) {
         .current_dir(repo)
         .output()
         .expect("git invocation failed");
-    assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 async fn persisted_submit_fixture() -> PersistedSubmitFixture {
@@ -624,7 +628,9 @@ impl PersistedSubmitFixture {
 #[tokio::test]
 async fn persisted_submit_plan_does_not_enqueue_delegation_request() {
     if !br_available() {
-        eprintln!("skipping persisted_submit_plan_does_not_enqueue_delegation_request: `br` not on PATH");
+        eprintln!(
+            "skipping persisted_submit_plan_does_not_enqueue_delegation_request: `br` not on PATH"
+        );
         return;
     }
 
@@ -637,5 +643,8 @@ async fn persisted_submit_plan_does_not_enqueue_delegation_request() {
     )
     .await;
 
-    assert!(recv.is_err(), "persisted submit_plan must not dispatch directly");
+    assert!(
+        recv.is_err(),
+        "persisted submit_plan must not dispatch directly"
+    );
 }

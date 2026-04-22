@@ -123,7 +123,7 @@ fn parse_delegation_id_compat(label: &str) -> Option<&str> {
         .or_else(|| label.strip_prefix(LEGACY_DELEGATION_ID_PREFIX))
 }
 
-fn has_ready_for_review_label(labels: &[String]) -> bool {
+pub(crate) fn has_ready_for_review_label_compat(labels: &[String]) -> bool {
     labels.iter().any(|label| {
         label == crate::plan::labels::READY_FOR_REVIEW || label == LEGACY_READY_FOR_REVIEW
     })
@@ -196,7 +196,7 @@ pub fn project_status_for_issue(
         };
     }
 
-    if has_ready_for_review_label(&issue.labels) {
+    if has_ready_for_review_label_compat(&issue.labels) {
         let summary =
             latest_completion_facts(audits).and_then(|(_, _, result_summary, _)| result_summary);
         return PlanTaskStatus::AwaitingReview { summary };

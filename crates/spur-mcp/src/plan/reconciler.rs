@@ -33,7 +33,11 @@ pub(crate) fn beads_journal_path(repo_root: &std::path::Path) -> std::path::Path
 }
 
 pub(crate) async fn monitor_journal_appends(path: std::path::PathBuf, notify: Arc<Notify>) {
-    let mut last_len = tokio::fs::metadata(&path).await.ok().map(|m| m.len()).unwrap_or(0);
+    let mut last_len = tokio::fs::metadata(&path)
+        .await
+        .ok()
+        .map(|m| m.len())
+        .unwrap_or(0);
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let next_len = match tokio::fs::metadata(&path).await {
@@ -53,6 +57,10 @@ pub(crate) async fn monitor_journal_appends(path: std::path::PathBuf, notify: Ar
 struct ProjectedEpicCompletion {
     audit_outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
     add_integration_pending: bool,
+    approved_count: u32,
+    rejected_count: u32,
+    failed_count: u32,
+    cancelled_count: u32,
 }
 
 fn classify_epic_completion(
@@ -74,15 +82,33 @@ fn classify_epic_completion(
         return None;
     }
 
-    let has_terminal_failures = children.iter().any(|child| {
-        matches!(child.status.as_str(), "failed" | "cancelled" | "rejected")
+    let mut approved_count = 0u32;
+    let mut rejected_count = 0u32;
+    let mut failed_count = 0u32;
+    let mut cancelled_count = 0u32;
+
+    for child in children {
+        let rejected = child.status == "rejected"
             || child.labels.iter().any(|label| {
                 matches!(
                     label.as_str(),
                     "rejected" | "review-rejected" | crate::plan::labels::REVIEW_REJECTED
                 )
-            })
-    });
+            });
+        if rejected {
+            rejected_count += 1;
+            continue;
+        }
+
+        match child.status.as_str() {
+            "failed" => failed_count += 1,
+            "cancelled" => cancelled_count += 1,
+            status if status == closed_status => approved_count += 1,
+            _ => return None,
+        }
+    }
+
+    let has_terminal_failures = rejected_count > 0 || failed_count > 0 || cancelled_count > 0;
 
     Some(ProjectedEpicCompletion {
         audit_outcome: if has_terminal_failures {
@@ -91,6 +117,10 @@ fn classify_epic_completion(
             crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved
         },
         add_integration_pending: !has_terminal_failures,
+        approved_count,
+        rejected_count,
+        failed_count,
+        cancelled_count,
     })
 }
 
@@ -480,19 +510,21 @@ impl Reconciler {
                 // v0e: opt-in auto-merge / auto-PR on durable all-approved state.
                 if self.auto_merge_approved_plans
                     && outcome.add_integration_pending
-                    && epic.labels.contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+                    && epic
+                        .labels
+                        .contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
                 {
                     if let Some(automation) = self.automation.as_ref() {
                         if let Some(outcome_summary) =
                             crate::plan::projector::epic_completion_outcome_summary(
-                                &audits,
-                                plan_id,
-                                &epic.id,
+                                &audits, plan_id, &epic.id,
                             )
                         {
                             let mut merge_succeeded = false;
                             match automation.merge_plan(plan_id).await {
-                                Ok(crate::plan::PlanMergeState::Succeeded { merge_branch, .. }) => {
+                                Ok(crate::plan::PlanMergeState::Succeeded {
+                                    merge_branch, ..
+                                }) => {
                                     let params = build_auto_pr_params(
                                         plan_id,
                                         &epic.title,
@@ -505,7 +537,10 @@ impl Reconciler {
                                         merge_succeeded = true;
                                     }
                                 }
-                                Ok(crate::plan::PlanMergeState::Conflict { conflict_task_id, .. }) => {
+                                Ok(crate::plan::PlanMergeState::Conflict {
+                                    conflict_task_id,
+                                    ..
+                                }) => {
                                     tracing::warn!(%plan_id, %conflict_task_id, "auto-merge detected conflict");
                                 }
                                 Ok(crate::plan::PlanMergeState::Failed { error }) => {
@@ -524,8 +559,10 @@ impl Reconciler {
                                     .update_issue(
                                         &epic.id,
                                         spur_pm::IssueUpdate {
-                                            remove_labels: vec![crate::plan::labels::INTEGRATION_PENDING
-                                                .to_string()],
+                                            remove_labels: vec![
+                                                crate::plan::labels::INTEGRATION_PENDING
+                                                    .to_string(),
+                                            ],
                                             ..Default::default()
                                         },
                                     )
@@ -582,6 +619,21 @@ impl Reconciler {
                         epic_id = %epic.id,
                         "epic completion audit emission failed on close: {error}"
                     );
+                }
+            }
+            if !has_epic_completion {
+                if let Some(sink) = self
+                    .dispatch
+                    .as_ref()
+                    .and_then(|dispatch| dispatch.event_sink.as_ref())
+                {
+                    sink.emit(spur_acp::SpurEventBody::PlanCompleted {
+                        plan_id: plan_id.to_string(),
+                        approved: outcome.approved_count,
+                        rejected: outcome.rejected_count,
+                        failed: outcome.failed_count,
+                        cancelled: outcome.cancelled_count,
+                    });
                 }
             }
             if outcome.add_integration_pending {
@@ -817,9 +869,18 @@ mod tests {
 
     #[test]
     fn auto_pr_params_include_plan_id_and_summary() {
-        let params = super::build_auto_pr_params("plan-123", "Epic title", "All approved", "spur/merge-1");
-        assert!(params.title.contains("plan-123"), "title missing plan_id: {}", params.title);
-        assert!(params.body.contains("All approved"), "body missing outcome: {}", params.body);
+        let params =
+            super::build_auto_pr_params("plan-123", "Epic title", "All approved", "spur/merge-1");
+        assert!(
+            params.title.contains("plan-123"),
+            "title missing plan_id: {}",
+            params.title
+        );
+        assert!(
+            params.body.contains("All approved"),
+            "body missing outcome: {}",
+            params.body
+        );
         assert_eq!(params.head_branch, "spur/merge-1");
     }
 
@@ -838,7 +899,10 @@ mod tests {
         }
 
         async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
-            self.actions.lock().await.push(format!("pr:{}", params.title));
+            self.actions
+                .lock()
+                .await
+                .push(format!("pr:{}", params.title));
             Ok("https://example.invalid/pr/1".to_string())
         }
     }
@@ -865,7 +929,13 @@ mod tests {
         let repo = dir.path();
 
         assert!(
-            Command::new("br").args(["init"]).current_dir(repo).output().expect("br init").status.success(),
+            Command::new("br")
+                .args(["init"])
+                .current_dir(repo)
+                .output()
+                .expect("br init")
+                .status
+                .success(),
             "br init failed"
         );
 
@@ -875,8 +945,7 @@ mod tests {
             .output()
             .expect("br create epic");
         let epic_json = String::from_utf8_lossy(&epic_out.stdout);
-        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json)
-            .unwrap()["id"]
+        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json).unwrap()["id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -888,8 +957,8 @@ mod tests {
                 .output()
                 .expect("br create task");
             let task_json = String::from_utf8_lossy(&task_out.stdout);
-            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json)
-                .unwrap()["id"]
+            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json).unwrap()
+                ["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
@@ -1004,8 +1073,7 @@ mod tests {
             .output()
             .expect("br create epic");
         let epic_json = String::from_utf8_lossy(&epic_out.stdout);
-        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json)
-            .unwrap()["id"]
+        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json).unwrap()["id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -1017,8 +1085,8 @@ mod tests {
                 .output()
                 .expect("br create task");
             let task_json = String::from_utf8_lossy(&task_out.stdout);
-            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json)
-                .unwrap()["id"]
+            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json).unwrap()
+                ["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
@@ -1059,7 +1127,9 @@ mod tests {
         // emit_epic_completion_audit) fails, while list_issues/list_comments
         // continue to work because SQLite opens read-only for queries.
         let db_path = repo.join(".beads").join("beads.db");
-        let mut perms = std::fs::metadata(&db_path).expect("db metadata").permissions();
+        let mut perms = std::fs::metadata(&db_path)
+            .expect("db metadata")
+            .permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(&db_path, perms).expect("set readonly");
 

@@ -4,11 +4,13 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use spur_mcp::plan::audit_sentinel::{AuditSentinelKind, EpicCompletionOutcome};
-use spur_mcp::plan::labels;
 use serde_json::json;
 use spur_acp::{BrainSessionId, SessionId};
-use spur_mcp::plan::reconciler::{Reconciler, ReconcilerAutomation, ReconcilerConfig, ReconcilerDispatchCtx};
+use spur_mcp::plan::audit_sentinel::{AuditSentinelKind, EpicCompletionOutcome};
+use spur_mcp::plan::labels;
+use spur_mcp::plan::reconciler::{
+    Reconciler, ReconcilerAutomation, ReconcilerConfig, ReconcilerDispatchCtx,
+};
 use spur_mcp::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
 use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
@@ -33,7 +35,10 @@ fn run_br(repo: &Path, args: &[&str]) {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        panic!("br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}", output.status);
+        panic!(
+            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        );
     }
 }
 
@@ -51,7 +56,10 @@ fn run_br_json(repo: &Path, args: &[&str]) -> String {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        panic!("br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}", output.status);
+        panic!(
+            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        );
     }
 }
 
@@ -91,15 +99,39 @@ async fn seed_all_approved_epic(
 ) -> (Arc<spur_pm::PmService>, String, String, String) {
     let epic_id = parse_id_from_create(&run_br_json(
         repo,
-        &["create", "--type", "epic", "--title", "Auto-Merge Epic", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Auto-Merge Epic",
+            "--priority",
+            "2",
+        ],
     ));
     let task_a_id = parse_id_from_create(&run_br_json(
         repo,
-        &["create", "--type", "task", "--title", "Task A", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A",
+            "--priority",
+            "2",
+        ],
     ));
     let task_b_id = parse_id_from_create(&run_br_json(
         repo,
-        &["create", "--type", "task", "--title", "Task B", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task B",
+            "--priority",
+            "2",
+        ],
     ));
 
     let plan_label = labels::plan_id(plan_id);
@@ -127,7 +159,10 @@ impl ReconcilerAutomation for RecordingAutomation {
     }
 
     async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
-        self.actions.lock().await.push(format!("pr:{}", params.title));
+        self.actions
+            .lock()
+            .await
+            .push(format!("pr:{}", params.title));
         self.params.lock().await.push(params);
         Ok("https://example.invalid/pr/42".to_string())
     }
@@ -212,7 +247,10 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
         reconciler.tick_once().await.expect("tick_once");
 
         let recorded = actions.lock().await;
-        let merge_calls: Vec<_> = recorded.iter().filter(|a| a.starts_with("merge:")).collect();
+        let merge_calls: Vec<_> = recorded
+            .iter()
+            .filter(|a| a.starts_with("merge:"))
+            .collect();
         let pr_calls: Vec<_> = recorded.iter().filter(|a| a.starts_with("pr:")).collect();
         assert_eq!(
             merge_calls.len(),
@@ -220,7 +258,12 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
             "expected exactly one merge call, got: {:?}",
             *recorded
         );
-        assert_eq!(pr_calls.len(), 1, "expected exactly one PR call, got: {:?}", *recorded);
+        assert_eq!(
+            pr_calls.len(),
+            1,
+            "expected exactly one PR call, got: {:?}",
+            *recorded
+        );
 
         let pr_params = params.lock().await;
         let pr = pr_params.first().expect("PR params recorded");
@@ -298,11 +341,27 @@ fn continuation_ctx() -> DetachedContinuationCtx {
 fn seed_ready_task(repo: &Path, plan_id: &str) -> (String, String) {
     let epic_id = parse_id_from_create(&run_br_json(
         repo,
-        &["create", "--type", "epic", "--title", "Wake Epic", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Wake Epic",
+            "--priority",
+            "2",
+        ],
     ));
     let task_id = parse_id_from_create(&run_br_json(
         repo,
-        &["create", "--type", "task", "--title", "Ready Task", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Ready Task",
+            "--priority",
+            "2",
+        ],
     ));
     label_issue(repo, &epic_id, &labels::plan_id(plan_id));
     label_issue(repo, &task_id, &labels::plan_id(plan_id));
@@ -349,7 +408,10 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
             }]
         }))
         .await;
-    assert!(response.get("error").is_none(), "submit_plan should succeed: {response}");
+    assert!(
+        response.get("error").is_none(),
+        "submit_plan should succeed: {response}"
+    );
 
     let recv = tokio::time::timeout(
         std::time::Duration::from_millis(100),
@@ -364,18 +426,36 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
     // 2. execute_epic must not dispatch directly
     let epic_id = parse_id_from_create(&run_br_json(
         dir.path(),
-        &["create", "--type", "epic", "--title", "Exec Epic", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Exec Epic",
+            "--priority",
+            "2",
+        ],
     ));
     let task_a_id = parse_id_from_create(&run_br_json(
         dir.path(),
-        &["create", "--type", "task", "--title", "Task A", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A",
+            "--priority",
+            "2",
+        ],
     ));
     run_br(dir.path(), &["dep", "add", &task_a_id, &epic_id]);
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "codex".into(),
         ..Default::default()
     }]);
-    let response = server.__test_call_execute_epic(&epic_id, Some("codex")).await;
+    let response = server
+        .__test_call_execute_epic(&epic_id, Some("codex"))
+        .await;
     assert!(
         response.get("error").is_none(),
         "execute_epic should succeed: {response}"
@@ -386,10 +466,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
         channel.request_rx.recv(),
     )
     .await;
-    assert!(
-        recv.is_err(),
-        "execute_epic must not dispatch directly"
-    );
+    assert!(recv.is_err(), "execute_epic must not dispatch directly");
 
     // 3. persisted review approve must not dispatch directly
     let state = PlanState {
@@ -432,7 +509,10 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
     .await
     .expect("review_task approve should succeed");
     assert!(
-        matches!(drx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+        matches!(
+            drx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
         "persisted review approve must not enqueue a follow-up dispatch"
     );
 }
@@ -475,7 +555,10 @@ async fn t_v0e_3_fast_forward_matches_polling() {
     assert!(poll_did_work, "polling tick must observe ready task");
     let poll_req = poll_rx.recv().await;
     assert!(poll_req.is_some(), "polling tick must dispatch ready task");
-    assert_eq!(poll_req.unwrap().issue_id.as_deref(), Some(task_poll.as_str()));
+    assert_eq!(
+        poll_req.unwrap().issue_id.as_deref(),
+        Some(task_poll.as_str())
+    );
 
     let dir_ff = TempDir::new().expect("tempdir");
     run_br(dir_ff.path(), &["init"]);
@@ -546,7 +629,10 @@ async fn t_v0e_3_fast_forward_matches_polling() {
         None,
         Some(plan_id.into()),
     );
-    let term_poll_did_work = term_poll_reconciler.tick_once().await.expect("term poll tick");
+    let term_poll_did_work = term_poll_reconciler
+        .tick_once()
+        .await
+        .expect("term poll tick");
     assert!(term_poll_did_work, "polling tick must close epic");
     let epic = pm_term_poll
         .get_issue(&epic_term_poll)
@@ -591,10 +677,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
     tokio::task::yield_now().await;
     term_fast_forward.notify_one();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let epic = pm_term_ff
-        .get_issue(&epic_term_ff)
-        .await
-        .expect("get epic");
+    let epic = pm_term_ff.get_issue(&epic_term_ff).await.expect("get epic");
     assert_eq!(epic.status, pm_term_ff.closed_status());
     assert!(
         epic.labels.iter().any(|l| l == labels::INTEGRATION_PENDING),

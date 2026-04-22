@@ -728,16 +728,19 @@ pub async fn emit_epic_completion_audit(
         epic_id: epic_id.to_string(),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
-    adv.add_comment(epic_id, &body).await.map_err(|error| {
-        warn!(
-            target: "spur.audit.emit_failure",
-            kind = "epic_completion",
-            epic_id = %epic_id,
-            plan_id = %plan_id,
-            "EpicCompletion audit comment emission failed: {error}"
-        );
-        error
-    }).map(|_comment_id| ())
+    adv.add_comment(epic_id, &body)
+        .await
+        .map_err(|error| {
+            warn!(
+                target: "spur.audit.emit_failure",
+                kind = "epic_completion",
+                epic_id = %epic_id,
+                plan_id = %plan_id,
+                "EpicCompletion audit comment emission failed: {error}"
+            );
+            error
+        })
+        .map(|_comment_id| ())
 }
 
 /// Emit a `[[spur-audit v1]] Approval` sentinel comment on the task issue.
@@ -1054,7 +1057,9 @@ pub async fn run_plan(
     fast_forward: Option<Arc<tokio::sync::Notify>>,
 ) {
     if plan.lock().await.epic_id.is_some() {
-        tracing::warn!("run_plan is ephemeral-only in v0e; persisted plans must use the reconciler");
+        tracing::warn!(
+            "run_plan is ephemeral-only in v0e; persisted plans must use the reconciler"
+        );
         return;
     }
 
@@ -2794,11 +2799,7 @@ mod tests {
     async fn run_plan_with_epic_id_does_not_dispatch() {
         let (plan, tx, mut rx) = build_run_plan_fixture(Some("bd-epic".into()));
         tokio::spawn(async move { run_plan(plan, tx, None, None, None).await });
-        let recv = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx.recv(),
-        )
-        .await;
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
         assert!(
             matches!(recv, Ok(None) | Err(_)),
             "run_plan must not dispatch when epic_id is present; got {recv:?}"
@@ -2809,11 +2810,7 @@ mod tests {
     async fn run_plan_without_epic_id_still_dispatches() {
         let (plan, tx, mut rx) = build_run_plan_fixture(None);
         tokio::spawn(async move { run_plan(plan, tx, None, None, None).await });
-        let recv = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx.recv(),
-        )
-        .await;
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
         assert!(
             matches!(recv, Ok(Some(_))),
             "run_plan must dispatch when epic_id is None; got {recv:?}"
