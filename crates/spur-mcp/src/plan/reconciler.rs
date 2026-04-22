@@ -109,11 +109,12 @@ fn build_auto_pr_params(
     outcome_summary: &str,
     merge_branch: &str,
 ) -> spur_pm::PrParams {
-    // Stub: fully implemented in Task 8.
     spur_pm::PrParams {
-        title: String::new(),
-        body: String::new(),
-        head_branch: String::new(),
+        title: format!("[SPUR] {epic_title} ({plan_id})"),
+        body: format!(
+            "Auto-created for plan `{plan_id}`.\n\nOutcome: {outcome_summary}\nMerge branch: {merge_branch}"
+        ),
+        head_branch: merge_branch.to_string(),
         base_branch: None,
         repo: None,
     }
@@ -428,6 +429,47 @@ impl Reconciler {
                     )
                     .await;
                     did_work = true;
+                }
+
+                // v0e: opt-in auto-merge / auto-PR on durable all-approved state.
+                if self.auto_merge_approved_plans
+                    && outcome.add_integration_pending
+                    && epic.labels.contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+                {
+                    if let Some(automation) = self.automation.as_ref() {
+                        let outcome_summary = match outcome.audit_outcome {
+                            crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved => "All approved",
+                            crate::plan::audit_sentinel::EpicCompletionOutcome::TerminalWithFailures => {
+                                "Terminal with failures"
+                            }
+                        };
+                        match automation.merge_plan(plan_id).await {
+                            Ok(crate::plan::PlanMergeState::Succeeded { merge_branch, .. }) => {
+                                let params = build_auto_pr_params(
+                                    plan_id,
+                                    &epic.title,
+                                    outcome_summary,
+                                    &merge_branch,
+                                );
+                                if let Err(e) = automation.create_pr(params).await {
+                                    tracing::warn!(%plan_id, "auto-merge PR creation failed: {e}");
+                                }
+                            }
+                            Ok(crate::plan::PlanMergeState::Conflict { conflict_task_id, .. }) => {
+                                tracing::warn!(%plan_id, %conflict_task_id, "auto-merge detected conflict");
+                            }
+                            Ok(crate::plan::PlanMergeState::Failed { error }) => {
+                                tracing::warn!(%plan_id, "auto-merge failed: {error}");
+                            }
+                            Ok(crate::plan::PlanMergeState::NotStarted) => {
+                                tracing::warn!(%plan_id, "auto-merge returned NotStarted unexpectedly");
+                            }
+                            Err(e) => {
+                                tracing::warn!(%plan_id, "auto-merge error: {e}");
+                            }
+                        }
+                        did_work = true;
+                    }
                 }
                 continue;
             }
