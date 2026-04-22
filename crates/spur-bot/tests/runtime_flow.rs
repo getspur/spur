@@ -160,3 +160,85 @@ async fn permission_callback_returns_exact_option_id() {
     let response = reply_rx.await.unwrap();
     assert_eq!(response.option_id, "allow_once");
 }
+
+#[tokio::test]
+async fn review_prompt_resolves_once_and_siblings_go_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = BotStateStore::new(dir.path().join(".spur/bot/state.json"));
+    let (user_tx, _user_rx) = tokio::sync::mpsc::channel(1);
+    let (review_tx, mut review_rx) = tokio::sync::mpsc::channel(1);
+    let (_event_tx, event_rx) = tokio::sync::broadcast::channel(4);
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let host = InteractiveFrontendHost::from_parts_for_test(
+        user_tx,
+        review_tx,
+        event_rx,
+        perm_rx,
+        tokio::spawn(async {}),
+    );
+    let handle = host.handle();
+    let mut runtime = BotRuntime::new(store);
+
+    let renders = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::ExecutorReviewRequested {
+                id: "exec-1".into(),
+                attempt_n: 1,
+                kind: spur_acp::ReviewKind::Completion,
+                payload: spur_acp::ReviewPayload {
+                    summary: "Add frobnicate module".into(),
+                    diff_summary: None,
+                    pr_url: None,
+                    error: None,
+                    delegation_plan: None,
+                    chosen_matches_dispatched: None,
+                },
+            },
+        ))
+        .unwrap();
+
+    let buttons = renders
+        .iter()
+        .find_map(|item| match item {
+            RuntimeRender::ReviewPrompt { buttons, .. } => Some(buttons.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(buttons.len(), 3);
+    let first_token = &buttons[0].token;
+    let second_token = &buttons[1].token;
+    assert_ne!(first_token, second_token);
+
+    // First callback succeeds.
+    let renders = runtime
+        .handle_callback(&handle, "cbq-1", first_token)
+        .await
+        .unwrap();
+    assert!(renders.iter().any(|item| matches!(
+        item,
+        RuntimeRender::AnswerCallback { text, .. } if text == "Review decision received."
+    )));
+
+    // Exactly one review decision was enqueued.
+    let decision = review_rx.recv().await.unwrap();
+    assert!(matches!(
+        decision,
+        spur_core::InteractiveInput::SubmitReview { executor_id, attempt_n, .. }
+        if executor_id == "exec-1" && attempt_n == 1
+    ));
+
+    // Second callback on a sibling token is rejected as stale.
+    let renders = runtime
+        .handle_callback(&handle, "cbq-2", second_token)
+        .await
+        .unwrap();
+    assert!(renders.iter().any(|item| matches!(
+        item,
+        RuntimeRender::AnswerCallback { text, .. } if text.contains("expired")
+    )));
+
+    // No second review decision was enqueued.
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), review_rx.recv())
+        .await
+        .is_err());
+}
