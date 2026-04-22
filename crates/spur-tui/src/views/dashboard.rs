@@ -700,10 +700,8 @@ impl DashboardView {
         {
             return true;
         }
-        matches!(
-            ch,
-            'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's'
-        ) || (ch == 'c' && self.focused_panel == Panel::Agents)
+        matches!(ch, 'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's')
+            || (ch == 'c' && self.focused_panel == Panel::Agents)
     }
 
     /// Handle a key that belongs to the view (navigation / actions).
@@ -797,8 +795,7 @@ impl DashboardView {
                             if let Some(ref exec_id) = self.focused_node {
                                 if let Some(node) = lineage.and_then(|l| l.node(exec_id)) {
                                     if let Some(ref iid) = node.issue_id {
-                                        self.issue_focus =
-                                            IssueFocus::Loading { id: iid.clone() };
+                                        self.issue_focus = IssueFocus::Loading { id: iid.clone() };
                                         self.issue_detail_pane.reset();
                                         return Some(Action::Issue(
                                             crate::action::IssueAction::ViewDetail {
@@ -864,16 +861,14 @@ impl DashboardView {
                                     .map(String::from),
                             };
                             if let Some(id) = id {
-                                return Some(Action::Issue(
-                                    crate::action::IssueAction::WorkOn { id },
-                                ));
+                                return Some(Action::Issue(crate::action::IssueAction::WorkOn {
+                                    id,
+                                }));
                             }
                             return None;
                         }
                         'r' => Some(Action::JumpToReview),
-                        'c' if self.focused_panel == Panel::Agents => {
-                            Some(Action::ToggleCollapse)
-                        }
+                        'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
                         'g' => {
                             if let Some(ref id) = self.focused_node.clone() {
                                 let _trace = worker_streams.get_mut(&id.0);
@@ -912,8 +907,7 @@ impl DashboardView {
                 }
 
                 // Insert mode view chars (empty bar).
-                if self.focused_node.is_some()
-                    && self.detail_pane.current_tab == DetailTab::Review
+                if self.focused_node.is_some() && self.detail_pane.current_tab == DetailTab::Review
                 {
                     if let Some(decision) =
                         crate::components::review_card::decision_for_key(ch, None)
@@ -1101,7 +1095,10 @@ impl DashboardView {
                 }
                 _ => None,
             },
-            KeyOwner::View => self.handle_view_key(key, lineage, worker_streams),
+            KeyOwner::View if self.input_bar.is_empty() => {
+                self.handle_view_key(key, lineage, worker_streams)
+            }
+            KeyOwner::View => None,
         }
     }
 }
