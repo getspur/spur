@@ -59,6 +59,7 @@ impl Default for PersistedBotState {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct LegacyPersistedBotState {
     version: u32,
     operator_chat_id: Option<i64>,

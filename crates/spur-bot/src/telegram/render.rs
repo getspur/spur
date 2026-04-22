@@ -42,6 +42,7 @@ pub async fn render_batch_to_thread(
                     .await?;
             }
             crate::runtime::RuntimeRender::FinalizePrompt { .. } => {}
+            crate::runtime::RuntimeRender::CreateTopic { .. } => {}
         }
     }
     Ok(())

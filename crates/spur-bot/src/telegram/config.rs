@@ -3,7 +3,7 @@
 /// `SPUR_TELEGRAM_BOT_TOKEN` is read when `bot_token` is missing or empty,
 /// so users can keep secrets out of `.spur/config.toml`.
 pub fn resolve_from_env(cfg: &mut spur_acp::config::TelegramBotConfig) {
-    if cfg.bot_token.as_deref().map_or(true, |s| s.trim().is_empty()) {
+    if cfg.bot_token.as_deref().is_none_or(|s| s.trim().is_empty()) {
         if let Ok(token) = std::env::var("SPUR_TELEGRAM_BOT_TOKEN") {
             if !token.trim().is_empty() {
                 cfg.bot_token = Some(token);
