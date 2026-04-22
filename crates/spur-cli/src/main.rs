@@ -127,6 +127,11 @@ enum Commands {
         #[command(subcommand)]
         command: FlagsCommands,
     },
+    /// Bot frontend commands
+    Bot {
+        #[command(subcommand)]
+        command: BotCommands,
+    },
     /// Launch interactive TUI dashboard
     Watch {
         /// Override the brain agent (default from config)
@@ -175,6 +180,16 @@ enum WorkflowCommands {
 enum ConfigCommands {
     /// Validate that every [agents.entries] block has a coherent configuration.
     Check,
+}
+
+#[derive(Subcommand)]
+enum BotCommands {
+    /// Launch the Telegram bot frontend.
+    Telegram {
+        /// Override the brain agent (default from config)
+        #[arg(long)]
+        brain: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -422,6 +437,19 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Flags { command } => commands::flags::run(command).await,
+        Commands::Bot {
+            command: BotCommands::Telegram { brain },
+        } => {
+            let config = load_config()?;
+            spur_bot::telegram::config::validate(&config.bot.telegram)?;
+            let host = build_interactive_host(repo_root.clone(), config.clone(), brain).await?;
+            spur_bot::telegram::run_telegram_bot(
+                &config.bot.telegram,
+                host,
+                repo_root.join(".spur").join("bot").join("state.json"),
+            )
+            .await
+        }
         Commands::Watch {
             brain,
             sessions,
@@ -707,6 +735,39 @@ fn load_config() -> Result<SpurConfig> {
     } else {
         Ok(SpurConfig::default())
     }
+}
+
+async fn build_interactive_host(
+    repo_root: PathBuf,
+    config: SpurConfig,
+    brain: Option<String>,
+) -> Result<spur_interactive::InteractiveFrontendHost> {
+    let license = SpurLicense::from_env_or_disabled();
+    let pm_service = if license
+        .feature_gate()
+        .has(spur_license::FeatureKey::PM_INTEGRATION)
+    {
+        spur_pm::PmService::try_new(
+            config.pm.github.as_ref().and_then(|g| g.repo.clone()),
+            config.pm.beads.as_ref().is_none_or(|b| b.enabled),
+            config.pm.github.as_ref().is_none_or(|g| g.enabled),
+            &repo_root,
+            None,
+        )
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
+
+    let orch = Orchestrator::new(repo_root, config, Some(license.feature_gate()))?;
+    let orch = if let Some(pm) = pm_service.map(std::sync::Arc::new) {
+        orch.with_pm_service(pm)
+    } else {
+        orch
+    };
+    let _license_runtime = orch.spawn_license_runtime(license);
+    Ok(spur_interactive::InteractiveFrontendHost::spawn(orch, brain))
 }
 
 fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
