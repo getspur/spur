@@ -232,6 +232,7 @@ allowing a later webhook mode if operational needs change.
 - handling callback queries
 - sending and editing Telegram messages
 - rate-limit-aware request execution
+- dispatcher routing and dependency injection for transport handlers
 
 `teloxide` must **not** own SPUR session state, prompt lifecycle, review
 state, permission state, or bot persistence.
@@ -244,6 +245,13 @@ logic.
 
 Do not build v1 on top of `teloxide` dialogue storage/state machines.
 
+That means:
+
+- do not use `teloxide::dispatching::dialogue::Dialogue`
+- do not use `dialogue::enter(...)`
+- do not use `InMemStorage`, `SqliteStorage`, `RedisStorage`, or other
+  teloxide dialogue storage backends for SPUR runtime state
+
 The approved design already has a SPUR-owned runtime model:
 
 - sticky current session
@@ -253,6 +261,11 @@ The approved design already has a SPUR-owned runtime model:
 
 Replacing those with transport-owned dialogue state would split the source
 of truth and make future multi-transport support harder.
+
+`teloxide` should therefore be used with dispatcher handlers and explicit
+shared dependencies, not as a dialogue-owned state machine. The bot runtime
+remains the only source of truth for current session binding, prompt
+lifecycle, and restart behavior.
 
 ---
 
@@ -316,6 +329,29 @@ Behavior:
 - `/resume <id>` switches the pointer on successful restore
 - a newly created session becomes current when `AgentSessionReady` arrives
 
+### Binding States
+
+The transport/runtime boundary should model current-session binding as an
+explicit transient state machine:
+
+- `NoSession`
+- `RestorePending { acp_session_id, brain }`
+- `Active { acp_session_id, brain }`
+
+This is intentionally small. It is enough to keep startup restore,
+plain-text routing, and transport rendering coherent without importing
+Telegram-specific concepts into `spur-core`.
+
+The key invariant is:
+
+- inbound Telegram messages may request a new or resumed session
+- only SPUR runtime events may confirm that the current binding is live
+
+In particular, the current ACP session binding must be committed only when
+`AgentSessionReady` arrives from the shared runtime. The Telegram handler
+that sent `NewSessionWithMessage` or `ResumeSession` must not persist or
+finalize the binding on its own.
+
 ### Startup Restore
 
 On startup:
@@ -362,6 +398,15 @@ The following must remain memory-only:
 
 These are transport-local interaction details, not durable product state.
 
+Ephemeral prompt state also includes non-rehydratable handles from the SPUR
+runtime:
+
+- permission `reply_tx` oneshot channels
+- pending review routing slots keyed by executor id and attempt number
+
+Those values are valid only for the current process lifetime, so they must
+never be persisted through teloxide storage or local bot state files.
+
 ### Restart Invariant
 
 After restart, old inline buttons must be treated as stale.
@@ -369,10 +414,25 @@ After restart, old inline buttons must be treated as stale.
 - callback tokens are regenerated per process lifetime
 - old button clicks return a clean “expired after restart” response
 - no attempt is made to rehydrate old review or permission prompts
+- the previous process's working-status message is orphaned and must not be
+  edited after restart
 
 Stale callbacks should always acknowledge the button press. They may emit
 one compact service message in chat when needed, but repeated stale clicks
 must not create repeated chat noise.
+
+### Callback Token Requirements
+
+Interactive Telegram buttons must use compact opaque callback tokens owned by
+`spur-bot`.
+
+Rules:
+
+- tokens must be generated with process-scoped uniqueness
+- tokens must not embed raw ACP option ids, executor ids, or chat ids
+- tokens must resolve through in-memory prompt state only
+- token misses are treated as stale callbacks, not as recoverable prompt
+  state
 
 ---
 
@@ -521,8 +581,9 @@ When `ExecutorReviewRequested` arrives:
   executor/task label, short summary, and diff stats when available
 - show buttons for `Approve`, `Reject`, `Retry`
 - keep button labels short and action-first
-- on click, route the exact review decision through
-  `InteractiveInput::SubmitReview`
+- on click, route the exact review decision through the review-dispatch
+  channel that feeds `review_dispatcher_loop`, not through the main
+  `run_interactive` input channel
 - once terminal, edit the message and remove the keyboard
 
 If the prompt is stale, superseded, or lost during restart, the callback
@@ -539,11 +600,17 @@ When ACP emits a permission request:
 - visible labels may be shortened for readability
 - do not truncate the action verb out of a visible option label
 - callback payloads must use compact opaque bot tokens
+- every button click must call `answerCallbackQuery` before any potentially
+  slow SPUR-side work
 - clicking a button resolves the stored `reply_tx` with the exact ACP
   `option_id`
 
 This preserves ACP correctness while keeping Telegram callback payloads
 small and transport-safe.
+
+Permission prompts are intentionally ephemeral. Because they hold a live ACP
+`reply_tx` oneshot sender, they cannot survive process restart. Any
+pre-restart permission callback must therefore be treated as stale.
 
 ### ASCII Wireframes
 
