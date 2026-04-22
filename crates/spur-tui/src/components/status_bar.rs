@@ -100,10 +100,9 @@ impl StatusBar {
             ViewId::Dashboard => {
                 " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
             }
-            ViewId::SessionDetail(_) => hint_for_session_detail(
-                props.stream_in_flight,
-                props.esc_consumed_by_composer,
-            ),
+            ViewId::SessionDetail(_) => {
+                hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
+            }
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => " [Esc]close",

@@ -9,11 +9,14 @@
 use std::path::Path;
 
 use spur_acp::{validate_agent_config, SpurConfig};
-use spur_bot::telegram::config::validate as validate_telegram_config;
+use spur_bot::telegram::config::{
+    resolve_from_env as resolve_telegram_env, validate as validate_telegram_config,
+};
 
 /// Returns the exit code: 0 on success, 1 on any fatal error.
 pub fn run(repo_root: &Path) -> anyhow::Result<i32> {
-    let cfg = load_spur_config(repo_root)?;
+    let mut cfg = load_spur_config(repo_root)?;
+    resolve_telegram_env(&mut cfg.bot.telegram);
 
     if cfg.agents.entries.is_empty() {
         eprintln!("no agents configured in .spur/config.toml");

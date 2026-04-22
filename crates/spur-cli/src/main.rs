@@ -440,7 +440,8 @@ async fn main() -> Result<()> {
         Commands::Bot {
             command: BotCommands::Telegram { brain },
         } => {
-            let config = load_config()?;
+            let mut config = load_config()?;
+            spur_bot::telegram::config::resolve_from_env(&mut config.bot.telegram);
             spur_bot::telegram::config::validate(&config.bot.telegram)?;
             let host = build_interactive_host(repo_root.clone(), config.clone(), brain).await?;
             spur_bot::telegram::run_telegram_bot(
@@ -530,7 +531,9 @@ async fn main() -> Result<()> {
                                 .await;
                         }
                         other => {
-                            let _ = host_handle.send_command(tui_input_to_interactive(other)).await;
+                            let _ = host_handle
+                                .send_command(tui_input_to_interactive(other))
+                                .await;
                         }
                     }
                 }
@@ -767,7 +770,9 @@ async fn build_interactive_host(
         orch
     };
     let _license_runtime = orch.spawn_license_runtime(license);
-    Ok(spur_interactive::InteractiveFrontendHost::spawn(orch, brain))
+    Ok(spur_interactive::InteractiveFrontendHost::spawn(
+        orch, brain,
+    ))
 }
 
 fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
