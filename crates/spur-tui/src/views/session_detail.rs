@@ -2460,6 +2460,10 @@ mod composer_routing_tests {
         v.handle_key(KeyEvent::new(code, KeyModifiers::NONE), &test_ctx())
     }
 
+    fn press_mod(v: &mut SessionDetailView, code: KeyCode, m: KeyModifiers) -> Option<Action> {
+        v.handle_key(KeyEvent::new(code, m), &test_ctx())
+    }
+
     #[test]
     fn empty_emacs_j_scrolls_without_typing() {
         let mut v = make_view();
@@ -2507,6 +2511,45 @@ mod composer_routing_tests {
             "cursor should move up in multiline composer, before={cursor_before}, after={cursor_after}"
         );
         assert!(act.is_none());
+    }
+
+    #[test]
+    fn pending_permission_with_non_empty_composer_emits_grant() {
+        let mut v = make_view();
+        v.input_bar_mut_for_test().set_text("hello".into(), 5);
+        v.push_permission("allow file write?", 60);
+
+        let act = press(&mut v, KeyCode::Char('y'));
+
+        assert_eq!(v.input_bar_text_for_test(), "hello", "permission key must not type into bar");
+        assert!(
+            matches!(act, Some(Action::PermissionGrant(crate::action::PermissionChoice::Allow))),
+            "expected PermissionGrant(Allow), got {:?}",
+            act
+        );
+    }
+
+    #[test]
+    fn non_empty_vim_normal_ctrl_p_recalls_history_not_paste() {
+        let mut v = make_view();
+        v.set_edit_mode(crate::components::input_bar::EditMode::Vim(
+            crate::components::input_bar::VimMode::Normal,
+        ));
+        v.seed_input_history(vec![
+            crate::input_history::InputHistoryEntry::new(
+                crate::input_history::InputStateSnapshot::from_text("refactor the walker"),
+            ),
+        ]);
+        v.input_bar_mut_for_test().set_text("current draft".into(), 13);
+
+        let act = press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            v.input_bar_text_for_test(),
+            "refactor the walker",
+            "Ctrl+P must recall history in Vim Normal, not paste"
+        );
+        assert!(act.is_none(), "history nav must not emit an action");
     }
 }
 
