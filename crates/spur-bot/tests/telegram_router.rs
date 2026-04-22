@@ -1,4 +1,4 @@
-use frankenstein::types::{Chat, ChatType, Message, User, CallbackQuery, MaybeInaccessibleMessage};
+use frankenstein::types::{CallbackQuery, Chat, ChatType, MaybeInaccessibleMessage, Message, User};
 use frankenstein::updates::{Update, UpdateContent};
 use spur_bot::telegram::router::{normalize_update, TelegramInput};
 

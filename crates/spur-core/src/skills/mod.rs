@@ -73,6 +73,8 @@ fn bundled_raw() -> &'static HashMap<&'static str, &'static str> {
             "worker-mention-routing",
             include_str!("worker-mention-routing/SKILL.md"),
         );
+        m.insert("brainstorming", include_str!("brainstorming/SKILL.md"));
+        m.insert("writing-plans", include_str!("writing-plans/SKILL.md"));
         m
     })
 }
@@ -526,6 +528,70 @@ mod tests {
         assert!(
             body.contains("avoid_for"),
             "should reference avoid_for override condition"
+        );
+    }
+
+    #[test]
+    fn brainstorming_skill_contains_beads_epic_creation() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("brainstorming", &fake).unwrap();
+        assert!(
+            body.contains("create_issue"),
+            "should instruct creating beads epic"
+        );
+        assert!(
+            body.contains("NO IMPLEMENTATION WITHOUT AN APPROVED SPEC AND A BEADS EPIC"),
+            "should enforce beads-first design gate"
+        );
+        assert!(
+            body.contains("Invoke writing-plans"),
+            "should hand off to writing-plans"
+        );
+    }
+
+    #[test]
+    fn writing_plans_skill_contains_dag_and_beads_integration() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("writing-plans", &fake).unwrap();
+        assert!(
+            body.contains("submit_plan"),
+            "should reference plan submission"
+        );
+        assert!(
+            body.contains("Depends on:"),
+            "should define task dependencies"
+        );
+        assert!(
+            body.contains("spur:plan-task-id"),
+            "should reference beads plan task labels"
+        );
+        assert!(
+            body.contains("Scope Boundary:"),
+            "should define worker scope boundaries"
+        );
+    }
+
+    #[test]
+    fn brainstorming_description_contains_trigger_phrases() {
+        let fake = PathBuf::from("/nonexistent");
+        let raw = all_bundled_raw().get("brainstorming").unwrap();
+        let parsed = frontmatter::parse_source(raw);
+        let desc = parsed.description.unwrap_or("");
+        assert!(
+            desc.contains("brainstorm") || desc.contains("design"),
+            "description should contain trigger phrases for matching, got: {desc}"
+        );
+    }
+
+    #[test]
+    fn writing_plans_description_contains_trigger_phrases() {
+        let fake = PathBuf::from("/nonexistent");
+        let raw = all_bundled_raw().get("writing-plans").unwrap();
+        let parsed = frontmatter::parse_source(raw);
+        let desc = parsed.description.unwrap_or("");
+        assert!(
+            desc.contains("plan") || desc.contains("tasks"),
+            "description should contain trigger phrases for matching, got: {desc}"
         );
     }
 }

@@ -20,7 +20,10 @@ impl ThreadKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BindingState {
     Unbound,
-    RestorePending { acp_session_id: String, brain: String },
+    RestorePending {
+        acp_session_id: String,
+        brain: String,
+    },
     Active {
         #[serde(skip)]
         session: spur_acp::SessionId,
