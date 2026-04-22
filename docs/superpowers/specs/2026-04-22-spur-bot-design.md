@@ -166,6 +166,101 @@ The architecture should be split into four layers:
    concrete implementation. Future transports such as Discord should plug
    into the same `spur-bot` runtime model.
 
+### Mermaid Architecture Diagram
+
+The following diagram is the authoritative high-level architecture for v1.
+It shows both the shared runtime boundary and the transport-specific pieces.
+
+```mermaid
+flowchart TB
+  operator["Operator"]
+  dm["Telegram DM"]
+  telegram["spur-bot::telegram<br/>teloxide dispatcher and handlers"]
+  discord["Future transport<br/>spur-bot::discord"]
+
+  runtime["spur-bot runtime<br/>commands, current-session binding,<br/>prompt registry, rendering policy"]
+  durable[".spur/bot state<br/>chat_id, current acp_session_id, brain"]
+  prompts["In-memory prompt registry<br/>review tokens and permission tokens"]
+
+  usertx["user_tx<br/>Message / NewSession / Resume / Cancel"]
+  reviewtx["dispatch_tx<br/>SubmitReview only"]
+
+  shared["Shared interactive runtime wiring<br/>reuse spur watch startup and shutdown"]
+  orch["spur-core Orchestrator<br/>run_interactive"]
+  reviewloop["review_dispatcher_loop"]
+  reviewsink["ReviewSink"]
+
+  events["SpurEvent stream"]
+  perm["PermissionRequest channel<br/>reply_tx"]
+  acp["Brain ACP session"]
+
+  operator --> dm --> telegram
+  telegram --> runtime
+  discord -. future transport .-> runtime
+
+  runtime --> durable
+  runtime --> prompts
+
+  runtime --> usertx --> shared --> orch
+  runtime --> reviewtx --> reviewloop --> reviewsink
+  shared --> reviewloop
+
+  orch --> acp
+  orch --> events --> runtime
+  orch --> perm --> runtime
+  reviewsink -. review decision resolution .-> orch
+```
+
+### Mermaid Interaction Diagram
+
+The following sequence diagram defines the detailed v1 interactive flow for
+plain chat, permission prompts, review prompts, and restart-safe stale
+callbacks.
+
+```mermaid
+sequenceDiagram
+  actor U as Operator
+  participant T as teloxide dispatcher
+  participant B as spur-bot runtime
+  participant UTX as user_tx
+  participant RTX as dispatch_tx
+  participant O as Orchestrator
+  participant A as Brain ACP session
+
+  U->>T: Send plain text DM
+  T->>B: Message update
+  alt No active session
+    B->>UTX: NewSessionWithMessage
+  else Active session
+    B->>UTX: Message
+  end
+  UTX->>O: InteractiveInput
+  O-->>B: AgentSessionReady(acp_session_id, brain)
+  B->>B: Persist current session binding
+  B-->>T: Send working status and final answer
+
+  A-->>O: PermissionRequest(options, reply_tx)
+  O-->>B: PermissionRequest via permission channel
+  B-->>T: Send permission card
+  U->>T: Tap permission option
+  T->>B: CallbackQuery(permission token)
+  B->>T: answerCallbackQuery
+  B->>A: Resolve reply_tx with exact option_id
+
+  O-->>B: ExecutorReviewRequested(id, attempt_n)
+  B-->>T: Send review card
+  U->>T: Tap Approve / Reject / Retry
+  T->>B: CallbackQuery(review token)
+  B->>T: answerCallbackQuery
+  B->>RTX: SubmitReview(executor_id, attempt_n, decision)
+  RTX->>O: review_dispatcher_loop
+
+  Note over B,T: After restart, prompt registry is empty
+  U->>T: Tap old callback button
+  T->>B: CallbackQuery(stale token)
+  B->>T: answerCallbackQuery expired after restart
+```
+
 ### Crate Shape
 
 Recommended initial structure:
