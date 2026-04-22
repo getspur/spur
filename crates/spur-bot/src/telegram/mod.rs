@@ -22,6 +22,12 @@ pub async fn run_telegram_bot(
         crate::telegram::sender::TelegramSender::new(client.clone(), cfg.max_requests_per_second);
     let cancellation = tokio_util::sync::CancellationToken::new();
 
+    // Startup capability gate.
+    let me = client.get_me().await?;
+    if !me.has_topics_enabled.unwrap_or(false) {
+        anyhow::bail!("telegram bot does not have topics enabled; enable private topics in BotFather before using thread sessions");
+    }
+
     let poll_cancellation = cancellation.clone();
     let cfg_poll_timeout = cfg.poll_timeout_secs;
     let poll_client = client.clone();
@@ -47,36 +53,96 @@ pub async fn run_telegram_bot(
             maybe_update = update_rx.recv() => {
                 let Some(inputs) = maybe_update else { break; };
                 for input in inputs {
-                    let renders = match input {
-                        router::TelegramInput::Text { chat_id, text, .. } => {
-                            runtime.handle_chat_text(&handle, chat_id, &text).await?
+                    match input {
+                        router::TelegramInput::Text {
+                            chat_id,
+                            message_thread_id,
+                            text,
+                            ..
+                        } => {
+                            let renders = runtime
+                                .handle_chat_text(&handle, chat_id, message_thread_id, &text)
+                                .await?;
+                            let mut all_renders = renders;
+                            let key = crate::state::ThreadKey { chat_id, message_thread_id };
+                            let pending = runtime.flush_pending(&handle, &key).await?;
+                            all_renders.extend(pending);
+
+                            // Handle topic creation inline.
+                            for render in &all_renders {
+                                if let crate::runtime::RuntimeRender::CreateTopic { topic_name } = render {
+                                    let topic = client.create_forum_topic(chat_id, topic_name.clone()).await?;
+                                    runtime.ensure_topic_record(chat_id, topic.message_thread_id, topic_name.clone())?;
+                                    client.send_text_to_thread(
+                                        chat_id,
+                                        Some(topic.message_thread_id),
+                                        "Send your first message to start the session.".into(),
+                                    ).await?;
+                                }
+                            }
+
+                            let display_renders: Vec<_> = all_renders
+                                .into_iter()
+                                .filter(|r| !matches!(r, crate::runtime::RuntimeRender::CreateTopic { .. }))
+                                .collect();
+                            render::render_batch_to_thread(
+                                &client,
+                                &sender,
+                                chat_id,
+                                message_thread_id,
+                                display_renders,
+                            )
+                            .await?;
                         }
-                        router::TelegramInput::Callback { query_id, token, .. } => {
-                            runtime.handle_callback(&handle, &query_id, &token).await?
+                        router::TelegramInput::Callback {
+                            query_id,
+                            token,
+                            chat_id,
+                            message_thread_id,
+                            ..
+                        } => {
+                            let key = crate::state::ThreadKey { chat_id, message_thread_id };
+                            let renders = runtime.handle_callback(&handle, &key, &query_id, &token).await?;
+                            render::render_batch_to_thread(
+                                &client,
+                                &sender,
+                                chat_id,
+                                message_thread_id,
+                                renders,
+                            )
+                            .await?;
                         }
-                    };
-                    let mut all_renders = renders;
-                    let pending = runtime.flush_pending(&handle).await?;
-                    all_renders.extend(pending);
-                    if let Some(chat_id) = runtime.bound_chat_id() {
-                        render::render_batch(&client, &sender, chat_id, all_renders).await?;
                     }
                 }
             }
             Ok(event) = event_rx.recv() => {
-                let renders = runtime.handle_spur_event(event)?;
+                let (maybe_key, renders) = runtime.handle_spur_event(event)?;
                 let mut all_renders = renders;
-                let pending = runtime.flush_pending(&handle).await?;
-                all_renders.extend(pending);
-                if let Some(chat_id) = runtime.bound_chat_id() {
-                    render::render_batch(&client, &sender, chat_id, all_renders).await?;
+                if let Some(ref key) = maybe_key {
+                    let pending = runtime.flush_pending(&handle, key).await?;
+                    all_renders.extend(pending);
+                }
+                if let Some(key) = maybe_key {
+                    render::render_batch_to_thread(
+                        &client,
+                        &sender,
+                        key.chat_id,
+                        key.message_thread_id,
+                        all_renders,
+                    )
+                    .await?;
                 }
             }
             Some(request) = perm_rx.recv() => {
-                let renders = runtime.handle_permission_request(request)?;
-                if let Some(chat_id) = runtime.bound_chat_id() {
-                    render::render_batch(&client, &sender, chat_id, renders).await?;
-                }
+                let (key, renders) = runtime.handle_permission_request(request)?;
+                render::render_batch_to_thread(
+                    &client,
+                    &sender,
+                    key.chat_id,
+                    key.message_thread_id,
+                    renders,
+                )
+                .await?;
             }
         }
     }

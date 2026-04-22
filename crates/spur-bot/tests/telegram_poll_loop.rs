@@ -15,6 +15,7 @@ fn try_send_on_full_channel_preserves_offset_and_does_not_panic() {
     tx.try_send(vec![TelegramInput::Text {
         user_id: 1,
         chat_id: 1,
+        message_thread_id: None,
         text: "first".into(),
     }])
     .unwrap();
@@ -23,6 +24,7 @@ fn try_send_on_full_channel_preserves_offset_and_does_not_panic() {
     let result = tx.try_send(vec![TelegramInput::Text {
         user_id: 1,
         chat_id: 1,
+        message_thread_id: None,
         text: "second".into(),
     }]);
     assert!(result.is_err(), "try_send should fail on a full channel");
@@ -43,11 +45,13 @@ fn batch_forward_is_atomic_under_channel_pressure() {
         TelegramInput::Text {
             user_id: 1,
             chat_id: 1,
+            message_thread_id: None,
             text: "a".into(),
         },
         TelegramInput::Text {
             user_id: 1,
             chat_id: 1,
+            message_thread_id: None,
             text: "b".into(),
         },
     ];
@@ -58,11 +62,13 @@ fn batch_forward_is_atomic_under_channel_pressure() {
         TelegramInput::Text {
             user_id: 1,
             chat_id: 1,
+            message_thread_id: None,
             text: "c".into(),
         },
         TelegramInput::Text {
             user_id: 1,
             chat_id: 1,
+            message_thread_id: None,
             text: "d".into(),
         },
     ];
@@ -76,4 +82,24 @@ fn batch_forward_is_atomic_under_channel_pressure() {
     let received = rx.try_recv().unwrap();
     assert_eq!(received.len(), 2);
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn batch_forward_preserves_thread_identity() {
+    let batch = vec![
+        spur_bot::telegram::router::TelegramInput::Text {
+            user_id: 338086459,
+            chat_id: 42,
+            message_thread_id: Some(77),
+            text: "hello".into(),
+        },
+    ];
+
+    assert_eq!(
+        match &batch[0] {
+            spur_bot::telegram::router::TelegramInput::Text { message_thread_id, .. } => *message_thread_id,
+            _ => None,
+        },
+        Some(77)
+    );
 }

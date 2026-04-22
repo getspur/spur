@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::commands::{parse_chat_input, BotCommand, ParsedChatInput};
-use crate::state::{BindingState, BotStateStore, PersistedBotState};
+use crate::state::{BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord, ThreadKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptButton {
@@ -36,9 +36,17 @@ pub enum RuntimeRender {
         token: String,
         text: String,
     },
+    CreateTopic {
+        topic_name: String,
+    },
 }
 
-enum PendingPrompt {
+struct PendingPrompt {
+    thread_key: ThreadKey,
+    kind: PromptKind,
+}
+
+enum PromptKind {
     Review {
         executor_id: String,
         attempt_n: u32,
@@ -52,14 +60,29 @@ enum PendingPrompt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum PromptGroup {
-    Review { executor_id: String, attempt_n: u32 },
-    Permission { prompt_id: String },
+    Review {
+        executor_id: String,
+        attempt_n: u32,
+    },
+    Permission {
+        prompt_id: String,
+    },
+}
+
+pub struct ThreadRecord {
+    pub topic_name: String,
+    pub archived: bool,
+    pub binding: BindingState,
+    pub acp_session_id: Option<String>,
+    pub brain: Option<String>,
+    pub live_session: Option<spur_acp::SessionId>,
+    pub archived_previous: Vec<String>,
 }
 
 pub struct BotRuntime {
     state_store: BotStateStore,
-    binding: BindingState,
     persisted: PersistedBotState,
+    threads: HashMap<ThreadKey, ThreadRecord>,
     prompts: HashMap<String, PendingPrompt>,
     prompt_groups: HashMap<PromptGroup, Vec<String>>,
     permission_reply_txs:
@@ -67,32 +90,69 @@ pub struct BotRuntime {
     /// Accumulates `AgentMessageChunk` text per session so that `TurnComplete`
     /// can emit a single `FinalAnswer`.
     output_buffers: HashMap<spur_acp::SessionId, String>,
-    /// Input queued while a persisted session is being restored.
-    pending_input: Option<spur_core::InteractiveInput>,
+    /// Input queued while a persisted session is being restored, keyed by thread.
+    pending_inputs: HashMap<ThreadKey, spur_core::InteractiveInput>,
+    /// Maps live session to the thread it belongs to.
+    session_threads: HashMap<spur_acp::SessionId, ThreadKey>,
+    /// Threads waiting for a new session to become ready.
+    pending_new_session_key: Option<ThreadKey>,
+    /// Threads waiting for a resumed session to become ready, keyed by acp_session_id.
+    pending_resume: HashMap<String, ThreadKey>,
+    /// Executor ID -> session mapping so that reviews can be routed.
+    executor_sessions: HashMap<String, spur_acp::SessionId>,
+    /// Thread that requested `/sessions` so the reply can be routed back.
+    pending_list_sessions_key: Option<ThreadKey>,
 }
 
 impl BotRuntime {
     pub fn new(state_store: BotStateStore) -> Self {
         let persisted = state_store.load().unwrap_or_default();
-        let binding = match (
-            persisted.current_acp_session_id.clone(),
-            persisted.current_brain.clone(),
-        ) {
-            (Some(acp_session_id), Some(brain)) => BindingState::RestorePending {
-                acp_session_id,
-                brain,
-            },
-            _ => BindingState::NoSession,
-        };
+        let mut threads = HashMap::new();
+
+        for (thread_id, record) in &persisted.threads {
+            let key = ThreadKey {
+                chat_id: persisted.operator_chat_id.unwrap_or(0),
+                message_thread_id: Some(*thread_id),
+            };
+            let binding = match &record.binding_state {
+                BindingState::Active {
+                    acp_session_id,
+                    brain,
+                    ..
+                } => BindingState::RestorePending {
+                    acp_session_id: acp_session_id.clone(),
+                    brain: brain.clone(),
+                },
+                other => other.clone(),
+            };
+            threads.insert(
+                key,
+                ThreadRecord {
+                    topic_name: record.topic_name.clone(),
+                    archived: record.archived,
+                    binding,
+                    acp_session_id: record.acp_session_id.clone(),
+                    brain: record.brain.clone(),
+                    live_session: None,
+                    archived_previous: Vec::new(),
+                },
+            );
+        }
+
         Self {
             state_store,
-            binding,
             persisted,
+            threads,
             prompts: HashMap::new(),
             prompt_groups: HashMap::new(),
             permission_reply_txs: HashMap::new(),
             output_buffers: HashMap::new(),
-            pending_input: None,
+            pending_inputs: HashMap::new(),
+            session_threads: HashMap::new(),
+            pending_new_session_key: None,
+            pending_resume: HashMap::new(),
+            executor_sessions: HashMap::new(),
+            pending_list_sessions_key: None,
         }
     }
 
@@ -104,44 +164,153 @@ impl BotRuntime {
         self.persisted.operator_chat_id
     }
 
+    /// Test helper: ensure a topic record exists.
+    pub fn ensure_topic_record(
+        &mut self,
+        chat_id: i64,
+        message_thread_id: i32,
+        topic_name: String,
+    ) -> anyhow::Result<()> {
+        let key = ThreadKey {
+            chat_id,
+            message_thread_id: Some(message_thread_id),
+        };
+        self.threads.entry(key).or_insert(ThreadRecord {
+            topic_name,
+            archived: false,
+            binding: BindingState::Unbound,
+            acp_session_id: None,
+            brain: None,
+            live_session: None,
+            archived_previous: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Test helper: pre-seed a RestorePending binding.
+    pub fn restore_topic_binding(
+        &mut self,
+        chat_id: i64,
+        message_thread_id: i32,
+        topic_name: String,
+        acp_session_id: String,
+        brain: String,
+    ) {
+        let key = ThreadKey {
+            chat_id,
+            message_thread_id: Some(message_thread_id),
+        };
+        self.threads.insert(
+            key,
+            ThreadRecord {
+                topic_name,
+                archived: false,
+                binding: BindingState::RestorePending {
+                    acp_session_id: acp_session_id.clone(),
+                    brain: brain.clone(),
+                },
+                acp_session_id: Some(acp_session_id),
+                brain: Some(brain),
+                live_session: None,
+                archived_previous: Vec::new(),
+            },
+        );
+    }
+
+    /// Test helper: activate a binding directly.
+    pub fn activate_topic_binding(
+        &mut self,
+        chat_id: i64,
+        message_thread_id: i32,
+        topic_name: String,
+        acp_session_id: String,
+        brain: String,
+    ) {
+        let session = spur_acp::SessionId(format!("spur_{acp_session_id}"));
+        let key = ThreadKey {
+            chat_id,
+            message_thread_id: Some(message_thread_id),
+        };
+        self.threads.insert(
+            key.clone(),
+            ThreadRecord {
+                topic_name,
+                archived: false,
+                binding: BindingState::Active {
+                    session: session.clone(),
+                    acp_session_id: acp_session_id.clone(),
+                    brain: brain.clone(),
+                },
+                acp_session_id: Some(acp_session_id),
+                brain: Some(brain),
+                live_session: Some(session.clone()),
+                archived_previous: Vec::new(),
+            },
+        );
+        self.session_threads.insert(session, key);
+    }
+
+    /// Test helper: get a thread record by message_thread_id (uses the persisted chat_id).
+    pub fn thread_record(&self, message_thread_id: i32) -> Option<&ThreadRecord> {
+        let key = ThreadKey {
+            chat_id: self.persisted.operator_chat_id.unwrap_or(0),
+            message_thread_id: Some(message_thread_id),
+        };
+        self.threads.get(&key)
+    }
+
     pub async fn handle_chat_text(
         &mut self,
         handle: &spur_interactive::InteractiveFrontendHandle,
         chat_id: i64,
+        message_thread_id: Option<i32>,
         text: &str,
     ) -> anyhow::Result<Vec<RuntimeRender>> {
         self.persisted.operator_chat_id = Some(chat_id);
-        self.state_store.save(&self.persisted)?;
+        self.state_store.save(&self.persistable_state())?;
 
+        let key = ThreadKey {
+            chat_id,
+            message_thread_id,
+        };
         match parse_chat_input(text) {
+            ParsedChatInput::PlainText(_body) if message_thread_id.is_none() => {
+                Ok(vec![RuntimeRender::ServiceMessage {
+                    text: "Use /new in the lobby to create a topic, or send a message inside an existing topic.".into(),
+                }])
+            }
             ParsedChatInput::PlainText(body) => {
-                let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
-                    body,
-                ))];
-                match &self.binding {
-                    BindingState::NoSession => {
+                let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(body))];
+                let record = self.threads.get_mut(&key).ok_or_else(|| anyhow::anyhow!("unknown topic"))?;
+                match &record.binding {
+                    BindingState::Unbound => {
                         handle
                             .send_command(spur_core::InteractiveInput::NewSessionWithMessage {
                                 blocks,
                                 interrupt: false,
                             })
                             .await?;
+                        self.pending_new_session_key = Some(key.clone());
                     }
                     BindingState::RestorePending { acp_session_id, .. } => {
-                        // Resume the persisted session before treating the text as an
-                        // in-session message. Queue the message so it is sent only after
-                        // the session is actually active.
-                        if self.pending_input.is_none() {
+                        if !self.pending_inputs.contains_key(&key) {
                             handle
                                 .send_command(spur_core::InteractiveInput::ResumeSession {
                                     session_id: acp_session_id.clone(),
                                 })
                                 .await?;
+                            self.pending_resume.insert(acp_session_id.clone(), key.clone());
                         }
-                        self.pending_input = Some(spur_core::InteractiveInput::Message {
-                            blocks,
-                            interrupt: false,
-                        });
+                        self.pending_inputs.insert(
+                            key.clone(),
+                            spur_core::InteractiveInput::Message {
+                                blocks,
+                                interrupt: false,
+                            },
+                        );
+                        return Ok(vec![RuntimeRender::WorkingStatus {
+                            text: "Restoring session…".into(),
+                        }]);
                     }
                     BindingState::Active { .. } => {
                         handle
@@ -151,33 +320,40 @@ impl BotRuntime {
                             })
                             .await?;
                     }
+                    BindingState::ArchivedDetached => {
+                        return Ok(vec![RuntimeRender::ServiceMessage {
+                            text: "This topic is archived. Use /resume <id> to rebind it.".into(),
+                        }]);
+                    }
                 }
                 Ok(vec![RuntimeRender::WorkingStatus {
                     text: "Working…".into(),
                 }])
             }
-            ParsedChatInput::Command(cmd) => self.handle_command(handle, cmd).await,
+            ParsedChatInput::Command(cmd) => {
+                self.handle_command(handle, key, cmd).await
+            }
         }
     }
 
     async fn handle_command(
         &mut self,
         handle: &spur_interactive::InteractiveFrontendHandle,
+        key: ThreadKey,
         cmd: BotCommand,
     ) -> anyhow::Result<Vec<RuntimeRender>> {
         match cmd {
-            BotCommand::New => {
-                self.binding = BindingState::NoSession;
-                self.persisted.current_acp_session_id = None;
-                self.persisted.current_brain = None;
-                self.pending_input = None;
-                self.output_buffers.clear();
-                self.state_store.save(&self.persisted)?;
-                Ok(vec![RuntimeRender::ServiceMessage {
-                    text: "Current session cleared. The next plain message starts a new session.".into(),
-                }])
+            BotCommand::New if key.message_thread_id.is_none() => {
+                let topic_name = format!("Session {}", self.persisted.next_topic_seq);
+                self.persisted.next_topic_seq += 1;
+                self.state_store.save(&self.persistable_state())?;
+                Ok(vec![RuntimeRender::CreateTopic { topic_name }])
             }
+            BotCommand::New => Ok(vec![RuntimeRender::ServiceMessage {
+                text: "Use /new in the lobby to create a topic.".into(),
+            }]),
             BotCommand::Sessions => {
+                self.pending_list_sessions_key = Some(key.clone());
                 handle
                     .send_command(spur_core::InteractiveInput::ListSessions)
                     .await?;
@@ -186,48 +362,89 @@ impl BotRuntime {
                 }])
             }
             BotCommand::Resume { session_id } => {
-                self.pending_input = None;
-                self.output_buffers.clear();
+                if key.message_thread_id.is_none() {
+                    return Ok(vec![RuntimeRender::ServiceMessage {
+                        text: "Use /resume inside a topic.".into(),
+                    }]);
+                }
+                let record = self
+                    .threads
+                    .get_mut(&key)
+                    .ok_or_else(|| anyhow::anyhow!("unknown topic"))?;
+
+                // Archive any current live binding for this topic.
+                if let Some(old_session) = record.live_session.take() {
+                    if let Some(old_acp) = record.acp_session_id.clone() {
+                        record.archived_previous.push(old_acp);
+                    }
+                    self.session_threads.remove(&old_session);
+                }
+
+                let brain = record.brain.clone().unwrap_or_else(|| "kimi".into());
+                record.binding = BindingState::RestorePending {
+                    acp_session_id: session_id.clone(),
+                    brain: brain.clone(),
+                };
+                record.acp_session_id = Some(session_id.clone());
+                record.brain = Some(brain);
+                self.pending_inputs.remove(&key);
+
                 handle
                     .send_command(spur_core::InteractiveInput::ResumeSession {
                         session_id: session_id.clone(),
                     })
                     .await?;
+                self.pending_resume.insert(session_id.clone(), key.clone());
+
                 Ok(vec![RuntimeRender::WorkingStatus {
                     text: format!("Resuming `{session_id}`…"),
                 }])
             }
-            BotCommand::Current => Ok(vec![RuntimeRender::ServiceMessage {
-                text: match &self.binding {
-                    BindingState::NoSession => "No current session.".into(),
-                    BindingState::RestorePending { acp_session_id, brain } => {
-                        format!("Restore pending: `{acp_session_id}` via `{brain}`.")
+            BotCommand::Current => {
+                let text = if let Some(record) = self.threads.get(&key) {
+                    match &record.binding {
+                        BindingState::Unbound => "No current session in this topic.".into(),
+                        BindingState::RestorePending {
+                            acp_session_id,
+                            brain,
+                        } => {
+                            format!("Restore pending: `{acp_session_id}` via `{brain}`.")
+                        }
+                        BindingState::Active {
+                            acp_session_id,
+                            brain,
+                            ..
+                        } => {
+                            format!("Current session: `{acp_session_id}` via `{brain}`.")
+                        }
+                        BindingState::ArchivedDetached => "This topic is archived.".into(),
                     }
-                    BindingState::Active {
-                        acp_session_id,
-                        brain,
-                        ..
-                    } => format!("Current session: `{acp_session_id}` via `{brain}`."),
-                },
-            }]),
-            BotCommand::Cancel => {
-                if let BindingState::Active { session, .. } = &self.binding {
-                    handle
-                        .send_command(spur_core::InteractiveInput::CancelStream {
-                            session: session.clone(),
-                        })
-                        .await?;
-                    Ok(vec![RuntimeRender::ServiceMessage {
-                        text: "Cancel requested for the current turn.".into(),
-                    }])
+                } else if key.message_thread_id.is_none() {
+                    "Lobby — no session binding.".into()
                 } else {
-                    Ok(vec![RuntimeRender::ServiceMessage {
-                        text: "No in-flight turn is currently running.".into(),
-                    }])
+                    "Unknown topic.".into()
+                };
+                Ok(vec![RuntimeRender::ServiceMessage { text }])
+            }
+            BotCommand::Cancel => {
+                if let Some(record) = self.threads.get(&key) {
+                    if let BindingState::Active { session, .. } = &record.binding {
+                        handle
+                            .send_command(spur_core::InteractiveInput::CancelStream {
+                                session: session.clone(),
+                            })
+                            .await?;
+                        return Ok(vec![RuntimeRender::ServiceMessage {
+                            text: "Cancel requested for the current turn.".into(),
+                        }]);
+                    }
                 }
+                Ok(vec![RuntimeRender::ServiceMessage {
+                    text: "No in-flight turn is currently running.".into(),
+                }])
             }
             BotCommand::Start | BotCommand::Help => Ok(vec![RuntimeRender::ServiceMessage {
-                text: "Send plain text to talk to SPUR. Commands: /new /sessions /resume <id> /current /cancel".into(),
+                text: "Lobby commands: /new /sessions /help\nTopic commands: plain text /resume <id> /current /cancel".into(),
             }]),
         }
     }
@@ -235,7 +452,7 @@ impl BotRuntime {
     pub fn handle_spur_event(
         &mut self,
         event: spur_acp::SpurEvent,
-    ) -> anyhow::Result<Vec<RuntimeRender>> {
+    ) -> anyhow::Result<(Option<ThreadKey>, Vec<RuntimeRender>)> {
         match event.body {
             spur_acp::SpurEventBody::AgentSessionReady {
                 session,
@@ -244,22 +461,43 @@ impl BotRuntime {
                 resumed,
                 ..
             } => {
-                self.binding = BindingState::Active {
-                    session: session.clone(),
-                    acp_session_id: acp_session_id.clone(),
-                    brain: brain.clone(),
+                let key = if resumed {
+                    self.pending_resume
+                        .remove(&acp_session_id)
+                        .or_else(|| self.session_threads.get(&session).cloned())
+                } else {
+                    self.pending_new_session_key.take()
                 };
-                self.persisted.current_acp_session_id = Some(acp_session_id.clone());
-                self.persisted.current_brain = Some(brain.clone());
+
+                let key = key.unwrap_or_else(|| {
+                    ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
+                });
+
+                if let Some(record) = self.threads.get_mut(&key) {
+                    record.binding = BindingState::Active {
+                        session: session.clone(),
+                        acp_session_id: acp_session_id.clone(),
+                        brain: brain.clone(),
+                    };
+                    record.live_session = Some(session.clone());
+                    record.acp_session_id = Some(acp_session_id.clone());
+                    record.brain = Some(brain.clone());
+                }
+
+                self.session_threads.insert(session.clone(), key.clone());
                 self.output_buffers.remove(&session);
-                self.state_store.save(&self.persisted)?;
-                Ok(vec![RuntimeRender::ServiceMessage {
-                    text: if resumed {
-                        format!("Restored session `{acp_session_id}` via `{brain}`.")
-                    } else {
-                        format!("Started session `{acp_session_id}` via `{brain}`.")
-                    },
-                }])
+                self.state_store.save(&self.persistable_state())?;
+
+                Ok((
+                    Some(key),
+                    vec![RuntimeRender::ServiceMessage {
+                        text: if resumed {
+                            format!("Restored session `{acp_session_id}` via `{brain}`.")
+                        } else {
+                            format!("Started session `{acp_session_id}` via `{brain}`.")
+                        },
+                    }],
+                ))
             }
             spur_acp::SpurEventBody::AgentNotification {
                 session,
@@ -267,38 +505,61 @@ impl BotRuntime {
             } => {
                 if let Some(text) = extract_agent_text(&notification) {
                     self.output_buffers
-                        .entry(session)
+                        .entry(session.clone())
                         .or_default()
                         .push_str(&text);
                 }
-                Ok(vec![])
+                let key = self.session_threads.get(&session).cloned();
+                Ok((key, vec![]))
             }
             spur_acp::SpurEventBody::TurnComplete { session } => {
-                if let Some(text) = self
+                let key = self.session_threads.get(&session).cloned();
+                let render = if let Some(text) = self
                     .output_buffers
                     .remove(&session)
                     .filter(|s| !s.trim().is_empty())
                 {
-                    Ok(vec![RuntimeRender::FinalAnswer { text }])
+                    vec![RuntimeRender::FinalAnswer { text }]
                 } else {
-                    Ok(vec![])
-                }
+                    vec![]
+                };
+                Ok((key, render))
             }
             spur_acp::SpurEventBody::BrainError { session, message } => {
+                let key = self.session_threads.get(&session).cloned();
                 self.output_buffers.remove(&session);
-                Ok(vec![RuntimeRender::ServiceMessage {
-                    text: format!("Error: {message}"),
-                }])
+                Ok((
+                    key,
+                    vec![RuntimeRender::ServiceMessage {
+                        text: format!("Error: {message}"),
+                    }],
+                ))
             }
             spur_acp::SpurEventBody::SessionsListed { sessions, .. } => {
-                Ok(vec![RuntimeRender::ServiceMessage {
-                    text: sessions
-                        .iter()
-                        .take(5)
-                        .map(|s| s.session_id.0.to_string())
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                }])
+                let key = self
+                    .pending_list_sessions_key
+                    .take()
+                    .unwrap_or_else(|| ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0)));
+                Ok((
+                    Some(key),
+                    vec![RuntimeRender::ServiceMessage {
+                        text: sessions
+                            .iter()
+                            .take(5)
+                            .map(|s| s.session_id.0.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    }],
+                ))
+            }
+            spur_acp::SpurEventBody::ExecutorSpawned {
+                id,
+                session_id,
+                ..
+            } => {
+                self.executor_sessions.insert(id, session_id.clone());
+                let key = self.session_threads.get(&session_id).cloned();
+                Ok((key, vec![]))
             }
             spur_acp::SpurEventBody::ExecutorReviewRequested {
                 id,
@@ -306,6 +567,14 @@ impl BotRuntime {
                 payload,
                 ..
             } => {
+                let key = self
+                    .executor_sessions
+                    .get(&id)
+                    .and_then(|session| self.session_threads.get(session).cloned())
+                    .unwrap_or_else(|| {
+                        ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
+                    });
+
                 let group = PromptGroup::Review {
                     executor_id: id.clone(),
                     attempt_n,
@@ -330,10 +599,13 @@ impl BotRuntime {
                     let token = uuid::Uuid::new_v4().simple().to_string();
                     self.prompts.insert(
                         token.clone(),
-                        PendingPrompt::Review {
-                            executor_id: id.clone(),
-                            attempt_n,
-                            decision,
+                        PendingPrompt {
+                            thread_key: key.clone(),
+                            kind: PromptKind::Review {
+                                executor_id: id.clone(),
+                                attempt_n,
+                                decision,
+                            },
                         },
                     );
                     tokens.push(token.clone());
@@ -343,12 +615,15 @@ impl BotRuntime {
                     });
                 }
                 self.prompt_groups.insert(group, tokens);
-                Ok(vec![RuntimeRender::ReviewPrompt {
-                    text: format!("Review required for `{id}`: {}", payload.summary),
-                    buttons,
-                }])
+                Ok((
+                    Some(key),
+                    vec![RuntimeRender::ReviewPrompt {
+                        text: format!("Review required for `{id}`: {}", payload.summary),
+                        buttons,
+                    }],
+                ))
             }
-            _ => Ok(vec![]),
+            _ => Ok((None, vec![])),
         }
     }
 
@@ -358,10 +633,13 @@ impl BotRuntime {
     pub async fn flush_pending(
         &mut self,
         handle: &spur_interactive::InteractiveFrontendHandle,
+        key: &ThreadKey,
     ) -> anyhow::Result<Vec<RuntimeRender>> {
-        if let BindingState::Active { .. } = self.binding {
-            if let Some(input) = self.pending_input.take() {
-                handle.send_command(input).await?;
+        if let Some(record) = self.threads.get(key) {
+            if matches!(record.binding, BindingState::Active { .. }) {
+                if let Some(input) = self.pending_inputs.remove(key) {
+                    handle.send_command(input).await?;
+                }
             }
         }
         Ok(vec![])
@@ -370,7 +648,15 @@ impl BotRuntime {
     pub fn handle_permission_request(
         &mut self,
         request: spur_acp::types::PermissionRequest,
-    ) -> anyhow::Result<Vec<RuntimeRender>> {
+    ) -> anyhow::Result<(ThreadKey, Vec<RuntimeRender>)> {
+        let session_str = request.args.session_id.0.to_string();
+        let session_id = spur_acp::SessionId(session_str);
+        let key = self
+            .session_threads
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_else(|| ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0)));
+
         let prompt_id = uuid::Uuid::new_v4().simple().to_string();
         self.permission_reply_txs
             .insert(prompt_id.clone(), request.reply_tx);
@@ -380,9 +666,12 @@ impl BotRuntime {
             let token = uuid::Uuid::new_v4().simple().to_string();
             self.prompts.insert(
                 token.clone(),
-                PendingPrompt::Permission {
-                    prompt_id: prompt_id.clone(),
-                    option_id: opt.option_id.to_string(),
+                PendingPrompt {
+                    thread_key: key.clone(),
+                    kind: PromptKind::Permission {
+                        prompt_id: prompt_id.clone(),
+                        option_id: opt.option_id.to_string(),
+                    },
                 },
             );
             tokens.push(token.clone());
@@ -397,18 +686,22 @@ impl BotRuntime {
             },
             tokens,
         );
-        Ok(vec![RuntimeRender::PermissionPrompt {
-            text: format!(
-                "Permission required for `{}`",
-                request.args.tool_call.tool_call_id
-            ),
-            buttons,
-        }])
+        Ok((
+            key,
+            vec![RuntimeRender::PermissionPrompt {
+                text: format!(
+                    "Permission required for `{}`",
+                    request.args.tool_call.tool_call_id
+                ),
+                buttons,
+            }],
+        ))
     }
 
     pub async fn handle_callback(
         &mut self,
         handle: &spur_interactive::InteractiveFrontendHandle,
+        thread_key: &ThreadKey,
         query_id: &str,
         token: &str,
     ) -> anyhow::Result<Vec<RuntimeRender>> {
@@ -419,8 +712,15 @@ impl BotRuntime {
             }]);
         };
 
-        let group = match &prompt {
-            PendingPrompt::Review {
+        if &prompt.thread_key != thread_key {
+            return Ok(vec![RuntimeRender::AnswerCallback {
+                query_id: query_id.into(),
+                text: "This action expired after restart.".into(),
+            }]);
+        }
+
+        let group = match &prompt.kind {
+            PromptKind::Review {
                 executor_id,
                 attempt_n,
                 ..
@@ -428,7 +728,7 @@ impl BotRuntime {
                 executor_id: executor_id.clone(),
                 attempt_n: *attempt_n,
             },
-            PendingPrompt::Permission { prompt_id, .. } => PromptGroup::Permission {
+            PromptKind::Permission { prompt_id, .. } => PromptGroup::Permission {
                 prompt_id: prompt_id.clone(),
             },
         };
@@ -440,8 +740,8 @@ impl BotRuntime {
             }
         }
 
-        match prompt {
-            PendingPrompt::Review {
+        match prompt.kind {
+            PromptKind::Review {
                 executor_id,
                 attempt_n,
                 decision,
@@ -464,7 +764,7 @@ impl BotRuntime {
                     },
                 ])
             }
-            PendingPrompt::Permission {
+            PromptKind::Permission {
                 prompt_id,
                 option_id,
             } => {
@@ -487,6 +787,37 @@ impl BotRuntime {
                 ])
             }
         }
+    }
+
+    fn persistable_state(&self) -> PersistedBotState {
+        let mut persisted = self.persisted.clone();
+        for (key, record) in &self.threads {
+            if let Some(thread_id) = key.message_thread_id {
+                let mut binding_state = record.binding.clone();
+                if let BindingState::Active {
+                    acp_session_id,
+                    brain,
+                    ..
+                } = &binding_state
+                {
+                    binding_state = BindingState::RestorePending {
+                        acp_session_id: acp_session_id.clone(),
+                        brain: brain.clone(),
+                    };
+                }
+                persisted.threads.insert(
+                    thread_id,
+                    PersistedThreadRecord {
+                        topic_name: record.topic_name.clone(),
+                        archived: record.archived,
+                        acp_session_id: record.acp_session_id.clone(),
+                        brain: record.brain.clone(),
+                        binding_state,
+                    },
+                );
+            }
+        }
+        persisted
     }
 }
 

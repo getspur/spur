@@ -62,29 +62,20 @@ fn test_update_with_message_thread(
     message_thread_id: Option<i32>,
     text: &str,
 ) -> Update {
+    let mut json = serde_json::json!({
+        "message_id": 3,
+        "date": 0,
+        "chat": { "id": chat_id, "type": "private" },
+        "from": { "id": user_id, "is_bot": false, "first_name": "Kevin" },
+        "text": text,
+    });
+    if let Some(thread_id) = message_thread_id {
+        json["message_thread_id"] = serde_json::json!(thread_id);
+    }
+    let message: Message = serde_json::from_value(json).unwrap();
     Update {
         update_id: 3,
-        content: UpdateContent::Message(Box::new(
-            Message::builder()
-                .message_id(3)
-                .date(0)
-                .chat(
-                    Chat::builder()
-                        .id(chat_id)
-                        .type_field(ChatType::Private)
-                        .build(),
-                )
-                .from(
-                    User::builder()
-                        .id(user_id)
-                        .is_bot(false)
-                        .first_name("Kevin")
-                        .build(),
-                )
-                .message_thread_id(message_thread_id)
-                .text(text)
-                .build(),
-        )),
+        content: UpdateContent::Message(Box::new(message)),
     }
 }
 
@@ -95,18 +86,16 @@ fn test_callback_update_with_thread(
     query_id: &str,
     token: &str,
 ) -> Update {
-    let message = Message::builder()
-        .message_id(4)
-        .date(0)
-        .chat(
-            Chat::builder()
-                .id(chat_id)
-                .type_field(ChatType::Private)
-                .build(),
-        )
-        .message_thread_id(message_thread_id)
-        .text("prompt")
-        .build();
+    let mut json = serde_json::json!({
+        "message_id": 4,
+        "date": 0,
+        "chat": { "id": chat_id, "type": "private" },
+        "text": "prompt",
+    });
+    if let Some(thread_id) = message_thread_id {
+        json["message_thread_id"] = serde_json::json!(thread_id);
+    }
+    let message: Message = serde_json::from_value(json).unwrap();
 
     let query = CallbackQuery {
         id: query_id.into(),

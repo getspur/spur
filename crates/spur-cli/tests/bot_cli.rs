@@ -15,3 +15,15 @@ fn bot_telegram_help_smoke() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Launch the Telegram bot frontend"));
 }
+
+#[test]
+fn bot_telegram_help_still_exposes_the_command() {
+    let out = Command::new(spur_binary())
+        .args(["bot", "telegram", "--help"])
+        .output()
+        .expect("spawn");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("bot telegram"));
+}
