@@ -36,7 +36,7 @@ pub async fn run_telegram_bot(
             |batch| {
                 for update in batch {
                     if let Some(input) = router::normalize_update(&update, operator_user_id) {
-                        let _ = update_tx.blocking_send(input);
+                        update_tx.try_send(input)?;
                     }
                 }
                 Ok(())
