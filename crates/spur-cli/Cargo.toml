@@ -21,6 +21,7 @@ spur-cost = { workspace = true }
 spur-pm = { workspace = true }
 spur-license = { workspace = true }
 spur-tui = { workspace = true }
+spur-interactive = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

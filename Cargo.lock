@@ -3432,6 +3432,7 @@ dependencies = [
  "spur-acp",
  "spur-core",
  "spur-cost",
+ "spur-interactive",
  "spur-license",
  "spur-pm",
  "spur-tui",
@@ -3483,6 +3484,17 @@ dependencies = [
  "serde_json",
  "spur-acp",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "spur-interactive"
+version = "0.4.5"
+dependencies = [
+ "anyhow",
+ "spur-acp",
+ "spur-core",
  "tokio",
  "tracing",
 ]

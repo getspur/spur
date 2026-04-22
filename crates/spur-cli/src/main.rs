@@ -466,118 +466,43 @@ async fn main() -> Result<()> {
             let pm_arc = pm_service.map(std::sync::Arc::new);
 
             let orch = Orchestrator::new(repo_root.clone(), config, Some(license.feature_gate()))?;
-            let mut orch = if let Some(pm) = pm_arc {
+            let orch = if let Some(pm) = pm_arc {
                 orch.with_pm_service(pm)
             } else {
                 orch
             };
             let _license_runtime = orch.spawn_license_runtime(license.clone());
-            let event_rx = orch.subscribe();
-
-            // Clone the review_sink BEFORE orch is moved.
-            let review_sink_for_dispatcher = orch.review_sink.clone();
-
-            // Create permission channel
-            let (perm_tx, perm_rx) =
-                tokio::sync::mpsc::unbounded_channel::<spur_acp::types::PermissionRequest>();
-
-            // Channel feeding run_interactive (non-review InteractiveInput variants).
-            let (user_tx, user_rx) = tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
-
-            // Channel feeding the review dispatcher (SubmitReview only).
-            let (dispatch_tx, dispatch_rx) =
-                tokio::sync::mpsc::channel::<spur_core::InteractiveInput>(32);
-
-            // Spawn the review dispatcher task.
-            tokio::spawn(spur_core::review_dispatcher_loop(
-                dispatch_rx,
-                review_sink_for_dispatcher,
-            ));
 
             // Retain a copy of the brain override before it is moved into the
             // orchestrator spawn below, so the auto-resume block can inspect it.
             let brain_for_resume = brain.clone();
 
-            // Spawn interactive orchestrator (moves orch). `mut` so we can
-            // `&mut orch_handle` inside a timeout for graceful shutdown below.
-            let overflow_continuations = spur_core::continuation_bridge::new_overflow_buf();
+            let mut host = spur_interactive::InteractiveFrontendHost::spawn(orch, brain);
+            let host_handle = host.handle();
+            let event_rx = host.take_event_stream().expect("event stream");
+            let perm_rx = host.take_permission_stream();
 
-            // Wire the ingress sender + overflow into the orchestrator so that
-            // `McpCallbackServer` can route detached delegation completions back
-            // through `report_detached_completion`.
-            orch.set_continuation_tx(user_tx.clone(), overflow_continuations.clone());
-
-            let mut orch_handle = tokio::spawn(async move {
-                if let Err(e) = orch
-                    .run_interactive(user_rx, brain, Some(perm_tx), overflow_continuations)
-                    .await
-                {
-                    tracing::error!(error = %e, "Interactive session error");
-                }
-            });
-
-            // TUI → spur-cli translation task: routes review decisions to dispatch_tx,
-            // everything else to user_tx.
+            // TUI → spur-cli translation task: routes SubmitReview through
+            // send_review, everything else through send_command.
             let (tui_tx, mut tui_rx) = tokio::sync::mpsc::channel::<spur_tui::UserInput>(32);
-            let user_tx_for_tui = user_tx.clone();
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
-                    let converted = match input {
-                        spur_tui::UserInput::Message {
-                            blocks, interrupt, ..
-                        } => spur_core::InteractiveInput::Message { blocks, interrupt },
-                        spur_tui::UserInput::NewSessionWithMessage { blocks, interrupt } => {
-                            spur_core::InteractiveInput::NewSessionWithMessage { blocks, interrupt }
-                        }
-                        spur_tui::UserInput::ListSessions => {
-                            spur_core::InteractiveInput::ListSessions
-                        }
-                        spur_tui::UserInput::ResumeSession { session_id } => {
-                            spur_core::InteractiveInput::ResumeSession { session_id }
-                        }
-                        spur_tui::UserInput::SetSessionMode { mode_id } => {
-                            spur_core::InteractiveInput::SetSessionMode { mode_id }
-                        }
+                    match input {
                         spur_tui::UserInput::SubmitReview {
                             executor_id,
                             attempt_n,
                             decision,
-                        } => spur_core::InteractiveInput::SubmitReview {
-                            executor_id,
-                            attempt_n,
-                            decision,
-                        },
-                        spur_tui::UserInput::VendorExec {
-                            session,
-                            method,
-                            params,
-                        } => spur_core::InteractiveInput::VendorExec {
-                            session,
-                            method,
-                            params,
-                        },
-                        spur_tui::UserInput::CancelStream { session } => {
-                            spur_core::InteractiveInput::CancelStream { session }
+                        } => {
+                            let _ = host_handle
+                                .send_review(spur_interactive::ReviewSubmission {
+                                    executor_id,
+                                    attempt_n,
+                                    decision,
+                                })
+                                .await;
                         }
-                        spur_tui::UserInput::RefreshIssues => {
-                            spur_core::InteractiveInput::RefreshIssues
-                        }
-                        spur_tui::UserInput::GetIssueDetail { id } => {
-                            spur_core::InteractiveInput::GetIssueDetail { id }
-                        }
-                        spur_tui::UserInput::UpdateIssue { id, update } => {
-                            spur_core::InteractiveInput::UpdateIssue { id, update }
-                        }
-                    };
-
-                    // SubmitReview → dispatch_tx; everything else → user_tx.
-                    if matches!(converted, spur_core::InteractiveInput::SubmitReview { .. }) {
-                        if let Err(e) = dispatch_tx.send(converted).await {
-                            tracing::warn!(error = %e, "review decision dropped — dispatcher channel closed");
-                        }
-                    } else {
-                        if let Err(e) = user_tx_for_tui.send(converted).await {
-                            tracing::warn!(error = %e, "user input dropped — orchestrator channel closed");
+                        other => {
+                            let _ = host_handle.send_command(tui_input_to_interactive(other)).await;
                         }
                     }
                 }
@@ -623,9 +548,11 @@ async fn main() -> Result<()> {
                         .await;
                 });
             } else if !force_picker {
-                let warm_tx = user_tx.clone();
+                let warm_handle = host.handle();
                 tokio::spawn(async move {
-                    let _ = warm_tx.send(spur_core::InteractiveInput::WarmConnect).await;
+                    let _ = warm_handle
+                        .send_command(spur_core::InteractiveInput::WarmConnect)
+                        .await;
                 });
             }
 
@@ -635,32 +562,16 @@ async fn main() -> Result<()> {
             let tui_result = spur_tui::app::run_tui_with_license(
                 event_rx,
                 Some(tui_tx),
-                Some(perm_rx),
+                perm_rx,
                 force_picker,
                 config_arc,
                 initial_license_state,
             )
             .await;
 
-            // TUI exited — its `user_input_tx` is dropped, which causes the
-            // translator task to exit, which drops `user_tx` and `dispatch_tx`,
-            // which causes `run_interactive`'s `user_input_rx.recv()` and the
-            // `review_dispatcher_loop` to return, letting the orchestrator's
-            // cleanup path (`connection.shutdown()` → `killpg` on the agent's
-            // pgid) run to completion.
-            //
-            // Wait up to 5s for that graceful chain; if it stalls, abort the
-            // task — `Drop for NativeAcpConnection` will still SIGKILL the
-            // process group, preventing zombie descendants.
-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut orch_handle).await {
-                Ok(_) => tracing::info!("orchestrator shut down gracefully"),
-                Err(_) => {
-                    tracing::warn!("orchestrator shutdown timed out after 5s; aborting");
-                    orch_handle.abort();
-                    // Swallow JoinError::Cancelled so we can surface the TUI
-                    // error (if any) instead of the abort-induced cancellation.
-                    let _ = (&mut orch_handle).await;
-                }
+            // Structured shutdown through the shared host.
+            if let Err(e) = host.shutdown().await {
+                tracing::warn!(%e, "orchestrator shutdown timed out; aborting");
             }
 
             // Propagate the TUI error (if any) after structured shutdown.
@@ -734,6 +645,46 @@ async fn cmd_agents(repo_root: PathBuf, command: Option<AgentsCommands>) -> Resu
         }
     }
     Ok(())
+}
+
+fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::InteractiveInput {
+    match input {
+        spur_tui::UserInput::Message {
+            blocks, interrupt, ..
+        } => spur_core::InteractiveInput::Message { blocks, interrupt },
+        spur_tui::UserInput::NewSessionWithMessage { blocks, interrupt } => {
+            spur_core::InteractiveInput::NewSessionWithMessage { blocks, interrupt }
+        }
+        spur_tui::UserInput::ListSessions => spur_core::InteractiveInput::ListSessions,
+        spur_tui::UserInput::ResumeSession { session_id } => {
+            spur_core::InteractiveInput::ResumeSession { session_id }
+        }
+        spur_tui::UserInput::SetSessionMode { mode_id } => {
+            spur_core::InteractiveInput::SetSessionMode { mode_id }
+        }
+        spur_tui::UserInput::VendorExec {
+            session,
+            method,
+            params,
+        } => spur_core::InteractiveInput::VendorExec {
+            session,
+            method,
+            params,
+        },
+        spur_tui::UserInput::CancelStream { session } => {
+            spur_core::InteractiveInput::CancelStream { session }
+        }
+        spur_tui::UserInput::RefreshIssues => spur_core::InteractiveInput::RefreshIssues,
+        spur_tui::UserInput::GetIssueDetail { id } => {
+            spur_core::InteractiveInput::GetIssueDetail { id }
+        }
+        spur_tui::UserInput::UpdateIssue { id, update } => {
+            spur_core::InteractiveInput::UpdateIssue { id, update }
+        }
+        spur_tui::UserInput::SubmitReview { .. } => {
+            unreachable!("review routing is handled before translation")
+        }
+    }
 }
 
 fn format_duration(secs: i64) -> String {
