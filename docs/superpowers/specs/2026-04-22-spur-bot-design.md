@@ -175,7 +175,7 @@ It shows both the shared runtime boundary and the transport-specific pieces.
 flowchart TB
   operator["Operator"]
   dm["Telegram DM"]
-  telegram["spur-bot::telegram<br/>teloxide dispatcher and handlers"]
+  telegram["spur-bot::telegram<br/>frankenstein client + poll loop + router"]
   discord["Future transport<br/>spur-bot::discord"]
 
   runtime["spur-bot runtime<br/>commands, current-session binding,<br/>prompt registry, rendering policy"]
@@ -220,7 +220,7 @@ callbacks.
 ```mermaid
 sequenceDiagram
   actor U as Operator
-  participant T as teloxide dispatcher
+  participant T as frankenstein poll loop + router
   participant B as spur-bot runtime
   participant UTX as user_tx
   participant RTX as dispatch_tx
@@ -275,7 +275,10 @@ crates/spur-bot/
     telegram/
       mod.rs
       config.rs
-      dispatcher.rs
+      client.rs
+      poll_loop.rs
+      router.rs
+      sender.rs
       render.rs
       format.rs
 ```
@@ -291,45 +294,54 @@ Responsibilities:
   Platform-agnostic command semantics.
 - `telegram/config.rs`
   Telegram-specific configuration.
-- `telegram/dispatcher.rs`
-  Telegram update intake and routing.
+- `telegram/client.rs`
+  Thin wrapper over the Telegram Bot API client.
+- `telegram/poll_loop.rs`
+  Long-polling task, offset management, and retry/backoff behavior.
+- `telegram/router.rs`
+  Update normalization and routing into bot-runtime actions.
+- `telegram/sender.rs`
+  Outbound Telegram request execution and rate limiting.
 - `telegram/render.rs`
   Telegram DM rendering.
 - `telegram/format.rs`
   Telegram-safe text splitting and formatting helpers.
 
-### Rust Telegram Framework Choice
+### Rust Telegram Transport Library Choice
 
-`spur-bot::telegram` should use **`teloxide`** as its Telegram transport
-framework.
+`spur-bot::telegram` should use **`frankenstein`** with the async
+`client-reqwest` feature as its Telegram API client.
 
 Why this is the best fit for the approved v1 scope:
 
-- it already supports both long polling and webhooks
-- it provides typed command parsing, callback-query handling, inline
-  keyboard helpers, dispatcher routing, and request throttling
-- it fits the current workspace well because SPUR already uses `tokio`,
-  and webhook support can later align with the existing Rust HTTP stack
-- its same-chat sequential update handling is a good match for the
-  single-operator DM model in v1
+- it is a thin, type-safe wrapper over the Telegram Bot API instead of a
+  framework with its own dispatcher or dialogue runtime
+- it fits the approved transport-only boundary because `spur-bot runtime`
+  already owns state, routing, and prompt lifecycle
+- it tracks newer Bot API releases and is a better fit for native draft
+  streaming support via `sendMessageDraft`
+- it works cleanly with the existing `tokio` + `reqwest` stack already used
+  across the workspace
 
-The approved transport mode for v1 is **long polling**.
+The approved transport mode for v1 is **long polling** through an explicit
+`getUpdates` loop owned by `telegram/poll_loop.rs`.
 
 This keeps deployment simple for the first bot transport while still
 allowing a later webhook mode if operational needs change.
 
 #### Framework Boundary
 
-`teloxide` should be used only for transport concerns:
+`frankenstein` should be used only for transport concerns:
 
 - receiving Telegram updates
-- parsing commands
-- handling callback queries
+- long-polling `getUpdates` intake
+- update parsing and routing
+- handling callback queries and message edits
 - sending and editing Telegram messages
-- rate-limit-aware request execution
-- dispatcher routing and dependency injection for transport handlers
+- draft streaming via `sendMessageDraft`
+- rate-limit-aware outbound request execution
 
-`teloxide` must **not** own SPUR session state, prompt lifecycle, review
+`frankenstein` must **not** own SPUR session state, prompt lifecycle, review
 state, permission state, or bot persistence.
 
 Those remain inside `spur-bot` runtime code so the bot behavior stays
@@ -338,14 +350,14 @@ logic.
 
 #### Explicit Non-Choice
 
-Do not build v1 on top of `teloxide` dialogue storage/state machines.
+Do not turn the Telegram adapter into a second bot runtime.
 
 That means:
 
-- do not use `teloxide::dispatching::dialogue::Dialogue`
-- do not use `dialogue::enter(...)`
-- do not use `InMemStorage`, `SqliteStorage`, `RedisStorage`, or other
-  teloxide dialogue storage backends for SPUR runtime state
+- do not let `frankenstein` types leak above `telegram/` transport modules
+- do not persist Telegram transport state outside `.spur/bot/`
+- do not let the polling loop own session semantics, prompt lifecycle, or
+  command semantics
 
 The approved design already has a SPUR-owned runtime model:
 
@@ -354,13 +366,13 @@ The approved design already has a SPUR-owned runtime model:
 - review and permission prompt lifecycle
 - restart-aware stale callback handling
 
-Replacing those with transport-owned dialogue state would split the source
+Replacing those with transport-owned logic would split the source
 of truth and make future multi-transport support harder.
 
-`teloxide` should therefore be used with dispatcher handlers and explicit
-shared dependencies, not as a dialogue-owned state machine. The bot runtime
-remains the only source of truth for current session binding, prompt
-lifecycle, and restart behavior.
+If a newly added Bot API method appears in Telegram docs before
+`frankenstein` exposes a typed helper, the transport may temporarily call
+the low-level `request(...)` path from `telegram/client.rs`. That fallback
+must remain transport-local and must not change the runtime boundary.
 
 ---
 
@@ -500,7 +512,7 @@ runtime:
 - pending review routing slots keyed by executor id and attempt number
 
 Those values are valid only for the current process lifetime, so they must
-never be persisted through teloxide storage or local bot state files.
+never be persisted through transport state or local bot state files.
 
 ### Restart Invariant
 
@@ -509,8 +521,8 @@ After restart, old inline buttons must be treated as stale.
 - callback tokens are regenerated per process lifetime
 - old button clicks return a clean “expired after restart” response
 - no attempt is made to rehydrate old review or permission prompts
-- the previous process's working-status message is orphaned and must not be
-  edited after restart
+- the previous process's working-status message or draft is orphaned and
+  must not be updated after restart
 
 Stale callbacks should always acknowledge the button press. They may emit
 one compact service message in chat when needed, but repeated stale clicks
@@ -621,6 +633,16 @@ Meaningful v1 milestones include:
 - turn completed
 - turn cancelled
 - error
+
+For v1, the in-progress assistant answer may optionally be rendered through
+Telegram drafts via `sendMessageDraft` instead of repeated
+`editMessageText` updates. When draft streaming is enabled:
+
+- it is used only for the single private operator DM
+- each active turn owns one ephemeral `draft_id`
+- draft updates are throttled and coalesced by the transport sender
+- the final assistant answer is still emitted as a normal durable message
+- drafts are never persisted and are abandoned on restart
 
 ### Message Hierarchy
 
@@ -848,11 +870,13 @@ Purpose:
 `spur-bot::telegram` should own:
 
 - bot token/config loading
-- Telegram update intake
+- long-polling update intake
 - authorized private-chat filtering
 - operator chat binding
+- outbound request execution and rate limiting
 - Telegram-specific formatting and message splitting
 - callback query acknowledgement and keyboard editing
+- optional draft streaming for in-progress assistant answers
 
 It should not own:
 
@@ -871,6 +895,13 @@ The Telegram adapter must respect Bot API constraints:
 - message rendering must use Telegram-safe formatting logic
 - message splitting must be character-safe and formatting-aware
 - callback queries must always be answered, including stale ones
+- startup must detect and clear conflicting webhook state before entering
+  long polling
+- `getUpdates` offset must only advance after updates are accepted by the
+  poll loop
+- outbound calls must pass through a rate limiter because `frankenstein`
+  does not provide one
+- `sendMessageDraft` applies only to private chats and must stay optional
 
 These are adapter concerns, not `spur-core` concerns.
 
@@ -922,8 +953,10 @@ Add targeted tests for:
 - callback token encoding/decoding
 - stale callback handling
 - Telegram-safe message splitting
-- command parsing
+- poll-loop offset advancement and retry/backoff behavior
 - update filtering for private authorized chat only
+- outbound sender rate-limiter behavior
+- `sendMessageDraft` param construction and draft-id stability
 
 ### Manual Smoke
 
@@ -938,6 +971,8 @@ V1 should include a manual smoke checklist:
 7. trigger a review prompt, exercise all three review actions
 8. trigger a permission prompt, confirm exact ACP options are returned
 9. click a pre-restart button and confirm clean stale-response behavior
+10. if draft streaming is enabled, confirm partial answer updates appear as
+    one animated draft and final answer lands as a durable message
 
 ---
 
