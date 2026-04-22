@@ -11,13 +11,31 @@ pub struct PromptButton {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeRender {
-    ServiceMessage { text: String },
-    WorkingStatus { text: String },
-    FinalAnswer { text: String },
-    ReviewPrompt { text: String, buttons: Vec<PromptButton> },
-    PermissionPrompt { text: String, buttons: Vec<PromptButton> },
-    AnswerCallback { query_id: String, text: String },
-    FinalizePrompt { token: String, text: String },
+    ServiceMessage {
+        text: String,
+    },
+    WorkingStatus {
+        text: String,
+    },
+    FinalAnswer {
+        text: String,
+    },
+    ReviewPrompt {
+        text: String,
+        buttons: Vec<PromptButton>,
+    },
+    PermissionPrompt {
+        text: String,
+        buttons: Vec<PromptButton>,
+    },
+    AnswerCallback {
+        query_id: String,
+        text: String,
+    },
+    FinalizePrompt {
+        token: String,
+        text: String,
+    },
 }
 
 enum PendingPrompt {
@@ -34,13 +52,8 @@ enum PendingPrompt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum PromptGroup {
-    Review {
-        executor_id: String,
-        attempt_n: u32,
-    },
-    Permission {
-        prompt_id: String,
-    },
+    Review { executor_id: String, attempt_n: u32 },
+    Permission { prompt_id: String },
 }
 
 pub struct BotRuntime {
@@ -95,7 +108,9 @@ impl BotRuntime {
 
         match parse_chat_input(text) {
             ParsedChatInput::PlainText(body) => {
-                let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(body))];
+                let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
+                    body,
+                ))];
                 match &self.binding {
                     BindingState::NoSession => {
                         handle
@@ -190,7 +205,10 @@ impl BotRuntime {
         }
     }
 
-    pub fn handle_spur_event(&mut self, event: spur_acp::SpurEvent) -> anyhow::Result<Vec<RuntimeRender>> {
+    pub fn handle_spur_event(
+        &mut self,
+        event: spur_acp::SpurEvent,
+    ) -> anyhow::Result<Vec<RuntimeRender>> {
         match event.body {
             spur_acp::SpurEventBody::AgentSessionReady {
                 session,
@@ -215,14 +233,16 @@ impl BotRuntime {
                     },
                 }])
             }
-            spur_acp::SpurEventBody::SessionsListed { sessions, .. } => Ok(vec![RuntimeRender::ServiceMessage {
-                text: sessions
-                    .iter()
-                    .take(5)
-                    .map(|s| s.session_id.0.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            }]),
+            spur_acp::SpurEventBody::SessionsListed { sessions, .. } => {
+                Ok(vec![RuntimeRender::ServiceMessage {
+                    text: sessions
+                        .iter()
+                        .take(5)
+                        .map(|s| s.session_id.0.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }])
+            }
             spur_acp::SpurEventBody::ExecutorReviewRequested {
                 id,
                 attempt_n,
@@ -306,7 +326,10 @@ impl BotRuntime {
             tokens,
         );
         Ok(vec![RuntimeRender::PermissionPrompt {
-            text: format!("Permission required for `{}`", request.args.tool_call.tool_call_id),
+            text: format!(
+                "Permission required for `{}`",
+                request.args.tool_call.tool_call_id
+            ),
             buttons,
         }])
     }

@@ -4,7 +4,9 @@ pub fn validate(cfg: &spur_acp::config::TelegramBotConfig) -> anyhow::Result<()>
     }
 
     anyhow::ensure!(
-        cfg.bot_token.as_deref().is_some_and(|s| !s.trim().is_empty()),
+        cfg.bot_token
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty()),
         "bot.telegram.bot_token is required when bot.telegram.enabled = true"
     );
     anyhow::ensure!(
