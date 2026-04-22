@@ -1,5 +1,13 @@
 ## Unreleased
 
+### Added
+- **Spur Way skill bundle.** Five new bundled skills harden brain-worker-beads collaboration:
+  `spur-way` (beads-first invariant), `beads-lifecycle` (status state machine),
+  `worker-signals` (`[[spur-signal v1]]` protocol), `brain-review-gate`
+  (beads-aware approval checklist), and `plan-task-discipline` (DAG integrity
+  rules). All compile into `spur-core` via `include_str!` and render across
+  the seven agent adapters. See `docs/superpowers/specs/2026-04-22-superpower-skill-hardening-spur-way.md`.
+
 ## v0.4.5 — 2026-04-19
 
 Spur 0.4.5 focuses on getting around faster and trusting what you see. A new universal palette (Ctrl+K) jumps you between sessions, workers, traces, and commands from anywhere. The `@mention` and `/slash` pickers now share one consistent interface. Agent output renders markdown and mermaid diagrams inline, and streaming stays smooth under bursty traffic.
