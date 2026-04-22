@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::commands::{parse_chat_input, BotCommand, ParsedChatInput};
 use crate::state::{BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord, ThreadKey};
@@ -43,6 +43,10 @@ pub enum RuntimeRender {
 
 struct PendingPrompt {
     thread_key: ThreadKey,
+    /// ACP session id captured at prompt creation time. If the topic is later
+    /// rebound to a different session, this prompt is stale even though the
+    /// `ThreadKey` still matches.
+    acp_session_id: Option<String>,
     kind: PromptKind,
 }
 
@@ -94,14 +98,15 @@ pub struct BotRuntime {
     pending_inputs: HashMap<ThreadKey, spur_core::InteractiveInput>,
     /// Maps live session to the thread it belongs to.
     session_threads: HashMap<spur_acp::SessionId, ThreadKey>,
-    /// Threads waiting for a new session to become ready.
-    pending_new_session_key: Option<ThreadKey>,
+    /// Threads waiting for a new session to become ready, in FIFO order.
+    /// Multiple topics can start fresh sessions before any `AgentSessionReady`
+    /// returns; preserving arrival order is the only way to bind each session
+    /// to the right topic.
+    pending_new_session_keys: VecDeque<ThreadKey>,
     /// Threads waiting for a resumed session to become ready, keyed by acp_session_id.
     pending_resume: HashMap<String, ThreadKey>,
     /// Executor ID -> session mapping so that reviews can be routed.
     executor_sessions: HashMap<String, spur_acp::SessionId>,
-    /// Thread that requested `/sessions` so the reply can be routed back.
-    pending_list_sessions_key: Option<ThreadKey>,
 }
 
 impl BotRuntime {
@@ -149,10 +154,9 @@ impl BotRuntime {
             output_buffers: HashMap::new(),
             pending_inputs: HashMap::new(),
             session_threads: HashMap::new(),
-            pending_new_session_key: None,
+            pending_new_session_keys: VecDeque::new(),
             pending_resume: HashMap::new(),
             executor_sessions: HashMap::new(),
-            pending_list_sessions_key: None,
         }
     }
 
@@ -164,7 +168,11 @@ impl BotRuntime {
         self.persisted.operator_chat_id
     }
 
-    /// Test helper: ensure a topic record exists.
+    /// Ensures an `Unbound` topic record exists for the given key and persists
+    /// it to disk before returning. The transport calls this immediately after
+    /// a successful `createForumTopic`; persistence here is what lets the topic
+    /// survive a restart that occurs before the operator sends the first
+    /// message.
     pub fn ensure_topic_record(
         &mut self,
         chat_id: i64,
@@ -175,6 +183,7 @@ impl BotRuntime {
             chat_id,
             message_thread_id: Some(message_thread_id),
         };
+        let inserted = !self.threads.contains_key(&key);
         self.threads.entry(key).or_insert(ThreadRecord {
             topic_name,
             archived: false,
@@ -184,6 +193,9 @@ impl BotRuntime {
             live_session: None,
             archived_previous: Vec::new(),
         });
+        if inserted {
+            self.state_store.save(&self.persistable_state())?;
+        }
         Ok(())
     }
 
@@ -250,6 +262,33 @@ impl BotRuntime {
         self.session_threads.insert(session, key);
     }
 
+    /// Test helper: pre-seed an archived/detached thread record (for `/sessions` coverage).
+    pub fn seed_archived_topic_record(
+        &mut self,
+        chat_id: i64,
+        message_thread_id: i32,
+        topic_name: String,
+        acp_session_id: String,
+        brain: String,
+    ) {
+        let key = ThreadKey {
+            chat_id,
+            message_thread_id: Some(message_thread_id),
+        };
+        self.threads.insert(
+            key,
+            ThreadRecord {
+                topic_name,
+                archived: true,
+                binding: BindingState::ArchivedDetached,
+                acp_session_id: Some(acp_session_id),
+                brain: Some(brain),
+                live_session: None,
+                archived_previous: Vec::new(),
+            },
+        );
+    }
+
     /// Test helper: get a thread record by message_thread_id (uses the persisted chat_id).
     pub fn thread_record(&self, message_thread_id: i32) -> Option<&ThreadRecord> {
         let key = ThreadKey {
@@ -290,7 +329,7 @@ impl BotRuntime {
                                 interrupt: false,
                             })
                             .await?;
-                        self.pending_new_session_key = Some(key.clone());
+                        self.pending_new_session_keys.push_back(key.clone());
                     }
                     BindingState::RestorePending { acp_session_id, .. } => {
                         if !self.pending_inputs.contains_key(&key) {
@@ -352,25 +391,50 @@ impl BotRuntime {
             BotCommand::New => Ok(vec![RuntimeRender::ServiceMessage {
                 text: "Use /new in the lobby to create a topic.".into(),
             }]),
-            BotCommand::Sessions => {
-                self.pending_list_sessions_key = Some(key.clone());
-                handle
-                    .send_command(spur_core::InteractiveInput::ListSessions)
-                    .await?;
-                Ok(vec![RuntimeRender::WorkingStatus {
-                    text: "Listing resumable sessions…".into(),
-                }])
-            }
+            BotCommand::Sessions => Ok(vec![RuntimeRender::ServiceMessage {
+                text: self.render_registry_summary(),
+            }]),
             BotCommand::Resume { session_id } => {
                 if key.message_thread_id.is_none() {
                     return Ok(vec![RuntimeRender::ServiceMessage {
                         text: "Use /resume inside a topic.".into(),
                     }]);
                 }
+                if !self.threads.contains_key(&key) {
+                    return Err(anyhow::anyhow!("unknown topic"));
+                }
+
+                // Archive any OTHER topic that currently owns the requested
+                // ACP session. This is the atomicity rule from the spec: no
+                // ACP session may be live-bound to multiple topics at once.
+                let conflicting_keys: Vec<ThreadKey> = self
+                    .threads
+                    .iter()
+                    .filter(|(k, r)| {
+                        *k != &key
+                            && r.acp_session_id.as_deref() == Some(session_id.as_str())
+                            && !matches!(r.binding, BindingState::ArchivedDetached)
+                    })
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for conflict in conflicting_keys {
+                    if let Some(other) = self.threads.get_mut(&conflict) {
+                        if let Some(old_session) = other.live_session.take() {
+                            self.session_threads.remove(&old_session);
+                        }
+                        if let Some(old_acp) = other.acp_session_id.clone() {
+                            other.archived_previous.push(old_acp);
+                        }
+                        other.binding = BindingState::ArchivedDetached;
+                        other.archived = true;
+                    }
+                    self.pending_inputs.remove(&conflict);
+                }
+
                 let record = self
                     .threads
                     .get_mut(&key)
-                    .ok_or_else(|| anyhow::anyhow!("unknown topic"))?;
+                    .expect("presence verified above");
 
                 // Archive any current live binding for this topic.
                 if let Some(old_session) = record.live_session.take() {
@@ -395,6 +459,7 @@ impl BotRuntime {
                     })
                     .await?;
                 self.pending_resume.insert(session_id.clone(), key.clone());
+                self.state_store.save(&self.persistable_state())?;
 
                 Ok(vec![RuntimeRender::WorkingStatus {
                     text: format!("Resuming `{session_id}`…"),
@@ -466,7 +531,7 @@ impl BotRuntime {
                         .remove(&acp_session_id)
                         .or_else(|| self.session_threads.get(&session).cloned())
                 } else {
-                    self.pending_new_session_key.take()
+                    self.pending_new_session_keys.pop_front()
                 };
 
                 let key = key.unwrap_or_else(|| {
@@ -535,23 +600,9 @@ impl BotRuntime {
                     }],
                 ))
             }
-            spur_acp::SpurEventBody::SessionsListed { sessions, .. } => {
-                let key = self
-                    .pending_list_sessions_key
-                    .take()
-                    .unwrap_or_else(|| ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0)));
-                Ok((
-                    Some(key),
-                    vec![RuntimeRender::ServiceMessage {
-                        text: sessions
-                            .iter()
-                            .take(5)
-                            .map(|s| s.session_id.0.to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    }],
-                ))
-            }
+            // `/sessions` is now served locally from the thread registry, so
+            // inbound `SessionsListed` events are informational only.
+            spur_acp::SpurEventBody::SessionsListed { .. } => Ok((None, vec![])),
             spur_acp::SpurEventBody::ExecutorSpawned {
                 id,
                 session_id,
@@ -574,6 +625,10 @@ impl BotRuntime {
                     .unwrap_or_else(|| {
                         ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
                     });
+                let prompt_acp_session_id = self
+                    .threads
+                    .get(&key)
+                    .and_then(|r| r.acp_session_id.clone());
 
                 let group = PromptGroup::Review {
                     executor_id: id.clone(),
@@ -601,6 +656,7 @@ impl BotRuntime {
                         token.clone(),
                         PendingPrompt {
                             thread_key: key.clone(),
+                            acp_session_id: prompt_acp_session_id.clone(),
                             kind: PromptKind::Review {
                                 executor_id: id.clone(),
                                 attempt_n,
@@ -656,6 +712,10 @@ impl BotRuntime {
             .get(&session_id)
             .cloned()
             .unwrap_or_else(|| ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0)));
+        let prompt_acp_session_id = self
+            .threads
+            .get(&key)
+            .and_then(|r| r.acp_session_id.clone());
 
         let prompt_id = uuid::Uuid::new_v4().simple().to_string();
         self.permission_reply_txs
@@ -668,6 +728,7 @@ impl BotRuntime {
                 token.clone(),
                 PendingPrompt {
                     thread_key: key.clone(),
+                    acp_session_id: prompt_acp_session_id.clone(),
                     kind: PromptKind::Permission {
                         prompt_id: prompt_id.clone(),
                         option_id: opt.option_id.to_string(),
@@ -713,6 +774,42 @@ impl BotRuntime {
         };
 
         if &prompt.thread_key != thread_key {
+            return Ok(vec![RuntimeRender::AnswerCallback {
+                query_id: query_id.into(),
+                text: "This action expired after restart.".into(),
+            }]);
+        }
+
+        // Even when the ThreadKey still matches, the topic may have been
+        // rebound to a different ACP session (e.g. via `/resume <id>`). Reject
+        // prompts that were issued under an earlier binding.
+        let current_acp = self
+            .threads
+            .get(thread_key)
+            .and_then(|r| r.acp_session_id.clone());
+        if prompt.acp_session_id != current_acp {
+            // Also clear prompt-group siblings so that Approve/Reject/Retry
+            // triplet doesn't leave orphan tokens behind.
+            let group = match &prompt.kind {
+                PromptKind::Review {
+                    executor_id,
+                    attempt_n,
+                    ..
+                } => PromptGroup::Review {
+                    executor_id: executor_id.clone(),
+                    attempt_n: *attempt_n,
+                },
+                PromptKind::Permission { prompt_id, .. } => PromptGroup::Permission {
+                    prompt_id: prompt_id.clone(),
+                },
+            };
+            if let Some(siblings) = self.prompt_groups.remove(&group) {
+                for sibling in siblings {
+                    if sibling != token {
+                        self.prompts.remove(&sibling);
+                    }
+                }
+            }
             return Ok(vec![RuntimeRender::AnswerCallback {
                 query_id: query_id.into(),
                 text: "This action expired after restart.".into(),
@@ -787,6 +884,36 @@ impl BotRuntime {
                 ])
             }
         }
+    }
+
+    fn render_registry_summary(&self) -> String {
+        let mut entries: Vec<(i32, &ThreadRecord)> = self
+            .threads
+            .iter()
+            .filter_map(|(k, r)| k.message_thread_id.map(|tid| (tid, r)))
+            .collect();
+        if entries.is_empty() {
+            return "No topics yet. Use /new in the lobby to create one.".into();
+        }
+        entries.sort_by_key(|(tid, _)| *tid);
+        let mut out = String::from("Topics:\n");
+        for (_, record) in entries {
+            let state = match &record.binding {
+                BindingState::Unbound => "unbound",
+                BindingState::RestorePending { .. } => "restore-pending",
+                BindingState::Active { .. } => "active",
+                BindingState::ArchivedDetached => "archived",
+            };
+            out.push_str(&format!("• {} — {}", record.topic_name, state));
+            if let Some(acp) = &record.acp_session_id {
+                out.push_str(&format!(" — `{acp}`"));
+            }
+            if record.archived && !matches!(record.binding, BindingState::ArchivedDetached) {
+                out.push_str(" (archived)");
+            }
+            out.push('\n');
+        }
+        out.trim_end().to_string()
     }
 
     fn persistable_state(&self) -> PersistedBotState {

@@ -172,6 +172,229 @@ async fn lobby_new_requires_topic_creation_before_chat() {
     ));
 }
 
+// ── Blocking-correctness regression coverage ─────────────────────────────────
+
+#[tokio::test]
+async fn new_topic_record_is_persisted_before_first_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".spur/bot/state.json");
+    let store = BotStateStore::new(path.clone());
+    let (user_tx, _user_rx) = tokio::sync::mpsc::channel(1);
+    let (review_tx, _review_rx) = tokio::sync::mpsc::channel(1);
+    let (_event_tx, event_rx) = tokio::sync::broadcast::channel(4);
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let host = InteractiveFrontendHost::from_parts_for_test(
+        user_tx,
+        review_tx,
+        event_rx,
+        perm_rx,
+        tokio::spawn(async {}),
+    );
+    let handle = host.handle();
+    let mut runtime = BotRuntime::new(store);
+
+    // /new in the lobby returns CreateTopic and persists the seq bump.
+    let renders = runtime
+        .handle_chat_text(&handle, 42, None, "/new")
+        .await
+        .unwrap();
+    assert!(matches!(renders.as_slice(), [RuntimeRender::CreateTopic { .. }]));
+
+    // The transport layer then calls ensure_topic_record; that call MUST persist
+    // so the Unbound thread survives a restart before the operator sends the
+    // first message.
+    runtime
+        .ensure_topic_record(42, 500, "Session 1".into())
+        .unwrap();
+
+    let reloaded = BotStateStore::new(path).load().unwrap();
+    let record = reloaded
+        .threads
+        .get(&500)
+        .expect("new topic must be persisted before first message");
+    assert_eq!(record.topic_name, "Session 1");
+    assert!(!record.archived);
+    assert!(matches!(record.binding_state, BindingState::Unbound));
+}
+
+#[tokio::test]
+async fn review_callback_becomes_stale_after_topic_rebind() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-old".into(), "kimi".into());
+
+    // Spawn an executor in the live session so the review prompt gets routed.
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::ExecutorSpawned {
+                id: "exec-1".into(),
+                parent_id: None,
+                session_id: spur_acp::SessionId("spur_acp-old".into()),
+                agent: "kimi".into(),
+                role: spur_acp::Role::Executor,
+                task_spec: String::new(),
+            },
+        ))
+        .unwrap();
+    let (_key, renders) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::ExecutorReviewRequested {
+                id: "exec-1".into(),
+                attempt_n: 1,
+                kind: spur_acp::ReviewKind::Completion,
+                payload: spur_acp::ReviewPayload {
+                    summary: "Review needed".into(),
+                    diff_summary: None,
+                    pr_url: None,
+                    error: None,
+                    delegation_plan: None,
+                    chosen_matches_dispatched: None,
+                },
+            },
+        ))
+        .unwrap();
+    let token = renders
+        .iter()
+        .find_map(|item| match item {
+            RuntimeRender::ReviewPrompt { buttons, .. } => Some(buttons[0].token.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    // Rebind the same topic to a different ACP session.
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "/resume acp-new")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await; // drain ResumeSession
+
+    // Old button must now be stale even though the ThreadKey still matches.
+    let key = spur_bot::state::ThreadKey {
+        chat_id: 42,
+        message_thread_id: Some(77),
+    };
+    let renders = runtime
+        .handle_callback(&handle, &key, "cbq-late", &token)
+        .await
+        .unwrap();
+    assert!(renders.iter().any(|item| matches!(
+        item,
+        RuntimeRender::AnswerCallback { text, .. } if text.contains("expired")
+    )));
+}
+
+#[tokio::test]
+async fn resume_detaches_other_topic_owning_same_session() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
+    runtime.ensure_topic_record(42, 88, "Topic B".into()).unwrap();
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(88), "/resume acp-shared")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await;
+
+    let a = runtime.thread_record(77).expect("topic A");
+    assert!(a.archived, "topic A must be archived after collision");
+    assert!(matches!(a.binding, BindingState::ArchivedDetached));
+    assert!(a.live_session.is_none());
+
+    let b = runtime.thread_record(88).expect("topic B");
+    assert!(matches!(
+        b.binding,
+        BindingState::RestorePending { ref acp_session_id, .. } if acp_session_id == "acp-shared"
+    ));
+}
+
+#[tokio::test]
+async fn multiple_pending_new_sessions_bind_in_fifo_order() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime.ensure_topic_record(42, 77, "Topic A".into()).unwrap();
+    runtime.ensure_topic_record(42, 88, "Topic B".into()).unwrap();
+
+    // Both topics fire NewSessionWithMessage before AgentSessionReady returns.
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello from A")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await;
+    runtime
+        .handle_chat_text(&handle, 42, Some(88), "hello from B")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await;
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_a".into()),
+                acp_session_id: "acp-a".into(),
+                brain: "kimi".into(),
+                resumed: false,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_b".into()),
+                acp_session_id: "acp-b".into(),
+                brain: "kimi".into(),
+                resumed: false,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    let a = runtime.thread_record(77).unwrap();
+    let b = runtime.thread_record(88).unwrap();
+    assert_eq!(
+        a.acp_session_id.as_deref(),
+        Some("acp-a"),
+        "topic A (first to fire) must bind the first Ready event"
+    );
+    assert_eq!(
+        b.acp_session_id.as_deref(),
+        Some("acp-b"),
+        "topic B (second to fire) must bind the second Ready event"
+    );
+}
+
+#[tokio::test]
+async fn sessions_command_renders_thread_registry_not_raw_acp_ids() {
+    let (mut runtime, handle, _user_rx) = test_runtime();
+    runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-a".into(), "kimi".into());
+    runtime.restore_topic_binding(42, 88, "Topic B".into(), "acp-b".into(), "claude".into());
+    runtime
+        .seed_archived_topic_record(42, 99, "Topic C".into(), "acp-c".into(), "kimi".into());
+
+    let renders = runtime
+        .handle_chat_text(&handle, 42, None, "/sessions")
+        .await
+        .unwrap();
+    let text = renders
+        .iter()
+        .find_map(|item| match item {
+            RuntimeRender::ServiceMessage { text } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("expected a ServiceMessage for /sessions");
+
+    assert!(
+        text.contains("Topic A") && text.contains("Topic B") && text.contains("Topic C"),
+        "sessions render must list every topic name; got: {text}"
+    );
+    assert!(
+        text.contains("acp-a") && text.contains("acp-b") && text.contains("acp-c"),
+        "sessions render must expose ACP ids when present; got: {text}"
+    );
+    assert!(
+        text.to_ascii_lowercase().contains("archived"),
+        "sessions render must label archived state; got: {text}"
+    );
+}
+
 // ── Existing regression tests (adapted to thread-native API) ────────────────
 
 #[tokio::test]
