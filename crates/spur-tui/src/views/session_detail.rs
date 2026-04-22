@@ -1359,12 +1359,21 @@ impl View for SessionDetailView {
                 // display arm fires below.
                 crate::app::apply_session_update(self, &notification.update);
 
-                // Flag streaming state for live content chunks. This is the
-                // caller's responsibility — the shared dispatcher is agnostic
-                // to session lifecycle state.
+                // Flag streaming state for observable turn progress. This is
+                // the caller's responsibility — the shared dispatcher is
+                // agnostic to session lifecycle state. Tool-bearing progress
+                // and plan updates arm the stream alongside text/thought
+                // chunks: a valid ACP turn can begin with ToolCall /
+                // ToolCallUpdate / Plan before any text chunk, and Esc-cancel
+                // plus the in-flight hint both key off stream_in_flight.
+                // UsageUpdate / CurrentModeUpdate are mirrored session state
+                // and do not by themselves prove visible turn progress.
                 match &notification.update {
                     spur_acp::SessionUpdate::AgentThoughtChunk(_)
-                    | spur_acp::SessionUpdate::AgentMessageChunk(_) => {
+                    | spur_acp::SessionUpdate::AgentMessageChunk(_)
+                    | spur_acp::SessionUpdate::ToolCall(_)
+                    | spur_acp::SessionUpdate::ToolCallUpdate(_)
+                    | spur_acp::SessionUpdate::Plan(_) => {
                         self.stream_in_flight = true;
                     }
                     _ => {}
