@@ -721,14 +721,14 @@ pub async fn emit_epic_completion_audit(
     epic_id: &str,
     plan_id: &str,
     outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
-) {
+) -> anyhow::Result<()> {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::EpicCompletion {
         outcome,
         plan_id: plan_id.to_string(),
         epic_id: epic_id.to_string(),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
-    if let Err(error) = adv.add_comment(epic_id, &body).await {
+    adv.add_comment(epic_id, &body).await.map_err(|error| {
         warn!(
             target: "spur.audit.emit_failure",
             kind = "epic_completion",
@@ -736,7 +736,8 @@ pub async fn emit_epic_completion_audit(
             plan_id = %plan_id,
             "EpicCompletion audit comment emission failed: {error}"
         );
-    }
+        error
+    }).map(|_comment_id| ())
 }
 
 /// Emit a `[[spur-audit v1]] Approval` sentinel comment on the task issue.
@@ -3999,5 +4000,55 @@ mod tests {
             .unwrap_or_default()
             .contains("create_pr"));
         assert_eq!(status["merge"]["merge_branch"], "spur/plan-merge-1");
+    }
+
+    // ─── emit_epic_completion_audit durable-state contract ───────────────
+
+    struct FailingAddCommentAdvanced;
+
+    #[async_trait::async_trait]
+    impl spur_pm::BeadsAdvanced for FailingAddCommentAdvanced {
+        async fn list_ready(
+            &self,
+            _filter: spur_pm::ReadyFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            Ok(vec![])
+        }
+
+        async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+            Ok(vec![])
+        }
+
+        async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<String> {
+            anyhow::bail!("disk full")
+        }
+
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_epic_completion_audit_returns_err_when_add_comment_fails() {
+        let advanced = FailingAddCommentAdvanced;
+        let result = super::emit_epic_completion_audit(
+            &advanced,
+            "bd-epic",
+            "plan-1",
+            crate::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "emit_epic_completion_audit must return Err when add_comment fails"
+        );
     }
 }

@@ -232,6 +232,31 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
         assert_eq!(pr.head_branch, "spur/merge-1");
     }
 
+    // --- Phase 3: idempotency — second tick must not duplicate automation ---
+    {
+        actions.lock().await.clear();
+        params.lock().await.clear();
+
+        let mut reconciler = Reconciler::new(
+            ReconcilerConfig::default(),
+            Arc::clone(&pm),
+            Arc::new(Notify::new()),
+            None,
+            Some("P1".into()),
+        );
+        reconciler.set_auto_merge_approved_plans(true);
+        reconciler.set_automation(automation.clone());
+
+        reconciler.tick_once().await.expect("tick_once");
+
+        let recorded = actions.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "second tick must not duplicate automation actions, got: {:?}",
+            *recorded
+        );
+    }
+
     // Verify durable audit was emitted.
     let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &epic_id]));
     assert!(sentinels.iter().any(|audit| matches!(

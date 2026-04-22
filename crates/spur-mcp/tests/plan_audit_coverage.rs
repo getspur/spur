@@ -352,7 +352,8 @@ async fn epic_completion_audit_round_trips_through_collect_sentinels() {
         "audit-plan-epic",
         spur_mcp::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,
     )
-    .await;
+    .await
+    .expect("emit epic completion audit must succeed");
 
     let epic_comments =
         run_br(dir.path(), &["comments", "list", &epic_id]).expect("br comments list epic");

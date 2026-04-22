@@ -420,18 +420,20 @@ impl Reconciler {
 
             if epic.status == closed_status {
                 if !has_epic_completion {
-                    crate::plan::emit_epic_completion_audit(
+                    let emitted = crate::plan::emit_epic_completion_audit(
                         adv,
                         &epic.id,
                         plan_id,
                         outcome.audit_outcome,
                     )
                     .await;
-                    audits.push(AuditSentinelKind::EpicCompletion {
-                        outcome: outcome.audit_outcome,
-                        plan_id: plan_id.to_string(),
-                        epic_id: epic.id.clone(),
-                    });
+                    if emitted.is_ok() {
+                        audits.push(AuditSentinelKind::EpicCompletion {
+                            outcome: outcome.audit_outcome,
+                            plan_id: plan_id.to_string(),
+                            epic_id: epic.id.clone(),
+                        });
+                    }
                     did_work = true;
                 }
 
@@ -439,40 +441,68 @@ impl Reconciler {
                 if self.auto_merge_approved_plans
                     && outcome.add_integration_pending
                     && epic.labels.contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
+                    && !epic
+                        .labels
+                        .contains(&crate::plan::labels::AUTO_MERGE_ATTEMPTED.to_string())
                 {
                     if let Some(automation) = self.automation.as_ref() {
-                        let outcome_summary = crate::plan::projector::epic_completion_outcome_summary(
-                            &audits,
-                            plan_id,
-                            &epic.id,
-                        )
-                        .expect("epic completion audit must be present");
-                        match automation.merge_plan(plan_id).await {
-                            Ok(crate::plan::PlanMergeState::Succeeded { merge_branch, .. }) => {
-                                let params = build_auto_pr_params(
-                                    plan_id,
-                                    &epic.title,
-                                    outcome_summary,
-                                    &merge_branch,
-                                );
-                                if let Err(e) = automation.create_pr(params).await {
-                                    tracing::warn!(%plan_id, "auto-merge PR creation failed: {e}");
+                        if let Some(outcome_summary) =
+                            crate::plan::projector::epic_completion_outcome_summary(
+                                &audits,
+                                plan_id,
+                                &epic.id,
+                            )
+                        {
+                            let mut merge_succeeded = false;
+                            match automation.merge_plan(plan_id).await {
+                                Ok(crate::plan::PlanMergeState::Succeeded { merge_branch, .. }) => {
+                                    let params = build_auto_pr_params(
+                                        plan_id,
+                                        &epic.title,
+                                        outcome_summary,
+                                        &merge_branch,
+                                    );
+                                    if let Err(e) = automation.create_pr(params).await {
+                                        tracing::warn!(%plan_id, "auto-merge PR creation failed: {e}");
+                                    } else {
+                                        merge_succeeded = true;
+                                    }
+                                }
+                                Ok(crate::plan::PlanMergeState::Conflict { conflict_task_id, .. }) => {
+                                    tracing::warn!(%plan_id, %conflict_task_id, "auto-merge detected conflict");
+                                }
+                                Ok(crate::plan::PlanMergeState::Failed { error }) => {
+                                    tracing::warn!(%plan_id, "auto-merge failed: {error}");
+                                }
+                                Ok(crate::plan::PlanMergeState::NotStarted) => {
+                                    tracing::warn!(%plan_id, "auto-merge returned NotStarted unexpectedly");
+                                }
+                                Err(e) => {
+                                    tracing::warn!(%plan_id, "auto-merge error: {e}");
                                 }
                             }
-                            Ok(crate::plan::PlanMergeState::Conflict { conflict_task_id, .. }) => {
-                                tracing::warn!(%plan_id, %conflict_task_id, "auto-merge detected conflict");
+                            if merge_succeeded {
+                                if let Err(e) = self
+                                    .pm
+                                    .update_issue(
+                                        &epic.id,
+                                        spur_pm::IssueUpdate {
+                                            add_labels: vec![crate::plan::labels::AUTO_MERGE_ATTEMPTED
+                                                .to_string()],
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        %plan_id,
+                                        epic_id = %epic.id,
+                                        "failed to add auto-merge-attempted label: {e}"
+                                    );
+                                }
                             }
-                            Ok(crate::plan::PlanMergeState::Failed { error }) => {
-                                tracing::warn!(%plan_id, "auto-merge failed: {error}");
-                            }
-                            Ok(crate::plan::PlanMergeState::NotStarted) => {
-                                tracing::warn!(%plan_id, "auto-merge returned NotStarted unexpectedly");
-                            }
-                            Err(e) => {
-                                tracing::warn!(%plan_id, "auto-merge error: {e}");
-                            }
+                            did_work = true;
                         }
-                        did_work = true;
                     }
                 }
                 continue;
@@ -502,13 +532,20 @@ impl Reconciler {
 
             self.pm.update_issue(&epic.id, update).await?;
             if !has_epic_completion {
-                crate::plan::emit_epic_completion_audit(
+                if let Err(error) = crate::plan::emit_epic_completion_audit(
                     adv,
                     &epic.id,
                     plan_id,
                     outcome.audit_outcome,
                 )
-                .await;
+                .await
+                {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        epic_id = %epic.id,
+                        "epic completion audit emission failed on close: {error}"
+                    );
+                }
             }
             if outcome.add_integration_pending {
                 if let Some(sink) = self
