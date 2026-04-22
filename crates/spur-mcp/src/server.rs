@@ -642,21 +642,12 @@ async fn apply_issue_update(
         pm.update_issue(issue_id, core_update).await?;
     }
 
-    for label in update.add_labels {
+    if !update.add_labels.is_empty() || !update.remove_labels.is_empty() {
         pm.update_issue(
             issue_id,
             spur_pm::IssueUpdate {
-                add_labels: vec![label],
-                ..Default::default()
-            },
-        )
-        .await?;
-    }
-    for label in update.remove_labels {
-        pm.update_issue(
-            issue_id,
-            spur_pm::IssueUpdate {
-                remove_labels: vec![label],
+                add_labels: update.add_labels,
+                remove_labels: update.remove_labels,
                 ..Default::default()
             },
         )

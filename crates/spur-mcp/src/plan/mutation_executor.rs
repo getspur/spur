@@ -267,15 +267,17 @@ pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result
     .await
     .context("emit mutation-commit audit")?;
 
-    pm.update_issue(
-        &batch.trigger_task_id,
-        IssueUpdate {
-            add_labels: vec![signal_processed_label(&batch.mutation_id)],
-            ..Default::default()
-        },
-    )
-    .await
-    .context("mark triggering signal processed")?;
+    if let Some(signal_id) = batch.trigger_signal_id {
+        pm.update_issue(
+            &batch.trigger_task_id,
+            IssueUpdate {
+                add_labels: vec![signal_processed_label(&signal_id)],
+                ..Default::default()
+            },
+        )
+        .await
+        .context("mark triggering signal processed")?;
+    }
 
     Ok(children_created)
 }

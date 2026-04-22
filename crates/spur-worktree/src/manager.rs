@@ -211,6 +211,16 @@ impl WorktreeManager {
         })
     }
 
+    /// Delete a snapshot branch previously created by `snapshot_brain_state`.
+    /// Safe to call immediately after `create_worktree` succeeds because the
+    /// worktree already has its own ref state.
+    pub async fn delete_snapshot_branch(&self, branch: &str) -> Result<()> {
+        self.run_git(&["branch", "-D", branch], None)
+            .await
+            .with_context(|| format!("failed to delete snapshot branch {branch}"))?;
+        Ok(())
+    }
+
     /// Collect the diff of the worker's task. Returns:
     /// - `(Some(diff), "HEAD")` if the worker left uncommitted changes.
     /// - `(Some(diff), "base_commit..HEAD")` if the worker already committed
@@ -654,5 +664,53 @@ mod tests_option_e {
         assert!(diff.is_none(), "expected None for no-change scenario");
         // Basis is still the attempted fallback.
         assert_eq!(basis, "base_commit..HEAD");
+    }
+
+    #[tokio::test]
+    async fn snapshot_branch_deleted_after_create_worktree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+
+        let mut manager = WorktreeManager::new(tmp.path().to_path_buf());
+        let snapshot_branch = manager
+            .snapshot_brain_state()
+            .await
+            .expect("snapshot brain state");
+
+        let branches_before = manager
+            .run_git(&["branch", "--list", &snapshot_branch], None)
+            .await
+            .expect("list snapshot branch before create_worktree");
+        assert!(
+            branches_before.contains(&snapshot_branch),
+            "snapshot branch must exist before worktree creation"
+        );
+
+        let sid = SessionId("s-snapshot".to_string());
+        manager
+            .create_worktree(&sid, "codex", &snapshot_branch)
+            .await
+            .expect("create worktree");
+
+        manager
+            .delete_snapshot_branch(&snapshot_branch)
+            .await
+            .expect("delete snapshot branch");
+
+        let branches_after = manager
+            .run_git(&["branch", "--list", &snapshot_branch], None)
+            .await
+            .expect("list snapshot branch after delete");
+        assert!(
+            !branches_after.contains(&snapshot_branch),
+            "snapshot branch must be deleted after worktree creation"
+        );
+
+        let wt_path = &manager.active.get(&sid.to_string()).unwrap().path;
+        let status = manager
+            .run_git(&["status", "--porcelain"], Some(wt_path))
+            .await
+            .expect("worktree status after snapshot deletion");
+        assert!(status.is_empty(), "worktree should remain usable");
     }
 }

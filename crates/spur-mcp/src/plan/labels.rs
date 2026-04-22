@@ -132,13 +132,17 @@ pub fn superseded_by_labels(child_ids: &[String]) -> Vec<String> {
 /// `signal:<kind>` label for historical filtering. Uses the compact UUID
 /// form for consistency with `mutation_id_label`.
 ///
+/// Durable dedup is keyed by the triggering signal's `signal_id`, not by the
+/// mutation or the issue as a whole. That allows distinct signals on one task
+/// to be processed independently over time.
+///
 /// **Only safe via `br label add` (IssueUpdate.add_labels)**, not via
 /// `br create --label`: `spur:signal-processed:` is a 22-char prefix, which
 /// combined with the 32-char compact UUID totals 54 chars — over the 50-char
 /// create-path cap. Callers at create time must use `mutation_id_label` instead.
 /// Example: `spur:signal-processed:f30c1a2e...` (total 54 chars).
-pub fn signal_processed_label(mutation_id: &uuid::Uuid) -> String {
-    format!("spur:signal-processed:{}", mutation_id.simple())
+pub fn signal_processed_label(signal_id: &uuid::Uuid) -> String {
+    format!("spur:signal-processed:{}", signal_id.simple())
 }
 
 #[cfg(test)]
