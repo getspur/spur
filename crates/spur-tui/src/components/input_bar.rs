@@ -817,10 +817,6 @@ impl InputBar {
                 self.set_mode(EditMode::Vim(VimMode::Normal));
                 return HandleOutcome::Key(IntentEvent::NoOp);
             }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.set_mode(EditMode::Vim(VimMode::Normal));
-                return HandleOutcome::Key(IntentEvent::NoOp);
-            }
             KeyCode::Char('j')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     || key.modifiers.contains(KeyModifiers::ALT) =>

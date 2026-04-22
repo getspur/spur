@@ -56,9 +56,9 @@ impl LicenseBadge {
 /// misleading `[Esc]stop` disappears once a cancel is already in progress.
 pub(crate) fn hint_for_session_detail(
     stream_in_flight: bool,
-    _esc_consumed_by_composer: bool,
+    esc_consumed_by_composer: bool,
 ) -> &'static str {
-    if stream_in_flight {
+    if stream_in_flight && !esc_consumed_by_composer {
         " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-w]workers [Ctrl-r]history [?]help"
     } else {
         " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-w]workers [Ctrl-r]history [?]help"
