@@ -143,6 +143,17 @@ enum Commands {
         /// Land on Dashboard instead of auto-resuming last session.
         #[arg(long)]
         dashboard: bool,
+        /// Profile the watch session and generate a flamegraph
+        #[arg(long)]
+        profile: bool,
+        /// Profiling duration in seconds (requires --profile)
+        #[arg(long, default_value = "30")]
+        duration: u64,
+    },
+    /// Performance profiling and monitoring
+    Profile {
+        #[command(subcommand)]
+        command: Option<commands::profile::ProfileCommands>,
     },
 }
 
@@ -451,11 +462,39 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Profile { command } => commands::profile::run(command).await,
         Commands::Watch {
             brain,
             sessions,
             dashboard,
+            profile,
+            duration,
         } => {
+            if profile {
+                let mut args = vec!["watch".to_string()];
+                if let Some(ref b) = brain {
+                    args.push(format!("--brain={}", b));
+                }
+                if sessions {
+                    args.push("--sessions".to_string());
+                }
+                if dashboard {
+                    args.push("--dashboard".to_string());
+                }
+                return commands::profile::run(Some(
+                    commands::profile::ProfileCommands::Flamegraph {
+                        bin: Some("spur".to_string()),
+                        test: None,
+                        bench: None,
+                        example: None,
+                        duration,
+                        output: std::path::PathBuf::from("flamegraph.svg"),
+                        args,
+                    },
+                ))
+                .await;
+            }
+
             let config = match load_config() {
                 Ok(c) => c,
                 Err(e) => {

@@ -1,0 +1,10 @@
+[build]
+# Force frame pointers for accurate stack unwinding during profiling.
+# Required by perf (Linux) and greatly improves DTrace (macOS) output quality.
+rustflags = ["-C", "force-frame-pointers=yes"]
+
+[alias]
+# One-step profiling build alias
+spur-profile = "build --profile profiling"
+# One-step flamegraph for the main spur binary
+spur-flamegraph = "flamegraph --profile profiling --bin spur"

@@ -90,3 +90,12 @@ spur-bot = { path = "crates/spur-bot" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Profiling profile: release optimizations with full debug symbols
+# Use with: cargo build --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+codegen-units = 1
+lto = "thin"
