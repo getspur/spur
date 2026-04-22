@@ -50,10 +50,11 @@ impl LicenseBadge {
 
 /// Returns the status-bar hint string for the SessionDetail view.
 ///
-/// When `stream_in_flight` is true the hint shows `[Esc]stop`; when the
-/// stream is idle it shows `[Esc]back`.  The caller is responsible for
-/// AND-ing with `!cancelling_in_flight` before passing the flag so the
-/// misleading `[Esc]stop` disappears once a cancel is already in progress.
+/// When `stream_in_flight` is true and the composer will not consume Esc,
+/// the hint shows `[Esc]stop`; otherwise it shows `[Esc]back`. The caller is
+/// responsible for AND-ing with `!cancelling_in_flight` before passing the
+/// stream flag so the misleading `[Esc]stop` disappears once a cancel is
+/// already in progress.
 pub(crate) fn hint_for_session_detail(
     stream_in_flight: bool,
     esc_consumed_by_composer: bool,
@@ -99,9 +100,10 @@ impl StatusBar {
             ViewId::Dashboard => {
                 " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
             }
-            ViewId::SessionDetail(_) => {
-                hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
-            }
+            ViewId::SessionDetail(_) => hint_for_session_detail(
+                props.stream_in_flight,
+                props.esc_consumed_by_composer,
+            ),
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => " [Esc]close",
