@@ -1,6 +1,4 @@
-use spur_bot::state::{
-    BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord,
-};
+use spur_bot::state::{BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord};
 
 #[test]
 fn persisted_state_round_trips() {

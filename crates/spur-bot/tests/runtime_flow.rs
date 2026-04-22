@@ -197,7 +197,10 @@ async fn topic_resume_archives_previous_binding() {
         .unwrap()
         .archived_previous
         .contains(&"acp-old".to_string()));
-    assert!(matches!(renders.as_slice(), [RuntimeRender::WorkingStatus { .. }]));
+    assert!(matches!(
+        renders.as_slice(),
+        [RuntimeRender::WorkingStatus { .. }]
+    ));
 }
 
 #[tokio::test]
@@ -228,7 +231,10 @@ async fn unknown_topic_resume_auto_registers_and_enters_restore_pending() {
         user_rx.recv().await.unwrap(),
         spur_core::InteractiveInput::ResumeSession { session_id } if session_id == "acp-rebound"
     ));
-    assert!(matches!(renders.as_slice(), [RuntimeRender::WorkingStatus { .. }]));
+    assert!(matches!(
+        renders.as_slice(),
+        [RuntimeRender::WorkingStatus { .. }]
+    ));
 
     let persisted = BotStateStore::new(path).load().unwrap();
     let record = persisted
@@ -287,7 +293,10 @@ async fn new_topic_record_is_persisted_before_first_message() {
         .handle_chat_text(&handle, 42, None, "/new")
         .await
         .unwrap();
-    assert!(matches!(renders.as_slice(), [RuntimeRender::CreateTopic { .. }]));
+    assert!(matches!(
+        renders.as_slice(),
+        [RuntimeRender::CreateTopic { .. }]
+    ));
 
     // The transport layer then calls ensure_topic_record; that call MUST persist
     // so the Unbound thread survives a restart before the operator sends the
@@ -393,7 +402,9 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
     // Topic A owns acp-shared and has a live session spur_acp-shared.
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
     // Topic B will take over acp-shared via /resume, forcing Topic A to archive.
-    runtime.ensure_topic_record(42, 88, "Topic B".into()).unwrap();
+    runtime
+        .ensure_topic_record(42, 88, "Topic B".into())
+        .unwrap();
 
     runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -470,7 +481,9 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
 async fn permission_callback_becomes_stale_after_topic_archived_with_preserved_acp_id() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
-    runtime.ensure_topic_record(42, 88, "Topic B".into()).unwrap();
+    runtime
+        .ensure_topic_record(42, 88, "Topic B".into())
+        .unwrap();
 
     // Permission request whose session_id matches Topic A's live session,
     // so the prompt is routed into Topic A.
@@ -532,7 +545,9 @@ async fn permission_callback_becomes_stale_after_topic_archived_with_preserved_a
 async fn resume_detaches_other_topic_owning_same_session() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
-    runtime.ensure_topic_record(42, 88, "Topic B".into()).unwrap();
+    runtime
+        .ensure_topic_record(42, 88, "Topic B".into())
+        .unwrap();
 
     runtime
         .handle_chat_text(&handle, 42, Some(88), "/resume acp-shared")
@@ -566,7 +581,10 @@ async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
         .unwrap();
     let first = user_rx.recv().await.unwrap();
     assert!(
-        matches!(first, spur_core::InteractiveInput::NewSessionWithMessage { .. }),
+        matches!(
+            first,
+            spur_core::InteractiveInput::NewSessionWithMessage { .. }
+        ),
         "first plain text must kick off NewSessionWithMessage; got {:?}",
         first
     );
@@ -684,8 +702,12 @@ async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
 #[tokio::test]
 async fn multiple_pending_new_sessions_bind_in_fifo_order() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
-    runtime.ensure_topic_record(42, 77, "Topic A".into()).unwrap();
-    runtime.ensure_topic_record(42, 88, "Topic B".into()).unwrap();
+    runtime
+        .ensure_topic_record(42, 77, "Topic A".into())
+        .unwrap();
+    runtime
+        .ensure_topic_record(42, 88, "Topic B".into())
+        .unwrap();
 
     // Both topics fire NewSessionWithMessage before AgentSessionReady returns.
     runtime
@@ -741,8 +763,7 @@ async fn sessions_command_renders_thread_registry_not_raw_acp_ids() {
     let (mut runtime, handle, _user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-a".into(), "kimi".into());
     runtime.restore_topic_binding(42, 88, "Topic B".into(), "acp-b".into(), "claude".into());
-    runtime
-        .seed_archived_topic_record(42, 99, "Topic C".into(), "acp-c".into(), "kimi".into());
+    runtime.seed_archived_topic_record(42, 99, "Topic C".into(), "acp-c".into(), "kimi".into());
 
     let renders = runtime
         .handle_chat_text(&handle, 42, None, "/sessions")

@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::commands::{parse_chat_input, BotCommand, ParsedChatInput};
-use crate::state::{BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord, ThreadKey};
+use crate::state::{
+    BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord, ThreadKey,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptButton {
@@ -67,13 +69,8 @@ enum PromptKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum PromptGroup {
-    Review {
-        executor_id: String,
-        attempt_n: u32,
-    },
-    Permission {
-        prompt_id: String,
-    },
+    Review { executor_id: String, attempt_n: u32 },
+    Permission { prompt_id: String },
 }
 
 pub struct ThreadRecord {
@@ -661,11 +658,7 @@ impl BotRuntime {
             // `/sessions` is now served locally from the thread registry, so
             // inbound `SessionsListed` events are informational only.
             spur_acp::SpurEventBody::SessionsListed { .. } => Ok((None, vec![])),
-            spur_acp::SpurEventBody::ExecutorSpawned {
-                id,
-                session_id,
-                ..
-            } => {
+            spur_acp::SpurEventBody::ExecutorSpawned { id, session_id, .. } => {
                 self.executor_sessions.insert(id, session_id.clone());
                 let key = self.session_threads.get(&session_id).cloned();
                 Ok((key, vec![]))
@@ -683,10 +676,8 @@ impl BotRuntime {
                     .unwrap_or_else(|| {
                         ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
                     });
-                let prompt_live_session = self
-                    .threads
-                    .get(&key)
-                    .and_then(|r| r.live_session.clone());
+                let prompt_live_session =
+                    self.threads.get(&key).and_then(|r| r.live_session.clone());
 
                 let group = PromptGroup::Review {
                     executor_id: id.clone(),
@@ -780,10 +771,7 @@ impl BotRuntime {
             .get(&session_id)
             .cloned()
             .unwrap_or_else(|| ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0)));
-        let prompt_live_session = self
-            .threads
-            .get(&key)
-            .and_then(|r| r.live_session.clone());
+        let prompt_live_session = self.threads.get(&key).and_then(|r| r.live_session.clone());
 
         let prompt_id = uuid::Uuid::new_v4().simple().to_string();
         self.permission_reply_txs

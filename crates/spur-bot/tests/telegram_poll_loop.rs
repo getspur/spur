@@ -86,18 +86,18 @@ fn batch_forward_is_atomic_under_channel_pressure() {
 
 #[tokio::test]
 async fn batch_forward_preserves_thread_identity() {
-    let batch = vec![
-        spur_bot::telegram::router::TelegramInput::Text {
-            user_id: 338086459,
-            chat_id: 42,
-            message_thread_id: Some(77),
-            text: "hello".into(),
-        },
-    ];
+    let batch = vec![spur_bot::telegram::router::TelegramInput::Text {
+        user_id: 338086459,
+        chat_id: 42,
+        message_thread_id: Some(77),
+        text: "hello".into(),
+    }];
 
     assert_eq!(
         match &batch[0] {
-            spur_bot::telegram::router::TelegramInput::Text { message_thread_id, .. } => *message_thread_id,
+            spur_bot::telegram::router::TelegramInput::Text {
+                message_thread_id, ..
+            } => *message_thread_id,
             _ => None,
         },
         Some(77)

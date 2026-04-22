@@ -311,6 +311,13 @@ Lobby plain text is rejected with a short instruction to:
 4. wait for the first plain-text message in that topic to start the SPUR
    session
 
+If the operator sends the first message inside a previously unseen non-lobby
+topic that was created manually in Telegram, the bot MUST lazily create and
+persist an `Unbound` thread record for that topic and then treat the message as
+the first plain-text message in an unbound topic. The fallback persisted topic
+name may be derived from the Telegram thread id when no better title is
+available.
+
 `/sessions` behavior:
 
 - list thread-oriented entries, not just raw ACP ids
@@ -345,6 +352,7 @@ Plain text behavior:
 `/resume <id>` behavior:
 
 - valid only inside a topic
+- if the topic is previously unseen, lazily register it first
 - archives any current live binding for that topic
 - attempts to bind the requested ACP session to that topic
 - leaves the existing binding unchanged if resume fails
