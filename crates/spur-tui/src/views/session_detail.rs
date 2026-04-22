@@ -2198,6 +2198,42 @@ mod cancel_state_tests {
         })
     }
 
+    fn tool_call_event(session: &spur_acp::SessionId, id: &str) -> SpurEvent {
+        let tc = spur_acp::AcpToolCall::new(spur_acp::ToolCallId::new(id), "read");
+        let update = spur_acp::SessionUpdate::ToolCall(tc);
+        let notification = spur_acp::SessionNotification::new(session.0.clone(), update);
+        SpurEvent::now(SpurEventBody::AgentNotification {
+            session: session.clone(),
+            notification: Box::new(notification),
+        })
+    }
+
+    fn tool_call_update_event(session: &spur_acp::SessionId, id: &str) -> SpurEvent {
+        let fields = agent_client_protocol::ToolCallUpdateFields::new()
+            .status(spur_acp::ToolCallStatus::InProgress);
+        let tcu = spur_acp::AcpToolCallUpdate::new(spur_acp::ToolCallId::new(id), fields);
+        let update = spur_acp::SessionUpdate::ToolCallUpdate(tcu);
+        let notification = spur_acp::SessionNotification::new(session.0.clone(), update);
+        SpurEvent::now(SpurEventBody::AgentNotification {
+            session: session.clone(),
+            notification: Box::new(notification),
+        })
+    }
+
+    fn plan_event(session: &spur_acp::SessionId) -> SpurEvent {
+        let plan = spur_acp::Plan::new(vec![spur_acp::PlanEntry::new(
+            "step 1",
+            spur_acp::PlanEntryPriority::Medium,
+            spur_acp::PlanEntryStatus::InProgress,
+        )]);
+        let update = spur_acp::SessionUpdate::Plan(plan);
+        let notification = spur_acp::SessionNotification::new(session.0.clone(), update);
+        SpurEvent::now(SpurEventBody::AgentNotification {
+            session: session.clone(),
+            notification: Box::new(notification),
+        })
+    }
+
     #[test]
     fn new_view_has_no_stream_in_flight() {
         let v = make_view();
@@ -2212,6 +2248,59 @@ mod cancel_state_tests {
         let sid = v.session_id().clone();
         v.handle_spur_event(&agent_msg_chunk_event(&sid), &test_ctx());
         assert!(v.stream_in_flight);
+    }
+
+    #[test]
+    fn tool_call_sets_stream_in_flight() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.handle_spur_event(&tool_call_event(&sid, "t1"), &test_ctx());
+        assert!(
+            v.stream_in_flight,
+            "tool-first turn should arm stream_in_flight"
+        );
+    }
+
+    #[test]
+    fn tool_call_update_sets_stream_in_flight() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.handle_spur_event(&tool_call_update_event(&sid, "t1"), &test_ctx());
+        assert!(
+            v.stream_in_flight,
+            "ToolCallUpdate should arm stream_in_flight"
+        );
+    }
+
+    #[test]
+    fn plan_sets_stream_in_flight() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.handle_spur_event(&plan_event(&sid), &test_ctx());
+        assert!(
+            v.stream_in_flight,
+            "plan-first turn should arm stream_in_flight"
+        );
+    }
+
+    #[test]
+    fn esc_cancels_after_tool_first_update() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
+        v.handle_spur_event(&tool_call_event(&sid, "t1"), &test_ctx());
+        assert!(v.stream_in_flight);
+
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Esc),
+            &test_ctx(),
+        );
+        assert!(
+            matches!(action, Some(Action::CancelStream { .. })),
+            "Esc after tool-first update should emit CancelStream, got {action:?}"
+        );
+        assert!(v.cancelling_in_flight);
     }
 
     #[test]
