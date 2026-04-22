@@ -316,6 +316,36 @@ pub struct SpurRuntimeConfig {
 
 /// Global SPUR configuration (from ~/.spur/config.toml + .spur/config.toml).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BotConfig {
+    pub telegram: TelegramBotConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelegramBotConfig {
+    pub enabled: bool,
+    pub bot_token: Option<String>,
+    pub operator_user_id: Option<i64>,
+    pub poll_timeout_secs: u64,
+    pub draft_streaming: bool,
+    pub max_requests_per_second: u32,
+}
+
+impl Default for TelegramBotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: None,
+            operator_user_id: None,
+            poll_timeout_secs: 30,
+            draft_streaming: false,
+            max_requests_per_second: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpurConfig {
     #[serde(default)]
     pub brain: BrainConfig,
@@ -329,6 +359,8 @@ pub struct SpurConfig {
     pub cost: CostConfig,
     #[serde(default)]
     pub pm: PmConfig,
+    #[serde(default)]
+    pub bot: BotConfig,
     #[serde(default)]
     pub project: Option<ProjectConfig>,
     /// Delegation dispatch tuning (Phase 1c async-first migration).
