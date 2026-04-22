@@ -799,6 +799,57 @@ async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
 }
 
 #[tokio::test]
+async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
+    if !br_available() {
+        eprintln!(
+            "skipping resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Legacy Review Ready",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::delegation_id("del-legacy"));
+    label_issue(dir.path(), &task_id, "ready-for-review");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+
+    let cleared = spur_mcp::server::resolve_dispatch_orphan(Arc::clone(&pm), &task_id)
+        .await
+        .expect("resolve dispatch orphan");
+    assert!(
+        !cleared,
+        "legacy ready-for-review marker should block dispatch orphan cleanup"
+    );
+
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(
+        issue
+            .labels
+            .iter()
+            .any(|label| label == &labels::delegation_id("del-legacy")),
+        "delegation label must be preserved while task is awaiting review"
+    );
+}
+
+#[tokio::test]
 async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     if !br_available() {
         eprintln!("skipping execute_epic_persists_execution_scope_labels_on_epic_and_tasks: `br` not on PATH");
@@ -894,6 +945,108 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
             .iter()
             .any(|label| label.starts_with("spur:agent:")));
     }
+}
+
+#[tokio::test]
+async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fresh_run() {
+    if !br_available() {
+        eprintln!(
+            "skipping execute_epic_reprojects_persisted_non_terminal_state_before_starting_fresh_run: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Execute Epic Twice",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_a_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A",
+            "--priority",
+            "2",
+        ],
+    ));
+    run_br(dir.path(), &["dep", "add", &task_a_id, &epic_id]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+    let brain_sid = BrainSessionId::new(SessionId::new());
+    let (mut server, _channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(Arc::clone(&pm)),
+        None,
+        test_continuation_ctx(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    let first = server
+        .__test_call_execute_epic(&epic_id, Some("codex"))
+        .await;
+    assert!(
+        first.get("error").is_none(),
+        "first execute_epic should succeed: {first}"
+    );
+    let first_text = first["result"]["content"][0]["text"]
+        .as_str()
+        .expect("execute_epic response text");
+    let first_json: serde_json::Value =
+        serde_json::from_str(first_text).expect("execute_epic response JSON");
+    let first_plan_id = first_json["plan_id"].as_str().expect("plan_id").to_string();
+
+    server
+        .__test_corrupt_cached_plan(
+            &first_plan_id,
+            &task_a_id,
+            "spur/bogus-worker",
+            "spur/bogus-snapshot",
+        )
+        .await
+        .expect("corrupt cached plan");
+
+    let second = server
+        .__test_call_execute_epic(&epic_id, Some("codex"))
+        .await;
+    assert!(
+        second.get("error").is_none(),
+        "second execute_epic should reproject persisted non-terminal state and reuse the active plan: {second}"
+    );
+
+    let second_text = second["result"]["content"][0]["text"]
+        .as_str()
+        .expect("execute_epic response text");
+    let second_json: serde_json::Value =
+        serde_json::from_str(second_text).expect("execute_epic response JSON");
+    let second_plan_id = second_json["plan_id"]
+        .as_str()
+        .expect("plan_id")
+        .to_string();
+    assert_eq!(
+        second_plan_id, first_plan_id,
+        "stale terminal cache must not cause execute_epic to start a fresh plan"
+    );
 }
 
 #[tokio::test]
@@ -1061,14 +1214,30 @@ async fn hybrid_fast_forward_matches_polling_projection() {
     let pm = Arc::new(pm);
     let epic_id = parse_id_from_create(&run_br_json(
         dir.path(),
-        &["create", "--type", "epic", "--title", "Plan 1 Epic", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan 1 Epic",
+            "--priority",
+            "2",
+        ],
     ));
     label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
 
     let task_id = parse_id_from_create(&run_br_json(
         dir.path(),
-        &["create", "--type", "task", "--title", "Ready Task", "--priority", "2"],
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Ready Task",
+            "--priority",
+            "2",
+        ],
     ));
     label_issue(dir.path(), &task_id, &labels::plan_id("plan-1"));
     label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
