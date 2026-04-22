@@ -441,9 +441,6 @@ impl Reconciler {
                 if self.auto_merge_approved_plans
                     && outcome.add_integration_pending
                     && epic.labels.contains(&crate::plan::labels::INTEGRATION_PENDING.to_string())
-                    && !epic
-                        .labels
-                        .contains(&crate::plan::labels::AUTO_MERGE_ATTEMPTED.to_string())
                 {
                     if let Some(automation) = self.automation.as_ref() {
                         if let Some(outcome_summary) =
@@ -487,7 +484,7 @@ impl Reconciler {
                                     .update_issue(
                                         &epic.id,
                                         spur_pm::IssueUpdate {
-                                            add_labels: vec![crate::plan::labels::AUTO_MERGE_ATTEMPTED
+                                            remove_labels: vec![crate::plan::labels::INTEGRATION_PENDING
                                                 .to_string()],
                                             ..Default::default()
                                         },
@@ -497,7 +494,7 @@ impl Reconciler {
                                     tracing::warn!(
                                         %plan_id,
                                         epic_id = %epic.id,
-                                        "failed to add auto-merge-attempted label: {e}"
+                                        "failed to remove integration-pending label: {e}"
                                     );
                                 }
                             }
@@ -895,6 +892,143 @@ mod tests {
         assert!(
             recorded.is_empty(),
             "config-off must produce zero automation actions, got: {:?}",
+            *recorded
+        );
+    }
+
+    /// Focused regression: when durable EpicCompletion audit emission fails
+    /// (e.g. disk-full / read-only database), the reconciler must suppress
+    /// merge_plan / create_pr even though the epic is closed and carries
+    /// integration-pending. Without this guard the old code would proceed
+    /// because it unconditionally appended a synthetic EpicCompletion to the
+    /// local audits vector.
+    #[tokio::test]
+    async fn failed_epic_completion_audit_suppresses_automation() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        fn br_available() -> bool {
+            Command::new("br")
+                .arg("--help")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+
+        if !br_available() {
+            eprintln!(
+                "skipping failed_epic_completion_audit_suppresses_automation: `br` not on PATH"
+            );
+            return;
+        }
+
+        let dir = TempDir::new().expect("tempdir");
+        let repo = dir.path();
+
+        assert!(
+            Command::new("br")
+                .args(["init"])
+                .current_dir(repo)
+                .output()
+                .expect("br init")
+                .status
+                .success(),
+            "br init failed"
+        );
+
+        let epic_out = Command::new("br")
+            .args(["create", "--type", "epic", "--title", "Test Epic", "--json"])
+            .current_dir(repo)
+            .output()
+            .expect("br create epic");
+        let epic_json = String::from_utf8_lossy(&epic_out.stdout);
+        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for title in ["Task A", "Task B"] {
+            let task_out = Command::new("br")
+                .args(["create", "--type", "task", "--title", title, "--json"])
+                .current_dir(repo)
+                .output()
+                .expect("br create task");
+            let task_json = String::from_utf8_lossy(&task_out.stdout);
+            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            Command::new("br")
+                .args(["label", "add", &task_id, "spur:plan-id:P1"])
+                .current_dir(repo)
+                .output()
+                .expect("label task");
+            Command::new("br")
+                .args(["update", &task_id, "--status", "closed"])
+                .current_dir(repo)
+                .output()
+                .expect("close task");
+        }
+
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:plan-id:P1"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic");
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:plan-complete"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic plan-complete");
+        Command::new("br")
+            .args(["update", &epic_id, "--status", "closed"])
+            .current_dir(repo)
+            .output()
+            .expect("close epic");
+        Command::new("br")
+            .args(["label", "add", &epic_id, "spur:integration-pending"])
+            .current_dir(repo)
+            .output()
+            .expect("label epic integration-pending");
+
+        // Make the beads database read-only so that add_comment (and therefore
+        // emit_epic_completion_audit) fails, while list_issues/list_comments
+        // continue to work because SQLite opens read-only for queries.
+        let db_path = repo.join(".beads").join("beads.db");
+        let mut perms = std::fs::metadata(&db_path).expect("db metadata").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&db_path, perms).expect("set readonly");
+
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads pm"),
+        );
+
+        let actions = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let automation = Arc::new(MockAutomation {
+            actions: Arc::clone(&actions),
+        });
+
+        let mut reconciler = Reconciler::new(
+            ReconcilerConfig::default(),
+            pm,
+            Arc::new(Notify::new()),
+            None,
+            Some("P1".into()),
+        );
+        reconciler.set_auto_merge_approved_plans(true);
+        reconciler.set_automation(automation);
+
+        reconciler.tick_once().await.unwrap();
+
+        let recorded = actions.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "failed epic-completion audit must suppress automation, got: {:?}",
             *recorded
         );
     }
