@@ -438,6 +438,19 @@ impl SessionDetailView {
         self.react_trace.set_mermaid_enabled(enabled);
     }
 
+    /// Whether a graphics picker is installed (and therefore Alt+V should
+    /// open the mermaid overlay instead of falling through to the composer).
+    #[cfg(feature = "markdown")]
+    fn has_render_picker(&self) -> bool {
+        self.render_picker.is_some()
+    }
+
+    /// No-op fallback when markdown feature is disabled.
+    #[cfg(not(feature = "markdown"))]
+    fn has_render_picker(&self) -> bool {
+        false
+    }
+
     /// Drop every cached inline `StatefulProtocol` so they are rebuilt at
     /// the new Rect size on the next render. Called on terminal resize.
     #[cfg(feature = "markdown")]
@@ -1018,7 +1031,8 @@ impl SessionDetailView {
                 let is_view_shortcut = (matches!(key.code, KeyCode::Char('o' | 'r'))
                     && key.modifiers.contains(KeyModifiers::CONTROL))
                     || (matches!(key.code, KeyCode::Char('v'))
-                        && key.modifiers.contains(KeyModifiers::ALT));
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                        && self.has_render_picker());
                 // Ctrl+P / Ctrl+N drive SessionDetail history when no picker owns them.
                 let is_history_nav = matches!(key.code, KeyCode::Char('p' | 'n'))
                     && key.modifiers.contains(KeyModifiers::CONTROL);
