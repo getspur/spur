@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use spur_pm::{IssueCreate, PmService};
+use spur_pm::{IssueCreate, IssueUpdate, PmService};
 use tempfile::TempDir;
 
 fn br_available() -> bool {
@@ -30,6 +30,8 @@ fn run_br(repo: &Path, args: &[&str]) -> String {
 struct BrShowIssue {
     #[serde(default)]
     created_by: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
 }
 
 #[tokio::test]
@@ -94,4 +96,74 @@ async fn pm_service_create_issue_uses_reconciler_actor_by_default() {
         .and_then(|issue| issue.created_by.as_deref())
         .expect("br show must expose created_by");
     assert_eq!(created_by, "reconciler");
+}
+
+#[tokio::test]
+async fn pm_service_update_issue_handles_multiple_label_changes() {
+    if !br_available() {
+        return;
+    }
+
+    let dir = TempDir::new().unwrap();
+    run_br(dir.path(), &["init"]);
+
+    let service = PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("beads backend should be available");
+
+    let issue_id = service
+        .create_issue(IssueCreate {
+            title: "Batch labels".to_string(),
+            issue_type: Some("task".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    service
+        .update_issue(
+            &issue_id,
+            IssueUpdate {
+                add_labels: vec!["alpha".to_string(), "beta".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("multi-label add should succeed");
+
+    let shown: Vec<BrShowIssue> =
+        serde_json::from_str(&run_br(dir.path(), &["show", &issue_id])).unwrap();
+    let labels_after_add = &shown.first().expect("issue row after add").labels;
+    assert!(
+        labels_after_add.iter().any(|label| label == "alpha"),
+        "alpha missing after add: {labels_after_add:?}"
+    );
+    assert!(
+        labels_after_add.iter().any(|label| label == "beta"),
+        "beta missing after add: {labels_after_add:?}"
+    );
+
+    service
+        .update_issue(
+            &issue_id,
+            IssueUpdate {
+                remove_labels: vec!["alpha".to_string(), "beta".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("multi-label remove should succeed");
+
+    let shown: Vec<BrShowIssue> =
+        serde_json::from_str(&run_br(dir.path(), &["show", &issue_id])).unwrap();
+    let labels_after_remove = &shown.first().expect("issue row after remove").labels;
+    assert!(
+        !labels_after_remove.iter().any(|label| label == "alpha"),
+        "alpha still present after remove: {labels_after_remove:?}"
+    );
+    assert!(
+        !labels_after_remove.iter().any(|label| label == "beta"),
+        "beta still present after remove: {labels_after_remove:?}"
+    );
 }
