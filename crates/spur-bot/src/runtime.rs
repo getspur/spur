@@ -64,6 +64,11 @@ pub struct BotRuntime {
     prompt_groups: HashMap<PromptGroup, Vec<String>>,
     permission_reply_txs:
         HashMap<String, tokio::sync::oneshot::Sender<spur_acp::types::PermissionResponse>>,
+    /// Accumulates `AgentMessageChunk` text per session so that `TurnComplete`
+    /// can emit a single `FinalAnswer`.
+    output_buffers: HashMap<spur_acp::SessionId, String>,
+    /// Input queued while a persisted session is being restored.
+    pending_input: Option<spur_core::InteractiveInput>,
 }
 
 impl BotRuntime {
@@ -86,6 +91,8 @@ impl BotRuntime {
             prompts: HashMap::new(),
             prompt_groups: HashMap::new(),
             permission_reply_txs: HashMap::new(),
+            output_buffers: HashMap::new(),
+            pending_input: None,
         }
     }
 
@@ -120,7 +127,23 @@ impl BotRuntime {
                             })
                             .await?;
                     }
-                    BindingState::RestorePending { .. } | BindingState::Active { .. } => {
+                    BindingState::RestorePending { acp_session_id, .. } => {
+                        // Resume the persisted session before treating the text as an
+                        // in-session message. Queue the message so it is sent only after
+                        // the session is actually active.
+                        if self.pending_input.is_none() {
+                            handle
+                                .send_command(spur_core::InteractiveInput::ResumeSession {
+                                    session_id: acp_session_id.clone(),
+                                })
+                                .await?;
+                        }
+                        self.pending_input = Some(spur_core::InteractiveInput::Message {
+                            blocks,
+                            interrupt: false,
+                        });
+                    }
+                    BindingState::Active { .. } => {
                         handle
                             .send_command(spur_core::InteractiveInput::Message {
                                 blocks,
@@ -147,6 +170,8 @@ impl BotRuntime {
                 self.binding = BindingState::NoSession;
                 self.persisted.current_acp_session_id = None;
                 self.persisted.current_brain = None;
+                self.pending_input = None;
+                self.output_buffers.clear();
                 self.state_store.save(&self.persisted)?;
                 Ok(vec![RuntimeRender::ServiceMessage {
                     text: "Current session cleared. The next plain message starts a new session.".into(),
@@ -161,6 +186,8 @@ impl BotRuntime {
                 }])
             }
             BotCommand::Resume { session_id } => {
+                self.pending_input = None;
+                self.output_buffers.clear();
                 handle
                     .send_command(spur_core::InteractiveInput::ResumeSession {
                         session_id: session_id.clone(),
@@ -218,12 +245,13 @@ impl BotRuntime {
                 ..
             } => {
                 self.binding = BindingState::Active {
-                    session,
+                    session: session.clone(),
                     acp_session_id: acp_session_id.clone(),
                     brain: brain.clone(),
                 };
                 self.persisted.current_acp_session_id = Some(acp_session_id.clone());
                 self.persisted.current_brain = Some(brain.clone());
+                self.output_buffers.remove(&session);
                 self.state_store.save(&self.persisted)?;
                 Ok(vec![RuntimeRender::ServiceMessage {
                     text: if resumed {
@@ -231,6 +259,35 @@ impl BotRuntime {
                     } else {
                         format!("Started session `{acp_session_id}` via `{brain}`.")
                     },
+                }])
+            }
+            spur_acp::SpurEventBody::AgentNotification {
+                session,
+                notification,
+            } => {
+                if let Some(text) = extract_agent_text(&notification) {
+                    self.output_buffers
+                        .entry(session)
+                        .or_default()
+                        .push_str(&text);
+                }
+                Ok(vec![])
+            }
+            spur_acp::SpurEventBody::TurnComplete { session } => {
+                if let Some(text) = self
+                    .output_buffers
+                    .remove(&session)
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    Ok(vec![RuntimeRender::FinalAnswer { text }])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            spur_acp::SpurEventBody::BrainError { session, message } => {
+                self.output_buffers.remove(&session);
+                Ok(vec![RuntimeRender::ServiceMessage {
+                    text: format!("Error: {message}"),
                 }])
             }
             spur_acp::SpurEventBody::SessionsListed { sessions, .. } => {
@@ -293,6 +350,21 @@ impl BotRuntime {
             }
             _ => Ok(vec![]),
         }
+    }
+
+    /// Send any input that was queued while waiting for a persisted session to
+    /// restore. Call this after `handle_spur_event` whenever the binding may
+    /// have transitioned to `Active`.
+    pub async fn flush_pending(
+        &mut self,
+        handle: &spur_interactive::InteractiveFrontendHandle,
+    ) -> anyhow::Result<Vec<RuntimeRender>> {
+        if let BindingState::Active { .. } = self.binding {
+            if let Some(input) = self.pending_input.take() {
+                handle.send_command(input).await?;
+            }
+        }
+        Ok(vec![])
     }
 
     pub fn handle_permission_request(
@@ -415,5 +487,17 @@ impl BotRuntime {
                 ])
             }
         }
+    }
+}
+
+fn extract_agent_text(
+    notification: &agent_client_protocol::SessionNotification,
+) -> Option<String> {
+    match &notification.update {
+        spur_acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+            spur_acp::ContentBlock::Text(tc) => Some(tc.text.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }

@@ -34,10 +34,14 @@ pub async fn run_telegram_bot(
             cfg_poll_timeout,
             poll_cancellation,
             |batch| {
+                let mut inputs = Vec::new();
                 for update in batch {
                     if let Some(input) = router::normalize_update(&update, operator_user_id) {
-                        update_tx.try_send(input)?;
+                        inputs.push(input);
                     }
+                }
+                if !inputs.is_empty() {
+                    update_tx.try_send(inputs)?;
                 }
                 Ok(())
             },
@@ -48,23 +52,31 @@ pub async fn run_telegram_bot(
     loop {
         tokio::select! {
             maybe_update = update_rx.recv() => {
-                let Some(input) = maybe_update else { break; };
-                let renders = match input {
-                    router::TelegramInput::Text { chat_id, text, .. } => {
-                        runtime.handle_chat_text(&handle, chat_id, &text).await?
+                let Some(inputs) = maybe_update else { break; };
+                for input in inputs {
+                    let renders = match input {
+                        router::TelegramInput::Text { chat_id, text, .. } => {
+                            runtime.handle_chat_text(&handle, chat_id, &text).await?
+                        }
+                        router::TelegramInput::Callback { query_id, token, .. } => {
+                            runtime.handle_callback(&handle, &query_id, &token).await?
+                        }
+                    };
+                    let mut all_renders = renders;
+                    let pending = runtime.flush_pending(&handle).await?;
+                    all_renders.extend(pending);
+                    if let Some(chat_id) = runtime.bound_chat_id() {
+                        render::render_batch(&client, &sender, chat_id, all_renders).await?;
                     }
-                    router::TelegramInput::Callback { query_id, token, .. } => {
-                        runtime.handle_callback(&handle, &query_id, &token).await?
-                    }
-                };
-                if let Some(chat_id) = runtime.bound_chat_id() {
-                    render::render_batch(&client, &sender, chat_id, renders).await?;
                 }
             }
             Ok(event) = event_rx.recv() => {
                 let renders = runtime.handle_spur_event(event)?;
+                let mut all_renders = renders;
+                let pending = runtime.flush_pending(&handle).await?;
+                all_renders.extend(pending);
                 if let Some(chat_id) = runtime.bound_chat_id() {
-                    render::render_batch(&client, &sender, chat_id, renders).await?;
+                    render::render_batch(&client, &sender, chat_id, all_renders).await?;
                 }
             }
             Some(request) = perm_rx.recv() => {
