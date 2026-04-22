@@ -32,11 +32,23 @@ enum PendingPrompt {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PromptGroup {
+    Review {
+        executor_id: String,
+        attempt_n: u32,
+    },
+    Permission {
+        prompt_id: String,
+    },
+}
+
 pub struct BotRuntime {
     state_store: BotStateStore,
     binding: BindingState,
     persisted: PersistedBotState,
     prompts: HashMap<String, PendingPrompt>,
+    prompt_groups: HashMap<PromptGroup, Vec<String>>,
     permission_reply_txs:
         HashMap<String, tokio::sync::oneshot::Sender<spur_acp::types::PermissionResponse>>,
 }
@@ -59,6 +71,7 @@ impl BotRuntime {
             binding,
             persisted,
             prompts: HashMap::new(),
+            prompt_groups: HashMap::new(),
             permission_reply_txs: HashMap::new(),
         }
     }
@@ -216,7 +229,12 @@ impl BotRuntime {
                 payload,
                 ..
             } => {
+                let group = PromptGroup::Review {
+                    executor_id: id.clone(),
+                    attempt_n,
+                };
                 let mut buttons = Vec::new();
+                let mut tokens = Vec::new();
                 for (decision, label) in [
                     (spur_acp::ReviewDecision::Approve, "Approve"),
                     (
@@ -241,11 +259,13 @@ impl BotRuntime {
                             decision,
                         },
                     );
+                    tokens.push(token.clone());
                     buttons.push(PromptButton {
                         token,
                         label: label.into(),
                     });
                 }
+                self.prompt_groups.insert(group, tokens);
                 Ok(vec![RuntimeRender::ReviewPrompt {
                     text: format!("Review required for `{id}`: {}", payload.summary),
                     buttons,
@@ -263,6 +283,7 @@ impl BotRuntime {
         self.permission_reply_txs
             .insert(prompt_id.clone(), request.reply_tx);
         let mut buttons = Vec::new();
+        let mut tokens = Vec::new();
         for opt in &request.args.options {
             let token = uuid::Uuid::new_v4().simple().to_string();
             self.prompts.insert(
@@ -272,11 +293,18 @@ impl BotRuntime {
                     option_id: opt.option_id.to_string(),
                 },
             );
+            tokens.push(token.clone());
             buttons.push(PromptButton {
                 token,
                 label: opt.name.to_string(),
             });
         }
+        self.prompt_groups.insert(
+            PromptGroup::Permission {
+                prompt_id: prompt_id.clone(),
+            },
+            tokens,
+        );
         Ok(vec![RuntimeRender::PermissionPrompt {
             text: format!("Permission required for `{}`", request.args.tool_call.tool_call_id),
             buttons,
@@ -295,6 +323,27 @@ impl BotRuntime {
                 text: "This action expired after restart.".into(),
             }]);
         };
+
+        let group = match &prompt {
+            PendingPrompt::Review {
+                executor_id,
+                attempt_n,
+                ..
+            } => PromptGroup::Review {
+                executor_id: executor_id.clone(),
+                attempt_n: *attempt_n,
+            },
+            PendingPrompt::Permission { prompt_id, .. } => PromptGroup::Permission {
+                prompt_id: prompt_id.clone(),
+            },
+        };
+        if let Some(siblings) = self.prompt_groups.remove(&group) {
+            for sibling in siblings {
+                if sibling != token {
+                    self.prompts.remove(&sibling);
+                }
+            }
+        }
 
         match prompt {
             PendingPrompt::Review {
