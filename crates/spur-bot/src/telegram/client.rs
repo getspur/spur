@@ -1,6 +1,4 @@
 use frankenstein::AsyncTelegramApi;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 #[derive(Clone)]
 pub struct TelegramClient {
@@ -115,17 +113,15 @@ impl TelegramClient {
     }
 }
 
-/// Deterministically map a local string draft id to a non-zero u64 suitable
-/// for the Telegram `sendMessageDraft` API.
-pub fn encode_draft_id(local_id: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    local_id.hash(&mut hasher);
-    let hash = hasher.finish();
-    if hash == 0 {
-        1
-    } else {
-        hash
+/// Deterministically map a local string draft id to a positive, non-zero
+/// `i32` value suitable for the Telegram `sendMessageDraft` API.
+pub fn encode_draft_id(local_id: &str) -> i32 {
+    let mut folded: u32 = 5381;
+    for byte in local_id.bytes() {
+        folded = folded.wrapping_mul(33).wrapping_add(byte as u32);
     }
+    let bounded = (folded % i32::MAX as u32) + 1;
+    bounded as i32
 }
 
 #[cfg(test)]
@@ -151,13 +147,20 @@ mod tests {
     }
 
     #[test]
+    fn draft_id_encoding_fits_positive_i32() {
+        let id = encode_draft_id("working-10001");
+        assert!(id > 0, "draft id must be positive");
+        assert!(id <= i32::MAX, "draft id must fit in i32");
+    }
+
+    #[test]
     fn draft_payload_contains_numeric_draft_id() {
         let payload = serde_json::json!({
             "chat_id": 10_001_i64,
             "draft_id": encode_draft_id("working-10001"),
             "text": "hello",
         });
-        let draft_id = payload.get("draft_id").and_then(|v| v.as_u64());
+        let draft_id = payload.get("draft_id").and_then(|v| v.as_i64());
         assert!(draft_id.is_some(), "payload must contain a numeric draft_id");
         assert_ne!(draft_id.unwrap(), 0, "draft_id must be non-zero");
     }
