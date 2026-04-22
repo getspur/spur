@@ -1,4 +1,6 @@
 use frankenstein::AsyncTelegramApi;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 #[derive(Clone)]
 pub struct TelegramClient {
@@ -37,11 +39,12 @@ impl TelegramClient {
     pub async fn send_message_draft(
         &self,
         chat_id: i64,
-        _draft_id: &str,
+        draft_id: &str,
         text: &str,
     ) -> anyhow::Result<()> {
         let payload = serde_json::json!({
             "chat_id": chat_id,
+            "draft_id": encode_draft_id(draft_id),
             "text": text,
         });
         let _: frankenstein::response::MethodResponse<bool> = self
@@ -109,5 +112,53 @@ impl TelegramClient {
             )
             .await?;
         Ok(())
+    }
+}
+
+/// Deterministically map a local string draft id to a non-zero u64 suitable
+/// for the Telegram `sendMessageDraft` API.
+pub fn encode_draft_id(local_id: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    local_id.hash(&mut hasher);
+    let hash = hasher.finish();
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_draft_id;
+
+    #[test]
+    fn draft_id_encoding_is_deterministic() {
+        assert_eq!(encode_draft_id("working-10001"), encode_draft_id("working-10001"));
+    }
+
+    #[test]
+    fn draft_id_encoding_is_non_zero() {
+        assert_ne!(encode_draft_id("working-10001"), 0);
+        assert_ne!(encode_draft_id(""), 0);
+    }
+
+    #[test]
+    fn distinct_draft_ids_do_not_collapse() {
+        let a = encode_draft_id("draft-a");
+        let b = encode_draft_id("draft-b");
+        assert_ne!(a, b, "distinct local draft ids should not map to the same telegram draft id");
+    }
+
+    #[test]
+    fn draft_payload_contains_numeric_draft_id() {
+        let payload = serde_json::json!({
+            "chat_id": 10_001_i64,
+            "draft_id": encode_draft_id("working-10001"),
+            "text": "hello",
+        });
+        let draft_id = payload.get("draft_id").and_then(|v| v.as_u64());
+        assert!(draft_id.is_some(), "payload must contain a numeric draft_id");
+        assert_ne!(draft_id.unwrap(), 0, "draft_id must be non-zero");
     }
 }
