@@ -1,12 +1,14 @@
 ## Unreleased
 
 ### Added
-- **Spur Way skill bundle.** Five new bundled skills harden brain-worker-beads collaboration:
-  `spur-way` (beads-first invariant), `beads-lifecycle` (status state machine),
-  `worker-signals` (`[[spur-signal v1]]` protocol), `brain-review-gate`
-  (beads-aware approval checklist), and `plan-task-discipline` (DAG integrity
-  rules). All compile into `spur-core` via `include_str!` and render across
-  the seven agent adapters. See `docs/superpowers/specs/2026-04-22-superpower-skill-hardening-spur-way.md`.
+- **Spur Way skill bundle.** Six bundled skills harden brain-worker-beads
+  collaboration: `spur-way` (beads-first invariant), `beads-lifecycle`
+  (status state machine), `worker-signals` (`[[spur-signal v1]]` protocol),
+  `brain-review-gate` (beads-aware approval checklist), `plan-task-discipline`
+  (DAG integrity rules), and `worker-mention-routing` (user `@`-mention
+  overrides algorithmic selection). All compile into `spur-core` via
+  `include_str!` and render across the seven agent adapters. See
+  `docs/superpowers/specs/2026-04-22-superpower-skill-hardening-spur-way.md`.
 
 ## v0.4.5 — 2026-04-19
 

@@ -69,6 +69,10 @@ fn bundled_raw() -> &'static HashMap<&'static str, &'static str> {
             "plan-task-discipline",
             include_str!("plan-task-discipline/SKILL.md"),
         );
+        m.insert(
+            "worker-mention-routing",
+            include_str!("worker-mention-routing/SKILL.md"),
+        );
         m
     })
 }
@@ -258,6 +262,7 @@ mod tests {
             "worker-signals",
             "brain-review-gate",
             "plan-task-discipline",
+            "worker-mention-routing",
         ] {
             let body = map
                 .get(name)
@@ -387,6 +392,10 @@ mod tests {
             ids.contains(&"worker-signals"),
             "worker-signals skill should be bundled"
         );
+        assert!(
+            ids.contains(&"worker-mention-routing"),
+            "worker-mention-routing skill should be bundled"
+        );
         // All bundled entries should have non-empty body.
         for s in &skills {
             assert!(!s.body.is_empty(), "{}: empty body", s.id);
@@ -472,5 +481,23 @@ mod tests {
         assert!(body.contains("DAG"));
         assert!(body.contains("Pending"));
         assert!(body.contains("Approved"));
+    }
+
+    #[test]
+    fn worker_mention_routing_skill_contains_hierarchy() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("worker-mention-routing", &fake).unwrap();
+        assert!(
+            body.contains("User @mention outranks your algorithm"),
+            "should declare user intent supremacy"
+        );
+        assert!(
+            body.contains("list_available_workers"),
+            "should require validation"
+        );
+        assert!(
+            body.contains("avoid_for"),
+            "should reference avoid_for override condition"
+        );
     }
 }
