@@ -51,7 +51,7 @@ impl TelegramSender {
         mut flush: impl FnMut(DraftUpdate) + Send + 'static,
     ) {
         let mut pending: HashMap<String, DraftUpdate> = HashMap::new();
-        let mut ticker = tokio::time::interval(flush_every);
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + flush_every, flush_every);
 
         loop {
             tokio::select! {
