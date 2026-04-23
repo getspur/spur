@@ -311,6 +311,13 @@ pub enum BrainRetireReason {
     Shutdown,
 }
 
+/// Whether a session history chunk is the initial hydrate or an older prepend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionHistoryChunkKind {
+    Initial,
+    Older,
+}
+
 /// The discriminated payload of a [`SpurEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -586,6 +593,16 @@ pub enum SpurEventBody {
     SessionHistory {
         session: SessionId,
         entries: Vec<HistoryEntry>,
+    },
+    /// Chunked replayed conversation history for a resumed session.
+    SessionHistoryChunk {
+        session: SessionId,
+        kind: SessionHistoryChunkKind,
+        entries: Vec<HistoryEntry>,
+        /// Opaque token for requesting the next older chunk. `None` means
+        /// no older history remains.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
     },
 
     // ── Worker _spur/* ExtNotification vocabulary (S5) ─────────────

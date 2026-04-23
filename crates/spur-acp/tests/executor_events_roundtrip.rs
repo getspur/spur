@@ -1,7 +1,8 @@
 //! Verifies new executor lineage events round-trip through serde JSON.
 
 use spur_acp::{
-    ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
+    HistoryEntry, ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent,
+    SpurEventBody,
 };
 
 #[test]
@@ -145,6 +146,43 @@ fn worker_notification_roundtrips() {
     ));
     assert!(json.contains("WorkerNotification"));
     assert!(json.contains("thinking..."));
+}
+
+#[test]
+fn session_history_chunk_roundtrips() {
+    use spur_acp::domain::events::SessionHistoryChunkKind;
+
+    let ev = SpurEvent::now(SpurEventBody::SessionHistoryChunk {
+        session: SessionId("brain-1".into()),
+        kind: SessionHistoryChunkKind::Initial,
+        entries: vec![
+            HistoryEntry {
+                role: "user".into(),
+                text: "first prompt".into(),
+            },
+            HistoryEntry {
+                role: "assistant".into(),
+                text: "first reply".into(),
+            },
+        ],
+        next_cursor: Some("cursor-1".into()),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    match round.body {
+        SpurEventBody::SessionHistoryChunk {
+            kind,
+            entries,
+            next_cursor,
+            ..
+        } => {
+            assert_eq!(kind, SessionHistoryChunkKind::Initial);
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].text, "first prompt");
+            assert_eq!(next_cursor.as_deref(), Some("cursor-1"));
+        }
+        other => panic!("unexpected body: {other:?}"),
+    }
 }
 
 #[test]
