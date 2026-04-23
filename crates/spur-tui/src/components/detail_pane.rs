@@ -158,8 +158,17 @@ impl DetailPane {
         self.is_following = false;
     }
 
+    pub fn scroll_up_by(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.is_following = false;
+    }
+
     pub fn scroll_down(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_add(1);
+    }
+
+    pub fn scroll_down_by(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
     }
 
     pub fn scroll_to_top(&mut self) {

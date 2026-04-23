@@ -42,46 +42,62 @@ impl HelpOverlay {
         };
 
         let mut out: Vec<Line<'static>> = vec![
-            header(" Dashboard — Lineage Tree"),
-            Line::from("  j / k              Move selection in lineage tree"),
-            Line::from("  Enter              Focus selected node"),
-            Line::from("  Esc                Unfocus (return to log)"),
-            Line::from("  \u{2190} / \u{2192}               Cycle detail tabs (when focused)"),
-            Line::from("  c                  Toggle collapse on selected subtree"),
-            Line::from("  r                  Jump to next pending review"),
-            Line::from("  a / d / m / R      Approve / deny / modify / retry (review tab)"),
+            header(" Dashboard — Modes"),
+            Line::from("  [NAV]              Navigation mode — keys control panels"),
+            Line::from("  [INSERT]           Compose mode — keys go to input bar"),
+            Line::from("  Esc                Exit Compose → Navigate"),
+            Line::from("  i / a / I / A / o  Enter Compose (Vim Normal)"),
+            Line::from("  Enter              Focus input bar (Emacs)"),
             Line::from(""),
-            header(" Dashboard — General"),
-            Line::from("  j/k, Up/Down       Scroll activity log"),
+            header(" Dashboard — Navigation"),
+            Line::from("  j/k, Up/Down       Scroll or navigate"),
+            Line::from("  PgUp / PgDn        Page scroll"),
+            Line::from("  Ctrl+d / Ctrl+u    Half-page scroll"),
             Line::from("  g / G              Jump to top / bottom"),
-            Line::from("  Tab                Cycle panel focus"),
+            Line::from("  Tab / Shift+Tab    Cycle panel focus (Agents ↔ Log)"),
+            Line::from("  1                  Jump to Agents panel"),
+            Line::from("  3                  Jump to Log panel"),
             Line::from("  z                  Zoom / restore panels"),
             Line::from("  v                  Toggle verbose mode"),
             Line::from("  s                  Open session picker"),
+            Line::from("  q                  Quit"),
             Line::from("  Ctrl-C             Quit (press twice to force)"),
+            Line::from(""),
+            header(" Dashboard — Lineage Tree"),
+            Line::from("  j / k              Move selection in lineage tree"),
+            Line::from("  Enter              Focus selected agent"),
+            Line::from("  c                  Toggle collapse on selected subtree"),
+            Line::from("  r                  Jump to next pending review"),
+            Line::from(""),
+            header(" Dashboard — Detail Pane (when agent focused)"),
+            Line::from("  \u{2190} / \u{2192}       Cycle detail tabs"),
+            Line::from("  1-5                Jump to Stream / Artifacts / Attempts / Task / Review"),
+            Line::from("  j / k              Scroll tab content"),
+            Line::from("  Ctrl+d / Ctrl+u    Half-page scroll"),
+            Line::from("  Ctrl+o             Toggle observe collapsed (Stream tab)"),
+            Line::from("  Esc                Unfocus agent (return to log)"),
+            Line::from(""),
+            header(" Dashboard — Review Tab"),
+            Line::from("  a                  Approve"),
+            Line::from("  d                  Deny"),
+            Line::from("  m                  Modify + approve"),
+            Line::from("  R                  Retry"),
             Line::from(""),
         ];
 
         if issues_enabled {
-            out.push(header(" Dashboard — Issues"));
-            out.push(Line::from("  Tab            Cycle to Issues panel"));
-            out.push(Line::from("  j / k          Navigate issue list"));
-            out.push(Line::from("  Enter          View issue detail"));
-            out.push(Line::from("  W              Work on issue (assign brain)"));
-            out.push(Line::from(
-                "  I              Issue detail (on focused executor)",
-            ));
-            out.push(Line::from("  /issues        Refresh issues"));
-            out.push(Line::from("  /work <id>     Work on issue by ID"));
-            out.push(Line::from(""));
-            out.push(header(" Issue Detail (overlay)"));
-            out.push(Line::from("  j / k          Scroll body"));
-            out.push(Line::from("  o              Set status: open"));
-            out.push(Line::from("  w              Set status: in progress"));
-            out.push(Line::from("  b              Set status: blocked"));
-            out.push(Line::from("  d              Set status: closed"));
-            out.push(Line::from("  W              Work on this issue"));
-            out.push(Line::from("  Esc            Close overlay"));
+            out.push(header(" Issue Browser (press 2 from Dashboard)"));
+            out.push(Line::from("  j / k, Up/Down   Navigate issue list"));
+            out.push(Line::from("  g / G            First / last issue"));
+            out.push(Line::from("  Enter            Open / close issue detail"));
+            out.push(Line::from("  o                Set status: open"));
+            out.push(Line::from("  w                Set status: in progress"));
+            out.push(Line::from("  b                Set status: blocked"));
+            out.push(Line::from("  d                Set status: closed"));
+            out.push(Line::from("  W                Work on issue"));
+            out.push(Line::from("  PgUp / PgDn      Scroll detail"));
+            out.push(Line::from("  s                Open session picker"));
+            out.push(Line::from("  Esc              Close detail or back to Dashboard"));
             out.push(Line::from(""));
         }
 
@@ -246,15 +262,19 @@ mod tests {
     }
 
     #[test]
-    fn issues_enabled_shows_issue_hotkeys() {
+    fn issues_enabled_shows_issue_browser_section() {
         let joined = help_lines(false, true).join("\n");
         assert!(
-            joined.contains("Dashboard — Issues"),
-            "expected Dashboard — Issues section: {joined}"
+            joined.contains("Issue Browser"),
+            "expected Issue Browser section: {joined}"
         );
         assert!(
-            joined.contains("Issue Detail"),
-            "expected Issue Detail section: {joined}"
+            !joined.contains("Issue Detail (overlay)"),
+            "Issue Detail overlay section must be removed: {joined}"
+        );
+        assert!(
+            !joined.contains("Dashboard — Issues"),
+            "Dashboard — Issues section must be removed: {joined}"
         );
         assert!(
             joined.contains('W'),
@@ -263,11 +283,24 @@ mod tests {
     }
 
     #[test]
-    fn issues_disabled_omits_issue_section() {
+    fn issues_disabled_omits_issue_browser_section() {
         let joined = help_lines(false, false).join("\n");
         assert!(
-            !joined.contains("Dashboard — Issues"),
-            "Dashboard — Issues must be hidden when issues_enabled=false: {joined}"
+            !joined.contains("Issue Browser"),
+            "Issue Browser must be hidden when issues_enabled=false: {joined}"
+        );
+    }
+
+    #[test]
+    fn help_has_detail_pane_and_review_tab_sections() {
+        let joined = help_lines(false, false).join("\n");
+        assert!(
+            joined.contains("Detail Pane (when agent focused)"),
+            "expected Detail Pane section: {joined}"
+        );
+        assert!(
+            joined.contains("Review Tab"),
+            "expected Review Tab section: {joined}"
         );
     }
 }

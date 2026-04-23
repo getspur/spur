@@ -118,6 +118,9 @@ pub struct InputBar {
     /// preserved across consecutive verticals, reset on any horizontal move
     /// or edit. Matches vim/emacs "remembered column" behavior.
     goal_vcol: Option<u16>,
+    /// When false, the input bar renders with a dim border to indicate it is
+    /// not receiving keys (Navigate mode). Set by the dashboard view.
+    active: bool,
 }
 
 impl InputBar {
@@ -142,6 +145,7 @@ impl InputBar {
             draft: InputStateSnapshot::default(),
             last_inner_width: std::cell::Cell::new(80),
             goal_vcol: None,
+            active: true,
         }
     }
 
@@ -170,6 +174,17 @@ impl InputBar {
     /// Get the current editing mode.
     pub fn mode(&self) -> EditMode {
         self.mode
+    }
+
+    /// Set whether the input bar is visually active (Compose mode) or
+    /// inactive (Navigate mode). Affects border color only.
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
+
+    /// Returns true when the input bar is visually active.
+    pub fn is_active(&self) -> bool {
+        self.active
     }
 
     /// Toggle between Emacs and Vim(Normal) modes.
@@ -1433,10 +1448,14 @@ impl InputBar {
 
         let title = self.build_title(mode_str);
 
-        let border_color = match self.mode {
-            EditMode::Vim(VimMode::Normal) => Color::Yellow,
-            EditMode::Vim(VimMode::Visual) => Color::LightYellow,
-            _ => Color::Green,
+        let border_color = if self.active {
+            match self.mode {
+                EditMode::Vim(VimMode::Normal) => Color::Yellow,
+                EditMode::Vim(VimMode::Visual) => Color::LightYellow,
+                _ => Color::Green,
+            }
+        } else {
+            Color::DarkGray
         };
 
         let block = Block::default()

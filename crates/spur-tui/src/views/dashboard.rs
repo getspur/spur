@@ -18,8 +18,7 @@ use crate::components::activity_log::ActivityLog;
 use crate::components::agents_tree::AgentsTree;
 use crate::components::detail_pane::{DetailPane, DetailTab};
 use crate::components::input_bar::{ActivityKind, EditMode, HandleOutcome, InputBar};
-use crate::components::issue_detail_pane::IssueDetailPane;
-use crate::components::issues_panel::IssuesPanel;
+
 use crate::components::status_bar::{StatusBar, StatusBarProps};
 use crate::components::{LogEntry, LogEntryKind};
 use crate::input_history::InputHistoryEntry;
@@ -30,21 +29,27 @@ use super::View;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     Agents,
-    Issues,
     Log,
 }
 
-/// State machine for issue detail focus. Invalid states are unrepresentable.
-pub enum IssueFocus {
-    None,
-    Loading {
-        id: String,
-    },
-    Loaded {
-        id: String,
-        issue: Box<spur_pm::Issue>,
-    },
+/// Explicit input modality for the dashboard.
+///
+/// Navigate mode: all keys control panels, trees, and overlays. The input bar
+/// is visually inactive (gray border). This eliminates the `key_owner()`
+/// heuristic — users can see which mode they're in.
+///
+/// Compose mode: all keys go to the input bar. The input bar is visually
+/// active (cyan border). Esc exits to Navigate mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DashboardMode {
+    /// Navigation mode — all keys control the view.
+    #[default]
+    Navigate,
+    /// Compose mode — all keys go to the input bar.
+    Compose,
 }
+
+
 
 /// The main dashboard view composing AgentsTree + ActivityLog + StatusBar.
 /// All agent-state is now read from `ExecutorLineage` (owned by `App`);
@@ -65,13 +70,13 @@ pub struct DashboardView {
     text_batch: HashMap<String, (String, Instant)>,
     start_time: Instant,
     tracked_issues: Vec<spur_pm::IssueSummary>,
-    issues_panel: IssuesPanel,
-    issue_detail_pane: IssueDetailPane,
-    issue_focus: IssueFocus,
     alert_summary: Option<(usize, usize, usize)>,
     /// When true, agents tree and issues panel are collapsed to maximize
     /// the log / detail viewport.
     layout_zoomed: bool,
+    /// Explicit input modality. Replaces the `key_owner()` heuristic with
+    /// a visible, predictable state machine.
+    mode: DashboardMode,
 }
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
@@ -89,30 +94,6 @@ fn truncate_display(s: &str, max: usize) -> String {
     let mut out = s[..end].trim_end().to_string();
     out.push('…');
     out
-}
-
-fn detail_event_to_issue(e: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
-    spur_pm::Issue {
-        id: e.id.clone(),
-        source: match e.source.as_str() {
-            "github" => spur_pm::PmSource::GitHub,
-            "linear" => spur_pm::PmSource::Linear,
-            "plane" => spur_pm::PmSource::Plane,
-            _ => spur_pm::PmSource::Beads,
-        },
-        title: e.title.clone(),
-        body: e.body.clone(),
-        status: e.status.clone(),
-        labels: e.labels.clone(),
-        assignee: e.assignee.clone(),
-        url: e.url.clone(),
-        priority: e.priority,
-        issue_type: e.issue_type.clone(),
-        blocked_by: e.blocked_by.clone(),
-        due_at: e.due_at,
-        created_at: e.created_at,
-        updated_at: e.updated_at,
-    }
 }
 
 fn format_issue_badge(issue_id: &str, issues: &[spur_pm::IssueSummary]) -> String {
@@ -161,11 +142,9 @@ impl DashboardView {
             text_batch: HashMap::new(),
             start_time: Instant::now(),
             tracked_issues: Vec::new(),
-            issues_panel: IssuesPanel::new(),
-            issue_detail_pane: IssueDetailPane::new(),
-            issue_focus: IssueFocus::None,
             alert_summary: None,
             layout_zoomed: false,
+            mode: DashboardMode::Navigate,
         }
     }
 
@@ -177,16 +156,17 @@ impl DashboardView {
     /// its available key bindings. This makes the invisible `j`/`k` routing
     /// explicit to the user.
     fn panel_context_hint(&self, lineage: &ExecutorLineage) -> String {
-        match &self.issue_focus {
-            IssueFocus::Loaded { .. } => {
-                "[Issue Detail] j/k scroll · o/w/b/d status · W work · Esc close".into()
-            }
-            IssueFocus::Loading { .. } => "[Issue Detail] Loading…".into(),
-            IssueFocus::None => match &self.focused_node {
+        // Mode badge is always visible so users know whether keys navigate or type.
+        let mode_badge = match self.mode {
+            DashboardMode::Navigate => "[NAV]",
+            DashboardMode::Compose => "[INSERT]",
+        };
+
+        let body = match &self.focused_node {
                 Some(id) => {
                     let agent = lineage.node(id).map(|n| n.agent.as_str()).unwrap_or("?");
                     format!(
-                        "[Detail: {}] ←/→ tabs · j/k scroll · Ctrl+O toggle · r review · Esc unfocus",
+                        "[Detail: {}] ←/→/1-5 tabs · j/k scroll · Ctrl+O toggle · r review · Esc unfocus",
                         agent
                     )
                 }
@@ -194,12 +174,14 @@ impl DashboardView {
                     Panel::Agents => {
                         "[Agents] j/k move · Enter focus · c collapse · Tab cycle".into()
                     }
-                    Panel::Issues => {
-                        "[Issues] j/k select · Enter detail · W work · Tab cycle".into()
-                    }
-                    Panel::Log => "[Log] j/k scroll · g/G top/bottom · Tab cycle".into(),
+                    Panel::Log => "[Log] j/k scroll · g/G top/bottom · PgUp/PgDn page · Tab cycle".into(),
                 },
-            },
+            };
+
+        if self.mode == DashboardMode::Compose {
+            format!("{} {} · Esc to navigate", mode_badge, body)
+        } else {
+            format!("{} {}", mode_badge, body)
         }
     }
 
@@ -243,10 +225,17 @@ impl DashboardView {
                 Style::default().fg(Color::DarkGray),
             ))
         } else if text.is_empty() {
-            // Panel context hint — always visible when idle so the user knows
-            // which panel is active and what j/k will do.
+            // When in Compose mode with an empty input bar, show a typing
+            // hint instead of panel navigation keys (those go to the input
+            // bar while in Compose mode, so the panel context would mislead).
+            let hint_text = if self.mode == DashboardMode::Compose {
+                "[INSERT] Typing \u{00b7} Enter to submit \u{00b7} Esc to navigate"
+                    .to_string()
+            } else {
+                self.panel_context_hint(lineage)
+            };
             Paragraph::new(Span::styled(
-                self.panel_context_hint(lineage),
+                hint_text,
                 Style::default().fg(Color::DarkGray),
             ))
         } else {
@@ -299,11 +288,20 @@ impl DashboardView {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
+        self.mode = DashboardMode::Compose;
         self.input_bar.insert_paste(text);
     }
 
     pub fn focused_node(&self) -> Option<&ExecutorId> {
         self.focused_node.as_ref()
+    }
+
+    pub fn focused_panel(&self) -> Panel {
+        self.focused_panel
+    }
+
+    pub fn mode(&self) -> DashboardMode {
+        self.mode
     }
 
     pub fn detail_pane(&self) -> &DetailPane {
@@ -328,6 +326,14 @@ impl DashboardView {
 
     pub fn scroll_activity_down_by(&mut self, lines: usize) {
         self.activity_log.scroll_down_by(lines, 20);
+    }
+
+    pub fn scroll_detail_up_by(&mut self, lines: usize) {
+        self.detail_pane.scroll_up_by(lines);
+    }
+
+    pub fn scroll_detail_down_by(&mut self, lines: usize) {
+        self.detail_pane.scroll_down_by(lines);
     }
 
     /// Update the brain status label shown in the InputBar.
@@ -485,6 +491,8 @@ impl DashboardView {
             frame.render_widget(paragraph, content_area);
             let input_bar_area = chunks[1];
             self.render_input_hint(frame, area, input_bar_area, lineage);
+            self.input_bar
+                .set_active(self.mode == DashboardMode::Compose);
             self.input_bar.render(frame, input_bar_area);
             StatusBar::render(
                 frame,
@@ -511,45 +519,26 @@ impl DashboardView {
 
         let input_height = self.input_bar.required_height(area.width);
 
-        let (agents_height, issues_height) = if self.layout_zoomed {
-            // Zoomed mode: collapse agents to a header bar, hide issues.
-            (1u16, 0u16)
+        let agents_height = if self.layout_zoomed {
+            // Zoomed mode: collapse agents to a header bar.
+            1u16
         } else {
-            let agents = (node_count as u16 + 2)
+            (node_count as u16 + 2)
                 .clamp(4, area.height * 40 / 100)
-                .min(12);
-            let issues = if self.tracked_issues.is_empty() {
-                0
-            } else {
-                crate::components::issues_panel::IssuesPanel::computed_height(
-                    self.tracked_issues.len(),
-                    area.height,
-                )
-            };
-            (agents, issues)
+                .min(12)
         };
 
-        let mut constraints = vec![
+        let constraints = vec![
             Constraint::Length(agents_height), // lineage tree
+            Constraint::Min(4),                // activity log / detail (fills)
+            Constraint::Length(input_height),  // input bar
+            Constraint::Length(1),             // status bar
         ];
-        if issues_height > 0 {
-            constraints.push(Constraint::Length(issues_height)); // issues panel
-        }
-        constraints.push(Constraint::Min(4)); // activity log (fills)
-        constraints.push(Constraint::Length(input_height)); // input bar
-        constraints.push(Constraint::Length(1)); // status bar
-
         let chunks = Layout::vertical(constraints).split(area);
 
-        // Chunk indices depend on whether issues panel is present
-        let issues_chunk = if issues_height > 0 {
-            Some(1usize)
-        } else {
-            None
-        };
-        let log_chunk = if issues_height > 0 { 2 } else { 1 };
-        let input_chunk = log_chunk + 1;
-        let status_chunk = input_chunk + 1;
+        let log_chunk = 1;
+        let input_chunk = 2;
+        let status_chunk = 3;
 
         if self.layout_zoomed {
             let block = Block::default()
@@ -566,45 +555,33 @@ impl DashboardView {
             self.agents_tree.render(frame, chunks[0], lineage);
         }
 
-        if let Some(ic) = issues_chunk {
-            self.issues_panel
-                .render(&self.tracked_issues, frame, chunks[ic]);
-        }
-
-        match &self.issue_focus {
-            IssueFocus::Loading { id } => {
-                IssueDetailPane::render_loading(id, frame, chunks[log_chunk]);
-            }
-            IssueFocus::Loaded { issue, .. } => {
-                self.issue_detail_pane
-                    .render(issue, frame, chunks[log_chunk]);
-            }
-            IssueFocus::None => match &self.focused_node {
-                Some(id) => {
-                    if let Some(node) = lineage.node(id) {
-                        let badge = node
-                            .issue_id
-                            .as_ref()
-                            .map(|iid| format_issue_badge(iid, &self.tracked_issues));
-                        let trace = worker_streams.get_mut(&id.0);
-                        self.detail_pane.render(
-                            frame,
-                            chunks[log_chunk],
-                            node,
-                            badge.as_deref(),
-                            trace,
-                        );
-                    } else {
-                        self.activity_log.render(frame, chunks[log_chunk]);
-                    }
-                }
-                None => {
+        match &self.focused_node {
+            Some(id) => {
+                if let Some(node) = lineage.node(id) {
+                    let badge = node
+                        .issue_id
+                        .as_ref()
+                        .map(|iid| format_issue_badge(iid, &self.tracked_issues));
+                    let trace = worker_streams.get_mut(&id.0);
+                    self.detail_pane.render(
+                        frame,
+                        chunks[log_chunk],
+                        node,
+                        badge.as_deref(),
+                        trace,
+                    );
+                } else {
                     self.activity_log.render(frame, chunks[log_chunk]);
                 }
-            },
+            }
+            None => {
+                self.activity_log.render(frame, chunks[log_chunk]);
+            }
         }
         let input_bar_area = chunks[input_chunk];
         self.render_input_hint(frame, area, input_bar_area, lineage);
+        self.input_bar
+            .set_active(self.mode == DashboardMode::Compose);
         self.input_bar.render(frame, input_bar_area);
         StatusBar::render(
             frame,
@@ -638,63 +615,67 @@ enum KeyOwner {
 
 impl DashboardView {
     /// Decide ownership from pre-key state.  No mutation.
+    ///
+    /// With the modal dashboard, ownership is explicit:
+    /// - Navigate mode: nearly everything goes to the view
+    /// - Compose mode: nearly everything goes to the composer
+    ///
+    /// The only exceptions are global bypasses (Ctrl+P/N/O, Alt+i) and
+    /// Esc which exits Compose mode.
     fn key_owner(&self, key: KeyEvent) -> KeyOwner {
-        if !self.input_bar.is_empty() {
-            let is_composer = matches!(
-                key.code,
-                KeyCode::Char(_)
-                    | KeyCode::Backspace
-                    | KeyCode::Delete
-                    | KeyCode::Left
-                    | KeyCode::Right
-                    | KeyCode::Home
-                    | KeyCode::End
-                    | KeyCode::Enter
-                    | KeyCode::Up
-                    | KeyCode::Down
-            ) || (key.code == KeyCode::Esc && self.input_bar.wants_esc());
-            return if is_composer {
-                KeyOwner::Composer
-            } else {
-                KeyOwner::View
-            };
+        // Global bypasses work in both modes.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('n') | KeyCode::Char('o'))
+        {
+            return KeyOwner::View;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('i'))
+        {
+            return KeyOwner::View;
         }
 
-        // Empty input bar.
-        match key.code {
-            KeyCode::Left | KeyCode::Right if self.focused_node.is_some() => KeyOwner::View,
-            KeyCode::Up | KeyCode::Down => KeyOwner::View,
-            KeyCode::Tab => KeyOwner::View,
-            KeyCode::Esc => KeyOwner::View,
-            KeyCode::Enter => KeyOwner::View,
-            KeyCode::Char(c) if self.input_bar.is_vim_normal() => {
-                // Vim Normal mode: review decisions take precedence over mode-entry.
-                if self.focused_node.is_some()
-                    && self.detail_pane.current_tab == DetailTab::Review
-                    && matches!(c, 'a' | 'd' | 'm' | 'R')
-                {
-                    KeyOwner::View
-                } else if matches!(c, 'i' | 'a' | 'A' | 'I' | 'o' | 'O') {
-                    KeyOwner::Composer
-                } else {
-                    KeyOwner::View
+        match self.mode {
+            DashboardMode::Compose => {
+                // Esc exits Compose mode and is handled by the view.
+                if key.code == KeyCode::Esc {
+                    return KeyOwner::View;
+                }
+                KeyOwner::Composer
+            }
+            DashboardMode::Navigate => {
+                // In Navigate mode, only explicit compose-entry keys go to the composer.
+                match key.code {
+                    KeyCode::Char(c) if self.input_bar.is_vim_normal() => {
+                        // Review tab creates a local keybinding scope that
+                        // overrides global Vim mode. The on-screen labels
+                        // [a/d/m/R] are explicit UI contracts, not text input.
+                        let in_review = self.focused_node.is_some()
+                            && self.detail_pane.current_tab == DetailTab::Review
+                            && matches!(c, 'a' | 'd' | 'm' | 'R');
+                        if in_review {
+                            KeyOwner::View
+                        } else if matches!(c, 'i' | 'a' | 'A' | 'I' | 'o' | 'O') {
+                            KeyOwner::Composer
+                        } else {
+                            KeyOwner::View
+                        }
+                    }
+                    // Emacs mode: non-view-action characters enter Compose mode.
+                    KeyCode::Char(c)
+                        if !self.input_bar.is_vim_normal()
+                            && !self.is_view_action_char(c) =>
+                    {
+                        KeyOwner::Composer
+                    }
+                    _ => KeyOwner::View,
                 }
             }
-            KeyCode::Char(c) if self.is_view_action_char(c) => KeyOwner::View,
-            KeyCode::Char(_) => KeyOwner::Composer,
-            KeyCode::Backspace
-            | KeyCode::Delete
-            | KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Home
-            | KeyCode::End => KeyOwner::Composer,
-            _ => KeyOwner::View,
         }
     }
 
-    /// Whether `ch` is a known view-action key when the input bar is empty
-    /// in Insert mode.  Must stay in sync with the Insert-mode view-char
-    /// arm in [`Self::handle_view_key`].
+    /// Whether `ch` is a known view-action key in Navigate mode.
+    /// These characters navigate instead of entering Compose mode in Emacs.
     fn is_view_action_char(&self, ch: char) -> bool {
         if self.focused_node.is_some()
             && self.detail_pane.current_tab == DetailTab::Review
@@ -702,7 +683,7 @@ impl DashboardView {
         {
             return true;
         }
-        matches!(ch, 'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's')
+        matches!(ch, 'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's' | 'q' | 'z')
             || (ch == 'c' && self.focused_panel == Panel::Agents)
     }
 
@@ -721,6 +702,72 @@ impl DashboardView {
             KeyCode::Right if self.focused_node.is_some() => {
                 self.detail_pane.cycle_tab(true);
                 None
+            }
+            // ── Direct tab jumping (focused node) ─────────────────────────
+            KeyCode::Char('1')
+                if self.focused_node.is_some()
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.detail_pane.jump_to_tab(DetailTab::Stream);
+                None
+            }
+            KeyCode::Char('2')
+                if self.focused_node.is_some()
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.detail_pane.jump_to_tab(DetailTab::Artifacts);
+                None
+            }
+            KeyCode::Char('3')
+                if self.focused_node.is_some()
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.detail_pane.jump_to_tab(DetailTab::Attempts);
+                None
+            }
+            KeyCode::Char('4')
+                if self.focused_node.is_some()
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.detail_pane.jump_to_tab(DetailTab::Task);
+                None
+            }
+            KeyCode::Char('5')
+                if self.focused_node.is_some()
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.detail_pane.jump_to_tab(DetailTab::Review);
+                None
+            }
+            // ── View jump: Issue Browser ──────────────────────────────────
+            KeyCode::Char('2')
+                if self.focused_node.is_none()
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                Some(Action::NavigateTo(ViewId::IssueBrowser))
+            }
+            // ── Half-page scroll ──────────────────────────────────────────
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.focused_node.is_some() {
+                    self.detail_pane.scroll_down_by(5);
+                } else {
+                    self.activity_log.scroll_down_by(5, 20);
+                }
+                Some(Action::ScrollDown)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.focused_node.is_some() {
+                    self.detail_pane.scroll_up_by(5);
+                } else {
+                    self.activity_log.scroll_up_by(5);
+                }
+                Some(Action::ScrollUp)
+            }
+            // ── Quit ──────────────────────────────────────────────────────
+            KeyCode::Char('q')
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                Some(Action::Quit)
             }
             KeyCode::Char(ch)
                 if !key
@@ -749,90 +796,27 @@ impl DashboardView {
                         }
                     }
                     let action = match ch {
-                        'o' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
-                            if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
-                                return Some(Action::Issue(
-                                    crate::action::IssueAction::UpdateStatus {
-                                        id: id.clone(),
-                                        status: "open".into(),
-                                    },
-                                ));
+                        // ── Direct panel jump (Navigate mode) ─────────────────
+                        '1' if self.focused_node.is_none() => {
+                            self.focused_panel = Panel::Agents;
+                            self.agents_tree.set_focused(true);
+                            self.activity_log.set_focused(false);
+                            None
+                        }
+                        '3' if self.focused_node.is_none() => {
+                            self.focused_panel = Panel::Log;
+                            self.agents_tree.set_focused(false);
+                            self.activity_log.set_focused(true);
+                            None
+                        }
+                        'j' if self.focused_panel == Panel::Agents
+                            && self.focused_node.is_none() =>
+                        {
+                            if let Some(lineage) = lineage {
+                                self.agents_tree.select_next(lineage);
                             }
-                            return None;
-                        }
-                        'w' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
-                            if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
-                                return Some(Action::Issue(
-                                    crate::action::IssueAction::UpdateStatus {
-                                        id: id.clone(),
-                                        status: "in_progress".into(),
-                                    },
-                                ));
-                            }
-                            return None;
-                        }
-                        'b' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
-                            if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
-                                return Some(Action::Issue(
-                                    crate::action::IssueAction::UpdateStatus {
-                                        id: id.clone(),
-                                        status: "blocked".into(),
-                                    },
-                                ));
-                            }
-                            return None;
-                        }
-                        'd' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
-                            if let IssueFocus::Loaded { ref id, .. } = self.issue_focus {
-                                return Some(Action::Issue(
-                                    crate::action::IssueAction::UpdateStatus {
-                                        id: id.clone(),
-                                        status: "closed".into(),
-                                    },
-                                ));
-                            }
-                            return None;
-                        }
-                        'I' if self.focused_node.is_some() => {
-                            if let Some(ref exec_id) = self.focused_node {
-                                if let Some(node) = lineage.and_then(|l| l.node(exec_id)) {
-                                    if let Some(ref iid) = node.issue_id {
-                                        self.issue_focus = IssueFocus::Loading { id: iid.clone() };
-                                        self.issue_detail_pane.reset();
-                                        return Some(Action::Issue(
-                                            crate::action::IssueAction::ViewDetail {
-                                                id: iid.clone(),
-                                            },
-                                        ));
-                                    } else {
-                                        self.activity_log.push(LogEntry {
-                                            timestamp: Self::now_stamp(),
-                                            prefix: "[tui]".into(),
-                                            message: "No issue linked to this executor".into(),
-                                            kind: LogEntryKind::Info,
-                                        });
-                                    }
-                                }
-                            }
-                            return None;
-                        }
-                        'j' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
-                            self.issue_detail_pane.scroll_down();
-                            Some(Action::ScrollDown)
-                        }
-                        'k' if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
-                            self.issue_detail_pane.scroll_up();
-                            Some(Action::ScrollUp)
-                        }
-                        'j' if self.focused_panel == Panel::Issues => {
-                            self.issues_panel.select_next(1, self.tracked_issues.len());
                             Some(Action::SelectNext)
                         }
-                        'k' if self.focused_panel == Panel::Issues => {
-                            self.issues_panel.select_prev(1, self.tracked_issues.len());
-                            Some(Action::SelectPrev)
-                        }
-                        'j' if self.focused_panel == Panel::Agents => Some(Action::SelectNext),
                         'j' => {
                             if let Some(ref id) = self.focused_node.clone() {
                                 let _trace = worker_streams.get_mut(&id.0);
@@ -842,7 +826,14 @@ impl DashboardView {
                             }
                             Some(Action::ScrollDown)
                         }
-                        'k' if self.focused_panel == Panel::Agents => Some(Action::SelectPrev),
+                        'k' if self.focused_panel == Panel::Agents
+                            && self.focused_node.is_none() =>
+                        {
+                            if let Some(lineage) = lineage {
+                                self.agents_tree.select_prev(lineage);
+                            }
+                            Some(Action::SelectPrev)
+                        }
                         'k' => {
                             if let Some(ref id) = self.focused_node.clone() {
                                 let _trace = worker_streams.get_mut(&id.0);
@@ -852,25 +843,17 @@ impl DashboardView {
                             }
                             Some(Action::ScrollUp)
                         }
-                        'W' if self.focused_panel == Panel::Issues
-                            || matches!(self.issue_focus, IssueFocus::Loaded { .. }) =>
-                        {
-                            let id = match &self.issue_focus {
-                                IssueFocus::Loaded { id, .. } => Some(id.clone()),
-                                _ => self
-                                    .issues_panel
-                                    .selected_id(&self.tracked_issues)
-                                    .map(String::from),
-                            };
-                            if let Some(id) = id {
-                                return Some(Action::Issue(crate::action::IssueAction::WorkOn {
-                                    id,
-                                }));
-                            }
-                            return None;
-                        }
                         'r' => Some(Action::JumpToReview),
                         'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
+                        'g' if self.focused_panel == Panel::Agents
+                            && self.focused_node.is_none() =>
+                        {
+                            if let Some(lineage) = lineage {
+                                self.agents_tree.select_first(lineage);
+                                self.agents_tree.scroll_to_top();
+                            }
+                            None
+                        }
                         'g' => {
                             if let Some(ref id) = self.focused_node.clone() {
                                 let _trace = worker_streams.get_mut(&id.0);
@@ -879,6 +862,15 @@ impl DashboardView {
                                 self.activity_log.scroll_to_top();
                             }
                             Some(Action::ScrollToTop)
+                        }
+                        'G' if self.focused_panel == Panel::Agents
+                            && self.focused_node.is_none() =>
+                        {
+                            if let Some(lineage) = lineage {
+                                self.agents_tree.select_last(lineage);
+                                self.agents_tree.scroll_to_bottom();
+                            }
+                            None
                         }
                         'G' => {
                             if let Some(ref id) = self.focused_node.clone() {
@@ -909,7 +901,8 @@ impl DashboardView {
                 }
 
                 // Insert mode view chars (empty bar).
-                if self.focused_node.is_some() && self.detail_pane.current_tab == DetailTab::Review
+                if self.focused_node.is_some()
+                    && self.detail_pane.current_tab == DetailTab::Review
                 {
                     if let Some(decision) =
                         crate::components::review_card::decision_for_key(ch, None)
@@ -928,15 +921,14 @@ impl DashboardView {
                     }
                 }
                 match ch {
-                    'j' if self.focused_panel == Panel::Issues => {
-                        self.issues_panel.select_next(1, self.tracked_issues.len());
+                    'j' if self.focused_panel == Panel::Agents
+                        && self.focused_node.is_none() =>
+                    {
+                        if let Some(lineage) = lineage {
+                            self.agents_tree.select_next(lineage);
+                        }
                         Some(Action::SelectNext)
                     }
-                    'k' if self.focused_panel == Panel::Issues => {
-                        self.issues_panel.select_prev(1, self.tracked_issues.len());
-                        Some(Action::SelectPrev)
-                    }
-                    'j' if self.focused_panel == Panel::Agents => Some(Action::SelectNext),
                     'j' => {
                         if let Some(ref id) = self.focused_node.clone() {
                             let _trace = worker_streams.get_mut(&id.0);
@@ -946,7 +938,14 @@ impl DashboardView {
                         }
                         Some(Action::ScrollDown)
                     }
-                    'k' if self.focused_panel == Panel::Agents => Some(Action::SelectPrev),
+                    'k' if self.focused_panel == Panel::Agents
+                        && self.focused_node.is_none() =>
+                    {
+                        if let Some(lineage) = lineage {
+                            self.agents_tree.select_prev(lineage);
+                        }
+                        Some(Action::SelectPrev)
+                    }
                     'k' => {
                         if let Some(ref id) = self.focused_node.clone() {
                             let _trace = worker_streams.get_mut(&id.0);
@@ -958,6 +957,15 @@ impl DashboardView {
                     }
                     'r' => Some(Action::JumpToReview),
                     'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
+                    'g' if self.focused_panel == Panel::Agents
+                        && self.focused_node.is_none() =>
+                    {
+                        if let Some(lineage) = lineage {
+                            self.agents_tree.select_first(lineage);
+                            self.agents_tree.scroll_to_top();
+                        }
+                        None
+                    }
                     'g' => {
                         if let Some(ref id) = self.focused_node.clone() {
                             let _trace = worker_streams.get_mut(&id.0);
@@ -966,6 +974,15 @@ impl DashboardView {
                             self.activity_log.scroll_to_top();
                         }
                         Some(Action::ScrollToTop)
+                    }
+                    'G' if self.focused_panel == Panel::Agents
+                        && self.focused_node.is_none() =>
+                    {
+                        if let Some(lineage) = lineage {
+                            self.agents_tree.select_last(lineage);
+                            self.agents_tree.scroll_to_bottom();
+                        }
+                        None
                     }
                     'G' => {
                         if let Some(ref id) = self.focused_node.clone() {
@@ -986,63 +1003,93 @@ impl DashboardView {
                 }
             }
             KeyCode::Up => {
-                if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
-                    self.issue_detail_pane.scroll_up();
-                } else if let Some(ref id) = self.focused_node.clone() {
+                if let Some(ref id) = self.focused_node.clone() {
                     let _trace = worker_streams.get_mut(&id.0);
                     self.detail_pane.scroll_up();
+                    Some(Action::ScrollUp)
+                } else if self.focused_panel == Panel::Agents {
+                    if let Some(lineage) = lineage {
+                        self.agents_tree.select_prev(lineage);
+                    }
+                    Some(Action::SelectPrev)
                 } else {
                     self.activity_log.scroll_up();
+                    Some(Action::ScrollUp)
+                }
+            }
+            KeyCode::Down => {
+                if let Some(ref id) = self.focused_node.clone() {
+                    let _trace = worker_streams.get_mut(&id.0);
+                    self.detail_pane.scroll_down();
+                    Some(Action::ScrollDown)
+                } else if self.focused_panel == Panel::Agents {
+                    if let Some(lineage) = lineage {
+                        self.agents_tree.select_next(lineage);
+                    }
+                    Some(Action::SelectNext)
+                } else {
+                    self.activity_log.scroll_down(20);
+                    Some(Action::ScrollDown)
+                }
+            }
+            // ── Page-wise scroll ──────────────────────────────────────────
+            KeyCode::PageUp => {
+                if self.focused_node.is_some() {
+                    self.detail_pane.scroll_up_by(10);
+                } else if self.focused_panel == Panel::Agents {
+                    if let Some(lineage) = lineage {
+                        self.agents_tree.select_prev(lineage);
+                        self.agents_tree.select_prev(lineage);
+                        self.agents_tree.select_prev(lineage);
+                        self.agents_tree.select_prev(lineage);
+                        self.agents_tree.select_prev(lineage);
+                    }
+                } else {
+                    self.activity_log.scroll_up_by(10);
                 }
                 Some(Action::ScrollUp)
             }
-            KeyCode::Down => {
-                if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
-                    self.issue_detail_pane.scroll_down();
-                } else if let Some(ref id) = self.focused_node.clone() {
-                    let _trace = worker_streams.get_mut(&id.0);
-                    self.detail_pane.scroll_down();
+            KeyCode::PageDown => {
+                if self.focused_node.is_some() {
+                    self.detail_pane.scroll_down_by(10);
+                } else if self.focused_panel == Panel::Agents {
+                    if let Some(lineage) = lineage {
+                        self.agents_tree.select_next(lineage);
+                        self.agents_tree.select_next(lineage);
+                        self.agents_tree.select_next(lineage);
+                        self.agents_tree.select_next(lineage);
+                        self.agents_tree.select_next(lineage);
+                    }
                 } else {
-                    self.activity_log.scroll_down(20);
+                    self.activity_log.scroll_down_by(10, 20);
                 }
                 Some(Action::ScrollDown)
             }
-            KeyCode::Tab if matches!(self.issue_focus, IssueFocus::None) => {
+            KeyCode::Tab => {
                 self.focused_panel = match self.focused_panel {
-                    Panel::Agents => {
-                        if !self.tracked_issues.is_empty() {
-                            Panel::Issues
-                        } else {
-                            Panel::Log
-                        }
-                    }
-                    Panel::Issues => Panel::Log,
+                    Panel::Agents => Panel::Log,
                     Panel::Log => Panel::Agents,
                 };
                 self.agents_tree
                     .set_focused(self.focused_panel == Panel::Agents);
-                self.issues_panel
-                    .set_focused(self.focused_panel == Panel::Issues);
                 self.activity_log
                     .set_focused(self.focused_panel == Panel::Log);
                 Some(Action::CycleFocus)
             }
-            KeyCode::Esc if !matches!(self.issue_focus, IssueFocus::None) => {
-                self.issue_focus = IssueFocus::None;
-                Some(Action::UnfocusNode)
+            // ── Reverse panel cycle ───────────────────────────────────────
+            KeyCode::BackTab => {
+                self.focused_panel = match self.focused_panel {
+                    Panel::Agents => Panel::Log,
+                    Panel::Log => Panel::Agents,
+                };
+                self.agents_tree
+                    .set_focused(self.focused_panel == Panel::Agents);
+                self.activity_log
+                    .set_focused(self.focused_panel == Panel::Log);
+                Some(Action::CycleFocus)
             }
             KeyCode::Esc if self.focused_node.is_some() => Some(Action::UnfocusNode),
             KeyCode::Esc => Some(Action::NavigateBack),
-            KeyCode::Enter if self.focused_panel == Panel::Issues => {
-                if let Some(id) = self.issues_panel.selected_id(&self.tracked_issues) {
-                    self.issue_focus = IssueFocus::Loading { id: id.to_string() };
-                    self.issue_detail_pane.reset();
-                    return Some(Action::Issue(crate::action::IssueAction::ViewDetail {
-                        id: id.to_string(),
-                    }));
-                }
-                None
-            }
             KeyCode::Enter if self.focused_panel == Panel::Agents => Some(Action::FocusNode),
             _ => None,
         }
@@ -1080,27 +1127,38 @@ impl DashboardView {
         let owner = self.key_owner(key);
 
         match owner {
-            KeyOwner::Composer => match self.input_bar.handle_key(key) {
-                HandleOutcome::Submit(text, interrupt) => {
-                    let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
-                        text,
-                    ))];
-                    if self.session_attached {
-                        Some(Action::SendMessage {
-                            session: spur_acp::SessionId(String::new()),
-                            blocks,
-                            interrupt,
-                        })
-                    } else {
-                        Some(Action::NewSessionWithMessage { blocks, interrupt })
-                    }
+            KeyOwner::Composer => {
+                // Enter Compose mode when typing in Navigate mode.
+                if self.mode == DashboardMode::Navigate {
+                    self.mode = DashboardMode::Compose;
                 }
-                _ => None,
-            },
-            KeyOwner::View if self.input_bar.is_empty() => {
+                match self.input_bar.handle_key(key) {
+                    HandleOutcome::Submit(text, interrupt) => {
+                        self.mode = DashboardMode::Navigate;
+                        let blocks = vec![spur_acp::ContentBlock::Text(
+                            spur_acp::TextContent::new(text),
+                        )];
+                        if self.session_attached {
+                            Some(Action::SendMessage {
+                                session: spur_acp::SessionId(String::new()),
+                                blocks,
+                                interrupt,
+                            })
+                        } else {
+                            Some(Action::NewSessionWithMessage { blocks, interrupt })
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            KeyOwner::View => {
+                // Esc in Compose mode exits to Navigate without emitting an action.
+                if self.mode == DashboardMode::Compose && key.code == KeyCode::Esc {
+                    self.mode = DashboardMode::Navigate;
+                    return None;
+                }
                 self.handle_view_key(key, lineage, worker_streams)
             }
-            KeyOwner::View => None,
         }
     }
 }
@@ -1395,20 +1453,6 @@ impl View for DashboardView {
                         issue.assignee = Some(a.clone());
                     }
                 }
-                if let IssueFocus::Loaded {
-                    id: ref focus_id,
-                    ref mut issue,
-                } = self.issue_focus
-                {
-                    if focus_id == id {
-                        if let Some(ref s) = status {
-                            issue.status = s.clone();
-                        }
-                        if let Some(a) = assignee {
-                            issue.assignee = Some(a.clone());
-                        }
-                    }
-                }
                 let status_suffix = status
                     .as_ref()
                     .map(|s| format!(": {}", s))
@@ -1444,9 +1488,6 @@ impl View for DashboardView {
                 // Sort by priority ascending (critical first)
                 self.tracked_issues
                     .sort_by(|a, b| a.priority.unwrap_or(99).cmp(&b.priority.unwrap_or(99)));
-                if !self.tracked_issues.is_empty() {
-                    self.issues_panel.select_first();
-                }
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".into(),
@@ -1564,33 +1605,6 @@ impl View for DashboardView {
                     message: format!("{} {}", verb, path.display()),
                     kind: LogEntryKind::Act,
                 });
-            }
-
-            SpurEventBody::IssueDetailFetched {
-                requested_id,
-                issue,
-            } => {
-                if let IssueFocus::Loading { id } = &self.issue_focus {
-                    if id == requested_id {
-                        let pm_issue = detail_event_to_issue(issue);
-                        self.issue_focus = IssueFocus::Loaded {
-                            id: requested_id.clone(),
-                            issue: Box::new(pm_issue),
-                        };
-                    }
-                }
-            }
-
-            SpurEventBody::IssueCommandError { operation, error } => {
-                self.activity_log.push(LogEntry {
-                    timestamp: Self::now_stamp(),
-                    prefix: "[pm]".into(),
-                    message: format!("{} failed: {}", operation, error),
-                    kind: LogEntryKind::Error,
-                });
-                if matches!(self.issue_focus, IssueFocus::Loading { .. }) {
-                    self.issue_focus = IssueFocus::None;
-                }
             }
 
             SpurEventBody::GraphAlertsSummary {
