@@ -321,6 +321,48 @@ strengths = []
 limitations = []
 inherit_defaults = true
 
+[[agents.entries]]
+name = "kimi"
+command = "kimi"
+args = ["acp"]
+transport = "acp"
+kind = "generic"
+role = "both"
+capabilities = []
+cost_tier = "medium"
+skip_permissions = false
+skip_permissions_args = []
+
+[agents.entries.review]
+review_required = false
+review_timeout_secs = 1800
+max_review_retries = 3
+
+[agents.entries.review.review_timeout_default.Reject]
+reason = "review timeout"
+
+[agents.entries.display]
+handle = "kimi"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+args_template = "raw_rest"
+ingest = []
+response = []
+static = []
+
+[agents.entries.permissions]
+skip = false
+args = []
+session_mode = "full-auto"
+
+[agents.entries.delegation]
+good_for = []
+avoid_for = []
+strengths = []
+limitations = []
+inherit_defaults = true
+
 [failover]
 cooldown_minutes = 30
 
