@@ -912,6 +912,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn monitor_journal_appends_survives_transient_metadata_error() {
+        use std::time::Duration;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("journal");
+        let hidden = dir.path().join("journal.hidden");
+        tokio::fs::write(&path, b"seed").await.expect("write seed journal");
+
+        let notify = Arc::new(Notify::new());
+        let handle = tokio::spawn(monitor_journal_appends(path.clone(), Arc::clone(&notify)));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::fs::rename(&path, &hidden)
+            .await
+            .expect("hide journal to force metadata failure");
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        tokio::fs::write(&path, b"seed-after-retry")
+            .await
+            .expect("recreate journal with appended content");
+
+        tokio::time::timeout(Duration::from_secs(2), notify.notified())
+            .await
+            .expect("monitor should retry transient metadata failures and wake on later append");
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
     #[test]
     fn auto_pr_params_include_plan_id_and_summary() {
         let params =
