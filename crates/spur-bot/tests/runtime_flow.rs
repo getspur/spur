@@ -1065,6 +1065,22 @@ async fn agent_session_ready_commits_binding_and_persists() {
         ))
         .unwrap();
 
+    let (key, _) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::TurnComplete {
+                session: spur_acp::SessionId("spur_1".into()),
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        key,
+        Some(spur_bot::state::ThreadKey {
+            chat_id: 42,
+            message_thread_id: Some(77),
+        }),
+        "fresh AgentSessionReady must still install a live route for turn completion"
+    );
+
     let persisted = runtime.state_store().load().unwrap();
     assert_eq!(persisted.threads.len(), 1);
     let record = persisted.threads.values().next().unwrap();
