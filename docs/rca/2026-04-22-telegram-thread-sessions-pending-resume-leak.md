@@ -12,7 +12,10 @@
 
 When a Telegram topic is in `RestorePending` state (waiting for `AgentSessionReady` after a `ResumeSession` command), and the user issues `/resume <different_session_id>` in the **same topic**, the old `acp_session_id`'s entry in `pending_resume` is **not removed**. A late `AgentSessionReady` for the old session can then hijack the topic, overwriting its `RestorePending { new_session }` binding with `Active { old_session }` — violating the operator's explicit intent.
 
-This is a **silent correctness failure**: the user asked to resume session Y, but the bot binds the topic to session X instead.
+This is a correctness failure with only a weak detection channel: the user asked
+to resume session Y, but a stale ready event can still bind the topic to session
+X instead. The bot may emit `Restored session X`, but that only helps if the
+operator notices the mismatch immediately.
 
 ---
 
@@ -51,7 +54,7 @@ The runtime does not validate, on `AgentSessionReady`, that the target topic is 
 
 ---
 
-### Branch B2: Bug Path (Same-Topic Rebind During RestorePending)
+### Branch B2: Bug Path (Same-Topic Rebind During RestorePending, X Ready First)
 
 **State:** Topic 77 is `RestorePending { acp_session_id: "X", brain: "kimi" }`. `pending_resume` contains `"X" -> Topic77`. The `ResumeSession { "X" }` command is in flight to the orchestrator.
 
@@ -59,43 +62,44 @@ The runtime does not validate, on `AgentSessionReady`, that the target topic is 
 
 **Trace (BUGGY):**
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Op as Operator
-    participant RT as BotRuntime
-    participant Orch as Orchestrator
-    participant PM as pending_resume HashMap
+1. Topic 77 starts in `RestorePending { X }` with `pending_resume = { "X" -> Topic77 }`.
+2. Operator issues `/resume Y` in the same topic.
+3. Runtime updates Topic 77 to `RestorePending { Y }` and inserts
+   `pending_resume = { "X" -> Topic77, "Y" -> Topic77 }`.
+4. `AgentSessionReady(X)` arrives first. The runtime removes `"X"` from
+   `pending_resume` and commits `Active { X }` without checking that the topic
+   now expects Y.
+5. `AgentSessionReady(Y)` arrives later. The runtime removes `"Y"` and commits
+   `Active { Y }`.
 
-    Note over RT: Topic 77: RestorePending { X }
-    Note over PM: { "X" -> Topic77 }
-
-    Op->>RT: "hello" (first message after restart)
-    RT->>Orch: ResumeSession { session_id: "X" }
-    RT->>PM: insert("X", Topic77)
-
-    Note over Orch: In-flight resume for X...
-
-    Op->>RT: /resume Y
-    RT->>RT: archive current binding<br/>Topic 77 -> RestorePending { Y }
-    RT->>Orch: ResumeSession { session_id: "Y" }
-    RT->>PM: insert("Y", Topic77)
-    Note over PM: { "X" -> Topic77, "Y" -> Topic77 }<br/>⚠️ OLD ENTRY LEAKED!
-
-    Orch-->>RT: AgentSessionReady {<br/>  acp_session_id: "X",<br/>  session: S_old<br/>}
-    RT->>PM: remove("X") -> Topic77
-    RT->>RT: Topic 77 -> Active { X }<br/>❌ WRONG! User asked for Y
-
-    Orch-->>RT: AgentSessionReady {<br/>  acp_session_id: "Y",<br/>  session: S_new<br/>}
-    RT->>PM: remove("Y") -> None (already consumed)<br/>Or Topic77 is now Active, not RestorePending
-    Note over RT: Topic 77 bound to X.<br/>Session Y ready event is orphaned or<br/>overwrites Active with wrong session.
-```
-
-**Verdict:** 🚨 **P1 Bug**. The topic ends up bound to the wrong session.
+**Verdict:** 🚨 **P1 Bug**. This ordering does **not** produce a permanent
+hijack, but it still violates operator intent: the topic is briefly rebound to X
+and the bot emits a misleading `Restored session X` message. It also risks stale
+route state because `session_threads` now contains both the old and new live
+session ids pointing at the same topic.
 
 ---
 
-### Branch B3: Expected Correct Path (After Fix)
+### Branch B3: Bug Path (Same-Topic Rebind During RestorePending, Y Ready First)
+
+**State:** Same as B2.
+
+**Trace (BUGGY):**
+
+1. Topic 77 starts in `RestorePending { X }` with `pending_resume = { "X" -> Topic77 }`.
+2. Operator issues `/resume Y` in the same topic.
+3. Runtime updates Topic 77 to `RestorePending { Y }` and inserts
+   `pending_resume = { "X" -> Topic77, "Y" -> Topic77 }`.
+4. `AgentSessionReady(Y)` arrives first and correctly commits `Active { Y }`.
+5. A later stale `AgentSessionReady(X)` still finds `"X" -> Topic77` and
+   overwrites the topic back to `Active { X }`.
+
+**Verdict:** 🚨 **P1 Bug**. This is the permanent hijack ordering. The final
+binding disagrees with the operator's latest explicit `/resume Y`.
+
+---
+
+### Branch B4: Expected Correct Path (After Fix)
 
 **State:** Same as B2.
 
@@ -138,7 +142,7 @@ sequenceDiagram
     RT->>RT: Topic 77 -> Active { Y }<br/>✅ CORRECT!
 ```
 
-**Verdict:** ✅ Correct. Both cleanup steps are required.
+**Verdict:** ✅ Correct. Both cleanup and commit-time validation are required.
 
 ---
 
@@ -270,7 +274,9 @@ spur_acp::SpurEventBody::AgentSessionReady {
 }
 ```
 
-**Missing:** A guard that checks `record.binding` is still `RestorePending { acp_session_id: expected }` matching the event.
+**Missing:** A guard that checks `record.binding` is still
+`RestorePending { acp_session_id: expected }` matching the event, plus a stale
+resumed-event drop path instead of falling through to the lobby/default route.
 
 ---
 
@@ -279,8 +285,8 @@ spur_acp::SpurEventBody::AgentSessionReady {
 | Dimension | Assessment |
 |-----------|------------|
 | **Frequency** | Low in normal use (users rarely `/resume` twice in quick succession), but **protocol-reachable** on every restore |
-| **Severity** | High — silent binding to wrong session; user input goes to the wrong ACP session |
-| **Detectability** | Hard — the UI shows "Restored session X" which looks correct; the operator only notices if session content diverges |
+| **Severity** | High — the topic can bind to the wrong ACP session and route subsequent messages incorrectly |
+| **Detectability** | Partial — the UI may show `Restored session X`, which is evidence of the bug, but only if the operator notices the mismatch against the requested Y |
 | **Recovery** | Manual — operator must `/resume Y` again, but may not realize the mismatch happened |
 | **Blast radius** | Single topic, but if the wrong session is active, all subsequent messages in that topic are misrouted |
 
@@ -301,35 +307,84 @@ self.pending_resume.retain(|_, k| k != &key);
 
 ### Part 2: Validation on `AgentSessionReady` (Fail-Safe)
 
-In `runtime.rs`, `AgentSessionReady` handler, after resolving `key`:
+In `runtime.rs`, resumed ready events should not fall through to the current
+`lobby`/`session_threads` fallback path. A stale resumed event with no pending
+target is not routable work; it is superseded state and should be dropped.
+
+Restructure the resumed branch so that it only commits when:
+
+- `pending_resume.remove(&acp_session_id)` returns a topic, and
+- that topic still has `BindingState::RestorePending { acp_session_id: expected }`
+  where `expected == event.acp_session_id`.
+
+For example:
 
 ```rust
-if resumed {
-    if let Some(record) = self.threads.get(&key) {
-        let still_expects = matches!(
+let key = if resumed {
+    let Some(key) = self.pending_resume.remove(&acp_session_id) else {
+        // Late or duplicate resumed event with no pending target.
+        return Ok((None, vec![]));
+    };
+
+    let still_expects = self.threads.get(&key).is_some_and(|record| {
+        matches!(
             &record.binding,
             BindingState::RestorePending {
                 acp_session_id: expected,
                 ..
             } if expected == &acp_session_id
-        );
-        if !still_expects {
-            // The topic is no longer waiting for this session.
-            // This is a late event for a rebind that has since been
-            // superseded. Do not mutate runtime state.
-            return Ok((None, vec![]));
-        }
+        )
+    });
+
+    if !still_expects {
+        // The topic was rebound or otherwise stopped waiting for this ACP id.
+        return Ok((None, vec![]));
     }
+
+    key
+} else {
+    // existing fresh-session FIFO logic
 }
 ```
 
-**Why both?** Part 1 prevents the orphan. Part 2 is a fail-safe against any other path that could leave stale entries (future refactors, crash recovery edge cases, etc.). Defense in depth.
+**Why both?** Part 1 prevents orphaned same-topic resume entries. Part 2 is the
+fail-safe that stops any stale resumed event from mutating runtime state or
+falling back to the lobby. Defense in depth.
 
 ---
 
-## 8. Regression Test
+## 8. Regression Tests
 
-Add to `crates/spur-bot/tests/runtime_flow.rs`:
+Add coverage to `crates/spur-bot/tests/runtime_flow.rs`. The current suite
+already guards the analogous stale-event case for fresh sessions
+(`stale_fresh_ready_does_not_reactivate_rebound_topic`), but it does not cover
+same-topic resumed rebinding.
+
+Minimum matrix:
+
+1. `same_topic_rebind_during_restore_old_ready_then_new_ready`
+   - Start in `RestorePending { X }`
+   - Trigger `/resume Y`
+   - Deliver `AgentSessionReady(X)` first, then `AgentSessionReady(Y)`
+   - Assert the topic stays `RestorePending { Y }` after the stale X event
+   - Assert final binding is `Active { Y }`
+   - Assert no stale live route for X remains after Y binds
+
+2. `same_topic_rebind_during_restore_new_ready_then_old_ready`
+   - Start in `RestorePending { X }`
+   - Trigger `/resume Y`
+   - Deliver `AgentSessionReady(Y)` first, then stale `AgentSessionReady(X)`
+   - Assert final binding remains `Active { Y }`
+   - Assert the stale X event does not overwrite the topic or emit a misleading
+     restore render
+
+3. `stale_resumed_ready_with_no_pending_target_is_dropped`
+   - Deliver `AgentSessionReady { resumed: true }` after the pending target has
+     been cleared
+   - Assert it does not bind the lobby
+   - Assert it does not create `session_threads` routing for the stale session
+
+One concrete test can look like:
 
 ```rust
 #[tokio::test]
@@ -411,13 +466,18 @@ async fn same_topic_rebind_during_restore_ignores_stale_ready_for_old_session() 
 
 ---
 
-## 9. Related Findings (Same Review, Lower Severity)
+The key requirement is not one specific test shape; it is that both event
+orders and the routing side effects are asserted.
+
+---
+
+## 9. Related Findings (Same Review, Lower Severity / Separate Verification)
 
 | # | Finding | File | Severity |
 |---|---------|------|----------|
 | 2 | `pending_inputs` is a single-slot overwrite buffer during `RestorePending` — second message loses first | `runtime.rs` | P2 |
 | 3 | Deleted-topic send failures crash the bot (spec requires archive + lobby notification) | `telegram/mod.rs` | P2 |
-| 4 | `BindingState::Active` with `#[serde(skip)] session` risks phantom `SessionId` on deserialization | `state.rs` | P2 (latent) |
+| 4 | `BindingState::Active` with `#[serde(skip)] session` needs separate verification; current `persistable_state()` rewrites `Active -> RestorePending` before save, so this risk is not established by this RCA | `state.rs` | Research |
 | 5 | `/sessions` and `/help` accepted in topics (spec implies lobby-only) | `runtime.rs` | P3 |
 | 6 | `is_topic_message` defensive check missing in router | `router.rs` | P3 |
 
