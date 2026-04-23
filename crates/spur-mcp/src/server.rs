@@ -1430,7 +1430,11 @@ impl McpCallbackServer {
         fast_forward: Option<Arc<tokio::sync::Notify>>,
     ) {
         self.reconciler_enabled = enable;
-        self.reconciler_fast_forward = fast_forward;
+        self.reconciler_fast_forward = if enable {
+            Some(fast_forward.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new())))
+        } else {
+            None
+        };
     }
 
     pub fn fast_forward_reconciler(&self) {
@@ -1810,12 +1814,15 @@ impl McpCallbackServer {
 
         let mut reconciler_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
         let reconciler_task = if self.reconciler_enabled {
-            let fast_forward = self.reconciler_fast_forward.as_ref().cloned();
+            let fast_forward = self
+                .reconciler_fast_forward
+                .as_ref()
+                .cloned()
+                .expect("reconciler_enabled must retain a fast-forward notify");
             if let Some(pm) = self.pm_service.as_ref() {
                 // Only spawn if PmService has an advanced() (beads) backend.
                 if pm.advanced().is_some() {
                     let pm = Arc::clone(pm);
-                    let fast = fast_forward.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
                     let dispatch = ReconcilerDispatchCtx {
                         delegation_tx: self.delegation_tx.clone(),
                         task_tracker: self.task_tracker.clone(),
@@ -1844,7 +1851,7 @@ impl McpCallbackServer {
                         let mut reconciler = Reconciler::new(
                             ReconcilerConfig::default(),
                             pm,
-                            fast,
+                            fast_forward,
                             Some(dispatch),
                             None, // plan_id: observe all plans when None
                         );
