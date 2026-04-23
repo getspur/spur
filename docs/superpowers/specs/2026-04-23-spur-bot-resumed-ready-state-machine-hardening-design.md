@@ -141,6 +141,11 @@ This gives the resumed path one clear rule:
 - resumed ready events commit only through current pending topic intent, never
   through fallback heuristics
 
+Fresh-session FIFO selection remains unchanged, but once that branch resolves a
+target topic it should commit through the same `bind_active_session(...)`
+helper. "Leave the fresh-session FIFO path unchanged" refers to how the topic is
+selected, not to maintaining two separate commit blocks.
+
 ---
 
 ## Runtime Architecture
@@ -184,13 +189,17 @@ This helper becomes the single commit point for live binding.
 
 Responsibility:
 
+- read the topic's current `live_session` before overwriting it
 - remove any old `live_session` route owned by that topic from
-  `session_threads`
+  `session_threads` before writing the new live session
 - set `BindingState::Active`
 - set `record.live_session`
 - update `record.acp_session_id`
 - update `record.brain`
 - insert the new `session_threads[session] = key`
+- treat an existing `session_threads[session]` entry for a different topic as
+  an invariant violation; implementations may defensively replace it, but must
+  at minimum make that collision impossible to ignore during development
 
 Invariant enforced:
 
@@ -233,6 +242,15 @@ The current fallback behavior must not be used for stale resumed events:
 Those fallback paths are correct for other event families, but not for
 superseded resumed-ready events.
 
+### `AgentSessionReady { resumed: false }`
+
+The fresh-session path keeps its current FIFO topic-selection semantics.
+
+After that selection resolves a topic, it should also call
+`bind_active_session(...)` rather than maintaining a separate inline commit
+block. This keeps route replacement logic centralized and prevents the resumed
+and fresh paths from drifting apart.
+
 ---
 
 ## Failure Handling
@@ -254,6 +272,11 @@ the runtime will:
 
 This keeps the runtime strict and local. The authoritative operator intent is
 the latest `/resume`, not the latest event arrival.
+
+This also applies to restart races. `pending_resume` remains runtime-only
+state; a post-restart late `AgentSessionReady { resumed: true }` with no current
+pending target is intentionally ignored. Recovery comes from the next topic
+message re-triggering `ResumeSession`, not from restoring the old fallback path.
 
 ---
 
@@ -311,12 +334,16 @@ Assertions:
 
 Setup:
 
-- let a topic commit to a newer active session after superseding an older one
+- use the same-topic supersession ordering where stale `X` binds first and the
+  later valid `Y` bind must replace that live route without an intervening
+  `/resume`
 
 Assertions:
 
 - the old live session route no longer points to the topic
+- the new live session route does point to the topic
 - event routing keyed by the stale session id no longer reaches the topic
+- event routing keyed by the committed new session id does reach the topic
 
 The last case is mandatory. The coupled fallout is not only visible binding
 corruption; it is also stale route retention.
