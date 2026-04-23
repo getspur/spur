@@ -43,6 +43,4 @@ pub struct DelegateParallelTaskInput {
 pub struct DelegateParallelInput {
     /// List of tasks to delegate in parallel. Each task carries its own context_files, issue_id, and delegation_plan.
     pub tasks: Vec<DelegateParallelTaskInput>,
-    /// Batch-level decomposition rationale. Documents why these N subtasks together and how they are independent. Per-task delegation_plan (inside tasks[]) takes precedence for reviewer mismatch checks.
-    pub delegation_plan: Option<DelegationPlan>,
 }
