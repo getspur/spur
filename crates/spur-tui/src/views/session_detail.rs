@@ -2923,8 +2923,11 @@ mod tests {
     fn test_ctx() -> crate::views::ViewContext<'static> {
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        static PLAN_PROJECTION: std::sync::LazyLock<spur_core::PlanProjectionStore> =
+            std::sync::LazyLock::new(spur_core::PlanProjectionStore::new);
         crate::views::ViewContext {
             lineage: &LINEAGE,
+            plan_projection: &PLAN_PROJECTION,
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
