@@ -43,7 +43,7 @@ pub struct ReviewPayload {
     pub chosen_matches_dispatched: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiffSummary {
     pub files_changed: usize,
     pub insertions: usize,
@@ -206,17 +206,35 @@ pub struct PlanSnapshotTask {
     pub task_id: String,
     pub task_name: String,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_id: Option<String>,
     pub status: String,
     pub attempt: u32,
     pub max_attempts: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unblocks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_summary: Option<DiffSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub next_action: String,
 }
 
 /// Snapshot of licensing state mirrored into the ACP event bus.

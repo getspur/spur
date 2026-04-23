@@ -2121,6 +2121,7 @@ fn dispatch_agent_message_chunk_appends_message_entry() {
         agent_kind: AgentKind::ClaudeCodeAcp,
         now_stamp: || "12:00".to_string(),
         tool_depth: &mut depths,
+        skip_plan_trace: false,
     };
     dispatch_session_update(&mut trace, &update, &mut ctx);
 
@@ -2145,6 +2146,7 @@ fn dispatch_thought_chunk_appends_think_entry() {
         agent_kind: AgentKind::ClaudeCodeAcp,
         now_stamp: || "12:00".to_string(),
         tool_depth: &mut depths,
+        skip_plan_trace: false,
     };
     dispatch_session_update(&mut trace, &update, &mut ctx);
 

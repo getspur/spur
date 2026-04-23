@@ -87,18 +87,30 @@ impl Adapter {
 
 fn render_agentskills(skill: &SkillPayload, target_root: &Path, name_prefix: &str) -> RenderedFile {
     use crate::skills::installer::{sha256_hex, Marker};
+    use crate::skills::SkillRole;
     let id = format!("{name_prefix}{}", skill.id);
     let path = target_root.join(&id).join("SKILL.md");
     let body = &skill.body;
+    let role_line = if name_prefix.is_empty() {
+        let role = match skill.role {
+            SkillRole::Brain => "brain",
+            SkillRole::Worker => "worker",
+            SkillRole::Both => "both",
+        };
+        format!("role: {role}\n")
+    } else {
+        String::new()
+    };
     let marker = Marker {
         version: 1,
         skill_id: id.clone(),
         sha256: sha256_hex(body.as_bytes()),
     };
     let bytes = format!(
-        "---\nname: {id}\ndescription: {desc}\n---\n{marker}{body}",
+        "---\nname: {id}\ndescription: {desc}\n{role_line}---\n{marker}{body}",
         id = id,
         desc = skill.description,
+        role_line = role_line,
         marker = marker.render(),
         body = body,
     )
@@ -207,7 +219,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/repo/.spur/skills/tdd/SKILL.md"),
         );
         let s = std::str::from_utf8(&rf.bytes).unwrap();
-        assert!(s.starts_with("---\nname: tdd\ndescription: Use for TDD\n---\n"));
+        assert!(s.starts_with("---\nname: tdd\ndescription: Use for TDD\nrole: both\n---\n"));
         assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=tdd sha256="));
         assert!(s.trim_end().ends_with("Write the test first."));
     }

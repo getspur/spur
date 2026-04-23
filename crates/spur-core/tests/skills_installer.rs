@@ -1,7 +1,7 @@
 //! End-to-end installer tests using tempdir roots.
 
 use spur_core::skills::installer::{run, SkipReason};
-use spur_core::skills::SkillSource;
+use spur_core::skills::{adapters::Adapter, SkillRole, SkillSource};
 use std::path::Path;
 
 fn count_files_under(dir: &Path) -> usize {
@@ -34,18 +34,26 @@ fn fresh_install_creates_all_expected_files() {
     // Snapshot skill IDs BEFORE run(): running the installer writes
     // .spur/skills/<id>/SKILL.md for every bundled skill, after which
     // list_active_skills would reclassify those same skills as Override.
-    let bundled_ids: Vec<String> = spur_core::skills::list_active_skills(tmp.path())
+    let bundled_skills: Vec<_> = spur_core::skills::list_active_skills(tmp.path())
         .unwrap()
         .iter()
         .filter(|s| matches!(s.source, SkillSource::Bundled))
-        .map(|s| s.id.clone())
+        .cloned()
         .collect();
-    let bundled_count = bundled_ids.len();
+    let bundled_ids: Vec<_> = bundled_skills.iter().map(|s| s.id.clone()).collect();
 
     let summary = run(tmp.path()).unwrap();
 
-    // Every bundled skill × 7 adapters should be written, + Kiro pointer.
-    let expected = bundled_count * 7 + 1; // +1 for Kiro pointer
+    // Brain-only bundled skills render only to `.spur/skills`; worker/both
+    // skills render to every adapter. The Kiro pointer is once per run.
+    let expected = bundled_skills
+        .iter()
+        .map(|skill| match skill.role {
+            SkillRole::Brain => 1,
+            SkillRole::Worker | SkillRole::Both => Adapter::all().len(),
+        })
+        .sum::<usize>()
+        + 1;
     assert_eq!(
         summary.written.len(),
         expected,

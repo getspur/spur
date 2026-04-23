@@ -38,6 +38,7 @@ pub struct DispatchCtx<'a, F: Fn() -> String> {
     pub agent_kind: AgentKind,
     pub now_stamp: F,
     pub tool_depth: &'a mut HashMap<String, u8>,
+    pub skip_plan_trace: bool,
 }
 
 /// Mutate `trace` in response to a single `SessionUpdate`.
@@ -152,6 +153,9 @@ pub fn dispatch_session_update<F: Fn() -> String>(
             }
         }
         SessionUpdate::Plan(plan) => {
+            if ctx.skip_plan_trace {
+                return;
+            }
             let text = plan
                 .entries
                 .iter()

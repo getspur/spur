@@ -1324,12 +1324,29 @@ impl SessionDetailView {
 }
 
 impl View for SessionDetailView {
-    fn handle_key(&mut self, key: KeyEvent, _ctx: &super::ViewContext) -> Option<Action> {
+    fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         // Any keystroke dismisses the resume banner, but the key continues
         // to flow through to the normal handler — the banner is purely
         // informational and never consumes input.
         if let Some(ref mut banner) = self.resume_banner {
             banner.dismiss();
+        }
+        let key = super::normalize_macos_option(key);
+        if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::ALT) {
+            if ctx
+                .plan_projection
+                .current_for_session(self.session_id())
+                .is_some()
+            {
+                return Some(Action::NavigateTo(ViewId::PlanInspector(
+                    self.session_id.clone(),
+                )));
+            }
+            self.input_bar.set_status(
+                Some("No tracked plan for this session yet".into()),
+                ActivityKind::Idle,
+            );
+            return None;
         }
         let action = self.handle_key_inner(key);
         // Arm the draft-save debounce whenever the InputBar text diverges
@@ -1344,7 +1361,7 @@ impl View for SessionDetailView {
         action
     }
 
-    fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
+    fn handle_spur_event(&mut self, event: &SpurEvent, ctx: &super::ViewContext) {
         match &event.body {
             SpurEventBody::AgentNotification {
                 session,
@@ -1381,11 +1398,16 @@ impl View for SessionDetailView {
 
                 let agent_name = self.agent_name.clone();
                 let agent_kind = self.agent_kind();
+                let skip_plan_trace = ctx
+                    .plan_projection
+                    .current_for_session(self.session_id())
+                    .is_some();
                 let mut ctx = crate::components::react_trace::dispatch::DispatchCtx {
                     agent_name: agent_name.as_str(),
                     agent_kind,
                     now_stamp: Self::now_stamp,
                     tool_depth: &mut self.tool_depth,
+                    skip_plan_trace,
                 };
                 crate::components::react_trace::dispatch::dispatch_session_update(
                     &mut self.react_trace,
@@ -1723,6 +1745,7 @@ impl View for SessionDetailView {
             frame,
             area,
             Some(ctx.lineage),
+            ctx.plan_projection.current_for_session(self.session_id()),
             ctx.license_badge,
             ctx.flag_summary,
         );
@@ -1734,6 +1757,7 @@ impl SessionDetailView {
         frame: &mut Frame,
         area: Rect,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+        tracked_plan: Option<&spur_core::TrackedPlan>,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
     ) {
@@ -1816,6 +1840,8 @@ impl SessionDetailView {
         .split(content_area);
 
         // ── Header: breadcrumb + elapsed + cost ─────────────────────────
+        let [header_left, header_right] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(48)]).areas(chunks[0]);
         let header = Line::from(vec![
             Span::styled(" Dashboard > ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -1836,7 +1862,10 @@ impl SessionDetailView {
                 Style::default().fg(Color::Yellow),
             ),
         ]);
-        frame.render_widget(Paragraph::new(header), chunks[0]);
+        frame.render_widget(Paragraph::new(header), header_left);
+        if let Some(plan) = tracked_plan {
+            crate::components::plan_pulse::render(frame, header_right, plan);
+        }
 
         // ── React trace ─────────────────────────────────────────────────
         #[cfg(feature = "markdown")]
@@ -2062,8 +2091,11 @@ mod invalidate_protocols_tests {
     fn test_ctx() -> crate::views::ViewContext<'static> {
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage: &LINEAGE,
+            plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -2222,8 +2254,11 @@ mod cancel_state_tests {
     fn test_ctx() -> crate::views::ViewContext<'static> {
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage: &LINEAGE,
+            plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -2631,12 +2666,16 @@ mod composer_routing_tests {
     use crate::action::Action;
     use crate::views::View;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_acp::{PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SpurEvent, SpurEventBody};
 
     fn test_ctx() -> crate::views::ViewContext<'static> {
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage: &LINEAGE,
+            plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -2662,6 +2701,60 @@ mod composer_routing_tests {
 
     fn press_mod(v: &mut SessionDetailView, code: KeyCode, m: KeyModifiers) -> Option<Action> {
         v.handle_key(KeyEvent::new(code, m), &test_ctx())
+    }
+
+    fn test_ctx_with_plan() -> crate::views::ViewContext<'static> {
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+            std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        static PLAN_PROJECTION: std::sync::LazyLock<spur_core::PlanProjectionStore> =
+            std::sync::LazyLock::new(|| {
+                let mut store = spur_core::PlanProjectionStore::default();
+                store.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+                    session_id: spur_acp::SessionId("s".into()),
+                    snapshot: Box::new(PlanSnapshot {
+                        plan_id: "plan-1".into(),
+                        status: "running".into(),
+                        progress: "0/1 done".into(),
+                        next_action:
+                            "Use get_task_diff to review each awaiting task, then review_task to approve or reject."
+                                .into(),
+                        ready_to_merge: false,
+                        counts: PlanSnapshotCounts {
+                            pending: 1,
+                            ..Default::default()
+                        },
+                        tasks: vec![PlanSnapshotTask {
+                            task_id: "task-1".into(),
+                            task_name: "task-1".into(),
+                            agent: "codex".into(),
+                            issue_id: Some("bd-1".into()),
+                            status: "pending".into(),
+                            attempt: 0,
+                            max_attempts: 3,
+                            depends_on: Vec::new(),
+                            blocked_by: Vec::new(),
+                            unblocks: Vec::new(),
+                            summary: None,
+                            feedback: None,
+                            error: None,
+                            worker_branch: None,
+                            delegation_id: None,
+                            diff_summary: None,
+                            mutation_id: None,
+                            superseded_by: Vec::new(),
+                            next_action: "wait".into(),
+                        }],
+                    }),
+                }));
+                store
+            });
+        crate::views::ViewContext {
+            lineage: &LINEAGE,
+            plan_projection: &PLAN_PROJECTION,
+            brain_status: &crate::app::BrainStatus::Idle,
+            license_badge: None,
+            flag_summary: None,
+        }
     }
 
     #[test]
@@ -2775,6 +2868,26 @@ mod composer_routing_tests {
             "Alt+V must reach composer when render_picker is None"
         );
         assert!(act.is_none(), "composer typing must not emit action");
+    }
+
+    #[test]
+    fn alt_p_noops_without_tracked_plan() {
+        let mut v = make_view();
+        let act = press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::ALT);
+        assert!(act.is_none(), "Alt+P must no-op without tracked plan");
+    }
+
+    #[test]
+    fn alt_p_opens_plan_inspector_when_plan_is_tracked() {
+        let mut v = make_view();
+        let act = v.handle_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT),
+            &test_ctx_with_plan(),
+        );
+        assert!(matches!(
+            act,
+            Some(Action::NavigateTo(ViewId::PlanInspector(_)))
+        ));
     }
 
     #[cfg(feature = "markdown")]
@@ -2964,8 +3077,11 @@ mod tests {
 
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
+            std::sync::OnceLock::new();
         let ctx = crate::views::ViewContext {
             lineage: &LINEAGE,
+            plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
