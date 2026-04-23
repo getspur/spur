@@ -264,6 +264,81 @@ pub enum InteractiveInput {
     },
 }
 
+/// Maximum number of disk-backed `HistoryEntry`s emitted per
+/// `SessionHistoryChunk`. The first `DISK_HISTORY_CHUNK_SIZE` most-recent
+/// entries form the `Initial` window; every preceding chunk is retained
+/// in-memory and emitted as `Older` on demand.
+const DISK_HISTORY_CHUNK_SIZE: usize = 200;
+
+/// In-memory provider backing the phase-1 disk-history lazy-load contract.
+///
+/// Ownership: a single `Option<RetainedDiskHistory>` lives in
+/// `run_interactive` for the currently-focused resumed session. It is
+/// cleared on session swap / resume boundaries so chunks from a prior
+/// session cannot leak into a newly resumed one.
+///
+/// `older_chunks` is ordered oldest-at-front / newest-older-at-back. Each
+/// `LoadOlderHistory` request pops from the back so the TUI sees chunks
+/// walking backward from the initial window.
+#[derive(Debug, Clone)]
+struct RetainedDiskHistory {
+    session: SessionId,
+    older_chunks: std::collections::VecDeque<Vec<spur_acp::HistoryEntry>>,
+}
+
+/// Split a flat disk-replayed history into (initial_window, older_chunks).
+///
+/// Invariants:
+/// - The last `chunk_size` entries become the `Initial` window.
+/// - Everything older is broken into chunks of at most `chunk_size`,
+///   ordered oldest-first so the deque's back is "nearest older" (the
+///   next chunk to prepend on the first `LoadOlderHistory` request).
+/// - If the input fits within a single chunk, `older_chunks` is empty.
+fn split_history_tail_window(
+    entries: Vec<spur_acp::HistoryEntry>,
+    chunk_size: usize,
+) -> (
+    Vec<spur_acp::HistoryEntry>,
+    std::collections::VecDeque<Vec<spur_acp::HistoryEntry>>,
+) {
+    if chunk_size == 0 || entries.len() <= chunk_size {
+        return (entries, std::collections::VecDeque::new());
+    }
+
+    let split_at = entries.len() - chunk_size;
+    let initial = entries[split_at..].to_vec();
+
+    // Chunk the older history walking BACKWARD from the boundary so the
+    // nearest-older chunk (immediately before the initial window) is
+    // always a full `chunk_size` and any short remainder ends up at the
+    // oldest end. Deque is then ordered oldest-at-front /
+    // newest-older-at-back so `pop_back` yields the next chunk to
+    // prepend.
+    let older_slice = &entries[..split_at];
+    let mut older: std::collections::VecDeque<Vec<spur_acp::HistoryEntry>> =
+        std::collections::VecDeque::new();
+    let mut end = older_slice.len();
+    while end > 0 {
+        let start = end.saturating_sub(chunk_size);
+        older.push_front(older_slice[start..end].to_vec());
+        end = start;
+    }
+
+    (initial, older)
+}
+
+/// Compute the opaque `next_cursor` for a `SessionHistoryChunk` given the
+/// count of older chunks still retained after the current emission.
+/// `None` signals "no older history remains"; the exact token contents are
+/// treated as opaque by consumers.
+fn next_history_cursor(remaining_older_chunks: usize) -> Option<String> {
+    if remaining_older_chunks == 0 {
+        None
+    } else {
+        Some(format!("older:{remaining_older_chunks}"))
+    }
+}
+
 /// Convert spur_pm::IssueSummary to the spur_acp mirror type for event bus transmission.
 fn to_summary_event(
     issue: &spur_pm::IssueSummary,
@@ -1016,6 +1091,14 @@ impl Orchestrator {
         const RECONNECT_CIRCUIT_LIMIT: usize = 3;
         const RECONNECT_CIRCUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
+        // Phase-1 lazy disk-history provider for the currently focused
+        // resumed session. Populated when `ResumeSession` falls back to
+        // the on-disk JSONL replay; drained one chunk at a time by
+        // `LoadOlderHistory`. Cleared on every new resume so chunks from
+        // a prior session cannot bleed across a swap. See
+        // `docs/superpowers/specs/2026-04-23-session-lazy-loading-design.md`.
+        let mut retained_disk_history: Option<RetainedDiskHistory> = None;
+
         // Startup: parallel-fetch issues + graph alerts for TUI display.
         if let Some(pm) = &self.pm_service {
             refresh_pm_state(pm, &self.funnel, None, false).await;
@@ -1252,18 +1335,44 @@ impl Orchestrator {
                                     }));
                                 }
 
+                                // Reset retained disk-history state on every resume
+                                // boundary so chunks from a prior session never leak
+                                // into the newly focused one.
+                                retained_disk_history = None;
+
                                 if history_count == 0 {
                                     let entries =
                                         Self::read_session_history_from_disk(&original_session_id);
                                     if !entries.is_empty() {
-                                        info!(
-                                            count = entries.len(),
-                                            "Replaying conversation history from disk"
-                                        );
-                                        self.emit(SpurEvent::now(SpurEventBody::SessionHistory {
-                                            session: spur_id.clone(),
+                                        let total = entries.len();
+                                        let (initial, older_chunks) = split_history_tail_window(
                                             entries,
-                                        }));
+                                            DISK_HISTORY_CHUNK_SIZE,
+                                        );
+                                        info!(
+                                            total,
+                                            initial_window = initial.len(),
+                                            older_chunks = older_chunks.len(),
+                                            "Replaying conversation history from disk (chunked)"
+                                        );
+                                        let next_cursor =
+                                            next_history_cursor(older_chunks.len());
+                                        self.emit(SpurEvent::now(
+                                            SpurEventBody::SessionHistoryChunk {
+                                                session: spur_id.clone(),
+                                                kind:
+                                                    spur_acp::domain::events::SessionHistoryChunkKind::Initial,
+                                                entries: initial,
+                                                next_cursor,
+                                            },
+                                        ));
+
+                                        if !older_chunks.is_empty() {
+                                            retained_disk_history = Some(RetainedDiskHistory {
+                                                session: spur_id.clone(),
+                                                older_chunks,
+                                            });
+                                        }
                                     }
                                 }
 
@@ -1465,16 +1574,49 @@ impl Orchestrator {
                     InteractiveInput::SubmitReview { .. } => {}
 
                     // ── LoadOlderHistory ──────────────────────────────────
-                    // Phase 1 of the lazy session-history contract: the
-                    // request side is wired all the way from the TUI, but
-                    // chunk emission is not implemented yet. Trace and drop
-                    // so the request chain is observable without side
-                    // effects. See the session-lazy-loading design spec.
+                    // Phase 1 of the lazy session-history contract. Pops the
+                    // nearest-older retained chunk for the matching resumed
+                    // session and emits it as `SessionHistoryChunk` with
+                    // `kind = Older`. Mismatched or absent retained state
+                    // is dropped silently (the TUI guards against firing
+                    // this outside partial-history state, but orchestrator
+                    // drops remain safe against late requests). See
+                    // `docs/superpowers/specs/2026-04-23-session-lazy-loading-design.md`.
                     InteractiveInput::LoadOlderHistory { session } => {
-                        tracing::debug!(
-                            session = %session,
-                            "LoadOlderHistory received; chunk emission not yet implemented"
-                        );
+                        let Some(state) = retained_disk_history.as_mut() else {
+                            tracing::debug!(
+                                session = %session,
+                                "LoadOlderHistory ignored: no retained disk history"
+                            );
+                            continue;
+                        };
+                        if state.session != session {
+                            tracing::debug!(
+                                retained = %state.session,
+                                requested = %session,
+                                "LoadOlderHistory ignored: session mismatch"
+                            );
+                            continue;
+                        }
+                        let Some(entries) = state.older_chunks.pop_back() else {
+                            tracing::debug!(
+                                session = %session,
+                                "LoadOlderHistory ignored: retained deque exhausted"
+                            );
+                            continue;
+                        };
+                        let next_cursor = next_history_cursor(state.older_chunks.len());
+                        // Clear the retained slot once the last chunk ships
+                        // so the next resume starts from a clean None.
+                        if state.older_chunks.is_empty() {
+                            retained_disk_history = None;
+                        }
+                        self.emit(SpurEvent::now(SpurEventBody::SessionHistoryChunk {
+                            session,
+                            kind: spur_acp::domain::events::SessionHistoryChunkKind::Older,
+                            entries,
+                            next_cursor,
+                        }));
                     }
                 }
 
@@ -6003,6 +6145,108 @@ mod beads_startup_warning_tests {
         assert_eq!(
             startup_beads_warning(&config, Some(gate.as_ref()), true, true, false),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod lazy_history_tests {
+    use super::{next_history_cursor, split_history_tail_window, DISK_HISTORY_CHUNK_SIZE};
+    use spur_acp::HistoryEntry;
+
+    fn entry(n: usize) -> HistoryEntry {
+        HistoryEntry {
+            role: "user".into(),
+            text: format!("m{n}"),
+        }
+    }
+
+    #[test]
+    fn split_history_tail_window_keeps_recent_tail_as_initial_window() {
+        let entries: Vec<_> = (0..5).map(entry).collect();
+        let (initial, mut older) = split_history_tail_window(entries, 2);
+
+        assert_eq!(
+            initial.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["m3", "m4"]
+        );
+        let nearest_older = older.pop_back().expect("nearest older chunk");
+        assert_eq!(
+            nearest_older
+                .iter()
+                .map(|e| e.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
+    }
+
+    #[test]
+    fn split_history_tail_window_preserves_oldest_remainder() {
+        let entries: Vec<_> = (0..5).map(entry).collect();
+        let (_initial, older) = split_history_tail_window(entries, 2);
+
+        assert_eq!(
+            older
+                .front()
+                .unwrap()
+                .iter()
+                .map(|e| e.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m0"]
+        );
+    }
+
+    #[test]
+    fn split_history_tail_window_fits_within_chunk_size_yields_no_older() {
+        let entries: Vec<_> = (0..2).map(entry).collect();
+        let (initial, older) = split_history_tail_window(entries, 4);
+
+        assert_eq!(
+            initial.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["m0", "m1"]
+        );
+        assert!(older.is_empty(), "no older chunks when history fits in window");
+    }
+
+    #[test]
+    fn split_history_tail_window_handles_empty_input() {
+        let (initial, older) = split_history_tail_window(Vec::new(), DISK_HISTORY_CHUNK_SIZE);
+        assert!(initial.is_empty());
+        assert!(older.is_empty());
+    }
+
+    #[test]
+    fn next_history_cursor_is_none_when_deque_is_empty() {
+        assert_eq!(next_history_cursor(0), None);
+    }
+
+    #[test]
+    fn next_history_cursor_is_some_when_older_remains() {
+        assert!(next_history_cursor(1).is_some());
+        assert!(next_history_cursor(42).is_some());
+    }
+
+    #[test]
+    fn split_history_tail_window_chunks_older_in_ascending_age_order() {
+        // With chunk_size=2 and 7 entries, expect initial=[m5,m6],
+        // older chunks (oldest→newest) = [[m0], [m1,m2], [m3,m4]].
+        let entries: Vec<_> = (0..7).map(entry).collect();
+        let (initial, older) = split_history_tail_window(entries, 2);
+
+        assert_eq!(
+            initial.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["m5", "m6"]
+        );
+        let texts: Vec<Vec<&str>> = older
+            .iter()
+            .map(|chunk: &Vec<HistoryEntry>| {
+                chunk.iter().map(|e| e.text.as_str()).collect()
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![vec!["m0"], vec!["m1", "m2"], vec!["m3", "m4"]],
+            "older deque should be oldest at front, newest-older at back"
         );
     }
 }
