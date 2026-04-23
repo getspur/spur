@@ -329,6 +329,12 @@ impl SessionDetailView {
             || self.ready_banner.is_some()
     }
 
+    /// Test-only: current banner state, if a resume banner is present.
+    #[cfg(any(test, debug_assertions))]
+    pub fn banner_state(&self) -> Option<crate::components::resume_banner::BannerState> {
+        self.resume_banner.as_ref().map(|b| b.state())
+    }
+
     /// Test/debug helper. Overrides the internal debounce clock so tests can
     /// simulate an elapsed debounce window without sleeping.
     pub fn test_set_last_draft_change(&mut self, at: std::time::Instant) {
