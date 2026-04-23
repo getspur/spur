@@ -1155,6 +1155,9 @@ impl SessionDetailView {
                 use crate::components::input_bar::HandleOutcome;
                 match self.input_bar.handle_key(key) {
                     HandleOutcome::Submit(_, _) => {
+                        if let Some(ref mut banner) = self.resume_banner {
+                            banner.record_message_sent();
+                        }
                         self.dispatch_intent(IntentEvent::Submitted);
                         if let Some((text, ranges, interrupt)) =
                             self.input_bar.take_submit_capture()
@@ -1325,11 +1328,18 @@ impl SessionDetailView {
 
 impl View for SessionDetailView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
-        // Any keystroke dismisses the resume banner, but the key continues
-        // to flow through to the normal handler — the banner is purely
-        // informational and never consumes input.
+        // Resume banner key consumption — must happen BEFORE normal key routing.
         if let Some(ref mut banner) = self.resume_banner {
-            banner.dismiss();
+            if banner.is_consuming_keys() {
+                if let Some(action) = banner.handle_key(key) {
+                    return Some(action);
+                }
+                // If banner handled the key but returned None (e.g. Esc fading),
+                // still allow the key to fall through UNLESS it was Esc.
+                if key.code == KeyCode::Esc {
+                    return None;
+                }
+            }
         }
         let key = super::normalize_macos_option(key);
         if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::ALT) {
@@ -1710,6 +1720,9 @@ impl View for SessionDetailView {
     fn tick(&mut self) {
         self.react_trace.tick();
         self.input_bar.tick();
+        if let Some(ref mut banner) = self.resume_banner {
+            banner.tick();
+        }
         #[cfg(feature = "markdown")]
         {
             use crate::components::markdown_stream::StateLookup;

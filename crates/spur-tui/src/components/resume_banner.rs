@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -8,47 +9,145 @@ use ratatui::{
     Frame,
 };
 
-/// Shown at the top of SessionDetailView when a session was auto-resumed on
-/// startup. Non-blocking — fades after 3s or on first keystroke. Keys are
-/// not consumed, just dismiss the banner.
+use crate::action::Action;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerState {
+    /// Banner is fully visible, consuming keys.
+    Visible,
+    /// Banner is fading out (300ms transition).
+    Fading,
+    /// Banner is hidden but may re-nudge on idle.
+    Hidden,
+    /// User has sent 3+ messages; banner never returns.
+    PermanentlyDismissed,
+}
+
 pub struct ResumeBanner {
     title: String,
     quit_ago: String,
-    shown_at: Instant,
-    dismissed: bool,
+    state: BannerState,
+    state_changed_at: Instant,
+    messages_sent: u32,
 }
 
 impl ResumeBanner {
+    const FADE_DURATION_MS: u64 = 300;
+    const RENUDGE_IDLE_S: u64 = 5;
+
     pub fn new(title: String, quit_ago: String) -> Self {
         Self {
             title,
             quit_ago,
-            shown_at: Instant::now(),
-            dismissed: false,
+            state: BannerState::Visible,
+            state_changed_at: Instant::now(),
+            messages_sent: 0,
+        }
+    }
+
+    pub fn state(&self) -> BannerState {
+        self.state
+    }
+
+    pub fn record_message_sent(&mut self) {
+        self.messages_sent += 1;
+        if self.messages_sent >= 3 {
+            self.state = BannerState::PermanentlyDismissed;
         }
     }
 
     pub fn should_render(&self) -> bool {
-        !self.dismissed && self.shown_at.elapsed() < std::time::Duration::from_secs(3)
+        match self.state {
+            BannerState::Visible => true,
+            BannerState::Fading => {
+                self.state_changed_at.elapsed().as_millis() < Self::FADE_DURATION_MS as u128
+            }
+            BannerState::Hidden | BannerState::PermanentlyDismissed => false,
+        }
     }
 
-    pub fn dismiss(&mut self) {
-        self.dismissed = true;
+    pub fn is_consuming_keys(&self) -> bool {
+        self.state == BannerState::Visible
+    }
+
+    /// Process a keystroke. Returns Some(Action) if the key maps to a banner
+    /// action (n = new, s = sessions), or None if the key just dismisses.
+    pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if !self.is_consuming_keys() {
+            return None;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.state = BannerState::Fading;
+                self.state_changed_at = Instant::now();
+                None
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.state = BannerState::PermanentlyDismissed;
+                Some(Action::NewSessionRequested)
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.state = BannerState::PermanentlyDismissed;
+                Some(Action::RequestSessions)
+            }
+            _ => {
+                // Any other key fades the banner but does not consume the action
+                self.state = BannerState::Fading;
+                self.state_changed_at = Instant::now();
+                None
+            }
+        }
+    }
+
+    pub fn tick(&mut self) {
+        // Advance Fading -> Hidden when fade completes
+        if self.state == BannerState::Fading {
+            if self.state_changed_at.elapsed().as_millis() >= Self::FADE_DURATION_MS as u128 {
+                self.state = BannerState::Hidden;
+                self.state_changed_at = Instant::now();
+            }
+        }
+    }
+
+    /// Call when the view has been idle (no keystrokes) for a while.
+    /// Returns true if the banner should re-nudge (transition Hidden -> Visible).
+    pub fn maybe_renudge(&mut self) -> bool {
+        if self.state != BannerState::Hidden {
+            return false;
+        }
+        if self.state_changed_at.elapsed().as_secs() >= Self::RENUDGE_IDLE_S {
+            self.state = BannerState::Visible;
+            self.state_changed_at = Instant::now();
+            return true;
+        }
+        false
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         if !self.should_render() {
             return;
         }
+        let alpha = match self.state {
+            BannerState::Fading => {
+                let elapsed = self.state_changed_at.elapsed().as_millis() as f64;
+                let max = Self::FADE_DURATION_MS as f64;
+                let ratio = 1.0 - (elapsed / max).min(1.0);
+                ratio
+            }
+            _ => 1.0,
+        };
+        // ratatui doesn't support true alpha; simulate with color intensity
+        let fg = if alpha < 0.5 { Color::DarkGray } else { Color::White };
+
         let line = Line::from(vec![
             Span::styled(" Resumed: ", Style::default().fg(Color::Green)),
-            Span::styled(self.title.clone(), Style::default().fg(Color::White)),
+            Span::styled(self.title.clone(), Style::default().fg(fg)),
             Span::styled(
-                format!(" \u{00b7} quit {} ", self.quit_ago),
+                format!(" - quit {} ", self.quit_ago),
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(
-                "\u{00b7} [s] picker \u{00b7} [n] new \u{00b7} [Esc] dismiss",
+                "- [Esc] stay - [n] new - [s] sessions",
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
