@@ -4,6 +4,7 @@ pub mod app;
 pub mod commands;
 pub mod components;
 pub mod input_history;
+pub mod landing;
 pub mod mentions;
 pub mod session_metadata;
 pub mod tui;

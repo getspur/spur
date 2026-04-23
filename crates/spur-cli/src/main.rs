@@ -42,6 +42,49 @@ fn init_tracing(
 /// Contract: every agent in `spur_acp::config::load_seed_template()`
 /// must have an entry here. Enforced by `tests/init_ux.rs`.
 
+fn resolve_landing(
+    new: bool,
+    sessions: bool,
+    dashboard: bool,
+    brain_override: Option<&str>,
+    meta: &spur_tui::session_metadata::SessionMetadataStore,
+    registry: &spur_acp::AgentRegistry,
+) -> spur_tui::landing::LandingDecision {
+    use spur_tui::landing::LandingDecision;
+    if new {
+        return LandingDecision::ShowDashboard;
+    }
+    if sessions && !dashboard {
+        return LandingDecision::ShowPicker;
+    }
+    if dashboard {
+        return LandingDecision::ShowDashboard;
+    }
+
+    if registry.list().is_empty() {
+        return LandingDecision::SetupRequired;
+    }
+
+    if let Some((acp, stored_brain)) = meta.last_active_acp() {
+        let brain_matches = match brain_override {
+            Some(requested) => requested == stored_brain,
+            None => true,
+        };
+        if brain_matches && meta.last_active_at_is_fresh(std::time::Duration::from_secs(86400)) {
+            return LandingDecision::AutoResume {
+                acp_id: acp,
+                brain: stored_brain,
+            };
+        }
+    }
+
+    if meta.has_any_session() {
+        return LandingDecision::ShowPicker;
+    }
+
+    LandingDecision::ShowDashboard
+}
+
 #[derive(Parser)]
 #[command(name = "spur", about = "Multi-agent orchestrator — issue in, PR out")]
 #[command(version)]
@@ -144,6 +187,9 @@ enum Commands {
         /// Land on Dashboard instead of auto-resuming last session.
         #[arg(long)]
         dashboard: bool,
+        /// Force Dashboard — do not auto-resume last session.
+        #[arg(long)]
+        new: bool,
         /// Profile the watch session and generate a flamegraph
         #[arg(long)]
         profile: bool,
@@ -468,6 +514,7 @@ async fn main() -> Result<()> {
             brain,
             sessions,
             dashboard,
+            new,
             profile,
             duration,
         } => {
@@ -481,6 +528,9 @@ async fn main() -> Result<()> {
                 }
                 if dashboard {
                     args.push("--dashboard".to_string());
+                }
+                if new {
+                    args.push("--new".to_string());
                 }
                 return commands::profile::run(Some(
                     commands::profile::ProfileCommands::Flamegraph {
@@ -546,6 +596,19 @@ async fn main() -> Result<()> {
             // orchestrator spawn below, so the auto-resume block can inspect it.
             let brain_for_resume = brain.clone();
 
+            // Landing decision: resolve BEFORE orch is moved into host.
+            let metadata_path = repo_root.join(".spur").join("session_metadata.json");
+            let meta = spur_tui::session_metadata::SessionMetadataStore::load(&metadata_path);
+            let landing = resolve_landing(
+                new,
+                sessions,
+                dashboard,
+                brain_for_resume.as_deref(),
+                &meta,
+                &orch.registry,
+            );
+            tracing::info!(?landing, "resolved TUI landing decision");
+
             let mut host = spur_interactive::InteractiveFrontendHost::spawn(orch, brain);
             let host_handle = host.handle();
             let event_rx = host.take_event_stream().expect("event stream");
@@ -579,52 +642,30 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Landing decision: auto-resume last active session, or land in
-            // the picker, or land on Dashboard. `--dashboard` forces Dashboard,
-            // `--sessions` forces the picker, and otherwise we auto-resume
-            // whichever session the metadata pointer names.
-            let metadata_path = repo_root.join(".spur").join("session_metadata.json");
-            let meta = spur_tui::session_metadata::SessionMetadataStore::load(&metadata_path);
+            use spur_tui::landing::LandingDecision;
+            let force_picker = matches!(landing, LandingDecision::ShowPicker);
 
-            let force_picker = sessions && !dashboard;
-
-            // Auto-resume is driven by the ACP session id (the agent-authoritative
-            // id), not the SPUR in-process id. We also gate on the stored brain
-            // matching the launch-time `--brain` override to avoid handing a
-            // claude-owned session id to kiro (and vice versa).
-            let auto_resume: Option<(String, String)> = if dashboard || sessions {
-                None
-            } else {
-                match meta.last_active_acp() {
-                    Some((acp, stored_brain)) => match brain_for_resume.as_deref() {
-                        Some(requested) if requested != stored_brain => {
-                            tracing::info!(
-                                requested = requested,
-                                stored = %stored_brain,
-                                "auto-resume skipped: brain override mismatches stored brain"
-                            );
-                            None
-                        }
-                        _ => Some((acp, stored_brain)),
-                    },
-                    None => None,
+            match &landing {
+                LandingDecision::AutoResume { acp_id, .. } => {
+                    let resume_tx = tui_tx.clone();
+                    let id = acp_id.clone();
+                    tokio::spawn(async move {
+                        let _ = resume_tx
+                            .send(spur_tui::UserInput::ResumeSession { session_id: id })
+                            .await;
+                    });
                 }
-            };
-
-            if let Some((acp_id, _stored_brain)) = auto_resume {
-                let resume_tx = tui_tx.clone();
-                tokio::spawn(async move {
-                    let _ = resume_tx
-                        .send(spur_tui::UserInput::ResumeSession { session_id: acp_id })
-                        .await;
-                });
-            } else if !force_picker {
-                let warm_handle = host.handle();
-                tokio::spawn(async move {
-                    let _ = warm_handle
-                        .send_command(spur_core::InteractiveInput::WarmConnect)
-                        .await;
-                });
+                LandingDecision::ShowPicker => {
+                    // picker opened by start_in_picker = true below
+                }
+                LandingDecision::ShowDashboard | LandingDecision::SetupRequired => {
+                    let warm_handle = host.handle();
+                    tokio::spawn(async move {
+                        let _ = warm_handle
+                            .send_command(spur_core::InteractiveInput::WarmConnect)
+                            .await;
+                    });
+                }
             }
 
             // Run TUI (blocks). Capture the result so we can run structured
