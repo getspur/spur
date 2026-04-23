@@ -500,6 +500,11 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub fn dashboard_is_configured(&self) -> bool {
+        self.dashboard.agents_configured()
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub fn new_for_palette_test() -> Self {
         // Minimal App for palette-integration tests. Uses the same path as
         // test_support::new_app — no user_input channel, no session picker —
