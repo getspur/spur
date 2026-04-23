@@ -75,6 +75,9 @@ pub struct DashboardView {
     /// Explicit input modality. Replaces the `key_owner()` heuristic with
     /// a visible, predictable state machine.
     mode: DashboardMode,
+    /// True when at least one agent is registered. Controls empty-state
+    /// rendering: false → setup-nudge, true → example-rich or classic splash.
+    agents_configured: bool,
 }
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
@@ -143,7 +146,16 @@ impl DashboardView {
             alert_summary: None,
             layout_zoomed: false,
             mode: DashboardMode::Navigate,
+            agents_configured: true,
         }
+    }
+
+    pub fn set_agents_configured(&mut self, configured: bool) {
+        self.agents_configured = configured;
+    }
+
+    pub fn agents_configured(&self) -> bool {
+        self.agents_configured
     }
 
     pub fn tracked_issues(&self) -> &[spur_pm::IssueSummary] {
@@ -443,74 +455,11 @@ impl DashboardView {
         let elapsed = self.elapsed();
 
         if node_count == 0 {
-            // Empty state: splash screen
-            let lines = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "SPUR",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Multi-agent orchestrator",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Type a task below to start",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Press [s] to browse sessions",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ];
-            let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-
-            let input_height = self.input_bar.required_height(area.width);
-            let chunks = Layout::vertical([
-                Constraint::Min(4),
-                Constraint::Length(input_height),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
-            let v_pad = chunks[0].height.saturating_sub(6) / 2;
-            let content_area = Rect {
-                x: chunks[0].x,
-                y: chunks[0].y + v_pad,
-                width: chunks[0].width,
-                height: chunks[0].height.saturating_sub(v_pad),
-            };
-            frame.render_widget(paragraph, content_area);
-            let input_bar_area = chunks[1];
-            self.render_input_hint(frame, area, input_bar_area, lineage);
-            self.input_bar
-                .set_active(self.mode == DashboardMode::Compose);
-            self.input_bar.render(frame, input_bar_area);
-            StatusBar::render(
-                frame,
-                chunks[2],
-                StatusBarProps {
-                    view: &ViewId::Dashboard,
-                    running,
-                    pending_review,
-                    total_cost,
-                    elapsed: &elapsed,
-                    current_mode: None,
-                    context_used: None,
-                    context_size: None,
-                    stream_in_flight: false,
-                    esc_consumed_by_composer: false,
-                    issue_count: self.tracked_issues.len(),
-                    alert_summary: self.alert_summary,
-                    license_badge,
-                    flag_summary,
-                },
-            );
+            if !self.agents_configured {
+                self.render_setup_nudge(frame, area, license_badge, flag_summary);
+                return;
+            }
+            self.render_empty_splash(frame, area, license_badge, flag_summary, lineage);
             return;
         }
 
@@ -601,6 +550,201 @@ impl DashboardView {
             },
         );
     }
+
+    fn render_empty_splash(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+        flag_summary: Option<(usize, usize)>,
+        lineage: &ExecutorLineage,
+    ) {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "SPUR",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Multi-agent orchestrator",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Type a task below to start",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press [s] to browse sessions",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+
+        let input_height = self.input_bar.required_height(area.width);
+        let chunks = Layout::vertical([
+            Constraint::Min(4),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+        let v_pad = chunks[0].height.saturating_sub(6) / 2;
+        let content_area = Rect {
+            x: chunks[0].x,
+            y: chunks[0].y + v_pad,
+            width: chunks[0].width,
+            height: chunks[0].height.saturating_sub(v_pad),
+        };
+        frame.render_widget(paragraph, content_area);
+        let input_bar_area = chunks[1];
+        self.render_input_hint(frame, area, input_bar_area, lineage);
+        self.input_bar
+            .set_active(self.mode == DashboardMode::Compose);
+        self.input_bar.render(frame, input_bar_area);
+        StatusBar::render(
+            frame,
+            chunks[2],
+            StatusBarProps {
+                view: &ViewId::Dashboard,
+                running: 0,
+                pending_review: 0,
+                total_cost: 0.0,
+                elapsed: "0m 00s",
+                current_mode: None,
+                context_used: None,
+                context_size: None,
+                stream_in_flight: false,
+                esc_consumed_by_composer: false,
+                issue_count: self.tracked_issues.len(),
+                alert_summary: self.alert_summary,
+                license_badge,
+                flag_summary,
+            },
+        );
+    }
+
+    fn render_setup_nudge(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
+        flag_summary: Option<(usize, usize)>,
+    ) {
+        let input_height = self.input_bar.required_height(area.width);
+        let chunks = Layout::vertical([
+            Constraint::Min(4),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+        let v_pad = chunks[0].height.saturating_sub(12) / 2;
+        let content_area = Rect {
+            x: chunks[0].x,
+            y: chunks[0].y + v_pad,
+            width: chunks[0].width,
+            height: chunks[0].height.saturating_sub(v_pad),
+        };
+
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "SPUR",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Ask for anything -- SPUR breaks it into tasks and delegates",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "to specialist agents, then reviews the results.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "+-------------------------------------------------------------+",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(vec![
+                Span::styled("|  ", Style::default().fg(Color::Yellow)),
+                Span::styled("! No agents configured. Run this in another terminal:", Style::default().fg(Color::Yellow)),
+                Span::styled("  |", Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(Span::styled(
+                "|                                                             |",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(vec![
+                Span::styled("|     ", Style::default().fg(Color::Yellow)),
+                Span::styled("spur init", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("                                               |", Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(Span::styled(
+                "|                                                             |",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(vec![
+                Span::styled("|  ", Style::default().fg(Color::Yellow)),
+                Span::styled("Then restart `spur tui` to begin.", Style::default().fg(Color::Yellow)),
+                Span::styled("                          |", Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(Span::styled(
+                "+-------------------------------------------------------------+",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Examples of what you can ask (after setup):",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "- Refactor the auth module to async/await and add benchmarks",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "- Find and fix the flaky test in ci/",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "- Add a /health endpoint with proper error handling",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+
+        let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(paragraph, content_area);
+
+        let input_bar_area = chunks[1];
+        self.input_bar.set_active(false);
+        self.input_bar.render(frame, input_bar_area);
+        StatusBar::render(
+            frame,
+            chunks[2],
+            StatusBarProps {
+                view: &ViewId::Dashboard,
+                running: 0,
+                pending_review: 0,
+                total_cost: 0.0,
+                elapsed: "0m 00s",
+                current_mode: None,
+                context_used: None,
+                context_size: None,
+                stream_in_flight: false,
+                esc_consumed_by_composer: false,
+                issue_count: self.tracked_issues.len(),
+                alert_summary: self.alert_summary,
+                license_badge,
+                flag_summary,
+            },
+        );
+    }
+
 }
 
 /// Who owns the next keystroke.
