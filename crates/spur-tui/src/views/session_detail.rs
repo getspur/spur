@@ -21,6 +21,28 @@ use super::View;
 
 const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts a fresh brain.";
 
+/// Whether the detail view believes more older history is available on
+/// disk for the current session.
+///
+/// `Complete` means the orchestrator has either streamed the entire
+/// disk-backed history or never had any to send — `PageUp` at the top of
+/// the trace falls through to a normal scroll. `Partial { next_cursor }`
+/// means at least one more `SessionHistoryChunk { kind: Older, .. }` is
+/// available and `PageUp` at the top should emit `LoadOlderHistory` to
+/// pull it in.
+///
+/// The cursor is opaque to the TUI; it round-trips back to the
+/// orchestrator inside `LoadOlderHistory` so the orchestrator can pop
+/// the matching nearest-older chunk. The TUI never inspects it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HistoryLoadState {
+    Complete,
+    Partial {
+        #[allow(dead_code)] // reserved for explicit cursor round-trip in a follow-up.
+        next_cursor: String,
+    },
+}
+
 /// Full-screen view of a brain session's ReAct trace with chat input.
 pub struct SessionDetailView {
     session_id: SessionId,
@@ -121,6 +143,13 @@ pub struct SessionDetailView {
     /// `resume_banner` when the view has been cleared. Cleared by
     /// construction of the next view (replacement drops it naturally).
     ready_banner: Option<String>,
+
+    /// Tracks whether more disk-backed history remains for this session.
+    /// Updated by `apply_history_initial_window` and
+    /// `prepend_history_chunk` in response to `SessionHistoryChunk`
+    /// events from the orchestrator. Read by the `PageUp` handler to
+    /// decide between requesting older history and a plain scroll.
+    pub(crate) history_load_state: HistoryLoadState,
 }
 
 impl SessionDetailView {
@@ -177,6 +206,7 @@ impl SessionDetailView {
             known_worker_names,
             cleared: false,
             ready_banner: None,
+            history_load_state: HistoryLoadState::Complete,
         }
     }
 
@@ -235,6 +265,7 @@ impl SessionDetailView {
             known_worker_names: std::collections::HashSet::new(),
             cleared: false,
             ready_banner: None,
+            history_load_state: HistoryLoadState::Complete,
         }
     }
 
@@ -317,6 +348,13 @@ impl SessionDetailView {
         // Marks.
         self.cleared = true;
         self.ready_banner = Some(READY_BANNER_TEXT.to_string());
+
+        // Lazy-history bookkeeping. The retired session id is the
+        // only valid target for a `LoadOlderHistory` request, and the
+        // orchestrator drops its retained chunks on clear, so reset to
+        // `Complete` to suppress further requests until the next
+        // `SessionHistoryChunk { kind: Initial, .. }`.
+        self.history_load_state = HistoryLoadState::Complete;
     }
 
     /// Whether the resume banner is currently visible (not dismissed and
@@ -753,6 +791,84 @@ impl SessionDetailView {
             #[cfg(feature = "markdown")]
             markdown: None,
         });
+    }
+
+    /// Convert ACP-level `HistoryEntry`s into trace entries using the
+    /// current `agent_name` for assistant attribution. Pure helper —
+    /// does not touch the trace itself. Used by both
+    /// `apply_history_initial_window` and `prepend_history_chunk` so
+    /// that the Initial and Older paths produce identical TraceEntries
+    /// for the same input.
+    fn history_entries_to_trace_entries(
+        entries: &[spur_acp::HistoryEntry],
+        agent_name: &str,
+    ) -> Vec<TraceEntry> {
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match entry.role.as_str() {
+                "user" => out.push(TraceEntry {
+                    kind: TraceKind::UserMessage,
+                    text: entry.text.clone(),
+                    timestamp: String::new(),
+                    #[cfg(feature = "markdown")]
+                    markdown: None,
+                }),
+                "assistant" => out.push(TraceEntry {
+                    kind: TraceKind::AgentMessage {
+                        agent: agent_name.to_string(),
+                    },
+                    text: entry.text.clone(),
+                    timestamp: String::new(),
+                    #[cfg(feature = "markdown")]
+                    markdown: None,
+                }),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Apply a `SessionHistoryChunk { kind: Initial, .. }` payload.
+    ///
+    /// Wipes the current trace (mirroring the previous one-shot
+    /// `replay_history` semantic for disk-backed resumes) and seeds it
+    /// with the supplied initial-window entries. `next_cursor = Some(_)`
+    /// arms `PageUp`-driven older-history loads; `None` marks the
+    /// history fully loaded.
+    pub fn apply_history_initial_window(
+        &mut self,
+        entries: &[spur_acp::HistoryEntry],
+        next_cursor: Option<String>,
+    ) {
+        self.react_trace.clear();
+        let converted = Self::history_entries_to_trace_entries(entries, &self.agent_name);
+        // `prepend_entries` on an empty trace is equivalent to a bulk
+        // push but preserves the `Following` anchor set by `clear()`.
+        self.react_trace.prepend_entries(converted);
+        self.history_load_state = match next_cursor {
+            Some(cursor) => HistoryLoadState::Partial { next_cursor: cursor },
+            None => HistoryLoadState::Complete,
+        };
+    }
+
+    /// Apply a `SessionHistoryChunk { kind: Older, .. }` payload.
+    ///
+    /// Prepends the supplied entries ahead of the existing trace
+    /// without disturbing the viewport's relationship to the entries
+    /// the user is currently looking at, and updates
+    /// `history_load_state` so subsequent `PageUp`s know whether more
+    /// older history is still available.
+    pub fn prepend_history_chunk(
+        &mut self,
+        entries: &[spur_acp::HistoryEntry],
+        next_cursor: Option<String>,
+    ) {
+        let converted = Self::history_entries_to_trace_entries(entries, &self.agent_name);
+        self.react_trace.prepend_entries(converted);
+        self.history_load_state = match next_cursor {
+            Some(cursor) => HistoryLoadState::Partial { next_cursor: cursor },
+            None => HistoryLoadState::Complete,
+        };
     }
 
     pub fn resolve_pending_permissions(&mut self) {
@@ -1273,6 +1389,23 @@ impl SessionDetailView {
                 // PageUp/PageDown work regardless of input bar state.
                 match key.code {
                     KeyCode::PageUp => {
+                        // When more older history is available on disk
+                        // and the viewport is already pinned to the
+                        // very top of the trace, escalate `PageUp` to a
+                        // `LoadOlderHistory` request instead of trying
+                        // to scroll past entry 0. The orchestrator
+                        // emits a `SessionHistoryChunk { kind: Older }`
+                        // event in response which the App routes back
+                        // through `prepend_history_chunk`.
+                        let can_load_more = matches!(
+                            self.history_load_state,
+                            HistoryLoadState::Partial { .. }
+                        ) && self.react_trace.is_at_top();
+                        if can_load_more {
+                            return Some(Action::LoadOlderHistory {
+                                session: self.session_id.clone(),
+                            });
+                        }
                         self.react_trace.page_up();
                         return Some(Action::ScrollUp);
                     }
@@ -3227,5 +3360,127 @@ mod tests {
             TraceKind::Delegate { status, .. } => assert_eq!(status, "done"),
             other => panic!("expected Delegate, got {:?}", other),
         }
+    }
+
+    // ── Task 5: lazy-history consumer ─────────────────────────────────
+    //
+    // PageUp at the trace top must request older history from the
+    // orchestrator when the detail view knows older history exists, and
+    // fall through to a normal scroll otherwise.
+
+    #[test]
+    fn pageup_at_trace_top_with_partial_history_requests_load_older_history() {
+        use crate::action::Action;
+        use crate::views::View;
+
+        let mut view = make_view();
+        view.apply_history_initial_window(
+            &[spur_acp::HistoryEntry {
+                role: "user".into(),
+                text: "hello".into(),
+            }],
+            Some("cursor-0".into()),
+        );
+        view.react_trace.scroll_to_top();
+
+        let action = <SessionDetailView as View>::handle_key(
+            &mut view,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::PageUp,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &test_ctx(),
+        );
+
+        assert!(
+            matches!(
+                action,
+                Some(Action::LoadOlderHistory { ref session })
+                    if *session == spur_acp::SessionId("s".into())
+            ),
+            "expected Action::LoadOlderHistory at top with partial history, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn pageup_with_complete_history_falls_through_to_scroll() {
+        use crate::action::Action;
+        use crate::views::View;
+
+        let mut view = make_view();
+        view.apply_history_initial_window(
+            &[spur_acp::HistoryEntry {
+                role: "user".into(),
+                text: "hello".into(),
+            }],
+            None,
+        );
+        view.react_trace.scroll_to_top();
+
+        let action = <SessionDetailView as View>::handle_key(
+            &mut view,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::PageUp,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &test_ctx(),
+        );
+
+        assert!(
+            matches!(action, Some(Action::ScrollUp)),
+            "expected ScrollUp when history is complete, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn prepend_history_chunk_grows_trace_and_keeps_partial_state() {
+        let mut view = make_view();
+        view.apply_history_initial_window(
+            &[spur_acp::HistoryEntry {
+                role: "user".into(),
+                text: "newer".into(),
+            }],
+            Some("cursor-1".into()),
+        );
+
+        let count_before = view.trace_entry_count();
+        view.prepend_history_chunk(
+            &[spur_acp::HistoryEntry {
+                role: "assistant".into(),
+                text: "older".into(),
+            }],
+            Some("cursor-0".into()),
+        );
+
+        assert_eq!(view.trace_entry_count(), count_before + 1);
+        assert!(matches!(
+            view.history_load_state,
+            HistoryLoadState::Partial { .. }
+        ));
+    }
+
+    #[test]
+    fn prepend_history_chunk_with_no_more_cursor_marks_complete() {
+        let mut view = make_view();
+        view.apply_history_initial_window(
+            &[spur_acp::HistoryEntry {
+                role: "user".into(),
+                text: "newer".into(),
+            }],
+            Some("cursor-1".into()),
+        );
+
+        view.prepend_history_chunk(
+            &[spur_acp::HistoryEntry {
+                role: "assistant".into(),
+                text: "older".into(),
+            }],
+            None,
+        );
+
+        assert!(matches!(
+            view.history_load_state,
+            HistoryLoadState::Complete
+        ));
     }
 }

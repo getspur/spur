@@ -936,6 +936,61 @@ impl App {
                 }
                 return;
             }
+            SpurEventBody::SessionHistoryChunk {
+                session,
+                kind,
+                entries,
+                next_cursor,
+            } => {
+                tracing::info!(
+                    ?kind,
+                    entry_count = entries.len(),
+                    has_next = next_cursor.is_some(),
+                    "SessionHistoryChunk: routing to detail view"
+                );
+                if let Some(ref mut detail) = self.session_detail {
+                    if detail.session_id() == session {
+                        match kind {
+                            spur_acp::domain::events::SessionHistoryChunkKind::Initial => {
+                                detail.apply_history_initial_window(
+                                    entries,
+                                    next_cursor.clone(),
+                                );
+                            }
+                            spur_acp::domain::events::SessionHistoryChunkKind::Older => {
+                                detail.prepend_history_chunk(entries, next_cursor.clone());
+                            }
+                        }
+                    }
+                }
+
+                // Backfill global input history from chunk user
+                // messages so Ctrl-P recalls past inputs even from
+                // chunked replays. Always runs (foreign-session chunks
+                // still contribute to the global history surface), but
+                // dedupes on text via `merge_input_history_entry`.
+                let mut changed = false;
+                {
+                    let hist = &mut self.metadata_store.metadata_mut().input_history;
+                    for entry in entries {
+                        if entry.role == "user" {
+                            let history_entry = InputHistoryEntry::from_text(entry.text.clone());
+                            changed |= Self::merge_input_history_entry(hist, history_entry);
+                        }
+                    }
+                }
+                if changed {
+                    if let Err(e) = self.metadata_store.save() {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to persist lazy-history input backfill"
+                        );
+                    }
+                    self.sync_input_history();
+                }
+
+                return;
+            }
             SpurEventBody::SessionHistory { entries, .. } => {
                 tracing::info!(
                     entry_count = entries.len(),
@@ -3388,5 +3443,123 @@ mod lazy_history_tests {
         let session = SessionId("b1".into());
 
         app.process_action(Action::LoadOlderHistory { session });
+    }
+
+    // ── Task 5: SessionHistoryChunk consumption ───────────────────────
+    //
+    // The Initial chunk seeds the detail-view trace and backfills global
+    // input history. Older chunks prepend without resetting the trace.
+
+    fn wrap_event(body: spur_acp::domain::events::SpurEventBody) -> spur_acp::SpurEvent {
+        spur_acp::SpurEvent::now(body)
+    }
+
+    #[test]
+    fn session_history_chunk_initial_window_updates_trace_and_input_history() {
+        let mut app = App::new_for_tests();
+        let sid = SessionId("brain-1".into());
+
+        app.handle_spur_event(wrap_event(SpurEventBody::BrainSpawned {
+            agent: "claude".into(),
+            session: sid.clone(),
+        }));
+
+        app.handle_spur_event(wrap_event(SpurEventBody::SessionHistoryChunk {
+            session: sid.clone(),
+            kind: spur_acp::domain::events::SessionHistoryChunkKind::Initial,
+            entries: vec![
+                spur_acp::HistoryEntry {
+                    role: "user".into(),
+                    text: "older prompt".into(),
+                },
+                spur_acp::HistoryEntry {
+                    role: "assistant".into(),
+                    text: "older answer".into(),
+                },
+            ],
+            next_cursor: Some("more-older".into()),
+        }));
+
+        let detail = app.session_detail.as_ref().expect("detail exists");
+        assert!(
+            detail.trace_entry_count() >= 2,
+            "initial window must seed at least the supplied entries; got {}",
+            detail.trace_entry_count()
+        );
+        assert_eq!(
+            app.metadata_store
+                .metadata()
+                .input_history
+                .last()
+                .expect("input history backfilled")
+                .snapshot
+                .text,
+            "older prompt"
+        );
+    }
+
+    #[test]
+    fn session_history_chunk_older_prepends_without_clearing_trace() {
+        let mut app = App::new_for_tests();
+        let sid = SessionId("brain-1".into());
+
+        app.handle_spur_event(wrap_event(SpurEventBody::BrainSpawned {
+            agent: "claude".into(),
+            session: sid.clone(),
+        }));
+
+        app.handle_spur_event(wrap_event(SpurEventBody::SessionHistoryChunk {
+            session: sid.clone(),
+            kind: spur_acp::domain::events::SessionHistoryChunkKind::Initial,
+            entries: vec![spur_acp::HistoryEntry {
+                role: "user".into(),
+                text: "newer".into(),
+            }],
+            next_cursor: Some("cursor-0".into()),
+        }));
+        let after_initial = app.session_detail.as_ref().unwrap().trace_entry_count();
+
+        app.handle_spur_event(wrap_event(SpurEventBody::SessionHistoryChunk {
+            session: sid.clone(),
+            kind: spur_acp::domain::events::SessionHistoryChunkKind::Older,
+            entries: vec![spur_acp::HistoryEntry {
+                role: "user".into(),
+                text: "older".into(),
+            }],
+            next_cursor: None,
+        }));
+
+        let after_older = app.session_detail.as_ref().unwrap().trace_entry_count();
+        assert!(
+            after_older > after_initial,
+            "Older chunk must add an entry; before={after_initial} after={after_older}"
+        );
+    }
+
+    #[test]
+    fn session_history_chunk_for_other_session_does_not_touch_detail() {
+        let mut app = App::new_for_tests();
+        let sid = SessionId("brain-1".into());
+
+        app.handle_spur_event(wrap_event(SpurEventBody::BrainSpawned {
+            agent: "claude".into(),
+            session: sid.clone(),
+        }));
+        let baseline = app.session_detail.as_ref().unwrap().trace_entry_count();
+
+        app.handle_spur_event(wrap_event(SpurEventBody::SessionHistoryChunk {
+            session: SessionId("brain-other".into()),
+            kind: spur_acp::domain::events::SessionHistoryChunkKind::Initial,
+            entries: vec![spur_acp::HistoryEntry {
+                role: "user".into(),
+                text: "stranger".into(),
+            }],
+            next_cursor: None,
+        }));
+
+        // Foreign session must not write to the focused detail's trace,
+        // but input-history backfill is still global so we don't assert it.
+        let after = app.session_detail.as_ref().unwrap().trace_entry_count();
+        assert_eq!(after, baseline);
     }
 }

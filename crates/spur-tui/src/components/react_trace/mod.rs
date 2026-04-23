@@ -579,6 +579,21 @@ impl ReactTrace {
         )
     }
 
+    /// True when the viewport is anchored at the very first row of the
+    /// first entry, i.e. PageUp would have nothing more to scroll into
+    /// view from the existing trace. Used by the lazy-history consumer
+    /// in `SessionDetailView` to decide whether `PageUp` should request
+    /// older history from the orchestrator.
+    pub fn is_at_top(&self) -> bool {
+        matches!(
+            self.anchor,
+            crate::components::react_trace::types::ScrollAnchor::Row {
+                entry_idx: 0,
+                row_within_entry: 0,
+            }
+        )
+    }
+
     /// Move viewport up by one row by re-anchoring to the previous row.
     pub fn scroll_up(&mut self) {
         self.shift_anchor_by(-1);
