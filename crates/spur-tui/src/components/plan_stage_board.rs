@@ -14,6 +14,7 @@ pub fn render_stage_board(
     area: Rect,
     plan: &TrackedPlan,
     selected_task_id: &str,
+    selected_stage_idx: usize,
     lineage: &ExecutorLineage,
 ) {
     let stage_count = max_stage(plan) + 1;
@@ -31,7 +32,7 @@ pub fn render_stage_board(
                 let selected = task.task_id == selected_task_id;
                 let title_line = vec![
                     Span::styled(
-                        if selected { "> " } else { "  " },
+                        if selected { "▶ " } else { "  " },
                         if selected {
                             Style::default()
                                 .fg(Color::Yellow)
@@ -61,14 +62,23 @@ pub fn render_stage_board(
             }
         }
 
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Stage {}", stage_idx)),
-            ),
-            *stage_area,
-        );
+        let is_active_stage = stage_idx == selected_stage_idx;
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Stage {}", stage_idx))
+            .border_style(if is_active_stage {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            })
+            .title_style(if is_active_stage {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
+        frame.render_widget(Paragraph::new(lines).block(block), *stage_area);
     }
 }
 
@@ -91,7 +101,7 @@ pub fn render_stacked_stage_groups(
             let selected = task.task_id == selected_task_id;
             let mut text = format!(
                 "{}{} {}",
-                if selected { "> " } else { "  " },
+                if selected { "▶ " } else { "  " },
                 status_badge(&task.status),
                 task.task_name
             );
@@ -191,8 +201,48 @@ fn status_style(status: &str) -> Style {
     }
 }
 
-fn live_chip(lineage: &ExecutorLineage, issue_id: &str) -> Option<String> {
-    preferred_live_node(lineage, issue_id).map(|node| format!("live:{}", phase_label(node.phase)))
+fn task_meta_chips<'a>(task: &TrackedTask, lineage: &ExecutorLineage) -> Vec<Span<'a>> {
+    let mut chips = Vec::new();
+
+    // Live worker link (agent + phase)
+    if let Some(issue_id) = task.issue_id.as_deref() {
+        if let Some(node) = preferred_live_node(lineage, issue_id) {
+            chips.push(Span::styled(
+                format!("{}:{}", node.agent, phase_label(node.phase)),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+    }
+
+    // Blocked indicator
+    if !task.blocked_by.is_empty() {
+        let label = if task.blocked_by.len() == 1 {
+            format!("blocked:{}", task.blocked_by[0])
+        } else {
+            format!("blocked:{} deps", task.blocked_by.len())
+        };
+        chips.push(Span::styled(label, Style::default().fg(Color::Red)));
+    }
+
+    // Dependency hint
+    if !task.depends_on.is_empty() {
+        let label = if task.depends_on.len() == 1 {
+            format!("↑{}", task.depends_on[0])
+        } else {
+            format!("↑{} deps", task.depends_on.len())
+        };
+        chips.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+    }
+
+    // Attempt / retry indicator
+    if task.attempt > 1 {
+        chips.push(Span::styled(
+            format!("retry {}/{}", task.attempt, task.max_attempts),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+
+    chips
 }
 
 fn is_live_phase(phase: LifecycleState) -> bool {
