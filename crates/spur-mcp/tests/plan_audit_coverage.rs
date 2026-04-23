@@ -174,6 +174,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
         Some("spur/brain-snapshot-test"),
         Some("0123456789abcdef0123456789abcdef01234567"),
         None,
+        Some(&spur_acp::SessionId("brain".into())),
     )
     .await;
 

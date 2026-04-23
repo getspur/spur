@@ -1,6 +1,7 @@
 pub mod dashboard;
 #[cfg(feature = "markdown")]
 pub mod mermaid_viewer;
+pub mod plan_inspector;
 pub mod session_detail;
 pub mod session_picker;
 
@@ -82,6 +83,7 @@ fn macos_option_char(ch: char) -> Option<char> {
 /// struct instead of extra parameters outside the trait.
 pub struct ViewContext<'a> {
     pub lineage: &'a spur_core::lineage::projection::ExecutorLineage,
+    pub plan_projection: &'a spur_core::PlanProjectionStore,
     pub brain_status: &'a crate::app::BrainStatus,
     pub license_badge: Option<&'a LicenseBadge>,
     pub flag_summary: Option<(usize, usize)>,
@@ -90,6 +92,9 @@ pub struct ViewContext<'a> {
 /// Test-only default context backed by empty lineage and idle status.
 #[cfg(test)]
 static TEST_BRAIN_STATUS: crate::app::BrainStatus = crate::app::BrainStatus::Idle;
+#[cfg(test)]
+static TEST_PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
+    std::sync::OnceLock::new();
 
 #[cfg(test)]
 impl ViewContext<'_> {
@@ -98,6 +103,7 @@ impl ViewContext<'_> {
     pub fn test_ctx(lineage: &spur_core::lineage::projection::ExecutorLineage) -> ViewContext<'_> {
         ViewContext {
             lineage,
+            plan_projection: TEST_PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             brain_status: &TEST_BRAIN_STATUS,
             license_badge: None,
             flag_summary: None,

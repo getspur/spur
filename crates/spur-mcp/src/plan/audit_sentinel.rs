@@ -50,6 +50,8 @@ pub enum AuditSentinelKind {
         base_snapshot_oid: Option<String>,
         #[serde(default)]
         execution_mode: Option<String>,
+        #[serde(default)]
+        brain_session_id: Option<String>,
     },
     TaskSpec {
         task_id: String,
@@ -199,6 +201,7 @@ mod tests {
             base_snapshot_branch: None,
             base_snapshot_oid: None,
             execution_mode: None,
+            brain_session_id: None,
         }
     }
 

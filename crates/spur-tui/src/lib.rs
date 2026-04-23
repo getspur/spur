@@ -28,8 +28,11 @@ pub mod test_support {
         lineage: &spur_core::lineage::projection::ExecutorLineage,
     ) -> crate::views::ViewContext<'_> {
         static IDLE: crate::app::BrainStatus = crate::app::BrainStatus::Idle;
+        static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage,
+            plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             brain_status: &IDLE,
             license_badge: None,
             flag_summary: None,

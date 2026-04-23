@@ -382,7 +382,7 @@ fn projection_derives_stage_depth_from_dependencies() {
 
 - [ ] **Step 2: Run the `spur-core` tests to verify the store does not exist yet**
 
-Run: `cargo test -p spur-core plan_projection -- --nocapture`
+Run: `cargo test -p spur-core --test plan_projection -- --nocapture`
 Expected: FAIL because `plan_projection` module is missing
 
 - [ ] **Step 3: Add the projection types and folding logic**
@@ -424,7 +424,7 @@ pub use plan_projection::{PlanProjectionStore, TrackedPlan, TrackedTask};
 
 - [ ] **Step 5: Re-run tests and commit**
 
-Run: `cargo test -p spur-core plan_projection -- --nocapture`
+Run: `cargo test -p spur-core --test plan_projection -- --nocapture`
 Expected: PASS
 
 Run: `cargo test -p spur-core -- --nocapture`
@@ -728,7 +728,7 @@ fn plan_inspector_renders_stacked_layout_below_90_cols() {
 
 - [ ] **Step 2: Run the inspector tests to verify the full UI is not implemented**
 
-Run: `cargo test -p spur-tui plan_inspector_snapshot -- --nocapture`
+Run: `cargo test -p spur-tui --test plan_inspector_snapshot -- --nocapture`
 Expected: FAIL because the view shell has no lane board or detail pane
 
 - [ ] **Step 3: Add the stage-board and detail components**
@@ -780,10 +780,10 @@ Render wide mode at `>= 90` columns and stacked grouped-list mode below that thr
 
 - [ ] **Step 5: Re-run tests and commit**
 
-Run: `cargo test -p spur-tui plan_inspector_snapshot -- --nocapture`
+Run: `cargo test -p spur-tui --test plan_inspector_snapshot -- --nocapture`
 Expected: PASS
 
-Run: `cargo test -p spur-tui --test plan_inspector_snapshot -- --nocapture`
+Run: `cargo test -p spur-tui -- --nocapture`
 Expected: PASS
 
 ```bash

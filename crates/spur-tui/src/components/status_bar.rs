@@ -104,6 +104,7 @@ impl StatusBar {
                 hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
             }
             ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
+            ViewId::PlanInspector(_) => " [Esc]back [Alt-p]close",
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => " [Esc]close",
         };
