@@ -170,13 +170,11 @@ impl View for PlanInspectorView {
                     });
 
             // ── Header ──────────────────────────────────────────────────────
-            let header_rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
-                .split(chunks[0]);
-            let header_cols = Layout::horizontal([
-                Constraint::Percentage(45),
-                Constraint::Percentage(55),
-            ])
-            .split(header_rows[0]);
+            let header_rows =
+                Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[0]);
+            let header_cols =
+                Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+                    .split(header_rows[0]);
 
             let status_color = plan_status_color(&plan.status);
             frame.render_widget(
@@ -223,7 +221,10 @@ impl View for PlanInspectorView {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(" next: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(truncate_display(&plan.next_action, area.width.saturating_sub(8) as usize)),
+                    Span::raw(truncate_display(
+                        &plan.next_action,
+                        area.width.saturating_sub(8) as usize,
+                    )),
                 ])),
                 header_rows[1],
             );

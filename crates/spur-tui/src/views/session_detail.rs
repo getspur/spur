@@ -1529,10 +1529,7 @@ impl View for SessionDetailView {
                 // promised continuation was lost.
                 self.react_trace.push(TraceEntry {
                     kind: TraceKind::Observe { payload: None },
-                    text: format!(
-                        "⚠ Continuation dropped for {}: {:?}",
-                        delegation_id, reason
-                    ),
+                    text: format!("⚠ Continuation dropped for {}: {:?}", delegation_id, reason),
                     timestamp: Self::now_stamp(),
                     #[cfg(feature = "markdown")]
                     markdown: None,
@@ -3147,14 +3144,13 @@ mod tests {
     fn prompt_dispatched_merged_pushes_think_entry() {
         let mut v = make_view();
         let sid = v.session_id().clone();
-        v.handle_spur_event(
-            &prompt_dispatched_event(&sid, "merged", 1),
-            &test_ctx(),
-        );
+        v.handle_spur_event(&prompt_dispatched_event(&sid, "merged", 1), &test_ctx());
         let entries = v.react_trace.entries_for_test();
         let last = entries.last().unwrap();
         assert!(matches!(last.kind, TraceKind::Think));
-        assert!(last.text.contains("Merging user message with 1 worker result"));
+        assert!(last
+            .text
+            .contains("Merging user message with 1 worker result"));
     }
 
     #[test]
@@ -3162,10 +3158,7 @@ mod tests {
         let mut v = make_view();
         let sid = v.session_id().clone();
         let before = v.react_trace.entry_count();
-        v.handle_spur_event(
-            &prompt_dispatched_event(&sid, "user_only", 0),
-            &test_ctx(),
-        );
+        v.handle_spur_event(&prompt_dispatched_event(&sid, "user_only", 0), &test_ctx());
         assert_eq!(v.react_trace.entry_count(), before);
     }
 
@@ -3222,7 +3215,10 @@ mod tests {
             &test_ctx(),
         );
         let entries = v.react_trace.entries_for_test();
-        let delegate_entry = entries.iter().find(|e| matches!(e.kind, TraceKind::Delegate { .. })).unwrap();
+        let delegate_entry = entries
+            .iter()
+            .find(|e| matches!(e.kind, TraceKind::Delegate { .. }))
+            .unwrap();
         match &delegate_entry.kind {
             TraceKind::Delegate { status, .. } => assert_eq!(status, "done"),
             other => panic!("expected Delegate, got {:?}", other),

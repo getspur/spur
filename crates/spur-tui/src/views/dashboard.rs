@@ -49,8 +49,6 @@ pub enum DashboardMode {
     Compose,
 }
 
-
-
 /// The main dashboard view composing AgentsTree + ActivityLog + StatusBar.
 /// All agent-state is now read from `ExecutorLineage` (owned by `App`);
 /// this struct only owns the activity log and UI controls.
@@ -163,20 +161,20 @@ impl DashboardView {
         };
 
         let body = match &self.focused_node {
-                Some(id) => {
-                    let agent = lineage.node(id).map(|n| n.agent.as_str()).unwrap_or("?");
-                    format!(
+            Some(id) => {
+                let agent = lineage.node(id).map(|n| n.agent.as_str()).unwrap_or("?");
+                format!(
                         "[Detail: {}] ←/→/1-5 tabs · j/k scroll · Ctrl+O toggle · r review · Esc unfocus",
                         agent
                     )
+            }
+            None => match self.focused_panel {
+                Panel::Agents => "[Agents] j/k move · Enter focus · c collapse · Tab cycle".into(),
+                Panel::Log => {
+                    "[Log] j/k scroll · g/G top/bottom · PgUp/PgDn page · Tab cycle".into()
                 }
-                None => match self.focused_panel {
-                    Panel::Agents => {
-                        "[Agents] j/k move · Enter focus · c collapse · Tab cycle".into()
-                    }
-                    Panel::Log => "[Log] j/k scroll · g/G top/bottom · PgUp/PgDn page · Tab cycle".into(),
-                },
-            };
+            },
+        };
 
         if self.mode == DashboardMode::Compose {
             format!("{} {} · Esc to navigate", mode_badge, body)
@@ -229,8 +227,7 @@ impl DashboardView {
             // hint instead of panel navigation keys (those go to the input
             // bar while in Compose mode, so the panel context would mislead).
             let hint_text = if self.mode == DashboardMode::Compose {
-                "[INSERT] Typing \u{00b7} Enter to submit \u{00b7} Esc to navigate"
-                    .to_string()
+                "[INSERT] Typing \u{00b7} Enter to submit \u{00b7} Esc to navigate".to_string()
             } else {
                 self.panel_context_hint(lineage)
             };
@@ -625,13 +622,14 @@ impl DashboardView {
     fn key_owner(&self, key: KeyEvent) -> KeyOwner {
         // Global bypasses work in both modes.
         if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('n') | KeyCode::Char('o'))
+            && matches!(
+                key.code,
+                KeyCode::Char('p') | KeyCode::Char('n') | KeyCode::Char('o')
+            )
         {
             return KeyOwner::View;
         }
-        if key.modifiers.contains(KeyModifiers::ALT)
-            && matches!(key.code, KeyCode::Char('i'))
-        {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('i')) {
             return KeyOwner::View;
         }
 
@@ -663,8 +661,7 @@ impl DashboardView {
                     }
                     // Emacs mode: non-view-action characters enter Compose mode.
                     KeyCode::Char(c)
-                        if !self.input_bar.is_vim_normal()
-                            && !self.is_view_action_char(c) =>
+                        if !self.input_bar.is_vim_normal() && !self.is_view_action_char(c) =>
                     {
                         KeyOwner::Composer
                     }
@@ -683,8 +680,10 @@ impl DashboardView {
         {
             return true;
         }
-        matches!(ch, 'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's' | 'q' | 'z')
-            || (ch == 'c' && self.focused_panel == Panel::Agents)
+        matches!(
+            ch,
+            'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's' | 'q' | 'z'
+        ) || (ch == 'c' && self.focused_panel == Panel::Agents)
     }
 
     /// Handle a key that belongs to the view (navigation / actions).
@@ -706,35 +705,45 @@ impl DashboardView {
             // ── Direct tab jumping (focused node) ─────────────────────────
             KeyCode::Char('1')
                 if self.focused_node.is_some()
-                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Stream);
                 None
             }
             KeyCode::Char('2')
                 if self.focused_node.is_some()
-                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Artifacts);
                 None
             }
             KeyCode::Char('3')
                 if self.focused_node.is_some()
-                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Attempts);
                 None
             }
             KeyCode::Char('4')
                 if self.focused_node.is_some()
-                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Task);
                 None
             }
             KeyCode::Char('5')
                 if self.focused_node.is_some()
-                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Review);
                 None
@@ -742,7 +751,9 @@ impl DashboardView {
             // ── View jump: Issue Browser ──────────────────────────────────
             KeyCode::Char('2')
                 if self.focused_node.is_none()
-                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 Some(Action::NavigateTo(ViewId::IssueBrowser))
             }
@@ -765,7 +776,9 @@ impl DashboardView {
             }
             // ── Quit ──────────────────────────────────────────────────────
             KeyCode::Char('q')
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 Some(Action::Quit)
             }
@@ -901,8 +914,7 @@ impl DashboardView {
                 }
 
                 // Insert mode view chars (empty bar).
-                if self.focused_node.is_some()
-                    && self.detail_pane.current_tab == DetailTab::Review
+                if self.focused_node.is_some() && self.detail_pane.current_tab == DetailTab::Review
                 {
                     if let Some(decision) =
                         crate::components::review_card::decision_for_key(ch, None)
@@ -921,9 +933,7 @@ impl DashboardView {
                     }
                 }
                 match ch {
-                    'j' if self.focused_panel == Panel::Agents
-                        && self.focused_node.is_none() =>
-                    {
+                    'j' if self.focused_panel == Panel::Agents && self.focused_node.is_none() => {
                         if let Some(lineage) = lineage {
                             self.agents_tree.select_next(lineage);
                         }
@@ -938,9 +948,7 @@ impl DashboardView {
                         }
                         Some(Action::ScrollDown)
                     }
-                    'k' if self.focused_panel == Panel::Agents
-                        && self.focused_node.is_none() =>
-                    {
+                    'k' if self.focused_panel == Panel::Agents && self.focused_node.is_none() => {
                         if let Some(lineage) = lineage {
                             self.agents_tree.select_prev(lineage);
                         }
@@ -957,9 +965,7 @@ impl DashboardView {
                     }
                     'r' => Some(Action::JumpToReview),
                     'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
-                    'g' if self.focused_panel == Panel::Agents
-                        && self.focused_node.is_none() =>
-                    {
+                    'g' if self.focused_panel == Panel::Agents && self.focused_node.is_none() => {
                         if let Some(lineage) = lineage {
                             self.agents_tree.select_first(lineage);
                             self.agents_tree.scroll_to_top();
@@ -975,9 +981,7 @@ impl DashboardView {
                         }
                         Some(Action::ScrollToTop)
                     }
-                    'G' if self.focused_panel == Panel::Agents
-                        && self.focused_node.is_none() =>
-                    {
+                    'G' if self.focused_panel == Panel::Agents && self.focused_node.is_none() => {
                         if let Some(lineage) = lineage {
                             self.agents_tree.select_last(lineage);
                             self.agents_tree.scroll_to_bottom();

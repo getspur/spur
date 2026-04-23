@@ -805,7 +805,10 @@ async fn same_topic_resume_supersession_ignores_old_ready_until_new_ready_arrive
 async fn late_resumed_ready_without_pending_target_is_ignored() {
     let (mut runtime, handle, _user_rx) = test_runtime();
     runtime.restore_topic_binding(42, 77, "Session 1".into(), "acp-77".into(), "kimi".into());
-    let _ = runtime.handle_chat_text(&handle, 42, None, "/sessions").await.unwrap();
+    let _ = runtime
+        .handle_chat_text(&handle, 42, None, "/sessions")
+        .await
+        .unwrap();
 
     let (key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(

@@ -121,18 +121,37 @@ fn append_message_after_turn_complete_creates_new_entry() {
     trace.append_message("Second turn", "claude", "10:01".into());
 
     let entries = trace.entries_for_tests();
-    assert_eq!(entries.len(), 2, "must create two separate AgentMessage entries");
+    assert_eq!(
+        entries.len(),
+        2,
+        "must create two separate AgentMessage entries"
+    );
 
-    let first = entries[0].markdown.as_ref().expect("first entry has stream");
-    let second = entries[1].markdown.as_ref().expect("second entry has stream");
+    let first = entries[0]
+        .markdown
+        .as_ref()
+        .expect("first entry has stream");
+    let second = entries[1]
+        .markdown
+        .as_ref()
+        .expect("second entry has stream");
 
     assert!(first.is_finalized(), "first stream must remain finalized");
-    assert!(!second.is_finalized(), "second stream must not be finalized");
+    assert!(
+        !second.is_finalized(),
+        "second stream must not be finalized"
+    );
 
     let (_, first_tail) = first.items_and_tail();
     let (_, second_tail) = second.items_and_tail();
-    assert_eq!(first_tail, "", "first stream tail must be empty after flush_final");
-    assert_eq!(second_tail, "Second turn", "second stream must contain new text in tail");
+    assert_eq!(
+        first_tail, "",
+        "first stream tail must be empty after flush_final"
+    );
+    assert_eq!(
+        second_tail, "Second turn",
+        "second stream must contain new text in tail"
+    );
 }
 
 /// TI.3 — open code fence containing `\n\n` must not busy-loop.

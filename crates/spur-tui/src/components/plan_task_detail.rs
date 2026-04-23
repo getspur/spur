@@ -53,14 +53,9 @@ pub fn render_task_detail(
             lines.push(Line::from(vec![
                 Span::styled(
                     "blocked_by: ",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    task.blocked_by.join(", "),
-                    Style::default().fg(Color::Red),
-                ),
+                Span::styled(task.blocked_by.join(", "), Style::default().fg(Color::Red)),
             ]));
         }
         if !task.unblocks.is_empty() {
@@ -122,10 +117,7 @@ fn section_header(title: &str) -> Line<'static> {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "━".repeat(20),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("━".repeat(20), Style::default().fg(Color::DarkGray)),
     ])
 }
 

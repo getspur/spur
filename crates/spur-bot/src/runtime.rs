@@ -737,7 +737,8 @@ impl BotRuntime {
     }
 
     fn supersede_pending_resume(&mut self, key: &ThreadKey) {
-        self.pending_resume.retain(|_, pending_key| pending_key != key);
+        self.pending_resume
+            .retain(|_, pending_key| pending_key != key);
     }
 
     fn resolve_resumed_ready(&mut self, acp_session_id: &str) -> Option<ThreadKey> {
