@@ -3532,11 +3532,6 @@ impl McpCallbackServer {
             .await
             .insert(plan_id.clone(), Arc::clone(&state));
 
-        {
-            let state = state.lock().await;
-            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &state);
-        }
-
         // Replace the sentinel with the real plan_id now that dispatch is
         // committed. active_plans lock is already released above, so these
         // two locks are never held simultaneously.
@@ -3562,6 +3557,11 @@ impl McpCallbackServer {
                 -32000,
                 "orchestrator shutting down — execute_epic aborted",
             );
+        }
+
+        {
+            let state = state.lock().await;
+            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &state);
         }
         self.fast_forward_reconciler();
 
