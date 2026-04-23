@@ -293,7 +293,19 @@ impl Reconciler {
             };
 
             let projected =
-                crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id).await?;
+                match crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id)
+                    .await
+                {
+                    Ok(projected) => projected,
+                    Err(error) => {
+                        tracing::warn!(
+                            issue_id = %summary.id,
+                            %plan_id,
+                            "reconciler skipping ready summary after plan projection failed: {error}"
+                        );
+                        continue;
+                    }
+                };
             let Some(task) = projected
                 .tasks
                 .iter()
