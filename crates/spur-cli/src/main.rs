@@ -745,6 +745,9 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
         spur_tui::UserInput::CancelStream { session } => {
             spur_core::InteractiveInput::CancelStream { session }
         }
+        spur_tui::UserInput::LoadOlderHistory { session } => {
+            spur_core::InteractiveInput::LoadOlderHistory { session }
+        }
         spur_tui::UserInput::RefreshIssues => spur_core::InteractiveInput::RefreshIssues,
         spur_tui::UserInput::GetIssueDetail { id } => {
             spur_core::InteractiveInput::GetIssueDetail { id }
@@ -819,4 +822,30 @@ fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
     let config = load_config()?;
     let license = SpurLicense::from_env_or_disabled();
     Orchestrator::new(repo_root, config, Some(license.feature_gate()))
+}
+
+#[cfg(test)]
+mod tui_bridge_tests {
+    //! Task 2 of the session-lazy-history plan: prove the CLI bridge maps
+    //! `UserInput::LoadOlderHistory` onto `InteractiveInput::LoadOlderHistory`
+    //! with the session id preserved. Disk-history chunk emission is not
+    //! wired yet — the orchestrator treats the request as a no-op.
+    use super::tui_input_to_interactive;
+    use spur_acp::SessionId;
+
+    #[test]
+    fn load_older_history_maps_to_orchestrator_variant() {
+        let session = SessionId("b1".into());
+        let bridged = tui_input_to_interactive(spur_tui::UserInput::LoadOlderHistory {
+            session: session.clone(),
+        });
+        match bridged {
+            spur_core::InteractiveInput::LoadOlderHistory { session: got } => {
+                assert_eq!(got, session, "bridge must preserve session id unchanged");
+            }
+            other => panic!(
+                "expected InteractiveInput::LoadOlderHistory, got {other:?}"
+            ),
+        }
+    }
 }

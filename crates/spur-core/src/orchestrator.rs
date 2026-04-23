@@ -252,6 +252,16 @@ pub enum InteractiveInput {
         session: SessionId,
         continuation: spur_acp::domain::BrainContinuation,
     },
+    /// Request the next older history chunk for a resumed session. Phase 1
+    /// of the lazy session-history contract (see
+    /// `docs/superpowers/specs/2026-04-23-session-lazy-loading-design.md`):
+    /// the TUI emits this when the user scrolls past the unloaded-history
+    /// sentinel. The orchestrator-side chunk emission path is not
+    /// implemented yet — this variant reserves the request side of the
+    /// contract and is currently handled as a traced no-op.
+    LoadOlderHistory {
+        session: SessionId,
+    },
 }
 
 /// Convert spur_pm::IssueSummary to the spur_acp mirror type for event bus transmission.
@@ -1453,6 +1463,19 @@ impl Orchestrator {
                     // Intentional no-op: spur-cli routes SubmitReview to the
                     // review_dispatcher_loop task, not to run_interactive.
                     InteractiveInput::SubmitReview { .. } => {}
+
+                    // ── LoadOlderHistory ──────────────────────────────────
+                    // Phase 1 of the lazy session-history contract: the
+                    // request side is wired all the way from the TUI, but
+                    // chunk emission is not implemented yet. Trace and drop
+                    // so the request chain is observable without side
+                    // effects. See the session-lazy-loading design spec.
+                    InteractiveInput::LoadOlderHistory { session } => {
+                        tracing::debug!(
+                            session = %session,
+                            "LoadOlderHistory received; chunk emission not yet implemented"
+                        );
+                    }
                 }
 
                 // Done handling non-prompt variant — go back to top of loop.

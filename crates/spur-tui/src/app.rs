@@ -78,6 +78,12 @@ pub enum UserInput {
     CancelStream {
         session: SessionId,
     },
+    /// Request the next older-history chunk for a resumed session. Maps
+    /// 1:1 to `spur_core::InteractiveInput::LoadOlderHistory` via `spur-cli`.
+    /// See `Action::LoadOlderHistory` for the request chain and phase-1 scope.
+    LoadOlderHistory {
+        session: SessionId,
+    },
     /// Request the orchestrator to refresh the issue list and re-emit IssuesLoaded.
     RefreshIssues,
     /// Request full issue detail from the PM backend.
@@ -1445,6 +1451,16 @@ impl App {
                 tracing::debug!(session = %session.0, "dispatching CancelStream to orchestrator");
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::CancelStream { session });
+                }
+            }
+
+            Action::LoadOlderHistory { session } => {
+                tracing::debug!(
+                    session = %session.0,
+                    "dispatching LoadOlderHistory to orchestrator"
+                );
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::LoadOlderHistory { session });
                 }
             }
 
@@ -3329,5 +3345,48 @@ mod quit_shortcut_tests {
             !app.quit_confirm_visible,
             "Esc should not open quit confirm from an empty dashboard"
         );
+    }
+}
+
+#[cfg(test)]
+mod lazy_history_tests {
+    //! Task 2 of the session-lazy-history plan: prove the request chain
+    //! queues `LoadOlderHistory` onto `user_input_tx` without touching the
+    //! session detail view or emitting any history chunks yet.
+    use super::*;
+    use spur_acp::SessionId;
+
+    #[test]
+    fn load_older_history_action_queues_user_input() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<UserInput>(8);
+        let mut app = App::new(Some(tx), false);
+        let session = SessionId("b1".into());
+
+        app.process_action(Action::LoadOlderHistory {
+            session: session.clone(),
+        });
+
+        let queued = rx.try_recv().expect("LoadOlderHistory must be queued");
+        match queued {
+            UserInput::LoadOlderHistory { session: got } => {
+                assert_eq!(got, session, "session id must pass through unchanged");
+            }
+            _ => panic!("expected UserInput::LoadOlderHistory"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one UserInput must be queued per Action"
+        );
+    }
+
+    #[test]
+    fn load_older_history_action_without_tx_is_silent_noop() {
+        // No user_input_tx: the request is dropped cleanly rather than
+        // panicking. Mirrors the existing behaviour of CancelStream and
+        // ResumeSession when the channel isn't wired.
+        let mut app = App::new_for_tests();
+        let session = SessionId("b1".into());
+
+        app.process_action(Action::LoadOlderHistory { session });
     }
 }

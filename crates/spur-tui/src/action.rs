@@ -124,6 +124,16 @@ pub enum Action {
     CancelStream {
         session: SessionId,
     },
+    /// Request the next older-history chunk for a resumed session. Phase 1
+    /// of the lazy session-history contract: `SessionDetailView` emits this
+    /// when the user scrolls past the unloaded-history sentinel. The
+    /// request travels `Action -> UserInput -> InteractiveInput` into the
+    /// orchestrator. Chunk event emission is not implemented yet — this
+    /// variant reserves the request side of the contract so the detail
+    /// view and trace work can land independently.
+    LoadOlderHistory {
+        session: SessionId,
+    },
     /// Refresh the tracked issues list from the PM backend.
     RefreshIssues,
     /// An issue-related action from the IssuesPanel or slash commands.
