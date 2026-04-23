@@ -689,3 +689,129 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
     assert!(server.__test_active_plan_count().await > 0);
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
+
+#[tokio::test]
+async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
+    if !br_available() {
+        eprintln!(
+            "skipping t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        "plan-11",
+        "Plan Eleven",
+        None,
+        &persisted_task("codex"),
+    )
+    .await
+    .expect("build epic subgraph");
+    let task_id = subgraph.task_map.get("t1").expect("task id").clone();
+    let stale_delegation_id = "del-stale";
+    add_labels(
+        pm.as_ref(),
+        &task_id,
+        &[labels::delegation_id(stale_delegation_id)],
+    )
+    .await;
+
+    let session_id = BrainSessionId::new(SessionId("brain".into()));
+    let (mut server, mut channel) =
+        McpCallbackServer::new(&session_id, Some(Arc::clone(&pm)), None, continuation_ctx());
+    server.set_reconciler_enabled(true, None);
+    server.set_repo_root(dir.path().to_path_buf());
+
+    let server = Arc::new(server);
+    let started = Arc::clone(&server).start().await;
+    let (_url, handle) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("Failed to bind TCP listener") {
+                eprintln!(
+                    "skipping t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch: {message}"
+                );
+                return;
+            }
+            panic!("start server: {message}");
+        }
+    };
+
+    let issue_after_start = pm
+        .get_issue(&task_id)
+        .await
+        .expect("get issue after startup reclaim");
+    assert!(
+        !issue_after_start
+            .labels
+            .contains(&labels::delegation_id(stale_delegation_id)),
+        "startup reclaim should clear stale dispatch intent before redispatch"
+    );
+
+    let request = tokio::time::timeout(Duration::from_secs(1), channel.request_rx.recv())
+        .await
+        .expect("redispatch timeout")
+        .expect("dispatch request");
+
+    let issue_after_redispatch = pm
+        .get_issue(&task_id)
+        .await
+        .expect("get issue after redispatch");
+    let fresh_delegation_id = request.id.as_str().to_string();
+    assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
+    assert_ne!(
+        fresh_delegation_id, stale_delegation_id,
+        "redispatch should mint a fresh delegation id"
+    );
+    assert!(
+        issue_after_redispatch
+            .labels
+            .contains(&labels::delegation_id(&fresh_delegation_id)),
+        "reconciler should persist fresh dispatch intent for the new delegation"
+    );
+    assert!(
+        !issue_after_redispatch
+            .labels
+            .contains(&labels::delegation_id(stale_delegation_id)),
+        "stale dispatch intent must stay cleared after redispatch"
+    );
+
+    let audits = spur_mcp::plan::projector::collect_sorted_audits(
+        pm.advanced()
+            .expect("advanced beads surface")
+            .list_comments(&task_id)
+            .await
+            .expect("task comments"),
+    );
+    let orphan_cleared_idx = audits
+        .iter()
+        .position(|audit| {
+            matches!(
+                audit,
+                AuditSentinelKind::DispatchOrphanCleared { delegation_id, .. }
+                    if delegation_id == stale_delegation_id
+            )
+        })
+        .expect("startup reclaim should record orphan clearing");
+    let redispatch_idx = audits
+        .iter()
+        .position(|audit| {
+            matches!(
+                audit,
+                AuditSentinelKind::Dispatch { delegation_id, .. }
+                    if delegation_id == &fresh_delegation_id
+            )
+        })
+        .expect("redispatch should record a fresh dispatch audit");
+    assert!(
+        orphan_cleared_idx < redispatch_idx,
+        "stale dispatch should be cleared before a fresh redispatch is recorded"
+    );
+
+    handle.abort();
+}
