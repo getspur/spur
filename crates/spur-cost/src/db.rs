@@ -19,6 +19,12 @@ pub struct SessionRecord {
     pub status: String,
     pub duration_seconds: Option<i64>,
     pub estimated_cost_usd: Option<f64>,
+    // Token-based fields (nullable for backward compatibility)
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
 }
 
 /// A logged delegation from brain to worker.
@@ -52,6 +58,17 @@ pub struct ProjectCostSummary {
     pub session_count: i64,
 }
 
+/// Token summary grouped by agent.
+#[derive(Debug, Clone)]
+pub struct TokenSummary {
+    pub agent: String,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_cache_creation_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub session_count: i64,
+}
+
 // ─── Database Initialization ──────────────────────────────────────────
 
 /// Open (or create) the SQLite database at `path` and ensure the schema exists.
@@ -72,7 +89,12 @@ pub fn init_db(path: &Path) -> Result<Connection> {
             ended_at TEXT,
             status TEXT NOT NULL DEFAULT 'running',
             duration_seconds INTEGER,
-            estimated_cost_usd REAL
+            estimated_cost_usd REAL,
+            model TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cache_creation_tokens INTEGER,
+            cache_read_tokens INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS delegation_log (
@@ -86,6 +108,88 @@ pub fn init_db(path: &Path) -> Result<Connection> {
             status TEXT NOT NULL DEFAULT 'pending',
             diff_stats TEXT
         );
+        
+        CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent);
+        CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
+        CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
+        
+        CREATE INDEX IF NOT EXISTS idx_delegation_brain ON delegation_log(brain_session);
+        CREATE INDEX IF NOT EXISTS idx_delegation_worker ON delegation_log(worker_session);
+        
+        -- Migration guard: these columns are now in CREATE TABLE above.
+        -- If upgrading from a schema prior to v0.4.5, run:
+        --   ALTER TABLE sessions ADD COLUMN model TEXT;
+        --   ALTER TABLE sessions ADD COLUMN input_tokens INTEGER;
+        --   ALTER TABLE sessions ADD COLUMN output_tokens INTEGER;
+        --   ALTER TABLE sessions ADD COLUMN cache_creation_tokens INTEGER;
+        --   ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER;
+        
+        -- Create view for token summary
+        CREATE VIEW IF NOT EXISTS v_session_tokens AS
+        SELECT
+            agent,
+            COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+            COALESCE(SUM(cache_creation_tokens), 0) AS total_cache_creation_tokens,
+            COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens,
+            COUNT(*) AS session_count
+        FROM sessions
+        WHERE input_tokens IS NOT NULL OR output_tokens IS NOT NULL
+        GROUP BY agent;
+        
+        CREATE VIEW IF NOT EXISTS v_model_costs AS
+        SELECT
+            model,
+            agent,
+            COALESCE(SUM(estimated_cost_usd), 0.0) AS total_cost,
+            COUNT(*) AS session_count,
+            COALESCE(SUM(duration_seconds), 0) AS total_duration
+        FROM sessions
+        WHERE model IS NOT NULL
+        GROUP BY model, agent;
+        
+        CREATE VIEW IF NOT EXISTS v_daily_costs AS
+        SELECT
+            date(started_at) AS day,
+            agent,
+            COALESCE(SUM(estimated_cost_usd), 0.0) AS total_cost,
+            COUNT(*) AS session_count,
+            COALESCE(SUM(duration_seconds), 0) AS total_duration
+        FROM sessions
+        GROUP BY date(started_at), agent;
+        
+        CREATE VIEW IF NOT EXISTS v_daily_tokens AS
+        SELECT
+            date(started_at) AS day,
+            agent,
+            COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+            COALESCE(SUM(cache_creation_tokens), 0) AS total_cache_creation_tokens,
+            COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens,
+            COUNT(*) AS session_count
+        FROM sessions
+        WHERE input_tokens IS NOT NULL OR output_tokens IS NOT NULL
+        GROUP BY date(started_at), agent;
+        
+        -- Ensure backward compatibility by creating a view for v1 schema access
+        CREATE VIEW IF NOT EXISTS v_session_costs AS
+        SELECT
+            id,
+            agent,
+            role,
+            parent_session,
+            task_summary,
+            project,
+            issue_ref,
+            started_at,
+            ended_at,
+            status,
+            duration_seconds,
+            estimated_cost_usd
+        FROM sessions;
+        
+        -- Create index on model column for cost analysis queries
+        CREATE INDEX IF NOT EXISTS idx_sessions_model ON sessions(model);
         ",
     )?;
 
@@ -108,6 +212,11 @@ fn session_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
         status: row.get(9)?,
         duration_seconds: row.get(10)?,
         estimated_cost_usd: row.get(11)?,
+        model: row.get(12)?,
+        input_tokens: row.get(13)?,
+        output_tokens: row.get(14)?,
+        cache_creation_tokens: row.get(15)?,
+        cache_read_tokens: row.get(16)?,
     })
 }
 
@@ -119,8 +228,9 @@ pub fn insert_session(conn: &Connection, session: &SessionRecord) -> Result<()> 
         "INSERT INTO sessions (
             id, agent, role, parent_session, task_summary, project,
             issue_ref, started_at, ended_at, status, duration_seconds,
-            estimated_cost_usd
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            estimated_cost_usd, model, input_tokens, output_tokens,
+            cache_creation_tokens, cache_read_tokens
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             session.id,
             session.agent,
@@ -134,6 +244,11 @@ pub fn insert_session(conn: &Connection, session: &SessionRecord) -> Result<()> 
             session.status,
             session.duration_seconds,
             session.estimated_cost_usd,
+            session.model,
+            session.input_tokens,
+            session.output_tokens,
+            session.cache_creation_tokens,
+            session.cache_read_tokens,
         ],
     )?;
     Ok(())
@@ -156,12 +271,56 @@ pub fn update_session_end(
     Ok(())
 }
 
+/// Update a session when it ends, including token counts and model.
+#[allow(clippy::too_many_arguments)]
+pub fn update_session_end_with_tokens(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    duration: i64,
+    cost: f64,
+    model: Option<&str>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cache_creation_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE sessions SET
+            ended_at = ?1,
+            status = ?2,
+            duration_seconds = ?3,
+            estimated_cost_usd = ?4,
+            model = ?5,
+            input_tokens = ?6,
+            output_tokens = ?7,
+            cache_creation_tokens = ?8,
+            cache_read_tokens = ?9
+         WHERE id = ?10",
+        params![
+            now,
+            status,
+            duration,
+            cost,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+            id,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Retrieve a single session and attach its delegations (as brain or worker).
 pub fn query_session(conn: &Connection, id: &str) -> Result<Option<SessionRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, agent, role, parent_session, task_summary, project,
                 issue_ref, started_at, ended_at, status, duration_seconds,
-                estimated_cost_usd
+                estimated_cost_usd, model, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens
          FROM sessions WHERE id = ?1",
     )?;
 
@@ -177,7 +336,8 @@ pub fn query_recent_sessions(conn: &Connection, limit: usize) -> Result<Vec<Sess
     let mut stmt = conn.prepare(
         "SELECT id, agent, role, parent_session, task_summary, project,
                 issue_ref, started_at, ended_at, status, duration_seconds,
-                estimated_cost_usd
+                estimated_cost_usd, model, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens
          FROM sessions
          ORDER BY started_at DESC
          LIMIT ?1",
@@ -321,6 +481,102 @@ pub fn query_cost_by_project(conn: &Connection) -> Result<Vec<ProjectCostSummary
             project: row.get(0)?,
             total_cost_usd: row.get(1)?,
             session_count: row.get(2)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+// ─── Token Aggregation Queries ────────────────────────────────────────
+
+/// Sum token usage by agent for today (UTC).
+pub fn query_tokens_today(conn: &Connection) -> Result<Vec<TokenSummary>> {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut stmt = conn.prepare(
+        "SELECT agent,
+                COALESCE(SUM(input_tokens), 0) AS total_input,
+                COALESCE(SUM(output_tokens), 0) AS total_output,
+                COALESCE(SUM(cache_creation_tokens), 0) AS total_cache_creation,
+                COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read,
+                COUNT(*) AS session_count
+         FROM sessions
+         WHERE started_at >= ?1
+           AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
+         GROUP BY agent
+         ORDER BY total_input + total_output DESC",
+    )?;
+
+    let rows = stmt.query_map(params![today], |row| {
+        Ok(TokenSummary {
+            agent: row.get(0)?,
+            total_input_tokens: row.get(1)?,
+            total_output_tokens: row.get(2)?,
+            total_cache_creation_tokens: row.get(3)?,
+            total_cache_read_tokens: row.get(4)?,
+            session_count: row.get(5)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Sum token usage by agent for a date range (ISO 8601 strings, inclusive).
+pub fn query_tokens_range(conn: &Connection, from: &str, to: &str) -> Result<Vec<TokenSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent,
+                COALESCE(SUM(input_tokens), 0) AS total_input,
+                COALESCE(SUM(output_tokens), 0) AS total_output,
+                COALESCE(SUM(cache_creation_tokens), 0) AS total_cache_creation,
+                COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read,
+                COUNT(*) AS session_count
+         FROM sessions
+         WHERE started_at >= ?1 AND started_at < ?2
+           AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
+         GROUP BY agent
+         ORDER BY total_input + total_output DESC",
+    )?;
+
+    let rows = stmt.query_map(params![from, to], |row| {
+        Ok(TokenSummary {
+            agent: row.get(0)?,
+            total_input_tokens: row.get(1)?,
+            total_output_tokens: row.get(2)?,
+            total_cache_creation_tokens: row.get(3)?,
+            total_cache_read_tokens: row.get(4)?,
+            session_count: row.get(5)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Cost summary grouped by model and agent.
+#[derive(Debug, Clone)]
+pub struct ModelCostSummary {
+    pub model: String,
+    pub agent: String,
+    pub total_cost_usd: f64,
+    pub session_count: i64,
+    pub total_duration_seconds: i64,
+}
+
+/// Sum costs grouped by model.
+pub fn query_cost_by_model(conn: &Connection) -> Result<Vec<ModelCostSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT model, agent,
+                COALESCE(SUM(estimated_cost_usd), 0.0) AS total_cost,
+                COUNT(*) AS session_count,
+                COALESCE(SUM(duration_seconds), 0) AS total_duration
+         FROM sessions
+         WHERE model IS NOT NULL
+         GROUP BY model, agent
+         ORDER BY total_cost DESC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ModelCostSummary {
+            model: row.get(0)?,
+            agent: row.get(1)?,
+            total_cost_usd: row.get(2)?,
+            session_count: row.get(3)?,
+            total_duration_seconds: row.get(4)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
