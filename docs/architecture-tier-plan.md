@@ -199,7 +199,7 @@ Each SPUR crate's capabilities are decomposed into atomic, gateable feature keys
 ### Journey A: Solo Developer (Community → Pro)
 
 ```
-Day 1: Installs SPUR, runs `spur watch`
+Day 1: Installs SPUR, runs `spur tui`
         ↓
         Brain orchestrates, delegates 1 task to worker
         ↓
@@ -233,7 +233,7 @@ Week 2: Using Pro with 5 parallel workers, auto-approve policies
         ↓
         Sets up GitHub integration once → whole team benefits
         ↓
-        New team member onboarding: `git clone && spur watch` 
+        New team member onboarding: `git clone && spur tui` 
         (centralized config already has PM integration)
 ```
 
@@ -517,7 +517,7 @@ Bad Path 4: Pro user sets up GitHub individually → Team wants to adopt
 | Community → Pro conversion rate | > 8% | `spur auth login` events / total installs |
 | Pro → Team conversion rate | > 15% | Team activations from Pro keys |
 | Time-to-first-delegation | < 2 min | Telemetry (when enabled) |
-| Day-7 retention (Community) | > 40% | Users who run `spur watch` again within 7 days |
+| Day-7 retention (Community) | > 40% | Users who run `spur tui` again within 7 days |
 | Net Promoter Score (Pro+) | > 50 | In-app survey |
 | Churn rate (Team) | < 3%/month | Cancellation events |
 

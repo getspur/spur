@@ -494,7 +494,7 @@ spur sessions                      List active sessions
 spur sessions kill <id>            Terminate a session
 spur run <task>                    Run an ad-hoc task
 spur exec --agent <name> <task>    Execute directly on a specific agent
-spur watch                         Open TUI dashboard
+spur tui                           Open TUI dashboard
 spur cost                          Show cost summary
 spur connect <service>             Authenticate with a PM tool
 spur workflow run <file>           Execute a workflow definition

@@ -15,6 +15,6 @@ The canonical list lives in [`crates/spur-license/resources/default_policy.json`
 
 ## Upgrading to Pro
 
-Run `spur auth login --key <YOUR-KEY>` once you have a license key. The tool persists the activation locally and the next `spur watch` comes up as Pro.
+Run `spur auth login --key <YOUR-KEY>` once you have a license key. The tool persists the activation locally and the next `spur tui` comes up as Pro.
 
 If you don't have a key yet, see [Try Pro](try-pro.md).
