@@ -1438,17 +1438,83 @@ impl View for SessionDetailView {
                 worker_session,
                 status,
             } => {
-                // The inline executor card (rendered from lineage) already
-                // reflects the terminal state. A separate Think entry here
-                // was redundant noise — and couldn't correlate back to the
-                // originating Delegate entry anyway (event lacks request_id).
-                //
-                // Edge case: if worker setup failed before WorkerSpawned
-                // (no executor node, no inline card), this no-op means the
-                // only failure signal is the brain's own response text.
-                // Acceptable — setup failures are rare and the brain always
-                // reports the error in its next message.
-                let _ = (worker_session, status);
+                // Update the matching Delegate trace entry so its status
+                // renders correctly even when lineage isn't yet available.
+                // worker_session.0 carries the request_id / executor_id.
+                let status_label = match status {
+                    spur_acp::DelegationStatus::Success => "done",
+                    spur_acp::DelegationStatus::Failed { .. } => "failed",
+                    spur_acp::DelegationStatus::Conflict { .. } => "conflict",
+                    spur_acp::DelegationStatus::Timeout => "timed out",
+                    spur_acp::DelegationStatus::Rejected { .. } => "rejected",
+                    spur_acp::DelegationStatus::Modified { .. } => "modified",
+                    spur_acp::DelegationStatus::TimedOut { .. } => "timed out",
+                    spur_acp::DelegationStatus::Cancelled { .. } => "cancelled",
+                    _ => "completed",
+                };
+                self.react_trace
+                    .update_delegate_status(&worker_session.0, status_label);
+            }
+
+            SpurEventBody::PromptDispatched {
+                session,
+                turn_kind,
+                continuations_count,
+            } => {
+                if session.0 != self.session_id.0 {
+                    return;
+                }
+                // Friendly trace note when the brain is re-entered with
+                // worker continuations (autonomous or merged turn).
+                let note = match turn_kind.as_str() {
+                    "continuation_only" => {
+                        if *continuations_count == 1 {
+                            "▸ Brain resuming with 1 worker result".to_string()
+                        } else {
+                            format!(
+                                "▸ Brain resuming with {} worker results",
+                                continuations_count
+                            )
+                        }
+                    }
+                    "merged" => {
+                        if *continuations_count == 1 {
+                            "▸ Merging user message with 1 worker result".to_string()
+                        } else {
+                            format!(
+                                "▸ Merging user message with {} worker results",
+                                continuations_count
+                            )
+                        }
+                    }
+                    _ => return, // user_only — no note needed
+                };
+                self.react_trace.push(TraceEntry {
+                    kind: TraceKind::Think,
+                    text: note,
+                    timestamp: Self::now_stamp(),
+                    #[cfg(feature = "markdown")]
+                    markdown: None,
+                });
+            }
+
+            SpurEventBody::ContinuationDropped {
+                delegation_id,
+                reason,
+            } => {
+                // This is a system-level event without session scoping;
+                // show it for the active session so the user knows a
+                // promised continuation was lost.
+                self.react_trace.push(TraceEntry {
+                    kind: TraceKind::Observe { payload: None },
+                    text: format!(
+                        "⚠ Continuation dropped for {}: {:?}",
+                        delegation_id, reason
+                    ),
+                    timestamp: Self::now_stamp(),
+                    #[cfg(feature = "markdown")]
+                    markdown: None,
+                });
             }
 
             SpurEventBody::CostUpdate {
@@ -2728,6 +2794,59 @@ mod composer_routing_tests {
 mod tests {
     use super::*;
 
+    fn make_view() -> SessionDetailView {
+        use spur_acp::AgentConfig;
+        use std::sync::Arc;
+        SessionDetailView::new(
+            spur_acp::SessionId("s".to_string()),
+            "claude".to_string(),
+            "brain".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(AgentConfig::with_defaults("claude")),
+            Vec::new(),
+        )
+    }
+
+    fn test_ctx() -> crate::views::ViewContext<'static> {
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+            std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        crate::views::ViewContext {
+            lineage: &LINEAGE,
+            brain_status: &crate::app::BrainStatus::Idle,
+            license_badge: None,
+            flag_summary: None,
+        }
+    }
+
+    fn prompt_dispatched_event(
+        session: &spur_acp::SessionId,
+        turn_kind: &str,
+        continuations_count: usize,
+    ) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::PromptDispatched {
+            session: session.clone(),
+            turn_kind: turn_kind.into(),
+            continuations_count,
+        })
+    }
+
+    fn continuation_dropped_event(delegation_id: &str) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::ContinuationDropped {
+            delegation_id: delegation_id.into(),
+            reason: spur_acp::domain::events::ContinuationDropReason::SessionSwap,
+        })
+    }
+
+    fn delegation_completed_event(
+        worker_session: &str,
+        status: spur_acp::DelegationStatus,
+    ) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::DelegationCompleted {
+            worker_session: spur_acp::SessionId(worker_session.into()),
+            status,
+        })
+    }
+
     #[test]
     fn new_view_defaults_cleared_false_and_no_ready_banner() {
         let view =
@@ -2889,5 +3008,105 @@ mod tests {
         view.reset_for_clear();
         assert_eq!(view.last_persisted_draft, "");
         assert!(view.last_draft_change_at.is_none());
+    }
+
+    #[test]
+    fn prompt_dispatched_continuation_only_pushes_think_entry() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.handle_spur_event(
+            &prompt_dispatched_event(&sid, "continuation_only", 3),
+            &test_ctx(),
+        );
+        let entries = v.react_trace.entries_for_test();
+        let last = entries.last().unwrap();
+        assert!(matches!(last.kind, TraceKind::Think));
+        assert!(last.text.contains("Brain resuming with 3 worker results"));
+    }
+
+    #[test]
+    fn prompt_dispatched_merged_pushes_think_entry() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.handle_spur_event(
+            &prompt_dispatched_event(&sid, "merged", 1),
+            &test_ctx(),
+        );
+        let entries = v.react_trace.entries_for_test();
+        let last = entries.last().unwrap();
+        assert!(matches!(last.kind, TraceKind::Think));
+        assert!(last.text.contains("Merging user message with 1 worker result"));
+    }
+
+    #[test]
+    fn prompt_dispatched_user_only_is_no_op() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        let before = v.react_trace.entry_count();
+        v.handle_spur_event(
+            &prompt_dispatched_event(&sid, "user_only", 0),
+            &test_ctx(),
+        );
+        assert_eq!(v.react_trace.entry_count(), before);
+    }
+
+    #[test]
+    fn prompt_dispatched_different_session_is_ignored() {
+        let mut v = make_view();
+        let other = spur_acp::SessionId("other".into());
+        let before = v.react_trace.entry_count();
+        v.handle_spur_event(
+            &prompt_dispatched_event(&other, "continuation_only", 2),
+            &test_ctx(),
+        );
+        assert_eq!(v.react_trace.entry_count(), before);
+    }
+
+    #[test]
+    fn continuation_dropped_pushes_observe_entry() {
+        let mut v = make_view();
+        v.handle_spur_event(&continuation_dropped_event("del-42"), &test_ctx());
+        let entries = v.react_trace.entries_for_test();
+        let last = entries.last().unwrap();
+        assert!(matches!(last.kind, TraceKind::Observe { .. }));
+        assert!(last.text.contains("Continuation dropped for del-42"));
+    }
+
+    #[test]
+    fn delegation_completed_updates_delegate_status() {
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        // Seed a delegation request so the trace has a Delegate entry.
+        v.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::DelegationRequested {
+                from: sid.clone(),
+                to_agent: "codex".into(),
+                task: "fix bug".into(),
+                request_id: "req-1".into(),
+                delegation_plan: None,
+                issue_id: None,
+            }),
+            &test_ctx(),
+        );
+        // Attach executor_id (simulating DelegationDispatched).
+        v.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::DelegationDispatched {
+                from: sid.clone(),
+                request_id: "req-1".into(),
+                executor_id: "exec-1".into(),
+            }),
+            &test_ctx(),
+        );
+        // Emit completion.
+        v.handle_spur_event(
+            &delegation_completed_event("exec-1", spur_acp::DelegationStatus::Success),
+            &test_ctx(),
+        );
+        let entries = v.react_trace.entries_for_test();
+        let delegate_entry = entries.iter().find(|e| matches!(e.kind, TraceKind::Delegate { .. })).unwrap();
+        match &delegate_entry.kind {
+            TraceKind::Delegate { status, .. } => assert_eq!(status, "done"),
+            other => panic!("expected Delegate, got {:?}", other),
+        }
     }
 }

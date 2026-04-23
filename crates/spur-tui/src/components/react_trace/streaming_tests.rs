@@ -104,6 +104,37 @@ fn turn_complete_final_code_fence_renders_styled() {
     assert!(stream.is_finalized());
 }
 
+/// TI.4 — append_message after force_flush_all must not panic.
+///
+/// Regression: append_message coalesced into the last AgentMessage entry
+/// regardless of whether its markdown stream was finalized by flush_final.
+/// A late chunk (or a new turn's first chunk) for the same agent would
+/// trigger the debug_assert panic in MarkdownStream::append.
+#[test]
+fn append_message_after_turn_complete_creates_new_entry() {
+    let mut trace = ReactTrace::new_for_tests();
+    trace.append_message("First turn", "claude", "10:00".into());
+    trace.force_flush_all(&StateLookup::empty());
+
+    // After TurnComplete the stream is finalized; a new chunk for the same
+    // agent must start a fresh entry rather than violating the contract.
+    trace.append_message("Second turn", "claude", "10:01".into());
+
+    let entries = trace.entries_for_tests();
+    assert_eq!(entries.len(), 2, "must create two separate AgentMessage entries");
+
+    let first = entries[0].markdown.as_ref().expect("first entry has stream");
+    let second = entries[1].markdown.as_ref().expect("second entry has stream");
+
+    assert!(first.is_finalized(), "first stream must remain finalized");
+    assert!(!second.is_finalized(), "second stream must not be finalized");
+
+    let (_, first_tail) = first.items_and_tail();
+    let (_, second_tail) = second.items_and_tail();
+    assert_eq!(first_tail, "", "first stream tail must be empty after flush_final");
+    assert_eq!(second_tail, "Second turn", "second stream must contain new text in tail");
+}
+
 /// TI.3 — open code fence containing `\n\n` must not busy-loop.
 ///
 /// Under the stateless heuristic, this tail matches \n\n+content but
