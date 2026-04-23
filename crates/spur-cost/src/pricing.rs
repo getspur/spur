@@ -216,7 +216,7 @@ impl PricingRegistry {
     /// Look up pricing for a model name, resolving aliases.
     ///
     /// The lookup is case-insensitive. If the exact model is not found,
-    /// aliases are tried, then a substring match against known models.
+    /// registered aliases are tried. Unknown models return `None`.
     pub fn get(&self, model: &str) -> Option<&ModelPricing> {
         let key = model.to_lowercase();
 
@@ -229,13 +229,6 @@ impl PricingRegistry {
         if let Some(canonical) = self.aliases.get(&key) {
             if let Some(p) = self.models.get(canonical) {
                 return Some(p);
-            }
-        }
-
-        // Substring match (fuzzy)
-        for (k, v) in &self.models {
-            if k.contains(&key) || key.contains(k) {
-                return Some(v);
             }
         }
 
@@ -515,10 +508,11 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_substring_match() {
+    fn test_registry_requires_exact_or_alias_match() {
         let reg = PricingRegistry::with_builtin_prices();
-        // "sonnet" should match "claude-sonnet-4"
-        assert!(reg.get("sonnet").is_some());
+        assert!(reg.get("sonnet").is_none());
+        assert!(reg.get("").is_none());
+        assert!(reg.get("claude-sonnet").is_some());
     }
 
     #[test]
