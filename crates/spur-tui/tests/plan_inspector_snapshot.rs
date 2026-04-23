@@ -291,7 +291,7 @@ fn plan_inspector_renders_wide_lane_board() {
     assert!(buffer_contains(&buffer, "Stage 0"));
     assert!(buffer_contains(&buffer, "Stage 1"));
     assert!(buffer_contains(&buffer, "Task detail"));
-    assert!(buffer_contains(&buffer, "live:run"));
+    assert!(buffer_contains(&buffer, "codex:run"));
 }
 
 #[test]
@@ -437,7 +437,7 @@ fn plan_inspector_prefers_live_executor_state_over_stale_higher_id() {
         .unwrap();
     let buffer = terminal.backend().buffer().clone();
     assert!(
-        buffer_contains(&buffer, "live:run"),
+        buffer_contains(&buffer, "codex:run"),
         "board should surface the live executor rather than a stale higher-id executor"
     );
     assert!(
@@ -445,3 +445,145 @@ fn plan_inspector_prefers_live_executor_state_over_stale_higher_id() {
         "detail pane should join against the live executor for the selected task"
     );
 }
+
+
+#[test]
+fn plan_inspector_renders_blocked_deps_and_retry_chips() {
+    let backend = TestBackend::new(160, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = plan_store_with_blocked_and_retry();
+    let lineage = sample_lineage();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+    };
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    // Navigate to Stage 1 (child task) so detail pane shows blocked_by.
+    let action = view.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &ctx);
+    assert!(action.is_none(), "navigation should remain in-view");
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    assert!(
+        buffer_contains(&buffer, "blocked:"),
+        "board should show blocked chip for tasks with unsatisfied dependencies"
+    );
+    assert!(
+        buffer_contains(&buffer, "↑parent"),
+        "board should show upstream dependency hint"
+    );
+    assert!(
+        buffer_contains(&buffer, "retry 2/3"),
+        "board should show retry chip when attempt > 1"
+    );
+    assert!(
+        buffer_contains(&buffer, "blocked_by:"),
+        "detail pane should render blocked_by with prominent styling"
+    );
+}
+
+#[test]
+fn plan_inspector_stacked_mode_shows_meta_chips() {
+    let backend = TestBackend::new(80, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = plan_store_with_blocked_and_retry();
+    let lineage = sample_lineage();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+    };
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    assert!(
+        buffer_contains(&buffer, "blocked:"),
+        "stacked board should show blocked chip"
+    );
+    assert!(
+        buffer_contains(&buffer, "↑parent"),
+        "stacked board should show dependency hint"
+    );
+    assert!(
+        buffer_contains(&buffer, "retry 2/3"),
+        "stacked board should show retry chip"
+    );
+}
+
+fn plan_store_with_blocked_and_retry() -> PlanProjectionStore {
+    let mut store = PlanProjectionStore::default();
+    store.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+        session_id: SessionId("brain-1".into()),
+        snapshot: Box::new(PlanSnapshot {
+            plan_id: "plan-1".into(),
+            status: "running".into(),
+            progress: "0/2 done".into(),
+            next_action: "waiting for dependencies".into(),
+            ready_to_merge: false,
+            counts: PlanSnapshotCounts {
+                pending: 2,
+                ..Default::default()
+            },
+            tasks: vec![
+                PlanSnapshotTask {
+                    task_id: "parent".into(),
+                    task_name: "parent".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-parent".into()),
+                    status: "approved".into(),
+                    attempt: 1,
+                    max_attempts: 3,
+                    depends_on: vec![],
+                    blocked_by: vec![],
+                    unblocks: vec!["child".into()],
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: None,
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: vec![],
+                    next_action: "".into(),
+                },
+                PlanSnapshotTask {
+                    task_id: "child".into(),
+                    task_name: "child".into(),
+                    agent: "kiro".into(),
+                    issue_id: Some("bd-child".into()),
+                    status: "pending".into(),
+                    attempt: 2,
+                    max_attempts: 3,
+                    depends_on: vec!["parent".into()],
+                    blocked_by: vec!["parent".into()],
+                    unblocks: vec![],
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: None,
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: vec![],
+                    next_action: "wait".into(),
+                },
+            ],
+        }),
+    }));
+    store
+}
+
+

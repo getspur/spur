@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph},
     Frame,
 };
 use spur_acp::{SessionId, SpurEvent};
@@ -148,7 +148,7 @@ impl View for PlanInspectorView {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         let chunks = Layout::vertical([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
@@ -158,6 +158,7 @@ impl View for PlanInspectorView {
         if let Some(plan) = ctx.plan_projection.current_for_session(&self.session_id) {
             self.ensure_selection(plan);
             let selected = self.selected_task(plan);
+            let selected_stage_idx = selected.map(|t| t.stage_idx).unwrap_or(0);
             let live_node =
                 selected
                     .and_then(|task| task.issue_id.as_deref())
@@ -168,20 +169,63 @@ impl View for PlanInspectorView {
                         )
                     });
 
+            // ── Header ──────────────────────────────────────────────────────
+            let header_rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
+                .split(chunks[0]);
+            let header_cols = Layout::horizontal([
+                Constraint::Percentage(45),
+                Constraint::Percentage(55),
+            ])
+            .split(header_rows[0]);
+
+            let status_color = plan_status_color(&plan.status);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(
-                        format!(" Plan Inspector {} ", plan.plan_id),
+                        format!(" Plan: {} ", plan.plan_id),
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(format!(
-                        "{}  {}  next: {}",
-                        plan.status, plan.progress, plan.next_action
-                    )),
+                    Span::styled(
+                        format!(" {} ", plan.status.to_uppercase()),
+                        Style::default()
+                            .fg(status_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("  {} ", plan.progress)),
                 ])),
-                chunks[0],
+                header_cols[0],
+            );
+
+            let total_tasks = plan.counts.pending
+                + plan.counts.ready
+                + plan.counts.dispatched
+                + plan.counts.awaiting_review
+                + plan.counts.approved
+                + plan.counts.rejected
+                + plan.counts.failed
+                + plan.counts.cancelled;
+            let gauge_ratio = if total_tasks == 0 {
+                0.0
+            } else {
+                plan.counts.approved as f64 / total_tasks as f64
+            };
+            frame.render_widget(
+                Gauge::default()
+                    .ratio(gauge_ratio.clamp(0.0, 1.0))
+                    .label(format!("{} / {} done", plan.counts.approved, total_tasks))
+                    .gauge_style(Style::default().fg(Color::Green))
+                    .style(Style::default().fg(Color::DarkGray)),
+                header_cols[1],
+            );
+
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" next: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(truncate_display(&plan.next_action, area.width.saturating_sub(8) as usize)),
+                ])),
+                header_rows[1],
             );
 
             if !self.stacked_mode {
@@ -194,6 +238,7 @@ impl View for PlanInspectorView {
                         board_area,
                         plan,
                         selected_task_id,
+                        selected_stage_idx,
                         ctx.lineage,
                     );
                 }
@@ -263,4 +308,27 @@ impl View for PlanInspectorView {
     }
 
     fn tick(&mut self) {}
+}
+
+fn plan_status_color(status: &str) -> Color {
+    match status {
+        "running" | "active" => Color::Yellow,
+        "approved" | "completed" | "success" => Color::Green,
+        "failed" | "rejected" | "error" => Color::Red,
+        "cancelled" => Color::Magenta,
+        _ => Color::DarkGray,
+    }
+}
+
+fn truncate_display(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = s[..end].trim_end().to_string();
+    out.push('…');
+    out
 }
