@@ -446,7 +446,6 @@ fn plan_inspector_prefers_live_executor_state_over_stale_higher_id() {
     );
 }
 
-
 #[test]
 fn plan_inspector_renders_blocked_deps_and_retry_chips() {
     let backend = TestBackend::new(160, 32);
@@ -585,5 +584,3 @@ fn plan_store_with_blocked_and_retry() -> PlanProjectionStore {
     }));
     store
 }
-
-

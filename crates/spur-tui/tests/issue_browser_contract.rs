@@ -59,10 +59,7 @@ fn sample_detail_event(id: &str) -> IssueDetailEvent {
 #[test]
 fn empty_browser_esc_navigates_back() {
     let mut view = IssueBrowserView::default();
-    let action = view.handle_key(
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    let action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(
         matches!(action, Some(Action::NavigateTo(ViewId::Dashboard))),
         "expected NavigateTo(Dashboard), got {:?}",
@@ -220,10 +217,7 @@ fn esc_while_loaded_closes_detail_not_navigates() {
         &test_ctx(),
     );
 
-    let action = view.handle_key(
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    let action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(action.is_none());
     assert!(!view.issue_detail_visible());
 }

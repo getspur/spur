@@ -19,8 +19,13 @@ use super::View;
 #[derive(Debug, Clone)]
 pub enum IssueFocus {
     None,
-    Loading { id: String },
-    Loaded { id: String, issue: Box<spur_pm::Issue> },
+    Loading {
+        id: String,
+    },
+    Loaded {
+        id: String,
+        issue: Box<spur_pm::Issue>,
+    },
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -133,43 +138,31 @@ impl IssueBrowserView {
             }
 
             // Enter — toggle detail
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                match &self.issue_focus {
-                    IssueFocus::Loaded { .. } => {
-                        self.issue_focus = IssueFocus::None;
+            KeyCode::Enter if key.modifiers.is_empty() => match &self.issue_focus {
+                IssueFocus::Loaded { .. } => {
+                    self.issue_focus = IssueFocus::None;
+                    None
+                }
+                _ => {
+                    if let Some(id) = self
+                        .issues_panel
+                        .selected_id(&self.tracked_issues)
+                        .map(String::from)
+                    {
+                        self.issue_focus = IssueFocus::Loading { id: id.clone() };
+                        self.issue_detail_pane.reset();
+                        Some(Action::Issue(IssueAction::ViewDetail { id }))
+                    } else {
                         None
                     }
-                    _ => {
-                        if let Some(id) = self
-                            .issues_panel
-                            .selected_id(&self.tracked_issues)
-                            .map(String::from)
-                        {
-                            self.issue_focus = IssueFocus::Loading {
-                                id: id.clone(),
-                            };
-                            self.issue_detail_pane.reset();
-                            Some(Action::Issue(IssueAction::ViewDetail { id }))
-                        } else {
-                            None
-                        }
-                    }
                 }
-            }
+            },
 
             // Status actions
-            KeyCode::Char('o') if key.modifiers.is_empty() => {
-                self.update_status("open")
-            }
-            KeyCode::Char('w') if key.modifiers.is_empty() => {
-                self.update_status("in_progress")
-            }
-            KeyCode::Char('b') if key.modifiers.is_empty() => {
-                self.update_status("blocked")
-            }
-            KeyCode::Char('d') if key.modifiers.is_empty() => {
-                self.update_status("closed")
-            }
+            KeyCode::Char('o') if key.modifiers.is_empty() => self.update_status("open"),
+            KeyCode::Char('w') if key.modifiers.is_empty() => self.update_status("in_progress"),
+            KeyCode::Char('b') if key.modifiers.is_empty() => self.update_status("blocked"),
+            KeyCode::Char('d') if key.modifiers.is_empty() => self.update_status("closed"),
             KeyCode::Char('W') if key.modifiers.is_empty() => {
                 let id = match &self.issue_focus {
                     IssueFocus::Loaded { id, .. } => Some(id.clone()),
@@ -246,7 +239,8 @@ impl IssueBrowserView {
                 .style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, inner);
         } else {
-            self.issues_panel.render(&self.tracked_issues, frame, chunks[0]);
+            self.issues_panel
+                .render(&self.tracked_issues, frame, chunks[0]);
         }
 
         // ── Detail or placeholder ────────────────────────────────────────

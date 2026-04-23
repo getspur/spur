@@ -227,13 +227,15 @@ async fn get_plan_status_preserves_in_progress_persisted_children() {
         "persisted projection must keep in_progress child tasks"
     );
     assert!(
-        tasks.iter().any(|task| {
-            task["task_id"] == "t1" && task["status"] == "dispatched"
-        }),
+        tasks
+            .iter()
+            .any(|task| { task["task_id"] == "t1" && task["status"] == "dispatched" }),
         "active child must still appear as dispatched: {projected}"
     );
     assert!(
-        tasks.iter().any(|task| task["task_id"] == "t2" && task["status"] == "pending"),
+        tasks
+            .iter()
+            .any(|task| task["task_id"] == "t2" && task["status"] == "pending"),
         "dependent sibling must remain visible after re-projection: {projected}"
     );
 }
