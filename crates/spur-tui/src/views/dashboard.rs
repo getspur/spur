@@ -78,6 +78,12 @@ pub struct DashboardView {
     /// True when at least one agent is registered. Controls empty-state
     /// rendering: false → setup-nudge, true → example-rich or classic splash.
     agents_configured: bool,
+    /// Rotating example prompts shown on the empty Dashboard state.
+    example_prompts: Vec<String>,
+    /// Current index into `example_prompts`.
+    example_index: usize,
+    /// When the example prompt last rotated (for 8s auto-advance).
+    example_last_rotated: Instant,
 }
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
@@ -147,6 +153,15 @@ impl DashboardView {
             layout_zoomed: false,
             mode: DashboardMode::Navigate,
             agents_configured: true,
+            example_prompts: vec![
+                "Refactor auth to async/await and benchmark each endpoint".into(),
+                "Add input validation to all API handlers".into(),
+                "Find the memory leak in the worker pool".into(),
+                "Write unit tests for the retry loop".into(),
+                "Migrate from serde_json to simd-json".into(),
+            ],
+            example_index: 0,
+            example_last_rotated: Instant::now(),
         }
     }
 
@@ -156,6 +171,25 @@ impl DashboardView {
 
     pub fn agents_configured(&self) -> bool {
         self.agents_configured
+    }
+
+    /// Advance rotating example prompts. Call from App::tick().
+    pub fn tick(&mut self) {
+        if self.example_prompts.len() > 1 {
+            let elapsed = self.example_last_rotated.elapsed().as_secs();
+            if elapsed >= 8 {
+                self.example_index = (self.example_index + 1) % self.example_prompts.len();
+                self.example_last_rotated = Instant::now();
+            }
+        }
+    }
+
+    /// Cycle to the next example prompt (e.g. on Tab press).
+    pub fn cycle_example(&mut self) {
+        if !self.example_prompts.is_empty() {
+            self.example_index = (self.example_index + 1) % self.example_prompts.len();
+            self.example_last_rotated = Instant::now();
+        }
     }
 
     pub fn tracked_issues(&self) -> &[spur_pm::IssueSummary] {
@@ -559,6 +593,11 @@ impl DashboardView {
         flag_summary: Option<(usize, usize)>,
         lineage: &ExecutorLineage,
     ) {
+        let example = self
+            .example_prompts
+            .get(self.example_index)
+            .cloned()
+            .unwrap_or_default();
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -569,19 +608,28 @@ impl DashboardView {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "Multi-agent orchestrator",
+                "Type a task below. SPUR breaks it into steps and delegates",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "to specialist agents -- you review before anything merges.",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "Type a task below to start",
-                Style::default().fg(Color::DarkGray),
+                "Try asking:",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
             )),
+            Line::from(vec![
+                Span::styled("-> ", Style::default().fg(Color::DarkGray)),
+                Span::styled(example, Style::default().fg(Color::Cyan)),
+            ]),
             Line::from(""),
-            Line::from(Span::styled(
-                "Press [s] to browse sessions",
-                Style::default().fg(Color::DarkGray),
-            )),
+            Line::from(vec![
+                Span::styled("[Tab] cycle examples  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("[s] browse sessions  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("[?] help", Style::default().fg(Color::DarkGray)),
+            ]),
         ];
         let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
 
@@ -1214,6 +1262,11 @@ impl DashboardView {
                 Some(Action::ScrollDown)
             }
             KeyCode::Tab => {
+                // In empty Dashboard state (no input, no focused node), Tab cycles examples.
+                if self.focused_node.is_none() && self.input_bar.text().is_empty() {
+                    self.cycle_example();
+                    return None;
+                }
                 self.focused_panel = match self.focused_panel {
                     Panel::Agents => Panel::Log,
                     Panel::Log => Panel::Agents,
