@@ -33,16 +33,25 @@ pub(crate) fn beads_journal_path(repo_root: &std::path::Path) -> std::path::Path
 }
 
 pub(crate) async fn monitor_journal_appends(path: std::path::PathBuf, notify: Arc<Notify>) {
-    let mut last_len = tokio::fs::metadata(&path)
-        .await
-        .ok()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let mut last_len = match tokio::fs::metadata(&path).await {
+        Ok(meta) => meta.len(),
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                ?path,
+                "journal metadata unavailable at startup; disabling poller"
+            );
+            return;
+        }
+    };
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let next_len = match tokio::fs::metadata(&path).await {
             Ok(meta) => meta.len(),
-            Err(_) => break,
+            Err(error) => {
+                tracing::debug!(%error, ?path, "journal metadata unavailable; retrying");
+                continue;
+            }
         };
         if next_len > last_len {
             last_len = next_len;
