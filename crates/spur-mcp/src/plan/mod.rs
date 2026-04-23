@@ -14,6 +14,7 @@ pub mod proposers;
 pub mod reconciler;
 pub mod signal_watcher;
 pub mod signals;
+pub mod snapshot;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;

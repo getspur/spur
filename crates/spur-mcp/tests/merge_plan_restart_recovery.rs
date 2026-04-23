@@ -165,6 +165,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         Some("spur/brain-snapshot-test"),
         Some(base_snapshot_oid.as_str()),
         Some("submit_plan"),
+        Some(&spur_acp::SessionId("brain".into())),
     )
     .await;
 

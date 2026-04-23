@@ -51,6 +51,7 @@ impl WorkerStreams {
             agent_kind: kind,
             now_stamp: now_stamp_hhmm,
             tool_depth: depths,
+            skip_plan_trace: false,
         };
         dispatch_session_update(trace, update, &mut ctx);
     }

@@ -223,6 +223,21 @@ impl Reconciler {
         self.automation = Some(automation);
     }
 
+    async fn emit_snapshot_for_plan(&self, plan_id: &str) {
+        let Some(sink) = self
+            .dispatch
+            .as_ref()
+            .and_then(|dispatch| dispatch.event_sink.as_deref())
+        else {
+            return;
+        };
+
+        match crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id).await {
+            Ok(projected) => crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected),
+            Err(error) => tracing::warn!(%plan_id, "failed to project plan snapshot: {error}"),
+        }
+    }
+
     pub async fn run(self, cancel: tokio::sync::oneshot::Receiver<()>) {
         let mut interval = self.config.base_interval;
         let journal_wake = self.journal_wake.clone();
@@ -363,12 +378,15 @@ impl Reconciler {
                 continue;
             }
 
+            self.emit_snapshot_for_plan(plan_id).await;
+
             let pm = Arc::clone(&self.pm);
             let plan_id = plan_id.to_string();
             let task_id = task.spec.task_id.clone();
             let issue_id = summary.id.clone();
             let delegation_id_for_completion = delegation_id.clone();
             let fast_forward = Arc::clone(&self.fast_forward);
+            let event_sink = dispatch.event_sink.clone();
             dispatch.task_tracker.spawn(async move {
                 let Ok(result) = rx.await else {
                     tracing::warn!(
@@ -401,6 +419,21 @@ impl Reconciler {
                         %delegation_id_for_completion,
                         "reconciler completion persistence failed: {error}"
                     );
+                }
+
+                if let Some(sink) = event_sink.as_deref() {
+                    match crate::plan::projector::project_plan_from_beads(pm.as_ref(), &plan_id)
+                        .await
+                    {
+                        Ok(projected) => {
+                            crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected)
+                        }
+                        Err(error) => tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            "failed to project plan snapshot after completion: {error}"
+                        ),
+                    }
                 }
             });
 

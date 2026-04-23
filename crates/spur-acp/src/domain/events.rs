@@ -43,7 +43,7 @@ pub struct ReviewPayload {
     pub chosen_matches_dispatched: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiffSummary {
     pub files_changed: usize,
     pub insertions: usize,
@@ -175,6 +175,66 @@ pub struct IssueDetailEvent {
     pub due_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Canonical durable plan state rendered by the plan inspector UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanSnapshot {
+    pub plan_id: String,
+    pub status: String,
+    pub progress: String,
+    pub next_action: String,
+    pub ready_to_merge: bool,
+    pub counts: PlanSnapshotCounts,
+    pub tasks: Vec<PlanSnapshotTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PlanSnapshotCounts {
+    pub pending: u32,
+    pub ready: u32,
+    pub dispatched: u32,
+    pub awaiting_review: u32,
+    pub approved: u32,
+    pub rejected: u32,
+    pub failed: u32,
+    pub cancelled: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanSnapshotTask {
+    pub task_id: String,
+    pub task_name: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    pub status: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unblocks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_summary: Option<DiffSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub next_action: String,
 }
 
 /// Snapshot of licensing state mirrored into the ACP event bus.
@@ -569,6 +629,12 @@ pub enum SpurEventBody {
         executor_id: String,
         path: std::path::PathBuf,
         kind: FileTouchKind,
+    },
+
+    /// Durable beads-backed plan state for a session.
+    PlanSnapshotUpdated {
+        session_id: SessionId,
+        snapshot: Box<PlanSnapshot>,
     },
 
     /// Brain submitted a review verdict on a plan task.

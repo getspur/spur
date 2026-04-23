@@ -22,8 +22,8 @@ pub use registry::AgentRegistry;
 
 // Re-export domain types
 pub use crate::domain::events::{
-    Artifact, DiffSummary, FileTouchKind, LifecycleState, LoadOutcome, ReviewDecision, ReviewKind,
-    ReviewPayload, Role,
+    Artifact, DiffSummary, FileTouchKind, LifecycleState, LoadOutcome, PlanSnapshot,
+    PlanSnapshotCounts, PlanSnapshotTask, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };
 pub use domain::{
     ArtifactKind, CancelOutcome, CancellationControl, DelegationId, DelegationPlan,

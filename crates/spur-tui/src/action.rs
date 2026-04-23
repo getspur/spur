@@ -151,6 +151,7 @@ pub enum ViewId {
     Dashboard,
     SessionDetail(SessionId),
     SessionPicker,
+    PlanInspector(SessionId),
     #[cfg(feature = "markdown")]
     MermaidOverlay(SessionId),
 }

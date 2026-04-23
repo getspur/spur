@@ -59,6 +59,7 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
             base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
             execution_mode: None,
+            brain_session_id: Some("brain-1".into()),
         },
         AuditSentinelKind::EpicCompletion {
             outcome: spur_mcp::plan::audit_sentinel::EpicCompletionOutcome::AllApproved,

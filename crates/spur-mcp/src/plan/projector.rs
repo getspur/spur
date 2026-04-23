@@ -324,6 +324,20 @@ pub fn plan_submit_base_snapshot_oid(audits: &[AuditSentinelKind]) -> Option<Str
     })
 }
 
+pub fn plan_submit_brain_session_id(audits: &[AuditSentinelKind]) -> Option<BrainSessionId> {
+    audits.iter().rev().find_map(|audit| {
+        if let AuditSentinelKind::PlanSubmit {
+            brain_session_id: Some(brain_session_id),
+            ..
+        } = audit
+        {
+            Some(BrainSessionId::new(SessionId(brain_session_id.clone())))
+        } else {
+            None
+        }
+    })
+}
+
 pub async fn project_plan_from_beads(
     pm: &spur_pm::PmService,
     plan_id: &str,
@@ -441,10 +455,13 @@ pub async fn project_plan_from_beads(
 
     recompute_open_statuses(&mut entries);
 
+    let brain_session_id = plan_submit_brain_session_id(&epic_audits)
+        .unwrap_or_else(|| BrainSessionId::new(SessionId(format!("persisted-plan:{plan_id}"))));
+
     Ok(PlanState {
         plan_id: plan_id.to_string(),
         tasks: entries,
-        brain_session_id: BrainSessionId::new(SessionId(format!("persisted-plan:{plan_id}"))),
+        brain_session_id,
         base_snapshot_branch: plan_submit_base_snapshot(&epic_audits),
         base_snapshot_oid: plan_submit_base_snapshot_oid(&epic_audits),
         merge_state: crate::plan::PlanMergeState::NotStarted,
@@ -702,10 +719,32 @@ mod tests {
             base_snapshot_branch: Some("refs/heads/main".into()),
             base_snapshot_oid: None,
             execution_mode: Some("submit_plan".into()),
+            brain_session_id: None,
         }];
 
         let base_snapshot_branch = super::plan_submit_base_snapshot(&audits);
         assert_eq!(base_snapshot_branch.as_deref(), Some("refs/heads/main"));
+    }
+
+    #[test]
+    fn plan_submit_audit_reconstructs_brain_session_id() {
+        let audits = vec![AuditSentinelKind::PlanSubmit {
+            plan_id: "plan-1".into(),
+            epic_issue_id: "bd-epic".into(),
+            task_ids: vec!["bd-1".into()],
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            execution_mode: Some("submit_plan".into()),
+            brain_session_id: Some("brain-123".into()),
+        }];
+
+        let brain_session_id = super::plan_submit_brain_session_id(&audits);
+        assert_eq!(
+            brain_session_id
+                .as_ref()
+                .map(|id| id.as_session_id().0.as_str()),
+            Some("brain-123")
+        );
     }
 
     #[test]
