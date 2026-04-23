@@ -183,19 +183,19 @@ impl AnalyticsEngine {
             dir.to_string_lossy().replace('\\', "/").replace('\'', "''")
         );
         let sql = format!(
-            "CREATE OR REPLACE VIEW claude_events AS \
-             SELECT \
-                timestamp::TIMESTAMP AS timestamp, \
-                sessionId AS session_id, \
-                'claude' AS agent, \
-                NULLIF(model, '<synthetic>') AS model, \
-                project, \
-                tokenUsage.inputTokens AS input_tokens, \
-                tokenUsage.outputTokens AS output_tokens, \
-                tokenUsage.cacheReadTokens AS cache_read_tokens, \
-                tokenUsage.cacheCreationTokens AS cache_creation_tokens, \
-                costUSD AS cost_usd \
-             FROM read_json_auto('{}', ignore_errors = true)",
+            r#"CREATE OR REPLACE VIEW claude_events AS
+             SELECT
+                timestamp::TIMESTAMP AS timestamp,
+                sessionId AS session_id,
+                'claude' AS agent,
+                NULLIF(message.model, '<synthetic>') AS model,
+                NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
+                message.usage.input_tokens AS input_tokens,
+                message.usage.output_tokens AS output_tokens,
+                message.usage.cache_read_input_tokens AS cache_read_tokens,
+                message.usage.cache_creation_input_tokens AS cache_creation_tokens,
+                costUSD AS cost_usd
+             FROM read_json_auto('{}', filename = true, ignore_errors = true)"#,
             pattern
         );
         self.conn
@@ -993,27 +993,27 @@ mod tests {
         // Write a Claude-style JSONL file
         let jsonl_path = claude_dir.join("2026-04-23.jsonl");
         let mut file = std::fs::File::create(&jsonl_path).unwrap();
-        writeln!(file, r#"{{"timestamp":"2026-04-23T10:00:00Z","sessionId":"sess-1","costUSD":0.05,"tokenUsage":{{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":200,"cacheCreationTokens":0}},"model":"claude-sonnet-4","project":"spur"}}"#).unwrap();
-        writeln!(file, r#"{{"timestamp":"2026-04-23T10:01:00Z","sessionId":"sess-1","costUSD":0.10,"tokenUsage":{{"inputTokens":2000,"outputTokens":1000,"cacheReadTokens":400,"cacheCreationTokens":0}},"model":"claude-sonnet-4","project":"spur"}}"#).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-04-23T10:00:00Z","sessionId":"sess-1","message":{{"usage":{{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}},"model":"claude-sonnet-4","id":"msg_1"}},"costUSD":0.05,"requestId":"req_1"}}"#).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-04-23T10:01:00Z","sessionId":"sess-1","message":{{"usage":{{"input_tokens":2000,"output_tokens":1000,"cache_creation_input_tokens":150,"cache_read_input_tokens":400}},"model":"claude-sonnet-4","id":"msg_2"}},"costUSD":0.10,"requestId":"req_2"}}"#).unwrap();
 
         // Override the view to read from temp dir
         let engine = setup_engine();
         engine
             .conn
             .execute_batch(&format!(
-                "CREATE OR REPLACE VIEW claude_events AS \
-             SELECT \
-                timestamp::TIMESTAMP AS timestamp, \
-                sessionId AS session_id, \
-                'claude' AS agent, \
-                NULLIF(model, '<synthetic>') AS model, \
-                project, \
-                tokenUsage.inputTokens AS input_tokens, \
-                tokenUsage.outputTokens AS output_tokens, \
-                tokenUsage.cacheReadTokens AS cache_read_tokens, \
-                tokenUsage.cacheCreationTokens AS cache_creation_tokens, \
-                costUSD AS cost_usd \
-             FROM read_json_auto('{}', ignore_errors=true)",
+                r#"CREATE OR REPLACE VIEW claude_events AS
+             SELECT
+                timestamp::TIMESTAMP AS timestamp,
+                sessionId AS session_id,
+                'claude' AS agent,
+                NULLIF(message.model, '<synthetic>') AS model,
+                NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
+                message.usage.input_tokens AS input_tokens,
+                message.usage.output_tokens AS output_tokens,
+                message.usage.cache_read_input_tokens AS cache_read_tokens,
+                message.usage.cache_creation_input_tokens AS cache_creation_tokens,
+                costUSD AS cost_usd
+             FROM read_json_auto('{}', filename = true, ignore_errors = true)"#,
                 jsonl_path.to_str().unwrap().replace('\\', "/")
             ))
             .unwrap();
@@ -1024,6 +1024,38 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM claude_events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2, "should have 2 claude events");
+
+        let (project, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens): (
+            String,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = engine
+            .conn
+            .query_row(
+                "SELECT project, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens \
+                 FROM claude_events ORDER BY timestamp LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(project, "spur");
+        assert_eq!(model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(input_tokens, 1000);
+        assert_eq!(output_tokens, 500);
+        assert_eq!(cache_read_tokens, 200);
+        assert_eq!(cache_creation_tokens, 100);
 
         // Query cost-enriched view
         let cost: f64 = engine
