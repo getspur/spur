@@ -104,6 +104,54 @@ fn new_session_with_message_does_not_leak_into_later_sessions() {
 }
 
 #[test]
+fn agent_notification_replay_path_stays_eager_and_does_not_require_history_chunks() {
+    use spur_acp::{
+        ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, SpurEvent,
+        SpurEventBody, TextContent,
+    };
+
+    let mut app = spur_tui::test_support::new_app();
+    let sid = SessionId("resume-live".into());
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "claude".into(),
+            session: sid.clone(),
+        }),
+    );
+
+    let notif = SessionNotification::new(
+        sid.0.clone(),
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            "live replay text",
+        )))),
+    );
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::AgentNotification {
+            session: sid.clone(),
+            notification: Box::new(notif),
+        }),
+    );
+
+    let detail = spur_tui::test_support::session_detail(&app).expect("has detail");
+    let entries = detail.react_trace().entries();
+    assert!(
+        entries.iter().any(|entry| {
+            matches!(
+                &entry.kind,
+                spur_tui::components::react_trace::TraceKind::AgentMessage { agent }
+                    if agent == "claude"
+            ) && entry
+                .markdown
+                .as_ref()
+                .is_some_and(|stream| stream.raw_text().contains("live replay text"))
+        }),
+        "live replay path must still work without SessionHistoryChunk; entries={entries:?}"
+    );
+}
+
+#[test]
 fn kiro_available_notification_populates_registry() {
     use spur_acp::{SessionId, SpurEvent, SpurEventBody};
     use spur_tui::views::View;
