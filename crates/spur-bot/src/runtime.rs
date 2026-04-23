@@ -593,18 +593,12 @@ impl BotRuntime {
                     })
                 };
 
-                if let Some(record) = self.threads.get_mut(&key) {
-                    record.binding = BindingState::Active {
-                        session: session.clone(),
-                        acp_session_id: acp_session_id.clone(),
-                        brain: brain.clone(),
-                    };
-                    record.live_session = Some(session.clone());
-                    record.acp_session_id = Some(acp_session_id.clone());
-                    record.brain = Some(brain.clone());
-                }
-
-                self.session_threads.insert(session.clone(), key.clone());
+                self.bind_active_session(
+                    &key,
+                    session.clone(),
+                    acp_session_id.clone(),
+                    brain.clone(),
+                );
                 self.output_buffers.remove(&session);
                 self.state_store.save(&self.persistable_state())?;
 
@@ -758,6 +752,38 @@ impl BotRuntime {
             )
         });
         still_expects.then_some(key)
+    }
+
+    fn bind_active_session(
+        &mut self,
+        key: &ThreadKey,
+        session: spur_acp::SessionId,
+        acp_session_id: String,
+        brain: String,
+    ) {
+        if let Some(existing_key) = self.session_threads.get(&session).cloned() {
+            debug_assert_eq!(
+                existing_key, *key,
+                "session_threads collision: session already routed to another topic"
+            );
+        }
+
+        if let Some(record) = self.threads.get_mut(key) {
+            if let Some(old_session) = record.live_session.clone() {
+                self.session_threads.remove(&old_session);
+            }
+
+            record.binding = BindingState::Active {
+                session: session.clone(),
+                acp_session_id: acp_session_id.clone(),
+                brain: brain.clone(),
+            };
+            record.live_session = Some(session.clone());
+            record.acp_session_id = Some(acp_session_id);
+            record.brain = Some(brain);
+        }
+
+        self.session_threads.insert(session, key.clone());
     }
 
     /// Send any input that was queued while waiting for a persisted session to
