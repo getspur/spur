@@ -7,6 +7,110 @@ use super::ReactTrace;
 use crate::components::markdown_stream::StateLookup;
 use crate::components::spinner;
 
+#[test]
+fn prepend_entries_shifts_row_anchor_forward_by_prepended_entry_count() {
+    use crate::components::react_trace::types::ScrollAnchor;
+    use crate::components::react_trace::{TraceEntry, TraceKind};
+
+    let mut trace = ReactTrace::new_for_tests();
+    trace.push(TraceEntry {
+        kind: TraceKind::UserMessage,
+        text: "first".into(),
+        timestamp: "10:00:00".into(),
+        markdown: None,
+    });
+    trace.push(TraceEntry {
+        kind: TraceKind::AgentMessage {
+            agent: "claude".into(),
+        },
+        text: "second".into(),
+        timestamp: "10:00:01".into(),
+        markdown: None,
+    });
+    trace.scroll_to_top();
+
+    trace.prepend_entries(vec![
+        TraceEntry {
+            kind: TraceKind::Think,
+            text: "older-a".into(),
+            timestamp: String::new(),
+            markdown: None,
+        },
+        TraceEntry {
+            kind: TraceKind::Think,
+            text: "older-b".into(),
+            timestamp: String::new(),
+            markdown: None,
+        },
+    ]);
+
+    assert!(matches!(
+        trace.anchor_for_tests(),
+        ScrollAnchor::Row {
+            entry_idx: 2,
+            row_within_entry: 0
+        }
+    ));
+}
+
+#[test]
+fn prepend_entries_preserves_following_anchor() {
+    use crate::components::react_trace::{TraceEntry, TraceKind};
+
+    let mut trace = ReactTrace::new_for_tests();
+    trace.push(TraceEntry {
+        kind: TraceKind::UserMessage,
+        text: "tail".into(),
+        timestamp: "10:00:00".into(),
+        markdown: None,
+    });
+    trace.scroll_to_bottom();
+
+    trace.prepend_entries(vec![TraceEntry {
+        kind: TraceKind::Think,
+        text: "older".into(),
+        timestamp: String::new(),
+        markdown: None,
+    }]);
+
+    assert!(matches!(
+        trace.anchor_for_tests(),
+        crate::components::react_trace::types::ScrollAnchor::Following
+    ));
+}
+
+#[test]
+fn prepend_entries_invalidates_layout_cache_from_zero() {
+    use crate::components::react_trace::{TraceEntry, TraceKind};
+
+    let mut trace = ReactTrace::new_for_tests();
+    trace.push(TraceEntry {
+        kind: TraceKind::UserMessage,
+        text: "tail".into(),
+        timestamp: "10:00:00".into(),
+        markdown: None,
+    });
+    trace.seed_line_cache_for_tests(80, &std::collections::HashMap::new());
+
+    let generation_before = trace.generation_for_tests();
+    trace.prepend_entries(vec![TraceEntry {
+        kind: TraceKind::Think,
+        text: "older".into(),
+        timestamp: String::new(),
+        markdown: None,
+    }]);
+
+    assert!(
+        trace.generation_for_tests() > generation_before,
+        "prepend must invalidate cached layouts by bumping generation"
+    );
+    assert_eq!(
+        trace.dirty_from_for_tests(),
+        Some(0),
+        "prepend must force a rebuild from the front boundary"
+    );
+}
+
 /// TI.2 — the original ghost-text failing case.
 ///
 /// Setup: a first chunk with an authoritative block boundary (`\n\n` + content)
@@ -121,18 +225,37 @@ fn append_message_after_turn_complete_creates_new_entry() {
     trace.append_message("Second turn", "claude", "10:01".into());
 
     let entries = trace.entries_for_tests();
-    assert_eq!(entries.len(), 2, "must create two separate AgentMessage entries");
+    assert_eq!(
+        entries.len(),
+        2,
+        "must create two separate AgentMessage entries"
+    );
 
-    let first = entries[0].markdown.as_ref().expect("first entry has stream");
-    let second = entries[1].markdown.as_ref().expect("second entry has stream");
+    let first = entries[0]
+        .markdown
+        .as_ref()
+        .expect("first entry has stream");
+    let second = entries[1]
+        .markdown
+        .as_ref()
+        .expect("second entry has stream");
 
     assert!(first.is_finalized(), "first stream must remain finalized");
-    assert!(!second.is_finalized(), "second stream must not be finalized");
+    assert!(
+        !second.is_finalized(),
+        "second stream must not be finalized"
+    );
 
     let (_, first_tail) = first.items_and_tail();
     let (_, second_tail) = second.items_and_tail();
-    assert_eq!(first_tail, "", "first stream tail must be empty after flush_final");
-    assert_eq!(second_tail, "Second turn", "second stream must contain new text in tail");
+    assert_eq!(
+        first_tail, "",
+        "first stream tail must be empty after flush_final"
+    );
+    assert_eq!(
+        second_tail, "Second turn",
+        "second stream must contain new text in tail"
+    );
 }
 
 /// TI.3 — open code fence containing `\n\n` must not busy-loop.

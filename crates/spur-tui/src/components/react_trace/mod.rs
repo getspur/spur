@@ -525,6 +525,52 @@ impl ReactTrace {
         }
     }
 
+    /// Prepend older entries ahead of the currently loaded trace without
+    /// disturbing the viewport's position relative to the existing content.
+    ///
+    /// When the trace is already at capacity, recency wins and the prepend is
+    /// dropped rather than evicting the live tail the user is already viewing.
+    pub fn prepend_entries(&mut self, mut incoming: Vec<TraceEntry>) {
+        use crate::components::react_trace::types::ScrollAnchor;
+
+        if incoming.is_empty() {
+            return;
+        }
+
+        let had_existing_entries = !self.entries.is_empty();
+        let available = MAX_LOG_ENTRIES.saturating_sub(self.entries.len());
+        if available == 0 {
+            return;
+        }
+        if incoming.len() > available {
+            let drop_oldest = incoming.len() - available;
+            incoming.drain(..drop_oldest);
+        }
+
+        let added = incoming.len();
+        if added == 0 {
+            return;
+        }
+
+        incoming.append(&mut self.entries);
+        self.entries = incoming;
+
+        if had_existing_entries {
+            if let ScrollAnchor::Row {
+                entry_idx,
+                row_within_entry,
+            } = self.anchor
+            {
+                self.anchor = ScrollAnchor::Row {
+                    entry_idx: entry_idx.saturating_add(added),
+                    row_within_entry,
+                };
+            }
+        }
+
+        self.invalidate_cache();
+    }
+
     /// Returns true when the viewport is pinned to the tail of the trace.
     pub fn is_following(&self) -> bool {
         matches!(
