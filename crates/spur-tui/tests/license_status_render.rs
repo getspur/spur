@@ -56,7 +56,7 @@ fn app_starts_with_active_plan_badge_when_seeded() {
         offline_ok: true,
         status_text: "Cached license available".into(),
     };
-    let app = spur_tui::app::App::new_with_license(None, false, cfg, state);
+    let app = spur_tui::app::App::new_with_license(None, false, cfg, state, spur_tui::landing::LandingDecision::ShowDashboard);
 
     let badge = app
         .license_badge_for_test()
@@ -84,7 +84,7 @@ fn active_to_invalid_transition_flips_badge_to_danger_tone() {
         offline_ok: true,
         status_text: "Cached".into(),
     };
-    let mut app = spur_tui::app::App::new_with_license(None, false, cfg, active);
+    let mut app = spur_tui::app::App::new_with_license(None, false, cfg, active, spur_tui::landing::LandingDecision::ShowDashboard);
 
     let invalid = LicenseStateEvent {
         status: LicenseStatusEvent::Invalid,
