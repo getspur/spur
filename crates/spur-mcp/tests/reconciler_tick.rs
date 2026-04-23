@@ -775,6 +775,93 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
 }
 
 #[tokio::test]
+async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
+    if !br_available() {
+        eprintln!(
+            "skipping tick_once_skips_broken_plan_and_dispatches_other_ready_work: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+
+    let broken_task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Broken Ready Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &broken_task_id, &labels::plan_id("bogus-plan"));
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Valid Plan Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let valid_task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Valid Ready Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &valid_task_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &valid_task_id, &labels::plan_task_id("t1"));
+    label_issue(dir.path(), &valid_task_id, &labels::agent("codex"));
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+        }),
+        None,
+    );
+
+    let did_work = reconciler
+        .tick_once()
+        .await
+        .expect("tick_once should skip the broken plan and continue dispatching");
+    assert!(did_work, "a valid ready task should still be dispatched");
+
+    let request = delegation_rx.recv().await.expect("dispatch request");
+    assert_eq!(request.issue_id.as_deref(), Some(valid_task_id.as_str()));
+}
+
+#[tokio::test]
 async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
     if !br_available() {
         eprintln!(
