@@ -211,6 +211,8 @@ pub struct App {
     config: std::sync::Arc<spur_acp::SpurConfig>,
     palette_visible: bool,
     palette_state: crate::components::palette::PaletteState,
+    /// Startup landing decision. Drives initial view and banner state.
+    landing: crate::landing::LandingDecision,
     /// Last dispatched Action, for integration tests only.
     #[cfg(any(test, debug_assertions))]
     last_action: Option<crate::action::Action>,
@@ -222,6 +224,7 @@ impl App {
             user_input_tx,
             start_in_picker,
             std::sync::Arc::new(spur_acp::SpurConfig::default()),
+            crate::landing::LandingDecision::ShowDashboard,
         )
     }
 
@@ -243,20 +246,23 @@ impl App {
         start_in_picker: bool,
         config: std::sync::Arc<spur_acp::SpurConfig>,
         license_state: LicenseStateEvent,
+        landing: crate::landing::LandingDecision,
     ) -> Self {
-        Self::build_with_license_state(user_input_tx, start_in_picker, config, license_state)
+        Self::build_with_license_state(user_input_tx, start_in_picker, config, license_state, landing)
     }
 
     pub fn new_with_config(
         user_input_tx: Option<mpsc::Sender<UserInput>>,
         start_in_picker: bool,
         config: std::sync::Arc<spur_acp::SpurConfig>,
+        landing: crate::landing::LandingDecision,
     ) -> Self {
         Self::new_with_license(
             user_input_tx,
             start_in_picker,
             config,
             Self::default_license_state("licensing not configured"),
+            landing,
         )
     }
 
@@ -265,6 +271,7 @@ impl App {
         start_in_picker: bool,
         config: std::sync::Arc<spur_acp::SpurConfig>,
         license_state: LicenseStateEvent,
+        landing: crate::landing::LandingDecision,
     ) -> Self {
         let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
         let metadata_store = SessionMetadataStore::load(&metadata_path);
@@ -316,9 +323,18 @@ impl App {
             config,
             palette_visible: false,
             palette_state: crate::components::palette::PaletteState::new(),
+            landing,
             #[cfg(any(test, debug_assertions))]
             last_action: None,
         };
+
+        // Apply landing-specific setup
+        match &app.landing {
+            crate::landing::LandingDecision::SetupRequired => {
+                app.dashboard.set_agents_configured(false);
+            }
+            _ => {}
+        }
 
         app.license_badge = license_badge_from_state(&app.license_state);
         app.flag_summary = compute_flag_summary();
@@ -2282,6 +2298,7 @@ pub async fn run_tui(
         start_in_picker,
         std::sync::Arc::new(spur_acp::SpurConfig::default()),
         App::default_license_state("licensing not configured"),
+        crate::landing::LandingDecision::ShowDashboard,
     )
     .await
 }
@@ -2293,9 +2310,10 @@ pub async fn run_tui_with_license(
     start_in_picker: bool,
     config: std::sync::Arc<spur_acp::SpurConfig>,
     license_state: LicenseStateEvent,
+    landing: crate::landing::LandingDecision,
 ) -> anyhow::Result<()> {
     let mut terminal = tui::setup()?;
-    let mut app = App::new_with_license(user_input_tx, start_in_picker, config, license_state);
+    let mut app = App::new_with_license(user_input_tx, start_in_picker, config, license_state, landing);
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
     let mut event_rx = event_rx;
@@ -2422,6 +2440,7 @@ pub async fn run_tui_with_config(
         start_in_picker,
         config,
         App::default_license_state("licensing not configured"),
+        crate::landing::LandingDecision::ShowDashboard,
     )
     .await
 }

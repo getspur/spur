@@ -678,6 +678,7 @@ async fn main() -> Result<()> {
                 force_picker,
                 config_arc,
                 initial_license_state,
+                landing.clone(),
             )
             .await;
 
