@@ -138,6 +138,25 @@ impl SessionMetadataStore {
         self.metadata.last_active_at = Some(at);
     }
 
+    /// Returns true if `last_active_at` exists and is within `max_age` of now.
+    pub fn last_active_at_is_fresh(&self, max_age: std::time::Duration) -> bool {
+        let Some(ref at) = self.metadata.last_active_at else {
+            return false;
+        };
+        let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at) else {
+            return false;
+        };
+        let now = chrono::Utc::now();
+        let diff = now.signed_duration_since(dt);
+        diff.num_seconds() >= 0
+            && diff.to_std().map(|d| d <= max_age).unwrap_or(false)
+    }
+
+    /// Returns true if any session entry exists in metadata.
+    pub fn has_any_session(&self) -> bool {
+        !self.metadata.sessions.is_empty()
+    }
+
     /// Clear the last-active pointer (used after an auto-resume banner has
     /// been shown so a subsequent session spawn in the same run doesn't
     /// re-trigger the banner).
