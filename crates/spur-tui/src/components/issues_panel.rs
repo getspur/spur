@@ -50,6 +50,12 @@ impl IssuesPanel {
         self.table_state.select(Some(0));
     }
 
+    pub fn select_last(&mut self, issue_count: usize) {
+        if issue_count > 0 {
+            self.table_state.select(Some(issue_count - 1));
+        }
+    }
+
     pub fn selected_id<'a>(&self, issues: &'a [IssueSummary]) -> Option<&'a str> {
         let idx = self.table_state.selected()?;
         issues.get(idx).map(|i| i.id.as_str())
@@ -103,13 +109,22 @@ impl IssuesPanel {
             Constraint::Min(20),
         ];
 
+        let selected_idx = self.table_state.selected().unwrap_or(0);
+        let total = issues.len();
         let (border_style, title) = if self.focused {
             (
                 Style::default().fg(Color::Cyan),
-                " Issues — [j/k] select · [Enter] detail · [W]ork ",
+                format!(
+                    " Issues {}/{} — [j/k] select · [Enter] detail · [W]ork ",
+                    selected_idx + 1,
+                    total
+                ),
             )
         } else {
-            (Style::default(), " Issues ")
+            (
+                Style::default(),
+                format!(" Issues {}/{} ", selected_idx + 1, total),
+            )
         };
 
         let table = Table::new(rows, widths)

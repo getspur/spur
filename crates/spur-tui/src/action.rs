@@ -149,6 +149,7 @@ pub enum PermissionChoice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewId {
     Dashboard,
+    IssueBrowser,
     SessionDetail(SessionId),
     SessionPicker,
     PlanInspector(SessionId),

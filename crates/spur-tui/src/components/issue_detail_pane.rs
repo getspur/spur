@@ -21,10 +21,18 @@ impl IssueDetailPane {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
+    pub fn scroll_up_by(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    }
+
     pub fn scroll_down(&mut self) {
         // Capped at a reasonable max; render() silently shows empty lines past body end.
         // A tighter cap would require knowing body line count + visible height at scroll time.
         self.scroll_offset = self.scroll_offset.saturating_add(1).min(500);
+    }
+
+    pub fn scroll_down_by(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(500);
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -129,11 +137,21 @@ impl IssueDetailPane {
         } else {
             issue.labels.join(", ")
         };
-        let meta3 = Line::from(vec![
+        let mut meta3_spans = vec![
             Span::styled("labels:", Style::default().fg(Color::DarkGray)),
             Span::raw(" "),
             Span::raw(labels_str),
-        ]);
+        ];
+        if !issue.url.is_empty() {
+            meta3_spans.push(Span::raw("  "));
+            meta3_spans.push(Span::styled("url:", Style::default().fg(Color::DarkGray)));
+            meta3_spans.push(Span::raw(" "));
+            meta3_spans.push(Span::styled(
+                issue.url.as_str(),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        let meta3 = Line::from(meta3_spans);
         frame.render_widget(Paragraph::new(meta3), chunks[3]);
 
         // ── Separator ────────────────────────────────────────────────────────────
