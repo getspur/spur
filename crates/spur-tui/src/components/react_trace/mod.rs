@@ -400,13 +400,15 @@ impl ReactTrace {
             if let Some(idx) = target_idx {
                 if let Some(entry) = self.entries.get_mut(idx) {
                     if let Some(stream) = entry.markdown.as_mut() {
-                        stream.append(text);
+                        if !stream.is_finalized() {
+                            stream.append(text);
+                            self.mark_dirty_from(idx);
+                            if self.is_following() {
+                                self.scroll_to_bottom();
+                            }
+                            return;
+                        }
                     }
-                    self.mark_dirty_from(idx);
-                    if self.is_following() {
-                        self.scroll_to_bottom();
-                    }
-                    return;
                 }
             }
             let mut stream =
@@ -861,6 +863,37 @@ impl ReactTrace {
             request_id = %request_id,
             executor_id = %executor_id,
             "DelegationDispatched arrived but no matching Delegate entry"
+        );
+    }
+
+    /// Locate the most recent `Delegate` entry whose `executor_id` matches
+    /// and update its `status`. Falls back to matching `request_id` only when
+    /// `executor_id` is `None` on the entry (pre-dispatch correlation).
+    pub fn update_delegate_status(&mut self, executor_id: &str, new_status: &str) {
+        for entry in self.entries.iter_mut().rev() {
+            if let TraceKind::Delegate {
+                status,
+                executor_id: eid,
+                request_id: rid,
+                ..
+            } = &mut entry.kind
+            {
+                // Prefer executor_id match; fall back to request_id only when
+                // executor_id hasn't been attached yet. This prevents updating
+                // the wrong entry if request_id and executor_id ever diverge.
+                let matches = eid.as_deref() == Some(executor_id)
+                    || (eid.is_none() && rid.as_deref() == Some(executor_id));
+                if matches {
+                    *status = new_status.to_string();
+                    self.invalidate_cache();
+                    return;
+                }
+            }
+        }
+        tracing::debug!(
+            executor_id = %executor_id,
+            new_status = %new_status,
+            "DelegationCompleted arrived but no matching Delegate entry"
         );
     }
 
@@ -2031,6 +2064,141 @@ mod tests {
         assert!(
             joined.contains("\u{2026}") || spinner::BRAILLE.iter().any(|f| joined.contains(f)),
             "pending Act must render a spinner placeholder, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn update_delegate_status_by_executor_id() {
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Delegate {
+                agent: "codex".into(),
+                task: "fix bug".into(),
+                status: "delegated".into(),
+                request_id: Some("req-1".into()),
+                executor_id: Some("exec-1".into()),
+            },
+            text: String::new(),
+            timestamp: "10:00".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        trace.update_delegate_status("exec-1", "done");
+        match &trace.entries[0].kind {
+            TraceKind::Delegate { status, .. } => assert_eq!(status, "done"),
+            other => panic!("expected Delegate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn update_delegate_status_falls_back_to_request_id_when_executor_id_none() {
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Delegate {
+                agent: "codex".into(),
+                task: "fix bug".into(),
+                status: "delegated".into(),
+                request_id: Some("req-1".into()),
+                executor_id: None,
+            },
+            text: String::new(),
+            timestamp: "10:00".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        trace.update_delegate_status("req-1", "failed");
+        match &trace.entries[0].kind {
+            TraceKind::Delegate { status, .. } => assert_eq!(status, "failed"),
+            other => panic!("expected Delegate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn update_delegate_status_prefers_executor_id_over_request_id() {
+        // If executor_id is already Some(different_value), do NOT match on
+        // request_id even if request_id equals the search key.
+        let mut trace = ReactTrace::new();
+        trace.push(TraceEntry {
+            kind: TraceKind::Delegate {
+                agent: "codex".into(),
+                task: "fix bug".into(),
+                status: "delegated".into(),
+                request_id: Some("shared-id".into()),
+                executor_id: Some("exec-a".into()),
+            },
+            text: String::new(),
+            timestamp: "10:00".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        trace.push(TraceEntry {
+            kind: TraceKind::Delegate {
+                agent: "kiro".into(),
+                task: "refactor".into(),
+                status: "delegated".into(),
+                request_id: Some("shared-id".into()),
+                executor_id: None,
+            },
+            text: String::new(),
+            timestamp: "10:01".into(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        // Searching for "shared-id" should update the SECOND entry (the one
+        // with executor_id == None), not the first.
+        trace.update_delegate_status("shared-id", "done");
+        assert_eq!(
+            match &trace.entries[0].kind {
+                TraceKind::Delegate { status, .. } => status.as_str(),
+                other => panic!("expected Delegate, got {:?}", other),
+            },
+            "delegated",
+            "first entry (with executor_id=Some) should NOT have been updated"
+        );
+        assert_eq!(
+            match &trace.entries[1].kind {
+                TraceKind::Delegate { status, .. } => status.as_str(),
+                other => panic!("expected Delegate, got {:?}", other),
+            },
+            "done",
+            "second entry (with executor_id=None) SHOULD have been updated"
+        );
+    }
+
+    #[test]
+    fn update_delegate_status_updates_most_recent_match() {
+        let mut trace = ReactTrace::new();
+        for i in 0..2 {
+            trace.push(TraceEntry {
+                kind: TraceKind::Delegate {
+                    agent: "codex".into(),
+                    task: format!("task {}", i),
+                    status: "delegated".into(),
+                    request_id: Some(format!("req-{}", i)),
+                    executor_id: Some("exec-shared".into()),
+                },
+                text: String::new(),
+                timestamp: format!("10:0{}", i),
+                #[cfg(feature = "markdown")]
+                markdown: None,
+            });
+        }
+        trace.update_delegate_status("exec-shared", "done");
+        // Most recent entry (index 1) should be updated.
+        assert_eq!(
+            match &trace.entries[1].kind {
+                TraceKind::Delegate { status, .. } => status.as_str(),
+                other => panic!("expected Delegate, got {:?}", other),
+            },
+            "done"
+        );
+        // Older entry should remain unchanged.
+        assert_eq!(
+            match &trace.entries[0].kind {
+                TraceKind::Delegate { status, .. } => status.as_str(),
+                other => panic!("expected Delegate, got {:?}", other),
+            },
+            "delegated"
         );
     }
 }

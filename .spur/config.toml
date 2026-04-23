@@ -217,7 +217,7 @@ name = "logout"
 description = "Logout of Codex"
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = []
 session_mode = "full-auto"
 
