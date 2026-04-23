@@ -85,6 +85,23 @@ fn run_br(repo: &Path, args: &[&str]) {
     }
 }
 
+/// Run `git <args>` in the given directory; panics on failure.
+fn run_git(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git invocation failed");
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        panic!(
+            "git {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
+            out.status
+        );
+    }
+}
+
 /// Extract the `"id"` field from a JSON object returned by `br create --json`.
 fn parse_id_from_create(json: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(json).expect("br create output not JSON");
@@ -110,6 +127,26 @@ fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
         .filter_map(audit_sentinel::parse_comment)
         .filter_map(|result| result.ok())
         .collect()
+}
+
+fn extract_submit_plan_task_issue_id(response: &serde_json::Value, task_id: &str) -> String {
+    assert!(
+        response.get("error").is_none(),
+        "submit_plan should succeed: {response}"
+    );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("submit_plan response text");
+    let task_map_json = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("task_map: "))
+        .expect("submit_plan response must include task_map line");
+    let task_map: std::collections::HashMap<String, String> =
+        serde_json::from_str(task_map_json).expect("task_map line must be valid JSON");
+    task_map
+        .get(task_id)
+        .cloned()
+        .unwrap_or_else(|| panic!("submit_plan task_map must include '{task_id}'"))
 }
 
 fn test_continuation_ctx() -> DetachedContinuationCtx {
@@ -1126,6 +1163,188 @@ async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
             .any(|label| label.starts_with("spur:plan-id:")),
         "task should not retain partially-written plan scope after execute_epic failure"
     );
+}
+
+#[tokio::test]
+async fn submit_plan_default_notify_path_dispatches_ready_task() {
+    if !br_available() {
+        eprintln!(
+            "skipping submit_plan_default_notify_path_dispatches_ready_task: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(dir.path(), &["config", "user.email", "test@spur"]);
+    run_git(dir.path(), &["config", "user.name", "spur-test"]);
+    std::fs::write(dir.path().join("seed.txt"), "seed\n").expect("write seed");
+    run_git(dir.path(), &["add", "seed.txt"]);
+    run_git(dir.path(), &["commit", "-q", "-m", "seed"]);
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let brain_sid = BrainSessionId::new(SessionId("brain".into()));
+    let (mut server, mut channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(Arc::clone(&pm)),
+        None,
+        test_continuation_ctx(),
+    );
+    server.set_repo_root(dir.path().to_path_buf());
+    server.set_reconciler_enabled(true, None);
+
+    let server = Arc::new(server);
+    let started = Arc::clone(&server).start().await;
+    let (_url, _handle) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("Failed to bind TCP listener") {
+                eprintln!(
+                    "skipping submit_plan_default_notify_path_dispatches_ready_task: {message}"
+                );
+                return;
+            }
+            panic!("start server: {message}");
+        }
+    };
+
+    let response = server
+        .__test_call_submit_plan(serde_json::json!({
+            "persist_as_epic": true,
+            "epic_title": "Default Notify Persisted Submit Epic",
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "codex",
+                "task": "Dispatch via started reconciler",
+                "depends_on": [],
+            }]
+        }))
+        .await;
+    let task_id = extract_submit_plan_task_issue_id(&response, "t1");
+
+    let request =
+        tokio::time::timeout(std::time::Duration::from_secs(1), channel.request_rx.recv())
+            .await
+            .expect("started reconciler should dispatch persisted submit_plan work within timeout")
+            .expect("dispatch request");
+
+    assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
+}
+
+#[tokio::test]
+async fn execute_epic_default_notify_path_dispatches_ready_task() {
+    if !br_available() {
+        eprintln!(
+            "skipping execute_epic_default_notify_path_dispatches_ready_task: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(dir.path(), &["config", "user.email", "test@spur"]);
+    run_git(dir.path(), &["config", "user.name", "spur-test"]);
+    std::fs::write(dir.path().join("seed.txt"), "seed\n").expect("write seed");
+    run_git(dir.path(), &["add", "seed.txt"]);
+    run_git(dir.path(), &["commit", "-q", "-m", "seed"]);
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Default Notify Execute Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_a_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_b_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task B",
+            "--priority",
+            "2",
+        ],
+    ));
+    run_br(dir.path(), &["dep", "add", &task_a_id, &epic_id]);
+    run_br(dir.path(), &["dep", "add", &task_b_id, &epic_id]);
+    run_br(dir.path(), &["dep", "add", &task_b_id, &task_a_id]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let brain_sid = BrainSessionId::new(SessionId("brain".into()));
+    let (mut server, mut channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(Arc::clone(&pm)),
+        None,
+        test_continuation_ctx(),
+    );
+    server.set_repo_root(dir.path().to_path_buf());
+    server.set_reconciler_enabled(true, None);
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    let server = Arc::new(server);
+    let started = Arc::clone(&server).start().await;
+    let (_url, _handle) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("Failed to bind TCP listener") {
+                eprintln!(
+                    "skipping execute_epic_default_notify_path_dispatches_ready_task: {message}"
+                );
+                return;
+            }
+            panic!("start server: {message}");
+        }
+    };
+
+    let response = server
+        .__test_call_execute_epic(&epic_id, Some("codex"))
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "execute_epic should succeed: {response}"
+    );
+
+    let request =
+        tokio::time::timeout(std::time::Duration::from_secs(1), channel.request_rx.recv())
+            .await
+            .expect("started reconciler should dispatch execute_epic work within timeout")
+            .expect("dispatch request");
+
+    assert_eq!(request.issue_id.as_deref(), Some(task_a_id.as_str()));
 }
 
 /// D1 regression: `Reconciler::run` must honor cancel even while a tick is
