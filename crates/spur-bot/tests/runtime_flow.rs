@@ -841,6 +841,62 @@ async fn late_resumed_ready_without_pending_target_is_ignored() {
 }
 
 #[tokio::test]
+async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime
+        .ensure_topic_record(42, 77, "Session 1".into())
+        .unwrap();
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    runtime.activate_topic_binding(42, 77, "Session 1".into(), "acp-X".into(), "kimi".into());
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_Y".into()),
+                acp_session_id: "acp-Y".into(),
+                brain: "kimi".into(),
+                resumed: false,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    let (old_key, _) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::TurnComplete {
+                session: spur_acp::SessionId("spur_acp-X".into()),
+            },
+        ))
+        .unwrap();
+    assert!(
+        old_key.is_none(),
+        "stale session route for acp-X must be removed after the fresh ready binds spur_Y"
+    );
+
+    let (new_key, _) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::TurnComplete {
+                session: spur_acp::SessionId("spur_Y".into()),
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        new_key,
+        Some(spur_bot::state::ThreadKey {
+            chat_id: 42,
+            message_thread_id: Some(77),
+        }),
+        "the committed fresh session spur_Y must still route to topic 77"
+    );
+}
+
+#[tokio::test]
 async fn multiple_pending_new_sessions_bind_in_fifo_order() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
