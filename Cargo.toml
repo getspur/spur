@@ -12,6 +12,7 @@ members = [
     "crates/spur-interactive",
     "crates/spur-bot",
     "crates/spur-cli",
+    "crates/spur-context",
 ]
 
 [workspace.package]
@@ -55,6 +56,7 @@ rmcp = { version = "1.4", features = [
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
+duckdb = { version = "1.10502.0" }
 
 # Logging
 tracing = "0.1"
@@ -85,6 +87,7 @@ spur-license = { path = "crates/spur-license" }
 spur-tui = { path = "crates/spur-tui" }
 spur-interactive = { path = "crates/spur-interactive" }
 spur-bot = { path = "crates/spur-bot" }
+spur-context = { path = "crates/spur-context" }
 
 # The profile that 'dist' will build with
 [profile.dist]

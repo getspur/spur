@@ -1,0 +1,22 @@
+[package]
+name = "spur-context"
+description = "DuckDB-backed analytics engine for cross-domain context queries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+spur-cost = { workspace = true }
+duckdb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+directories = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
