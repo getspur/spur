@@ -494,6 +494,7 @@ impl BotRuntime {
                 record.brain = Some(brain);
                 self.pending_inputs.remove(&key);
                 self.evict_pending_new(&key);
+                self.supersede_pending_resume(&key);
 
                 handle
                     .send_command(spur_core::InteractiveInput::ResumeSession {
@@ -740,6 +741,10 @@ impl BotRuntime {
     fn evict_pending_new(&mut self, key: &ThreadKey) {
         self.pending_new_session_guard.remove(key);
         self.pending_new_session_keys.retain(|k| k != key);
+    }
+
+    fn supersede_pending_resume(&mut self, key: &ThreadKey) {
+        self.pending_resume.retain(|_, pending_key| pending_key != key);
     }
 
     /// Send any input that was queued while waiting for a persisted session to
