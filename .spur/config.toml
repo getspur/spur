@@ -30,7 +30,7 @@ kind = "claude-stream-json"
 role = "both"
 capabilities = []
 cost_tier = "medium"
-skip_permissions = false
+skip_permissions = true
 skip_permissions_args = []
 
 [agents.entries.review]
@@ -52,7 +52,7 @@ response = []
 static = []
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = ["--dangerously-skip-permissions"]
 
 [agents.entries.delegation]
@@ -142,7 +142,7 @@ response = []
 static = []
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = []
 session_mode = "bypassPermissions"
 
@@ -352,7 +352,7 @@ response = []
 static = []
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = []
 session_mode = "full-auto"
 
