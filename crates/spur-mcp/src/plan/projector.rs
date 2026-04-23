@@ -345,6 +345,7 @@ pub async fn project_plan_from_beads(
     let mut summary_by_id = HashMap::new();
     for status in [
         Some("open".to_string()),
+        Some("in_progress".to_string()),
         Some(pm.closed_status().to_string()),
     ] {
         for summary in pm
