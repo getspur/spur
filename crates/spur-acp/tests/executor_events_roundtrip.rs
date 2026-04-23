@@ -148,6 +148,89 @@ fn worker_notification_roundtrips() {
 }
 
 #[test]
+fn plan_snapshot_updated_roundtrips() {
+    use spur_acp::{
+        PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent, SpurEventBody,
+    };
+
+    let ev = SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+        session_id: SessionId("brain-1".into()),
+        snapshot: Box::new(PlanSnapshot {
+            plan_id: "p-123".into(),
+            status: "running".into(),
+            progress: "1/3 reviewed, 1 running, 1 pending".into(),
+            next_action: "Workers still running. Poll get_plan_status to monitor.".into(),
+            ready_to_merge: false,
+            counts: PlanSnapshotCounts {
+                pending: 1,
+                ready: 0,
+                dispatched: 1,
+                awaiting_review: 1,
+                approved: 0,
+                rejected: 0,
+                failed: 0,
+                cancelled: 0,
+            },
+            tasks: vec![PlanSnapshotTask {
+                task_id: "task-projection".into(),
+                task_name: "Build PlanProjection".into(),
+                agent: "claude-code".into(),
+                issue_id: Some("BEADS-42".into()),
+                status: "awaiting_review".into(),
+                attempt: 1,
+                max_attempts: 3,
+                depends_on: vec!["task-contract".into()],
+                blocked_by: Vec::new(),
+                summary: Some("projects plan status into UI".into()),
+                feedback: None,
+                error: None,
+                worker_branch: Some("spur/worker-123".into()),
+                delegation_id: Some("del-123".into()),
+            }],
+        }),
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        round.body,
+        SpurEventBody::PlanSnapshotUpdated { .. }
+    ));
+}
+
+#[test]
+fn plan_snapshot_updated_rejects_malformed_payload() {
+    let json = r#"{
+        "occurred_at": {"secs_since_epoch": 1000, "nanos_since_epoch": 0},
+        "body": {"PlanSnapshotUpdated": {
+            "session_id": "brain-1",
+            "snapshot": {
+                "status": "running",
+                "progress": "1/3 reviewed, 1 running, 1 pending",
+                "next_action": "review",
+                "ready_to_merge": false,
+                "counts": {
+                    "pending": 1,
+                    "ready": 0,
+                    "dispatched": 1,
+                    "awaiting_review": 1,
+                    "approved": 0,
+                    "rejected": 0,
+                    "failed": 0,
+                    "cancelled": 0
+                },
+                "tasks": []
+            }
+        }}
+    }"#;
+    let result: Result<SpurEvent, _> = serde_json::from_str(json);
+    assert!(
+        result.is_err(),
+        "missing required plan_id must fail to deserialize"
+    );
+}
+
+#[test]
 fn plan_completed_roundtrips() {
     use spur_acp::{SpurEvent, SpurEventBody};
 
