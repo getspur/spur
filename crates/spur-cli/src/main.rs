@@ -133,7 +133,8 @@ enum Commands {
         command: BotCommands,
     },
     /// Launch interactive TUI dashboard
-    Watch {
+    #[command(visible_alias = "watch")]
+    Tui {
         /// Override the brain agent (default from config)
         #[arg(long)]
         brain: Option<String>,
@@ -208,7 +209,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let repo_root = std::env::current_dir()?;
 
-    let tui_mode = matches!(cli.command, Commands::Watch { .. });
+    let tui_mode = matches!(cli.command, Commands::Tui { .. });
     let _tracing_guard = init_tracing(tui_mode, &repo_root)?;
 
     match cli.command {
@@ -463,7 +464,7 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::Profile { command } => commands::profile::run(command).await,
-        Commands::Watch {
+        Commands::Tui {
             brain,
             sessions,
             dashboard,
@@ -471,7 +472,7 @@ async fn main() -> Result<()> {
             duration,
         } => {
             if profile {
-                let mut args = vec!["watch".to_string()];
+                let mut args = vec!["tui".to_string()];
                 if let Some(ref b) = brain {
                     args.push(format!("--brain={}", b));
                 }

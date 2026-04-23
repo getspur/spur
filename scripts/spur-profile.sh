@@ -14,8 +14,8 @@ case "$COMMAND" in
         cargo run --bin spur -- profile setup
         ;;
     flamegraph)
-        echo "[spur-profile] Generating flamegraph for spur watch..."
-        cargo flamegraph --profile profiling --bin spur -- watch
+        echo "[spur-profile] Generating flamegraph for spur tui..."
+        cargo flamegraph --profile profiling --bin spur -- tui
         ;;
     bench)
         echo "[spur-profile] Running benchmarks with profiling profile..."

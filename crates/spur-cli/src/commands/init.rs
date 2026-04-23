@@ -394,7 +394,7 @@ fn print_summary(config: &SpurConfig) {
     println!();
     println!("Next step:");
     println!("  spur run \"describe the repo in 3 bullets\"    # one-shot");
-    println!("  spur watch                                   # interactive TUI");
+    println!("  spur tui                                     # interactive TUI");
     println!("  spur config check                            # validate your setup");
     if config.bot.telegram.enabled {
         println!("  spur bot telegram                            # start Telegram bot");
