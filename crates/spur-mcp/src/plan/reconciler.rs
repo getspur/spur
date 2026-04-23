@@ -316,20 +316,22 @@ impl Reconciler {
                 continue;
             };
 
-            let projected =
-                match crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id)
-                    .await
-                {
-                    Ok(projected) => projected,
-                    Err(error) => {
-                        tracing::warn!(
-                            issue_id = %summary.id,
-                            %plan_id,
-                            "reconciler skipping ready summary after plan projection failed: {error}"
-                        );
-                        continue;
-                    }
-                };
+            let projected = match crate::plan::projector::project_plan_from_beads(
+                self.pm.as_ref(),
+                plan_id,
+            )
+            .await
+            {
+                Ok(projected) => projected,
+                Err(error) => {
+                    tracing::warn!(
+                        issue_id = %summary.id,
+                        %plan_id,
+                        "reconciler skipping ready summary after plan projection failed: {error}"
+                    );
+                    continue;
+                }
+            };
             let Some(task) = projected
                 .tasks
                 .iter()
@@ -961,7 +963,9 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("journal");
         let hidden = dir.path().join("journal.hidden");
-        tokio::fs::write(&path, b"seed").await.expect("write seed journal");
+        tokio::fs::write(&path, b"seed")
+            .await
+            .expect("write seed journal");
 
         let notify = Arc::new(Notify::new());
         let handle = tokio::spawn(monitor_journal_appends(path.clone(), Arc::clone(&notify)));

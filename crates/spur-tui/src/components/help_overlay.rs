@@ -71,7 +71,9 @@ impl HelpOverlay {
             Line::from(""),
             header(" Dashboard — Detail Pane (when agent focused)"),
             Line::from("  \u{2190} / \u{2192}       Cycle detail tabs"),
-            Line::from("  1-5                Jump to Stream / Artifacts / Attempts / Task / Review"),
+            Line::from(
+                "  1-5                Jump to Stream / Artifacts / Attempts / Task / Review",
+            ),
             Line::from("  j / k              Scroll tab content"),
             Line::from("  Ctrl+d / Ctrl+u    Half-page scroll"),
             Line::from("  Ctrl+o             Toggle observe collapsed (Stream tab)"),
@@ -97,7 +99,9 @@ impl HelpOverlay {
             out.push(Line::from("  W                Work on issue"));
             out.push(Line::from("  PgUp / PgDn      Scroll detail"));
             out.push(Line::from("  s                Open session picker"));
-            out.push(Line::from("  Esc              Close detail or back to Dashboard"));
+            out.push(Line::from(
+                "  Esc              Close detail or back to Dashboard",
+            ));
             out.push(Line::from(""));
         }
 
