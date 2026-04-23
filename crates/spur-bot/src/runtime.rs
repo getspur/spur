@@ -494,6 +494,7 @@ impl BotRuntime {
                 record.brain = Some(brain);
                 self.pending_inputs.remove(&key);
                 self.evict_pending_new(&key);
+                self.supersede_pending_resume(&key);
 
                 handle
                     .send_command(spur_core::InteractiveInput::ResumeSession {
@@ -569,9 +570,10 @@ impl BotRuntime {
                 ..
             } => {
                 let key = if resumed {
-                    self.pending_resume
-                        .remove(&acp_session_id)
-                        .or_else(|| self.session_threads.get(&session).cloned())
+                    let Some(key) = self.resolve_resumed_ready(&acp_session_id) else {
+                        return Ok((None, vec![]));
+                    };
+                    key
                 } else {
                     // Pop FIFO until we find a topic still eligible for a
                     // fresh bind. Eviction on `/resume` or archive leaves
@@ -586,25 +588,17 @@ impl BotRuntime {
                             break;
                         }
                     }
-                    chosen
+                    chosen.unwrap_or_else(|| {
+                        ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
+                    })
                 };
 
-                let key = key.unwrap_or_else(|| {
-                    ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
-                });
-
-                if let Some(record) = self.threads.get_mut(&key) {
-                    record.binding = BindingState::Active {
-                        session: session.clone(),
-                        acp_session_id: acp_session_id.clone(),
-                        brain: brain.clone(),
-                    };
-                    record.live_session = Some(session.clone());
-                    record.acp_session_id = Some(acp_session_id.clone());
-                    record.brain = Some(brain.clone());
-                }
-
-                self.session_threads.insert(session.clone(), key.clone());
+                self.bind_active_session(
+                    &key,
+                    session.clone(),
+                    acp_session_id.clone(),
+                    brain.clone(),
+                );
                 self.output_buffers.remove(&session);
                 self.state_store.save(&self.persistable_state())?;
 
@@ -740,6 +734,56 @@ impl BotRuntime {
     fn evict_pending_new(&mut self, key: &ThreadKey) {
         self.pending_new_session_guard.remove(key);
         self.pending_new_session_keys.retain(|k| k != key);
+    }
+
+    fn supersede_pending_resume(&mut self, key: &ThreadKey) {
+        self.pending_resume.retain(|_, pending_key| pending_key != key);
+    }
+
+    fn resolve_resumed_ready(&mut self, acp_session_id: &str) -> Option<ThreadKey> {
+        let key = self.pending_resume.remove(acp_session_id)?;
+        let still_expects = self.threads.get(&key).is_some_and(|record| {
+            matches!(
+                &record.binding,
+                BindingState::RestorePending {
+                    acp_session_id: expected,
+                    ..
+                } if expected == acp_session_id
+            )
+        });
+        still_expects.then_some(key)
+    }
+
+    fn bind_active_session(
+        &mut self,
+        key: &ThreadKey,
+        session: spur_acp::SessionId,
+        acp_session_id: String,
+        brain: String,
+    ) {
+        if let Some(existing_key) = self.session_threads.get(&session).cloned() {
+            debug_assert_eq!(
+                existing_key, *key,
+                "session_threads collision: session already routed to another topic"
+            );
+        }
+
+        if let Some(record) = self.threads.get_mut(key) {
+            if let Some(old_session) = record.live_session.clone() {
+                self.session_threads.remove(&old_session);
+            }
+
+            record.binding = BindingState::Active {
+                session: session.clone(),
+                acp_session_id: acp_session_id.clone(),
+                brain: brain.clone(),
+            };
+            record.live_session = Some(session.clone());
+            record.acp_session_id = Some(acp_session_id);
+            record.brain = Some(brain);
+        }
+
+        self.session_threads.insert(session, key.clone());
     }
 
     /// Send any input that was queued while waiting for a persisted session to
