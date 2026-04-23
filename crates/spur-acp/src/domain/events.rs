@@ -177,6 +177,48 @@ pub struct IssueDetailEvent {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Canonical durable plan state rendered by the plan inspector UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanSnapshot {
+    pub plan_id: String,
+    pub status: String,
+    pub progress: String,
+    pub next_action: String,
+    pub ready_to_merge: bool,
+    pub counts: PlanSnapshotCounts,
+    pub tasks: Vec<PlanSnapshotTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PlanSnapshotCounts {
+    pub pending: u32,
+    pub ready: u32,
+    pub dispatched: u32,
+    pub awaiting_review: u32,
+    pub approved: u32,
+    pub rejected: u32,
+    pub failed: u32,
+    pub cancelled: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanSnapshotTask {
+    pub task_id: String,
+    pub task_name: String,
+    pub agent: String,
+    pub issue_id: Option<String>,
+    pub status: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub depends_on: Vec<String>,
+    pub blocked_by: Vec<String>,
+    pub summary: Option<String>,
+    pub feedback: Option<String>,
+    pub error: Option<String>,
+    pub worker_branch: Option<String>,
+    pub delegation_id: Option<String>,
+}
+
 /// Snapshot of licensing state mirrored into the ACP event bus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LicenseStateEvent {
@@ -569,6 +611,12 @@ pub enum SpurEventBody {
         executor_id: String,
         path: std::path::PathBuf,
         kind: FileTouchKind,
+    },
+
+    /// Durable beads-backed plan state for a session.
+    PlanSnapshotUpdated {
+        session_id: SessionId,
+        snapshot: Box<PlanSnapshot>,
     },
 
     /// Brain submitted a review verdict on a plan task.
