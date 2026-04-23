@@ -570,9 +570,10 @@ impl BotRuntime {
                 ..
             } => {
                 let key = if resumed {
-                    self.pending_resume
-                        .remove(&acp_session_id)
-                        .or_else(|| self.session_threads.get(&session).cloned())
+                    let Some(key) = self.resolve_resumed_ready(&acp_session_id) else {
+                        return Ok((None, vec![]));
+                    };
+                    key
                 } else {
                     // Pop FIFO until we find a topic still eligible for a
                     // fresh bind. Eviction on `/resume` or archive leaves
@@ -587,12 +588,10 @@ impl BotRuntime {
                             break;
                         }
                     }
-                    chosen
+                    chosen.unwrap_or_else(|| {
+                        ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
+                    })
                 };
-
-                let key = key.unwrap_or_else(|| {
-                    ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
-                });
 
                 if let Some(record) = self.threads.get_mut(&key) {
                     record.binding = BindingState::Active {
@@ -745,6 +744,20 @@ impl BotRuntime {
 
     fn supersede_pending_resume(&mut self, key: &ThreadKey) {
         self.pending_resume.retain(|_, pending_key| pending_key != key);
+    }
+
+    fn resolve_resumed_ready(&mut self, acp_session_id: &str) -> Option<ThreadKey> {
+        let key = self.pending_resume.remove(acp_session_id)?;
+        let still_expects = self.threads.get(&key).is_some_and(|record| {
+            matches!(
+                &record.binding,
+                BindingState::RestorePending {
+                    acp_session_id: expected,
+                    ..
+                } if expected == acp_session_id
+            )
+        });
+        still_expects.then_some(key)
     }
 
     /// Send any input that was queued while waiting for a persisted session to
