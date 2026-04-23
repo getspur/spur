@@ -1,4 +1,5 @@
 pub mod dashboard;
+pub mod issue_browser;
 #[cfg(feature = "markdown")]
 pub mod mermaid_viewer;
 pub mod plan_inspector;

@@ -21,6 +21,8 @@ pub struct AgentsTree {
     pub(crate) collapsed: HashSet<ExecutorId>,
     /// Currently selected id (if any).
     selected: Option<ExecutorId>,
+    /// Vertical scroll offset in lines.
+    scroll_offset: usize,
 }
 
 impl Default for AgentsTree {
@@ -36,6 +38,7 @@ impl AgentsTree {
             tick_counter: 0,
             collapsed: HashSet::new(),
             selected: None,
+            scroll_offset: 0,
         }
     }
 
@@ -53,6 +56,16 @@ impl AgentsTree {
 
     pub fn set_selected(&mut self, id: Option<ExecutorId>) {
         self.selected = id;
+    }
+
+    pub fn select_first(&mut self, lineage: &ExecutorLineage) {
+        let order = self.visible_order(lineage);
+        self.selected = order.first().cloned();
+    }
+
+    pub fn select_last(&mut self, lineage: &ExecutorLineage) {
+        let order = self.visible_order(lineage);
+        self.selected = order.last().cloned();
     }
 
     pub fn toggle_collapsed(&mut self, id: &ExecutorId) {
@@ -91,6 +104,22 @@ impl AgentsTree {
         self.selected.clone()
     }
 
+    pub fn scroll_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    }
+
+    pub fn scroll_down(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_add(1);
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = usize::MAX;
+    }
+
     fn visible_order(&self, lineage: &ExecutorLineage) -> Vec<ExecutorId> {
         let mut out = Vec::new();
         for rid in lineage.root_ids() {
@@ -110,18 +139,39 @@ impl AgentsTree {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, lineage: &ExecutorLineage) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, lineage: &ExecutorLineage) {
         let block = Block::default()
             .title(" Lineage ")
             .borders(Borders::ALL)
             .border_style(focused_border_style(self.focused));
 
         let mut lines: Vec<Line> = Vec::new();
-        for rid in lineage.root_ids() {
-            self.render_subtree(lineage, rid, 0, &mut lines);
+        let roots = lineage.root_ids();
+        for (i, rid) in roots.iter().enumerate() {
+            let is_last = i == roots.len().saturating_sub(1);
+            self.render_subtree(lineage, rid, 0, is_last, &[], &mut lines);
         }
 
-        let paragraph = Paragraph::new(lines).block(block);
+        let inner_h = area.height.saturating_sub(2) as usize;
+        let total = lines.len();
+        let max_offset = total.saturating_sub(inner_h);
+
+        // Keep selected item visible
+        if let Some(ref sel) = self.selected {
+            let order = self.visible_order(lineage);
+            if let Some(idx) = order.iter().position(|id| id == sel) {
+                if idx < self.scroll_offset {
+                    self.scroll_offset = idx;
+                } else if inner_h > 0 && idx >= self.scroll_offset + inner_h {
+                    self.scroll_offset = idx.saturating_sub(inner_h - 1);
+                }
+            }
+        }
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+
+        let paragraph = Paragraph::new(lines)
+            .scroll((self.scroll_offset as u16, 0))
+            .block(block);
         frame.render_widget(paragraph, area);
     }
 
@@ -130,6 +180,8 @@ impl AgentsTree {
         l: &'a ExecutorLineage,
         id: &ExecutorId,
         depth: usize,
+        is_last: bool,
+        ancestor_states: &[bool],
         out: &mut Vec<Line<'a>>,
     ) {
         let node = match l.node(id) {
@@ -137,18 +189,53 @@ impl AgentsTree {
             None => return,
         };
         let is_selected = self.selected.as_ref() == Some(id);
-        out.push(self.build_line(node, depth, is_selected));
+        out.push(self.build_line(node, depth, is_last, ancestor_states, is_selected));
         if self.collapsed.contains(id) {
             return;
         }
-        for c in &node.child_ids {
-            self.render_subtree(l, c, depth + 1, out);
+        let child_count = node.child_ids.len();
+        for (i, c) in node.child_ids.iter().enumerate() {
+            let child_is_last = i == child_count.saturating_sub(1);
+            let mut next_ancestors = ancestor_states.to_vec();
+            next_ancestors.push(is_last);
+            self.render_subtree(l, c, depth + 1, child_is_last, &next_ancestors, out);
         }
     }
 
-    fn build_line<'a>(&self, node: &'a ExecutorNode, depth: usize, selected: bool) -> Line<'a> {
-        let indent = "  ".repeat(depth);
-        let connector = if depth == 0 { "" } else { "└─ " };
+    fn build_line<'a>(
+        &self,
+        node: &'a ExecutorNode,
+        depth: usize,
+        is_last: bool,
+        ancestor_states: &[bool],
+        selected: bool,
+    ) -> Line<'a> {
+        let mut indent = String::new();
+        for &ancestor_was_last in ancestor_states {
+            if ancestor_was_last {
+                indent.push_str("   ");
+            } else {
+                indent.push_str("│  ");
+            }
+        }
+        let connector = if depth == 0 {
+            ""
+        } else if is_last {
+            "└─ "
+        } else {
+            "├─ "
+        };
+
+        let has_children = !node.child_ids.is_empty();
+        let collapse_glyph = if has_children {
+            if self.collapsed.contains(&node.id) {
+                "▶ "
+            } else {
+                "▼ "
+            }
+        } else {
+            "  "
+        };
 
         let spinner = match node.phase {
             LifecycleState::Running | LifecycleState::Spawning => {
@@ -211,7 +298,7 @@ impl AgentsTree {
 
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(
-            format!("{}{}", indent, connector),
+            format!("{}{}{}", indent, connector, collapse_glyph),
             Style::default().fg(Color::DarkGray),
         ));
         spans.push(Span::styled(
@@ -259,8 +346,10 @@ pub fn render_lineage_to_strings(
     let mut tree = AgentsTree::new();
     tree.set_selected(selected);
     let mut out = Vec::new();
-    for rid in lineage.root_ids() {
-        collect_lines(&tree, lineage, rid, 0, &mut out);
+    let roots = lineage.root_ids();
+    for (i, rid) in roots.iter().enumerate() {
+        let is_last = i == roots.len().saturating_sub(1);
+        collect_lines(&tree, lineage, rid, 0, is_last, &[], &mut out);
     }
     out
 }
@@ -270,15 +359,41 @@ fn collect_lines(
     l: &ExecutorLineage,
     id: &ExecutorId,
     depth: usize,
+    is_last: bool,
+    ancestor_states: &[bool],
     out: &mut Vec<String>,
 ) {
     if let Some(node) = l.node(id) {
-        let indent = "  ".repeat(depth);
-        let connector = if depth == 0 { "" } else { "└─ " };
+        let mut indent = String::new();
+        for &ancestor_was_last in ancestor_states {
+            if ancestor_was_last {
+                indent.push_str("   ");
+            } else {
+                indent.push_str("│  ");
+            }
+        }
+        let connector = if depth == 0 {
+            ""
+        } else if is_last {
+            "└─ "
+        } else {
+            "├─ "
+        };
+        let has_children = !node.child_ids.is_empty();
+        let collapse_glyph = if has_children {
+            if tree.collapsed.contains(&node.id) {
+                "▶ "
+            } else {
+                "▼ "
+            }
+        } else {
+            "  "
+        };
         out.push(format!(
-            "{}{}{} {} [{:?}]",
+            "{}{}{}{} {} [{:?}]",
             indent,
             connector,
+            collapse_glyph,
             node.agent,
             match node.role {
                 Role::Brain => "BRAIN",
@@ -288,8 +403,12 @@ fn collect_lines(
             node.phase
         ));
         if !tree.collapsed.contains(id) {
-            for c in &node.child_ids {
-                collect_lines(tree, l, c, depth + 1, out);
+            let child_count = node.child_ids.len();
+            for (i, c) in node.child_ids.iter().enumerate() {
+                let child_is_last = i == child_count.saturating_sub(1);
+                let mut next_ancestors = ancestor_states.to_vec();
+                next_ancestors.push(is_last);
+                collect_lines(tree, l, c, depth + 1, child_is_last, &next_ancestors, out);
             }
         }
     }

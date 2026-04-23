@@ -29,6 +29,7 @@ use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::SessionMetadataStore;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
+use crate::views::issue_browser::IssueBrowserView;
 use crate::views::plan_inspector::PlanInspectorView;
 use crate::views::session_detail::SessionDetailView;
 use crate::views::session_picker::SessionPickerView;
@@ -172,6 +173,7 @@ pub struct App {
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
     plan_inspector: Option<PlanInspectorView>,
+    issue_browser: Option<IssueBrowserView>,
     help_visible: bool,
     /// Shown when the user requests quit while a brain is attached. While
     /// visible, all input is captured by the dialog.
@@ -286,6 +288,7 @@ impl App {
             session_detail: None,
             session_picker,
             plan_inspector: None,
+            issue_browser: None,
             help_visible: false,
             quit_confirm_visible: false,
             should_quit: false,
@@ -725,6 +728,10 @@ impl App {
                         .plan_inspector
                         .as_mut()
                         .and_then(|view| view.handle_key(key, &ctx)),
+                    ViewId::IssueBrowser => self
+                        .issue_browser
+                        .as_mut()
+                        .and_then(|view| view.handle_key(key, &ctx)),
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {
                         if let Some(viewer) = self.mermaid_viewer.as_mut() {
@@ -778,6 +785,7 @@ impl App {
                         }
                     }
                     ViewId::PlanInspector(_) => {}
+                    ViewId::IssueBrowser => {}
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {}
                 }
@@ -812,7 +820,13 @@ impl App {
 
         match self.current_view {
             ViewId::Dashboard => {
-                if is_up {
+                if self.dashboard.focused_node().is_some() {
+                    if is_up {
+                        self.dashboard.scroll_detail_up_by(lines);
+                    } else {
+                        self.dashboard.scroll_detail_down_by(lines);
+                    }
+                } else if is_up {
                     self.dashboard.scroll_activity_up_by(lines);
                 } else {
                     self.dashboard.scroll_activity_down_by(lines);
@@ -831,6 +845,26 @@ impl App {
                 // No mouse scroll in v1 picker.
             }
             ViewId::PlanInspector(_) => {}
+            ViewId::IssueBrowser => {
+                if let Some(ref mut browser) = self.issue_browser {
+                    if browser.issue_detail_visible() {
+                        if is_up {
+                            browser.scroll_issue_detail_up_by(lines as u16);
+                        } else {
+                            browser.scroll_issue_detail_down_by(lines as u16);
+                        }
+                    } else {
+                        let count = browser.tracked_issues().len();
+                        if count > 0 {
+                            if is_up {
+                                browser.issues_panel_mut().select_prev(lines, count);
+                            } else {
+                                browser.issues_panel_mut().select_next(lines, count);
+                            }
+                        }
+                    }
+                }
+            }
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {}
         }
@@ -1198,6 +1232,9 @@ impl App {
         if let Some(ref mut inspector) = self.plan_inspector {
             inspector.handle_spur_event(&event, &ctx);
         }
+        if let Some(ref mut browser) = self.issue_browser {
+            browser.handle_spur_event(&event, &ctx);
+        }
 
         // Sync status to InputBars
         self.sync_brain_status();
@@ -1237,6 +1274,14 @@ impl App {
                 self.dirty = true;
             }
 
+            Action::NavigateTo(ViewId::IssueBrowser) => {
+                if self.issue_browser.is_none() {
+                    self.issue_browser = Some(IssueBrowserView::new());
+                }
+                self.current_view = ViewId::IssueBrowser;
+                self.dirty = true;
+            }
+
             #[cfg(feature = "markdown")]
             Action::NavigateTo(ViewId::MermaidOverlay(ref session)) => {
                 use crate::views::mermaid_viewer::MermaidViewerView;
@@ -1256,6 +1301,11 @@ impl App {
                 if let ViewId::PlanInspector(ref session) = self.current_view {
                     self.current_view = ViewId::SessionDetail(session.clone());
                     self.plan_inspector = None;
+                    self.dirty = true;
+                    return;
+                }
+                if matches!(self.current_view, ViewId::IssueBrowser) {
+                    self.current_view = ViewId::Dashboard;
                     self.dirty = true;
                     return;
                 }
@@ -2094,6 +2144,11 @@ impl App {
                     view.tick();
                 }
             }
+            ViewId::IssueBrowser => {
+                if let Some(view) = self.issue_browser.as_mut() {
+                    view.tick();
+                }
+            }
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {
                 // The underlying session detail continues receiving
@@ -2150,6 +2205,11 @@ impl App {
             }
             ViewId::PlanInspector(_) => {
                 if let Some(ref mut view) = self.plan_inspector {
+                    view.render(frame, area, &ctx);
+                }
+            }
+            ViewId::IssueBrowser => {
+                if let Some(ref mut view) = self.issue_browser {
                     view.render(frame, area, &ctx);
                 }
             }
