@@ -700,6 +700,203 @@ async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
 }
 
 #[tokio::test]
+async fn same_topic_resume_supersession_keeps_new_binding_when_old_ready_arrives_late() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime.restore_topic_binding(42, 77, "Session 1".into(), "acp-X".into(), "kimi".into());
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello while restoring")
+        .await
+        .unwrap();
+    assert!(matches!(
+        user_rx.recv().await.unwrap(),
+        spur_core::InteractiveInput::ResumeSession { session_id } if session_id == "acp-X"
+    ));
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "/resume acp-Y")
+        .await
+        .unwrap();
+    assert!(matches!(
+        user_rx.recv().await.unwrap(),
+        spur_core::InteractiveInput::ResumeSession { session_id } if session_id == "acp-Y"
+    ));
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_Y".into()),
+                acp_session_id: "acp-Y".into(),
+                brain: "kimi".into(),
+                resumed: true,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_X".into()),
+                acp_session_id: "acp-X".into(),
+                brain: "kimi".into(),
+                resumed: true,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    let record = runtime.thread_record(77).expect("topic 77 present");
+    assert!(
+        matches!(
+            &record.binding,
+            BindingState::Active { acp_session_id, .. } if acp_session_id == "acp-Y"
+        ),
+        "late ready for X must not overwrite the newer /resume Y binding; binding was {:?}",
+        record.binding
+    );
+}
+
+#[tokio::test]
+async fn same_topic_resume_supersession_ignores_old_ready_until_new_ready_arrives() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime.restore_topic_binding(42, 77, "Session 1".into(), "acp-X".into(), "kimi".into());
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "/resume acp-Y")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    let (key, renders) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_X".into()),
+                acp_session_id: "acp-X".into(),
+                brain: "kimi".into(),
+                resumed: true,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    assert!(
+        key.is_none(),
+        "stale resumed-ready for X must not route anywhere while /resume Y is pending"
+    );
+    assert!(
+        renders.is_empty(),
+        "stale resumed-ready for X must not render while /resume Y is pending"
+    );
+
+    let record = runtime.thread_record(77).expect("topic 77 present");
+    assert!(
+        matches!(
+            &record.binding,
+            BindingState::RestorePending { acp_session_id, .. } if acp_session_id == "acp-Y"
+        ),
+        "old ready for X must not activate the topic while /resume Y is pending; binding was {:?}",
+        record.binding
+    );
+    assert!(record.live_session.is_none());
+}
+
+#[tokio::test]
+async fn late_resumed_ready_without_pending_target_is_ignored() {
+    let (mut runtime, handle, _user_rx) = test_runtime();
+    runtime.restore_topic_binding(42, 77, "Session 1".into(), "acp-77".into(), "kimi".into());
+    let _ = runtime.handle_chat_text(&handle, 42, None, "/sessions").await.unwrap();
+
+    let (key, renders) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur-late".into()),
+                acp_session_id: "acp-late".into(),
+                brain: "kimi".into(),
+                resumed: true,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    assert!(
+        key.is_none(),
+        "late resumed-ready with no pending target must not route anywhere"
+    );
+    assert!(
+        renders.is_empty(),
+        "late resumed-ready with no pending target must not render"
+    );
+
+    let record = runtime.thread_record(77).expect("topic 77 present");
+    assert!(
+        matches!(
+            &record.binding,
+            BindingState::RestorePending { acp_session_id, .. } if acp_session_id == "acp-77"
+        ),
+        "late unrelated resumed-ready must not mutate existing restore state; binding was {:?}",
+        record.binding
+    );
+    assert!(record.live_session.is_none());
+}
+
+#[tokio::test]
+async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime
+        .ensure_topic_record(42, 77, "Session 1".into())
+        .unwrap();
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    runtime.activate_topic_binding(42, 77, "Session 1".into(), "acp-X".into(), "kimi".into());
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_Y".into()),
+                acp_session_id: "acp-Y".into(),
+                brain: "kimi".into(),
+                resumed: false,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    let (old_key, _) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::TurnComplete {
+                session: spur_acp::SessionId("spur_acp-X".into()),
+            },
+        ))
+        .unwrap();
+    assert!(
+        old_key.is_none(),
+        "stale session route for acp-X must be removed after the fresh ready binds spur_Y"
+    );
+
+    let (new_key, _) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::TurnComplete {
+                session: spur_acp::SessionId("spur_Y".into()),
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        new_key,
+        Some(spur_bot::state::ThreadKey {
+            chat_id: 42,
+            message_thread_id: Some(77),
+        }),
+        "the committed fresh session spur_Y must still route to topic 77"
+    );
+}
+
+#[tokio::test]
 async fn multiple_pending_new_sessions_bind_in_fifo_order() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
@@ -867,6 +1064,22 @@ async fn agent_session_ready_commits_binding_and_persists() {
             },
         ))
         .unwrap();
+
+    let (key, _) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::TurnComplete {
+                session: spur_acp::SessionId("spur_1".into()),
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        key,
+        Some(spur_bot::state::ThreadKey {
+            chat_id: 42,
+            message_thread_id: Some(77),
+        }),
+        "fresh AgentSessionReady must still install a live route for turn completion"
+    );
 
     let persisted = runtime.state_store().load().unwrap();
     assert_eq!(persisted.threads.len(), 1);
