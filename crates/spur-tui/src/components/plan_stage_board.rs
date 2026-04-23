@@ -46,13 +46,16 @@ pub fn render_stage_board(
                 ];
                 lines.push(Line::from(title_line));
 
-                if let Some(issue_id) = task.issue_id.as_deref() {
-                    if let Some(chip) = live_chip(lineage, issue_id) {
-                        lines.push(Line::from(vec![
-                            Span::raw("    "),
-                            Span::styled(chip, Style::default().fg(Color::Cyan)),
-                        ]));
+                let meta = task_meta_chips(task, lineage);
+                if !meta.is_empty() {
+                    let mut meta_line = vec![Span::raw("    ")];
+                    for (i, span) in meta.into_iter().enumerate() {
+                        if i > 0 {
+                            meta_line.push(Span::raw("  "));
+                        }
+                        meta_line.push(span);
                     }
+                    lines.push(Line::from(meta_line));
                 }
                 lines.push(Line::raw(""));
             }
@@ -92,10 +95,14 @@ pub fn render_stacked_stage_groups(
                 status_badge(&task.status),
                 task.task_name
             );
-            if let Some(issue_id) = task.issue_id.as_deref() {
-                if let Some(chip) = live_chip(lineage, issue_id) {
-                    text.push_str("  ");
-                    text.push_str(&chip);
+            let meta = task_meta_chips(task, lineage);
+            if !meta.is_empty() {
+                text.push_str("  ");
+                for (i, span) in meta.into_iter().enumerate() {
+                    if i > 0 {
+                        text.push_str("  ");
+                    }
+                    text.push_str(&span.content);
                 }
             }
             lines.push(Line::from(text));
