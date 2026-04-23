@@ -700,6 +700,64 @@ async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
 }
 
 #[tokio::test]
+async fn same_topic_resume_supersession_keeps_new_binding_when_old_ready_arrives_late() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime.restore_topic_binding(42, 77, "Session 1".into(), "acp-X".into(), "kimi".into());
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello while restoring")
+        .await
+        .unwrap();
+    assert!(matches!(
+        user_rx.recv().await.unwrap(),
+        spur_core::InteractiveInput::ResumeSession { session_id } if session_id == "acp-X"
+    ));
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "/resume acp-Y")
+        .await
+        .unwrap();
+    assert!(matches!(
+        user_rx.recv().await.unwrap(),
+        spur_core::InteractiveInput::ResumeSession { session_id } if session_id == "acp-Y"
+    ));
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_Y".into()),
+                acp_session_id: "acp-Y".into(),
+                brain: "kimi".into(),
+                resumed: true,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_X".into()),
+                acp_session_id: "acp-X".into(),
+                brain: "kimi".into(),
+                resumed: true,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+            },
+        ))
+        .unwrap();
+
+    let record = runtime.thread_record(77).expect("topic 77 present");
+    assert!(
+        matches!(
+            &record.binding,
+            BindingState::Active { acp_session_id, .. } if acp_session_id == "acp-Y"
+        ),
+        "late ready for X must not overwrite the newer /resume Y binding; binding was {:?}",
+        record.binding
+    );
+}
+
+#[tokio::test]
 async fn multiple_pending_new_sessions_bind_in_fifo_order() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
