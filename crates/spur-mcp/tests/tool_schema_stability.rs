@@ -21,7 +21,7 @@ fn test_delegate_parallel_schema_stability() {
     let json = serde_json::to_value(&schema).unwrap();
     assert_eq!(json["title"], "DelegateParallelInput");
     assert!(json["properties"].get("tasks").is_some());
-    assert!(json["properties"].get("delegation_plan").is_some());
+    assert!(json["properties"].get("delegation_plan").is_none());
     assert_eq!(json["additionalProperties"], json!(false));
 }
 

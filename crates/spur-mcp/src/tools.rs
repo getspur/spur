@@ -64,7 +64,7 @@ fn delegate_to_worker_def() -> ToolDefinition {
 fn delegate_parallel_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_parallel".into(),
-        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. The `delegation_plan.decomposition` field MUST demonstrate subtasks are independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
+        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateParallelInput>(),
     }
 }
@@ -206,6 +206,14 @@ fn create_pr_def() -> ToolDefinition {
                 "branch": {
                     "type": "string",
                     "description": "Head branch name"
+                },
+                "base_branch": {
+                    "type": "string",
+                    "description": "Base branch to merge into (optional, defaults to repo default)"
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "Repository identifier (optional, for multi-repo setups)"
                 }
             },
             "required": ["title", "body", "branch"]
@@ -471,10 +479,6 @@ fn submit_plan_def() -> ToolDefinition {
                     },
                     "description": "Tasks with dependency edges forming a DAG. Tasks with no depends_on are dispatched immediately."
                 },
-                "delegation_plan": {
-                    "type": "object",
-                    "description": "Structured reasoning for the overall plan."
-                },
                 "persist_as_epic": {
                     "type": "boolean",
                     "description": "When true, mirror the plan into beads as an epic with child issues + dependency edges. Each child is labeled `spur:plan-id:<plan_id>` so review_task(approve) can auto-close the matching beads issue. Requires `epic_title` and a beads PM backend. Defaults to false (ephemeral in-memory plan only)."
@@ -563,10 +567,10 @@ pub fn review_task_def() -> ToolDefinition {
                 },
                 "feedback": {
                     "type": "string",
-                    "description": "Review notes. REQUIRED when decision='request_changes' (stored in the persisted retry comment for the next reconciler dispatch). Optional for approve/reject (stored as rationale)."
+                    "description": "Review notes. Required for all decisions — used as rationale for approve/reject and as retry instruction for request_changes."
                 }
             },
-            "required": ["plan_id", "task_id", "decision"]
+            "required": ["plan_id", "task_id", "decision", "feedback"]
         }),
     }
 }
