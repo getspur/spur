@@ -211,41 +211,90 @@ impl AnalyticsEngine {
         );
         let sql = format!(
             "CREATE OR REPLACE VIEW codex_events AS \
-             WITH raw AS ( \
+             WITH source AS ( \
                 SELECT \
-                    timestamp::TIMESTAMP AS ts, \
+                    timestamp::TIMESTAMP AS timestamp, \
+                    filename, \
+                    NULLIF(regexp_extract(filename, '.*/([^/]+)[.]jsonl$', 1), '') AS session_id, \
+                    \"type\" AS entry_type, \
+                    payload.type AS payload_type, \
+                    payload.info.last_token_usage.input_tokens AS last_input, \
+                    payload.info.last_token_usage.output_tokens AS last_output, \
+                    payload.info.last_token_usage.cached_input_tokens AS last_cached, \
+                    payload.info.total_token_usage.input_tokens AS total_input, \
+                    payload.info.total_token_usage.output_tokens AS total_output, \
+                    payload.info.total_token_usage.cached_input_tokens AS total_cached, \
+                    CASE \
+                        WHEN \"type\" = 'turn_context' THEN payload.model \
+                        ELSE payload.info.model \
+                    END AS candidate_model, \
+                    LAST_VALUE( \
+                        CASE \
+                            WHEN \"type\" = 'turn_context' THEN payload.model \
+                            ELSE payload.info.model \
+                        END IGNORE NULLS \
+                    ) OVER ( \
+                        PARTITION BY filename \
+                        ORDER BY timestamp::TIMESTAMP \
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW \
+                    ) AS carried_model \
+                FROM read_json_auto('{}', filename = true, ignore_errors = true) \
+             ), \
+             token_events AS ( \
+                SELECT \
+                    timestamp, \
                     session_id, \
-                    model, \
-                    last_token_usage.input_tokens AS last_input, \
-                    last_token_usage.output_tokens AS last_output, \
-                    last_token_usage.cached_input_tokens AS last_cached, \
-                    total_token_usage.input_tokens AS total_input, \
-                    total_token_usage.output_tokens AS total_output, \
-                    total_token_usage.cached_input_tokens AS total_cached \
-                FROM read_json_auto('{}', ignore_errors = true) \
+                    NULLIF(NULLIF(COALESCE(candidate_model, carried_model), ''), '<synthetic>') AS model, \
+                    last_input, \
+                    last_output, \
+                    last_cached, \
+                    total_input, \
+                    total_output, \
+                    total_cached \
+                FROM source \
+                WHERE entry_type = 'event_msg' \
+                  AND payload_type = 'token_count' \
              ), \
              with_lag AS ( \
-                SELECT *, \
-                    LAG(total_input) OVER (PARTITION BY session_id ORDER BY ts) AS prev_input, \
-                    LAG(total_output) OVER (PARTITION BY session_id ORDER BY ts) AS prev_output, \
-                    LAG(total_cached) OVER (PARTITION BY session_id ORDER BY ts) AS prev_cached \
-                FROM raw \
+                SELECT \
+                    *, \
+                    LAG(total_input) OVER (PARTITION BY session_id ORDER BY timestamp) AS prev_input, \
+                    LAG(total_output) OVER (PARTITION BY session_id ORDER BY timestamp) AS prev_output, \
+                    LAG(total_cached) OVER (PARTITION BY session_id ORDER BY timestamp) AS prev_cached \
+                FROM token_events \
+             ), \
+             converted AS ( \
+                SELECT \
+                    timestamp, \
+                    session_id, \
+                    'codex' AS agent, \
+                    model, \
+                    NULL::VARCHAR AS project, \
+                    COALESCE(last_input, GREATEST(total_input - COALESCE(prev_input, 0), 0::BIGINT)) AS input_tokens, \
+                    COALESCE(last_output, GREATEST(total_output - COALESCE(prev_output, 0), 0::BIGINT)) AS output_tokens, \
+                    LEAST( \
+                        COALESCE(last_cached, GREATEST(total_cached - COALESCE(prev_cached, 0), 0::BIGINT)), \
+                        COALESCE(last_input, GREATEST(total_input - COALESCE(prev_input, 0), 0::BIGINT)) \
+                    ) AS cache_read_tokens, \
+                    0::BIGINT AS cache_creation_tokens, \
+                    NULL::DOUBLE AS cost_usd \
+                FROM with_lag \
              ) \
              SELECT \
-                ts AS timestamp, \
+                timestamp, \
                 session_id, \
-                'codex' AS agent, \
-                COALESCE(NULLIF(model, ''), 'gpt-5') AS model, \
-                NULL::VARCHAR AS project, \
-                COALESCE(last_input, total_input - COALESCE(prev_input, 0)) AS input_tokens, \
-                COALESCE(last_output, total_output - COALESCE(prev_output, 0)) AS output_tokens, \
-                LEAST( \
-                    COALESCE(last_cached, total_cached - COALESCE(prev_cached, 0)), \
-                    COALESCE(last_input, total_input - COALESCE(prev_input, 0)) \
-                ) AS cache_read_tokens, \
-                0::BIGINT AS cache_creation_tokens, \
-                NULL::DOUBLE AS cost_usd \
-             FROM with_lag",
+                agent, \
+                model, \
+                project, \
+                input_tokens, \
+                output_tokens, \
+                cache_read_tokens, \
+                cache_creation_tokens, \
+                cost_usd \
+             FROM converted \
+             WHERE input_tokens > 0 \
+                OR output_tokens > 0 \
+                OR cache_read_tokens > 0",
             pattern
         );
         self.conn
@@ -1079,77 +1128,60 @@ mod tests {
         let codex_dir = tmp.path().join("codex/sessions/spur");
         std::fs::create_dir_all(&codex_dir).unwrap();
 
-        // Write a Codex-style JSONL file with cumulative totals
-        let jsonl_path = codex_dir.join("session.jsonl");
+        // Write a real Codex JSONL file.
+        let jsonl_path = codex_dir.join("codex-session.jsonl");
         let mut file = std::fs::File::create(&jsonl_path).unwrap();
-        // Row 1: first entry, no previous
-        writeln!(file, r#"{{"timestamp":"2026-04-23T10:00:00Z","session_id":"sess-codex-1","total_token_usage":{{"input_tokens":100,"output_tokens":50,"cached_input_tokens":10}},"model":"gpt-5"}}"#).unwrap();
-        // Row 2: second entry, cumulative
-        writeln!(file, r#"{{"timestamp":"2026-04-23T10:01:00Z","session_id":"sess-codex-1","total_token_usage":{{"input_tokens":300,"output_tokens":150,"cached_input_tokens":30}},"model":"gpt-5"}}"#).unwrap();
-        // Row 3: third entry with last_token_usage (direct delta)
-        writeln!(file, r#"{{"timestamp":"2026-04-23T10:02:00Z","session_id":"sess-codex-1","last_token_usage":{{"input_tokens":50,"output_tokens":25,"cached_input_tokens":5}},"total_token_usage":{{"input_tokens":350,"output_tokens":175,"cached_input_tokens":35}},"model":"gpt-5"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"turn_context","timestamp":"2026-04-20T10:00:00Z","payload":{{"model":"gpt-5"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"event_msg","timestamp":"2026-04-20T10:01:00Z","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":0,"total_tokens":1700}},"total_token_usage":{{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":0,"total_tokens":1700}},"model":"gpt-5"}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            r#"{"type":"event_msg","timestamp":"2026-04-20T10:02:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":300,"output_tokens":800,"reasoning_output_tokens":0,"total_tokens":2800}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            r#"{"type":"event_msg","timestamp":"2026-04-20T10:03:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":300,"output_tokens":800,"reasoning_output_tokens":0,"total_tokens":2800}}}}"#
+        )
+        .unwrap();
 
         let engine = setup_engine();
-        engine
-            .conn
-            .execute_batch(&format!(
-                "CREATE OR REPLACE VIEW codex_events AS \
-             WITH raw AS ( \
-                SELECT \
-                    timestamp::TIMESTAMP AS ts, \
-                    session_id, \
-                    model, \
-                    last_token_usage.input_tokens AS last_input, \
-                    last_token_usage.output_tokens AS last_output, \
-                    last_token_usage.cached_input_tokens AS last_cached, \
-                    total_token_usage.input_tokens AS total_input, \
-                    total_token_usage.output_tokens AS total_output, \
-                    total_token_usage.cached_input_tokens AS total_cached, \
-                FROM read_json_auto('{}', ignore_errors=true) \
-             ), \
-             with_lag AS ( \
-                SELECT *, \
-                    LAG(total_input) OVER (PARTITION BY session_id ORDER BY ts) AS prev_input, \
-                    LAG(total_output) OVER (PARTITION BY session_id ORDER BY ts) AS prev_output, \
-                    LAG(total_cached) OVER (PARTITION BY session_id ORDER BY ts) AS prev_cached \
-                FROM raw \
-             ) \
-             SELECT \
-                ts AS timestamp, \
-                session_id, \
-                'codex' AS agent, \
-                COALESCE(NULLIF(model, ''), 'gpt-5') AS model, \
-                NULL::VARCHAR AS project, \
-                COALESCE(last_input, total_input - COALESCE(prev_input, 0)) AS input_tokens, \
-                COALESCE(last_output, total_output - COALESCE(prev_output, 0)) AS output_tokens, \
-                LEAST( \
-                    COALESCE(last_cached, total_cached - COALESCE(prev_cached, 0)), \
-                    COALESCE(last_input, total_input - COALESCE(prev_input, 0)) \
-                ) AS cache_read_tokens, \
-                0::BIGINT AS cache_creation_tokens, \
-                NULL::DOUBLE AS cost_usd \
-             FROM with_lag",
-                jsonl_path.to_str().unwrap().replace('\\', "/")
-            ))
-            .unwrap();
+        engine.create_codex_view(&codex_dir).unwrap();
 
         // Verify delta computation
-        let mut stmt = engine.conn.prepare(
-            "SELECT input_tokens, output_tokens, cache_read_tokens FROM codex_events ORDER BY timestamp"
-        ).unwrap();
-        let rows: Vec<(i64, i64, i64)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        let mut stmt = engine
+            .conn
+            .prepare(
+                "SELECT session_id, model, input_tokens, output_tokens, cache_read_tokens \
+                 FROM codex_events ORDER BY timestamp",
+            )
+            .unwrap();
+        let rows: Vec<(String, Option<String>, i64, i64, i64)> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(rows.len(), 3);
-        // Row 1: total - 0 (no prev) = 100, 50, 10
-        assert_eq!(rows[0], (100, 50, 10));
-        // Row 2: total - prev = 300-100=200, 150-50=100, 30-10=20
-        assert_eq!(rows[1], (200, 100, 20));
-        // Row 3: last_token_usage = 50, 25, 5 (and capped at input)
-        assert_eq!(rows[2], (50, 25, 5));
+        assert_eq!(rows.len(), 2, "zero-delta row should be excluded");
+
+        assert_eq!(rows[0].0, "codex-session");
+        assert_eq!(rows[0].1.as_deref(), Some("gpt-5"));
+        assert_eq!((rows[0].2, rows[0].3, rows[0].4), (1000, 500, 200));
+
+        assert_eq!(rows[1].0, "codex-session");
+        assert_eq!(rows[1].1.as_deref(), Some("gpt-5"));
+        assert_eq!((rows[1].2, rows[1].3, rows[1].4), (1000, 300, 100));
     }
 
     #[test]
