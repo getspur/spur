@@ -450,9 +450,18 @@ mod tests {
         // Clear bundled set by not relying on it — bundled skills will also
         // be written, but we only assert our override landed.
         let summary = run(dir.path()).unwrap();
-        // Expected paths for `my-skill` (override) across 8 adapters + Kiro pointer.
+        let hermetic_override = dir.path().join(".spur/skills/my-skill/SKILL.md");
+        assert!(
+            hermetic_override.exists(),
+            "missing .spur/skills/my-skill/SKILL.md"
+        );
+        assert!(
+            !summary.written.contains(&hermetic_override),
+            "override seed should not be rewritten when unchanged"
+        );
+
+        // Expected worker-adapter outputs for `my-skill` plus the Kiro pointer.
         for expected in [
-            ".spur/skills/my-skill/SKILL.md",
             ".claude/skills/spurpower-my-skill/SKILL.md",
             ".codex/skills/spurpower-my-skill/SKILL.md",
             ".gemini/skills/spurpower-my-skill/SKILL.md",

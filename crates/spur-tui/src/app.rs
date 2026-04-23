@@ -11,7 +11,7 @@ use spur_acp::{
     LicenseBindingMode, LicensePlan as EventLicensePlan, LicenseStateEvent, LicenseStatusEvent,
     LicenseSubjectKind, SessionId, SpurEvent, SpurEventBody,
 };
-use spur_core::ExecutorLineage;
+use spur_core::{ExecutorLineage, PlanProjectionStore};
 
 #[cfg(feature = "markdown")]
 use ratatui_image::picker::Picker;
@@ -29,6 +29,7 @@ use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::SessionMetadataStore;
 use crate::tui;
 use crate::views::dashboard::DashboardView;
+use crate::views::plan_inspector::PlanInspectorView;
 use crate::views::session_detail::SessionDetailView;
 use crate::views::session_picker::SessionPickerView;
 use crate::views::View;
@@ -170,6 +171,7 @@ pub struct App {
     dashboard: DashboardView,
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
+    plan_inspector: Option<PlanInspectorView>,
     help_visible: bool,
     /// Shown when the user requests quit while a brain is attached. While
     /// visible, all input is captured by the dialog.
@@ -182,6 +184,8 @@ pub struct App {
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
     /// Event-sourced projection of brain → executor lineage.
     lineage: ExecutorLineage,
+    /// Durable plan snapshots keyed by session and plan id.
+    plan_projection: PlanProjectionStore,
     /// Per-executor `ReactTrace` instances rendered by the Stream tab.
     /// Populated on every `SpurEventBody::WorkerNotification`.
     pub(crate) worker_streams: crate::worker_streams::WorkerStreams,
@@ -281,6 +285,7 @@ impl App {
             dashboard: DashboardView::new(),
             session_detail: None,
             session_picker,
+            plan_inspector: None,
             help_visible: false,
             quit_confirm_visible: false,
             should_quit: false,
@@ -290,6 +295,7 @@ impl App {
             brain_name: None,
             pending_permission: None,
             lineage: ExecutorLineage::new(),
+            plan_projection: PlanProjectionStore::new(),
             worker_streams: crate::worker_streams::WorkerStreams::new(),
             #[cfg(feature = "markdown")]
             mermaid_picker,
@@ -693,6 +699,7 @@ impl App {
 
                 let ctx = crate::views::ViewContext {
                     lineage: &self.lineage,
+                    plan_projection: &self.plan_projection,
                     brain_status: &self.brain_status,
                     license_badge: self.license_badge.as_ref(),
                     flag_summary: self.flag_summary,
@@ -714,6 +721,10 @@ impl App {
                         .session_picker
                         .as_mut()
                         .and_then(|p| p.handle_key(key, &ctx)),
+                    ViewId::PlanInspector(_) => self
+                        .plan_inspector
+                        .as_mut()
+                        .and_then(|view| view.handle_key(key, &ctx)),
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {
                         if let Some(viewer) = self.mermaid_viewer.as_mut() {
@@ -766,6 +777,7 @@ impl App {
                             picker.handle_paste(&text);
                         }
                     }
+                    ViewId::PlanInspector(_) => {}
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {}
                 }
@@ -818,6 +830,7 @@ impl App {
             ViewId::SessionPicker => {
                 // No mouse scroll in v1 picker.
             }
+            ViewId::PlanInspector(_) => {}
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {}
         }
@@ -829,6 +842,7 @@ impl App {
         // Always fold into the lineage projection first. The projection is a
         // pure function of the event stream — view code reads from it later.
         self.lineage.apply(&event);
+        self.plan_projection.apply(&event);
 
         // Route worker stream updates into per-executor ReactTraces.
         // Orphan drop: skip events whose executor the lineage doesn't
@@ -1161,6 +1175,7 @@ impl App {
             | SpurEventBody::IssueReceived { .. }
             | SpurEventBody::PrCreated { .. }
             | SpurEventBody::IssueUpdated { .. }
+            | SpurEventBody::PlanSnapshotUpdated { .. }
             | SpurEventBody::AgentExtNotification { .. } => {}
             // Catch-all for future variants — log so we notice.
             _ => {
@@ -1171,6 +1186,7 @@ impl App {
         // Forward to views
         let ctx = crate::views::ViewContext {
             lineage: &self.lineage,
+            plan_projection: &self.plan_projection,
             brain_status: &self.brain_status,
             license_badge: self.license_badge.as_ref(),
             flag_summary: self.flag_summary,
@@ -1178,6 +1194,9 @@ impl App {
         self.dashboard.handle_spur_event(&event, &ctx);
         if let Some(ref mut detail) = self.session_detail {
             detail.handle_spur_event(&event, &ctx);
+        }
+        if let Some(ref mut inspector) = self.plan_inspector {
+            inspector.handle_spur_event(&event, &ctx);
         }
 
         // Sync status to InputBars
@@ -1212,6 +1231,12 @@ impl App {
                 self.current_view = ViewId::SessionPicker;
             }
 
+            Action::NavigateTo(ViewId::PlanInspector(ref session)) => {
+                self.plan_inspector = Some(PlanInspectorView::new(session.clone()));
+                self.current_view = ViewId::PlanInspector(session.clone());
+                self.dirty = true;
+            }
+
             #[cfg(feature = "markdown")]
             Action::NavigateTo(ViewId::MermaidOverlay(ref session)) => {
                 use crate::views::mermaid_viewer::MermaidViewerView;
@@ -1225,6 +1250,12 @@ impl App {
                 if let ViewId::MermaidOverlay(ref session) = self.current_view {
                     self.current_view = ViewId::SessionDetail(session.clone());
                     self.mermaid_viewer = None;
+                    self.dirty = true;
+                    return;
+                }
+                if let ViewId::PlanInspector(ref session) = self.current_view {
+                    self.current_view = ViewId::SessionDetail(session.clone());
+                    self.plan_inspector = None;
                     self.dirty = true;
                     return;
                 }
@@ -1983,6 +2014,14 @@ impl App {
         &mut self.worker_streams
     }
 
+    pub fn plan_projection(&self) -> &PlanProjectionStore {
+        &self.plan_projection
+    }
+
+    pub fn current_view(&self) -> &ViewId {
+        &self.current_view
+    }
+
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
         #[cfg(feature = "markdown")]
@@ -2050,6 +2089,11 @@ impl App {
                     p.tick()
                 }
             }
+            ViewId::PlanInspector(_) => {
+                if let Some(view) = self.plan_inspector.as_mut() {
+                    view.tick();
+                }
+            }
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {
                 // The underlying session detail continues receiving
@@ -2079,6 +2123,7 @@ impl App {
         // Construct the shared context once per frame.
         let ctx = crate::views::ViewContext {
             lineage: &self.lineage,
+            plan_projection: &self.plan_projection,
             brain_status: &self.brain_status,
             license_badge: self.license_badge.as_ref(),
             flag_summary: self.flag_summary,
@@ -2101,6 +2146,11 @@ impl App {
             ViewId::SessionPicker => {
                 if let Some(ref mut p) = self.session_picker {
                     p.render(frame, area, &ctx);
+                }
+            }
+            ViewId::PlanInspector(_) => {
+                if let Some(ref mut view) = self.plan_inspector {
+                    view.render(frame, area, &ctx);
                 }
             }
             #[cfg(feature = "markdown")]
@@ -2571,6 +2621,94 @@ mod worker_stream_routing_tests {
         app.tick();
         app.tick();
         assert!(app.worker_streams().get("exec-tick").is_some());
+    }
+}
+
+#[cfg(test)]
+mod plan_projection_tests {
+    use super::*;
+    use spur_acp::{PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask};
+
+    fn wrap(body: SpurEventBody) -> SpurEvent {
+        SpurEvent::now(body)
+    }
+
+    fn spawn_brain(app: &mut App, session: &SessionId) {
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: session.clone(),
+        }));
+    }
+
+    fn sample_plan_snapshot_event(session: &SessionId) -> SpurEvent {
+        wrap(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "p-1".into(),
+                status: "running".into(),
+                progress: "0/1 done".into(),
+                next_action:
+                    "Use get_task_diff to review each awaiting task, then review_task to approve or reject."
+                        .into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    pending: 1,
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "task-1".into(),
+                    task_name: "task-1".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-1".into()),
+                    status: "pending".into(),
+                    attempt: 0,
+                    max_attempts: 3,
+                    depends_on: Vec::new(),
+                    blocked_by: Vec::new(),
+                    unblocks: Vec::new(),
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: None,
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "wait".into(),
+                }],
+            }),
+        })
+    }
+
+    #[test]
+    fn navigate_to_plan_inspector_and_back_returns_to_session_detail() {
+        let mut app = App::new_for_tests();
+        let session = SessionId("brain-1".into());
+        spawn_brain(&mut app, &session);
+
+        app.process_action(Action::NavigateTo(ViewId::PlanInspector(session.clone())));
+        assert!(matches!(app.current_view(), ViewId::PlanInspector(_)));
+
+        app.process_action(Action::NavigateBack);
+        assert!(matches!(app.current_view(), ViewId::SessionDetail(_)));
+    }
+
+    #[test]
+    fn plan_snapshot_event_updates_plan_store() {
+        let mut app = App::new_for_tests();
+        let session = SessionId("brain-1".into());
+
+        app.handle_spur_event(sample_plan_snapshot_event(&session));
+
+        let plan = app
+            .plan_projection()
+            .current_for_session(&session)
+            .expect("tracked plan");
+        assert_eq!(plan.plan_id, "p-1");
+        assert_eq!(
+            plan.task("task-1").unwrap().issue_id.as_deref(),
+            Some("bd-1")
+        );
     }
 }
 

@@ -13,6 +13,7 @@ pub mod lineage;
 pub(crate) mod notification_drain;
 pub mod notification_pump;
 pub mod orchestrator;
+pub mod plan_projection;
 pub mod retry_loop;
 pub mod review_sink;
 pub mod skills;
@@ -27,6 +28,7 @@ pub use orchestrator::test_support;
 pub use orchestrator::{
     review_dispatcher_loop, BrainSession, InteractiveInput, Orchestrator, RunOpts, RunResult,
 };
+pub use plan_projection::{PlanProjectionStore, TrackedPlan, TrackedTask};
 pub use review_sink::{ReviewSink, ReviewSinkError};
 pub use spur_acp::{
     Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,

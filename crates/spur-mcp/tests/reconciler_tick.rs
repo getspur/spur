@@ -1434,6 +1434,92 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
     assert_eq!(request.issue_id.as_deref(), Some(task_a_id.as_str()));
 }
 
+#[tokio::test]
+async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
+    if !br_available() {
+        eprintln!(
+            "skipping execute_epic_shutdown_abort_does_not_emit_plan_snapshot: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Shutdown Abort Execute Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task A",
+            "--priority",
+            "2",
+        ],
+    ));
+    run_br(dir.path(), &["dep", "add", &task_id, &epic_id]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
+    let brain_sid = BrainSessionId::new(SessionId("brain".into()));
+    let (mut server, _channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(Arc::clone(&pm)),
+        Some(sink_ref),
+        test_continuation_ctx(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    server.shutdown().await;
+
+    let response = server
+        .__test_call_execute_epic(&epic_id, Some("codex"))
+        .await;
+    assert_eq!(
+        response["error"]["message"].as_str(),
+        Some("orchestrator shutting down — execute_epic aborted"),
+        "execute_epic should abort cleanly when task tracker is closed: {response}"
+    );
+    assert_eq!(
+        server.__test_active_plan_count().await,
+        0,
+        "shutdown abort should not leave a cached active plan behind"
+    );
+
+    let events = sink.events.lock().unwrap();
+    let snapshot_count = events
+        .iter()
+        .filter(|event| matches!(event.body, SpurEventBody::PlanSnapshotUpdated { .. }))
+        .count();
+    assert_eq!(
+        snapshot_count, 0,
+        "shutdown abort must not emit a PlanSnapshotUpdated event for a rolled-back plan"
+    );
+}
+
 /// D1 regression: `Reconciler::run` must honor cancel even while a tick is
 /// mid-flight. Prior to the biased cancel-race select, cancel could only win
 /// between ticks; a stuck `bv.triage`/`br ready` would hang shutdown.

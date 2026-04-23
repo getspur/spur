@@ -446,6 +446,7 @@ pub async fn emit_plan_submit_audit(
     base_snapshot_branch: Option<&str>,
     base_snapshot_oid: Option<&str>,
     execution_mode: Option<&str>,
+    brain_session_id: Option<&SessionId>,
 ) {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
         plan_id: plan_id.to_string(),
@@ -454,6 +455,7 @@ pub async fn emit_plan_submit_audit(
         base_snapshot_branch: base_snapshot_branch.map(str::to_string),
         base_snapshot_oid: base_snapshot_oid.map(str::to_string),
         execution_mode: execution_mode.map(str::to_string),
+        brain_session_id: brain_session_id.map(ToString::to_string),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
@@ -1431,7 +1433,12 @@ impl McpCallbackServer {
     ) {
         self.reconciler_enabled = enable;
         self.reconciler_fast_forward = if enable {
-            Some(fast_forward.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new())))
+            fast_forward.or_else(|| {
+                self.reconciler_fast_forward
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| Some(Arc::new(tokio::sync::Notify::new())))
+            })
         } else {
             None
         };
@@ -1664,6 +1671,17 @@ impl McpCallbackServer {
     pub async fn __test_call_submit_plan(&self, arguments: Value) -> Value {
         let resp = self.handle_submit_plan(Value::from(1), arguments).await;
         serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
+    /// Test-only: trigger the persisted-plan recovery path directly.
+    #[doc(hidden)]
+    pub async fn __test_recover_persisted_plans(&self) -> Result<(), String> {
+        let Some(pm) = self.pm_service.clone() else {
+            return Err("pm_service not configured".to_string());
+        };
+        self.recover_persisted_plans(pm)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Test-only: invoke any tool handler through the same JSON-RPC dispatch
@@ -3194,6 +3212,7 @@ impl McpCallbackServer {
                     base_snapshot_branch.as_deref(),
                     base_snapshot_oid.as_deref(),
                     Some("submit_plan"),
+                    Some(self.brain_session_id.as_session_id()),
                 )
                 .await;
             }
@@ -3203,6 +3222,11 @@ impl McpCallbackServer {
             .lock()
             .await
             .insert(plan_id.clone(), Arc::clone(&state));
+
+        if epic_subgraph.is_some() {
+            let state = state.lock().await;
+            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &state);
+        }
 
         if epic_subgraph.is_some() {
             self.fast_forward_reconciler();
@@ -3499,6 +3523,7 @@ impl McpCallbackServer {
                 base_snapshot_branch.as_deref(),
                 base_snapshot_oid.as_deref(),
                 Some("execute_epic"),
+                Some(self.brain_session_id.as_session_id()),
             )
             .await;
         }
@@ -3534,6 +3559,11 @@ impl McpCallbackServer {
                 -32000,
                 "orchestrator shutting down — execute_epic aborted",
             );
+        }
+
+        {
+            let state = state.lock().await;
+            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &state);
         }
         self.fast_forward_reconciler();
 
@@ -3819,10 +3849,16 @@ impl McpCallbackServer {
         )
         .await?;
 
+        if let Some(sink) = self.event_sink.as_deref() {
+            let projected = self.load_or_project_plan(&plan_id).await?;
+            let state = projected.lock().await;
+            crate::plan::snapshot::emit_plan_snapshot(Some(sink), &state);
+        }
+
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
 
-    async fn install_projected_plan(&self, projected: crate::plan::PlanState) {
+    async fn install_projected_plan(&self, projected: crate::plan::PlanState, emit_snapshot: bool) {
         let plan_id = projected.plan_id.clone();
         if let Some(epic_id) = projected.epic_id.clone() {
             self.plan_registry
@@ -3830,6 +3866,9 @@ impl McpCallbackServer {
                 .await
                 .by_epic
                 .insert(epic_id, plan_id.clone());
+        }
+        if emit_snapshot {
+            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &projected);
         }
         self.active_plans
             .lock()
@@ -3858,7 +3897,7 @@ impl McpCallbackServer {
             }
             let refreshed =
                 crate::plan::projector::project_plan_from_beads(pm.as_ref(), &plan_id).await?;
-            self.install_projected_plan(refreshed).await;
+            self.install_projected_plan(refreshed, true).await;
         }
 
         Ok(())
@@ -3894,7 +3933,7 @@ impl McpCallbackServer {
         let projected = crate::plan::projector::project_plan_from_beads(pm, plan_id)
             .await
             .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
-        self.install_projected_plan(projected).await;
+        self.install_projected_plan(projected, false).await;
         self.active_plans
             .lock()
             .await
@@ -4169,6 +4208,7 @@ mod merge_plan_tests {
             Some("spur/brain-snapshot-test"),
             Some(base_snapshot_oid.as_str()),
             Some("submit_plan"),
+            None,
         )
         .await;
 
@@ -4226,7 +4266,7 @@ mod merge_plan_tests {
             crate::plan::build_plan_status(plan_id, &projected)["ready_to_merge"],
             Value::Bool(true)
         );
-        server.install_projected_plan(projected).await;
+        server.install_projected_plan(projected, false).await;
         if clear_cache {
             server.active_plans.lock().await.remove(plan_id);
         }
@@ -4339,6 +4379,7 @@ mod merge_plan_tests {
             Some("spur/brain-snapshot-test"),
             Some(base_snapshot_oid.as_str()),
             Some("submit_plan"),
+            None,
         )
         .await;
 
@@ -4413,7 +4454,7 @@ mod merge_plan_tests {
             crate::plan::build_plan_status(plan_id, &projected)["ready_to_merge"],
             Value::Bool(true)
         );
-        server.install_projected_plan(projected).await;
+        server.install_projected_plan(projected, false).await;
         if clear_cache {
             server.active_plans.lock().await.remove(plan_id);
         }
@@ -4800,6 +4841,34 @@ mod reconciler_fast_forward_tests {
     }
 
     #[tokio::test]
+    async fn fast_forward_reconciler_uses_default_notify_when_enabled_without_config() {
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (mut server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        server.set_reconciler_enabled(true, None);
+        let notify = server
+            .reconciler_fast_forward
+            .as_ref()
+            .cloned()
+            .expect("default fast-forward notify should be allocated");
+
+        let waiter = tokio::spawn({
+            let notify = Arc::clone(&notify);
+            async move { notify.notified().await }
+        });
+
+        server.fast_forward_reconciler();
+
+        tokio::time::timeout(Duration::from_millis(50), waiter)
+            .await
+            .expect("fast-forward must wake the default reconciler channel")
+            .expect("waiter task must not panic");
+    }
+
+    #[tokio::test]
     async fn load_or_project_plan_returns_cached_entry_when_present() {
         let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
         let continuation_ctx = super::DetachedContinuationCtx {
@@ -4981,7 +5050,7 @@ mod reconciler_fast_forward_tests {
             epic_id: Some("bd-epic".into()),
         };
 
-        server.install_projected_plan(fresh).await;
+        server.install_projected_plan(fresh, false).await;
         let loaded = server
             .active_plans
             .lock()
@@ -5127,8 +5196,8 @@ mod reconciler_fast_forward_tests {
             epic_id: Some("bd-epic".into()),
         };
 
-        server.install_projected_plan(fresh_plan).await;
-        server.install_projected_plan(replacement_plan).await;
+        server.install_projected_plan(fresh_plan, false).await;
+        server.install_projected_plan(replacement_plan, false).await;
         let cached = server
             .active_plans
             .lock()
@@ -5176,6 +5245,7 @@ mod reconciler_fast_forward_tests {
             Some("main"),
             Some("abc123"),
             Some("test"),
+            None,
         )
         .await;
 
@@ -5219,7 +5289,7 @@ mod reconciler_fast_forward_tests {
 
         // Emit PlanSubmit audit WITHOUT base snapshot metadata.
         let adv = pm.advanced().expect("advanced");
-        crate::emit_plan_submit_audit(adv, "plan-1", &sg, None, None, None).await;
+        crate::emit_plan_submit_audit(adv, "plan-1", &sg, None, None, None, None).await;
 
         // The detector must report that legacy reclaim is still needed.
         let needs_reclaim = super::any_open_epic_lacks_rev1_metadata(pm.as_ref())
