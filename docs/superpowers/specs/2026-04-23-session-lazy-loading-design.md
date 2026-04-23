@@ -227,6 +227,8 @@ Practical shape for phase 1:
 - `SessionDetailView` decides whether to render a sentinel row above the
   loaded trace
 - `ReactTrace` remains the container for currently-loaded trace entries only
+- `ReactTrace` still needs an explicit prepend-oriented surface in phase 1,
+  because row anchors and cache invalidation live there
 
 ### Sentinel row
 
@@ -280,10 +282,11 @@ The implementation contract must add a real fetch path, for example:
 
 - new `Action::LoadOlderHistory { session, cursor }`
 - forwarded as a new `UserInput` variant
+- mapped by the CLI bridge into a new `InteractiveInput` variant
 - handled by the orchestrator through a retained history provider or a new
   paged replay source
-- emitted back through a new chunk event rather than overloading the existing
-  one-shot `SessionHistory` semantics
+- emitted back through a new `SpurEventBody` chunk event rather than
+  overloading the existing one-shot `SessionHistory` semantics
 
 Without that explicit contract, the current app treats scroll actions as
 view-local no-ops after `handle_key`, and the orchestrator drains resume
@@ -319,6 +322,10 @@ the orchestrator must make one of these choices explicitly:
 
 The spec should not assume option 2 already exists.
 
+If `LoadOutcome` influences which path is chosen, the implementation plan must
+state whether that signal is merely advisory or part of the real lazy-history
+decision contract.
+
 ### Disk fallback requirements
 
 The existing `SessionHistory` disk replay path in
@@ -353,6 +360,8 @@ The event contract must answer:
 - is more older history available afterward
 - should app-level side effects such as input-history backfill run for every
   chunk or only for the initial hydrate
+- which layer owns the full request/response chain:
+  `Action -> UserInput -> InteractiveInput -> SpurEventBody`
 
 ### 3. App-side side effects must stay correct under chunking
 
@@ -388,6 +397,15 @@ reordering existing live entries.
 Prepending older entries must preserve the user's visible position relative to
 the already-loaded content. This is the same class of problem already handled
 carefully in the scroll-anchor work; incremental history must reuse that rigor.
+
+That means phase 1 should expect a `ReactTrace` API in the shape of
+`prepend_entries` or equivalent, with the opposite anchor bookkeeping from
+front eviction:
+
+- existing `ScrollAnchor::Row { entry_idx, .. }` values shift by `+N`
+  prepended entries
+- cache invalidation starts at the prepend boundary
+- `Following` stays `Following`
 
 ### Cache invalidation
 
@@ -458,6 +476,8 @@ User selects session in picker
   -> SessionDetailView renders current loaded context + older-history sentinel
   -> User presses PageUp at sentinel
   -> Action::LoadOlderHistory
+  -> UserInput::LoadOlderHistory
+  -> InteractiveInput::LoadOlderHistory
   -> Orchestrator emits older-history chunk event
   -> SessionDetailView prepends that chunk without moving the viewport
   -> Live notifications continue below the loaded history boundary
@@ -485,10 +505,20 @@ This is intentionally not marketed as full lazy loading.
 - Scroll-anchor behavior remains stable when older chunks are prepended.
 - The event contract for lazy history is explicit enough that the behavior does
   not depend on hidden orchestrator state.
+- The full request/response chain is specified:
+  `Action -> UserInput -> InteractiveInput -> SpurEventBody`.
 - App-level input-history side effects remain correct under chunked history.
 - Disk fallback semantics are truthful about whether they are partial or full.
+- The live `load_session` replay path and the disk-fallback path are both
+  covered by acceptance criteria and tests, not just "history" generically.
 - Picker behavior is unchanged for users in phase 1, except for any internal
   state refactor required to prepare for future pagination.
+
+Suggested proof harnesses:
+
+- `crates/spur-tui/src/components/react_trace/streaming_tests.rs` for
+  prepend/anchor/cache behavior
+- session-resume tests spanning both live replay and `SessionHistory` fallback
 
 ## File Impact
 
