@@ -2190,8 +2190,9 @@ impl McpCallbackServer {
                     "continuation_will_fire": true,
                     "description": format!(
                         "Delegation to '{agent}' is running in the background \
-                         (delegation_id={request_id}); a continuation will fire \
-                         when the worker completes."
+                         (delegation_id={request_id}). A continuation event will \
+                         fire automatically when the worker completes. Do NOT call \
+                         check_delegation_status — you will be re-prompted automatically."
                     ),
                 });
                 let payload_text = serde_json::to_string_pretty(&payload)
@@ -2325,8 +2326,9 @@ impl McpCallbackServer {
                             "continuation_will_fire": true,
                             "description": format!(
                                 "Delegation to '{agent}' is running in the background \
-                                 (delegation_id={request_id}); a continuation will fire \
-                                 when the worker completes."
+                                 (delegation_id={request_id}). A continuation event will \
+                                 fire automatically when the worker completes. Do NOT call \
+                                 check_delegation_status — you will be re-prompted automatically."
                             ),
                         })
                     }
