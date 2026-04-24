@@ -109,7 +109,13 @@ async fn brain_error_on_resume_connect_failure_carries_requested_session_id() {
     //    the registry lookup is synchronous and fails instantly).
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let ev = events_rx.recv().await.expect("broadcast closed");
+            let ev = match events_rx.recv().await {
+                Ok(ev) => ev,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("event broadcast closed before BrainError was emitted");
+                }
+            };
             if let SpurEventBody::BrainError { session, message } = &ev.body {
                 return (session.clone(), message.clone());
             }
