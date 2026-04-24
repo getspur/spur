@@ -4478,6 +4478,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "async-trait",
+ "chrono",
  "directories",
  "futures",
  "proptest",

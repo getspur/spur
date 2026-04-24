@@ -207,6 +207,7 @@ impl BrainScheduler {
         batch: DrainedBatch,
         delivered_keys: Vec<DelegationKey>,
         dropped_terminal: Vec<(DelegationKey, DropReason)>,
+        spilled_with_reason: Option<Vec<(DelegationKey, DeferReason)>>,
     ) {
         let items = batch.into_items();
         let batch_keys: HashSet<_> = items.iter().map(PendingContinuation::key).collect();
@@ -222,8 +223,10 @@ impl BrainScheduler {
 
         let mut valid_delivered = HashSet::new();
         let mut valid_dropped = HashMap::new();
+        let mut valid_spilled = HashMap::new();
         let mut mismatched_batch_keys = HashSet::new();
         let mut spilled = Vec::new();
+        let explicit_spills = spilled_with_reason.is_some();
 
         let mut delivered_seen = HashSet::new();
         for key in delivered_keys {
@@ -269,19 +272,50 @@ impl BrainScheduler {
             valid_dropped.insert(key, reason);
         }
 
-        let overlap: Vec<_> = valid_delivered
+        if let Some(spilled_with_reason) = spilled_with_reason {
+            let mut spilled_seen = HashSet::new();
+            for (key, reason) in spilled_with_reason {
+                if !spilled_seen.insert(key.clone()) {
+                    debug_assert!(
+                        false,
+                        "commit_partial spilled_with_reason contains duplicate key: {:?}",
+                        key
+                    );
+                    continue;
+                }
+                if !batch_keys.contains(&key) {
+                    debug_assert!(
+                        false,
+                        "commit_partial spilled_with_reason contains unknown key: {:?}",
+                        key
+                    );
+                    self.emit_unknown_mismatched_drop(&key, &session_hint);
+                    continue;
+                }
+                valid_spilled.insert(key, reason);
+            }
+        }
+
+        let overlap: HashSet<_> = valid_delivered
             .iter()
-            .filter(|key| valid_dropped.contains_key(*key))
+            .filter(|key| valid_dropped.contains_key(*key) || valid_spilled.contains_key(*key))
             .cloned()
+            .chain(
+                valid_dropped
+                    .keys()
+                    .filter(|key| valid_spilled.contains_key(*key))
+                    .cloned(),
+            )
             .collect();
         for key in overlap {
             debug_assert!(
                 false,
-                "commit_partial key present in delivered_keys and dropped_terminal: {:?}",
+                "commit_partial key present in multiple partitions: {:?}",
                 key
             );
             valid_delivered.remove(&key);
             valid_dropped.remove(&key);
+            valid_spilled.remove(&key);
             mismatched_batch_keys.insert(key);
         }
 
@@ -299,6 +333,17 @@ impl BrainScheduler {
                 self.delivered_ids.insert(key);
                 continue;
             }
+            if let Some(reason) = valid_spilled.remove(&key) {
+                self.requeue_immediately(item, reason);
+                continue;
+            }
+            if explicit_spills {
+                debug_assert!(
+                    false,
+                    "commit_partial spilled_with_reason omitted batch key: {:?}",
+                    key
+                );
+            }
             spilled.push(item);
         }
 
@@ -313,7 +358,7 @@ impl BrainScheduler {
             .iter()
             .map(DelegationKey::from)
             .collect::<Vec<_>>();
-        self.commit_partial(batch, delivered_keys, Vec::new());
+        self.commit_partial(batch, delivered_keys, Vec::new(), None);
     }
 
     /// Called on prompt-dispatch failure.
@@ -955,6 +1000,10 @@ mod tests {
         let c = mk_cont("id-c", 1, &session);
         let a_key = DelegationKey::from(&a);
         let b_key = DelegationKey::from(&b);
+        let spill_reason = DeferReason::BudgetSpill {
+            budget_bytes: 1234,
+            continuation_bytes: 567,
+        };
 
         scheduler.push_continuation(a.clone());
         scheduler.push_continuation(b.clone());
@@ -970,6 +1019,7 @@ mod tests {
                     budget_bytes: MERGE_BUDGET_DEFAULT_BYTES,
                 },
             )],
+            Some(vec![(b_key.clone(), spill_reason.clone())]),
         );
 
         assert!(scheduler.delivered_ids.contains(&a_key));
@@ -982,9 +1032,9 @@ mod tests {
             event,
             SpurEventBody::ContinuationDeferred {
                 delegation_id,
-                reason: DeferReason::BudgetSpill { .. },
+                reason,
                 ..
-            } if delegation_id == "id-b"
+            } if delegation_id == "id-b" && reason == &spill_reason
         )));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -1014,6 +1064,7 @@ mod tests {
                     batch,
                     vec![key.clone()],
                     vec![(key, DropReason::SessionSwap)],
+                    None,
                 )
             }));
             assert!(result.is_err());
@@ -1025,6 +1076,7 @@ mod tests {
                 batch,
                 vec![key.clone()],
                 vec![(key, DropReason::SessionSwap)],
+                None,
             );
             let events = sink.snapshot();
             let (_, _, _, reason) = only_drop_event(&events);
@@ -1053,6 +1105,7 @@ mod tests {
                         (key.clone(), DropReason::SessionSwap),
                         (key, DropReason::StaleSession),
                     ],
+                    None,
                 )
             }));
             assert!(result.is_err());
@@ -1067,6 +1120,7 @@ mod tests {
                     (key.clone(), DropReason::SessionSwap),
                     (key, DropReason::StaleSession),
                 ],
+                None,
             );
             let events = sink.snapshot();
             let (_, _, _, reason) = only_drop_event(&events);
@@ -1088,14 +1142,14 @@ mod tests {
         {
             let _ = &sink;
             let result = catch_unwind(AssertUnwindSafe(|| {
-                scheduler.commit_partial(batch, vec![key.clone(), key], vec![])
+                scheduler.commit_partial(batch, vec![key.clone(), key], vec![], None)
             }));
             assert!(result.is_err());
         }
 
         #[cfg(not(debug_assertions))]
         {
-            scheduler.commit_partial(batch, vec![key.clone(), key.clone()], vec![]);
+            scheduler.commit_partial(batch, vec![key.clone(), key.clone()], vec![], None);
             assert!(scheduler.delivered_ids.contains(&key));
             assert_eq!(scheduler.delivered_ids.len(), 1);
         }
