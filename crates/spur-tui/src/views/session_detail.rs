@@ -1539,6 +1539,7 @@ impl View for SessionDetailView {
             SpurEventBody::ContinuationDropped {
                 delegation_id,
                 reason,
+                ..
             } => {
                 // This is a system-level event without session scoping;
                 // show it for the active session so the user knows a

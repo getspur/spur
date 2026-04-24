@@ -1,3 +1,6 @@
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_acp::{DelegationId, DelegationResult};
@@ -33,6 +36,10 @@ pub struct DelegationRequest {
     pub delegation_plan: Option<spur_acp::DelegationPlan>,
     /// Optional beads issue ID to auto-track for this delegation.
     pub issue_id: Option<String>,
+    /// Shared attempt tracker. Orchestrator updates this as review-loop
+    /// retries advance so detached continuations can report the final
+    /// 1-based worker attempt that produced the result.
+    pub attempt_tracker: Arc<AtomicU32>,
 }
 
 /// Channel the orchestrator holds to receive requests from the MCP server.
