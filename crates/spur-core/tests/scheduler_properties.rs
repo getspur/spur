@@ -58,7 +58,7 @@ impl ContinuationEventSink for NoopSink {
 proptest! {
     #[test]
     fn no_continuation_is_ever_scheduled_twice(events in prop::collection::vec(event_strategy(), 0..100)) {
-        let mut s = BrainScheduler::new(Some(SessionId::new()), Arc::new(NoopSink));
+        let mut s = BrainScheduler::new(Some(SessionId::new().into()), Arc::new(NoopSink));
         let mut now = Instant::now();
         let mut seen_scheduled_ids: std::collections::HashSet<DelegationKey> = Default::default();
 
@@ -91,7 +91,7 @@ proptest! {
 
     #[test]
     fn turn_in_flight_implies_idle(events in prop::collection::vec(event_strategy(), 0..50)) {
-        let mut s = BrainScheduler::new(Some(SessionId::new()), Arc::new(NoopSink));
+        let mut s = BrainScheduler::new(Some(SessionId::new().into()), Arc::new(NoopSink));
         let mut now = Instant::now();
         let mut in_flight = false;
 
@@ -115,7 +115,7 @@ proptest! {
 
     #[test]
     fn pending_user_is_never_leapfrogged_by_continuation(events in prop::collection::vec(event_strategy(), 0..80)) {
-        let mut s = BrainScheduler::new(Some(SessionId::new()), Arc::new(NoopSink));
+        let mut s = BrainScheduler::new(Some(SessionId::new().into()), Arc::new(NoopSink));
         let mut now = Instant::now();
         let mut user_pending = false;
 

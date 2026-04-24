@@ -76,11 +76,11 @@ async fn backpressure_overflow_on_full_channel() {
 
 #[test]
 fn session_swap_drops_all_pending_continuations() {
-    let mut s = BrainScheduler::new(Some(SessionId::new()), Arc::new(NoopSink));
+    let mut s = BrainScheduler::new(Some(SessionId::new().into()), Arc::new(NoopSink));
     s.push_continuation(mk_cont("id-1"));
     s.push_continuation(mk_cont("id-2"));
     let overflow = new_overflow_buf();
-    s.note_session_swap(Some(SessionId::new()), &overflow);
+    s.note_session_swap(Some(SessionId::new().into()), &overflow);
     // Scheduler is now empty.
     let action = s.next(Instant::now());
     assert!(matches!(
