@@ -1105,6 +1105,7 @@ pub async fn run_plan(
                 brain_session_id: brain_sid.clone(),
                 delegation_plan: None,
                 issue_id: task_spec.issue_id.clone(),
+                attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(1)),
             };
 
             if let Err(e) = delegation_tx.send(request).await {

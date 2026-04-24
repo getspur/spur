@@ -150,7 +150,6 @@ fn autonomous_turn_is_self_describing() {
 /// Time is driven via `tokio::time::pause()` / auto-advance so the race is
 /// deterministic without wall-clock sleeps.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "TODO(phase-4/5): depends on MCP callback/orchestrator continuation delivery"]
 async fn test_no_double_delivery_on_block_timeout() {
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::{BrainSessionId, DelegationResult};
@@ -277,7 +276,6 @@ async fn test_no_double_delivery_on_block_timeout() {
 /// is PURE JSON — no human-readable shadow prefix. Parsing the text with
 /// `serde_json::from_str` must succeed and yield the fields documented below.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "TODO(phase-4/5): depends on MCP callback/orchestrator continuation delivery"]
 async fn test_no_double_delivery_on_fast_path() {
     use serde_json::Value;
     use spur_acp::domain::delegation::DelegationStatus;
