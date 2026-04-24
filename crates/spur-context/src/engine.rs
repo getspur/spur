@@ -127,33 +127,51 @@ impl AnalyticsEngine {
     }
 
     fn discover_claude_dir() -> PathBuf {
-        env::var("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                directories::BaseDirs::new()
-                    .map(|b| b.home_dir().join(".config/claude/projects"))
-                    .unwrap_or_else(|| PathBuf::from("~/.config/claude/projects"))
-            })
+        if let Ok(path) = env::var("CLAUDE_CONFIG_DIR") {
+            return PathBuf::from(path);
+        }
+        #[cfg(test)]
+        {
+            PathBuf::from("__spur_context_test_missing__/claude")
+        }
+        #[cfg(not(test))]
+        {
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".config/claude/projects"))
+                .unwrap_or_else(|| PathBuf::from("~/.config/claude/projects"))
+        }
     }
 
     fn discover_codex_dir() -> PathBuf {
-        env::var("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                directories::BaseDirs::new()
-                    .map(|b| b.home_dir().join(".codex/sessions"))
-                    .unwrap_or_else(|| PathBuf::from("~/.codex/sessions"))
-            })
+        if let Ok(path) = env::var("CODEX_HOME") {
+            return PathBuf::from(path);
+        }
+        #[cfg(test)]
+        {
+            PathBuf::from("__spur_context_test_missing__/codex")
+        }
+        #[cfg(not(test))]
+        {
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".codex/sessions"))
+                .unwrap_or_else(|| PathBuf::from("~/.codex/sessions"))
+        }
     }
 
     fn discover_kiro_dir() -> PathBuf {
-        env::var("KIRO_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                directories::BaseDirs::new()
-                    .map(|b| b.home_dir().join(".kiro/sessions"))
-                    .unwrap_or_else(|| PathBuf::from("~/.kiro/sessions"))
-            })
+        if let Ok(path) = env::var("KIRO_HOME") {
+            return PathBuf::from(path);
+        }
+        #[cfg(test)]
+        {
+            PathBuf::from("__spur_context_test_missing__/kiro")
+        }
+        #[cfg(not(test))]
+        {
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".kiro/sessions"))
+                .unwrap_or_else(|| PathBuf::from("~/.kiro/sessions"))
+        }
     }
 
     fn has_jsonl_files(dir: &Path) -> bool {
@@ -183,19 +201,35 @@ impl AnalyticsEngine {
             dir.to_string_lossy().replace('\\', "/").replace('\'', "''")
         );
         let sql = format!(
-            r#"CREATE OR REPLACE VIEW claude_events AS
+            r#"CREATE OR REPLACE VIEW claude_raw AS
              SELECT
-                timestamp::TIMESTAMP AS timestamp,
-                sessionId AS session_id,
+                rtrim(line, chr(13)) AS line,
+                filename
+             FROM read_csv_auto(
+                '{}',
+                columns = {{'line': 'VARCHAR'}},
+                delim = '\0',
+                header = false,
+                filename = true,
+                ignore_errors = true,
+                quote = '',
+                escape = ''
+             );
+
+             CREATE OR REPLACE VIEW claude_events AS
+             SELECT
+                TRY_CAST(json_extract_string(line, '$.timestamp') AS TIMESTAMP) AS timestamp,
+                json_extract_string(line, '$.sessionId') AS session_id,
                 'claude' AS agent,
-                NULLIF(message.model, '<synthetic>') AS model,
+                NULLIF(json_extract_string(line, '$.message.model'), '<synthetic>') AS model,
                 NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
-                message.usage.input_tokens AS input_tokens,
-                message.usage.output_tokens AS output_tokens,
-                message.usage.cache_read_input_tokens AS cache_read_tokens,
-                message.usage.cache_creation_input_tokens AS cache_creation_tokens,
-                costUSD AS cost_usd
-             FROM read_json_auto('{}', filename = true, ignore_errors = true)"#,
+                TRY_CAST(json_extract(line, '$.message.usage.input_tokens') AS BIGINT) AS input_tokens,
+                TRY_CAST(json_extract(line, '$.message.usage.output_tokens') AS BIGINT) AS output_tokens,
+                TRY_CAST(json_extract(line, '$.message.usage.cache_read_input_tokens') AS BIGINT) AS cache_read_tokens,
+                TRY_CAST(json_extract(line, '$.message.usage.cache_creation_input_tokens') AS BIGINT) AS cache_creation_tokens,
+                TRY_CAST(json_extract(line, '$.costUSD') AS DOUBLE) AS cost_usd
+             FROM claude_raw
+             WHERE json_extract_string(line, '$.type') = 'assistant';"#,
             pattern
         );
         self.conn
@@ -210,91 +244,89 @@ impl AnalyticsEngine {
             dir.to_string_lossy().replace('\\', "/").replace('\'', "''")
         );
         let sql = format!(
-            "CREATE OR REPLACE VIEW codex_events AS \
-             WITH source AS ( \
-                SELECT \
-                    timestamp::TIMESTAMP AS timestamp, \
-                    filename, \
-                    NULLIF(regexp_extract(filename, '.*/([^/]+)[.]jsonl$', 1), '') AS session_id, \
-                    \"type\" AS entry_type, \
-                    payload.type AS payload_type, \
-                    payload.info.last_token_usage.input_tokens AS last_input, \
-                    payload.info.last_token_usage.output_tokens AS last_output, \
-                    payload.info.last_token_usage.cached_input_tokens AS last_cached, \
-                    payload.info.total_token_usage.input_tokens AS total_input, \
-                    payload.info.total_token_usage.output_tokens AS total_output, \
-                    payload.info.total_token_usage.cached_input_tokens AS total_cached, \
-                    CASE \
-                        WHEN \"type\" = 'turn_context' THEN payload.model \
-                        ELSE payload.info.model \
-                    END AS candidate_model, \
-                    LAST_VALUE( \
-                        CASE \
-                            WHEN \"type\" = 'turn_context' THEN payload.model \
-                            ELSE payload.info.model \
-                        END IGNORE NULLS \
-                    ) OVER ( \
-                        PARTITION BY filename \
-                        ORDER BY timestamp::TIMESTAMP \
-                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW \
-                    ) AS carried_model \
-                FROM read_json_auto('{}', filename = true, ignore_errors = true) \
-             ), \
-             token_events AS ( \
-                SELECT \
-                    timestamp, \
-                    session_id, \
-                    NULLIF(NULLIF(COALESCE(candidate_model, carried_model), ''), '<synthetic>') AS model, \
-                    last_input, \
-                    last_output, \
-                    last_cached, \
-                    total_input, \
-                    total_output, \
-                    total_cached \
-                FROM source \
-                WHERE entry_type = 'event_msg' \
-                  AND payload_type = 'token_count' \
-             ), \
-             with_lag AS ( \
-                SELECT \
-                    *, \
-                    LAG(total_input) OVER (PARTITION BY session_id ORDER BY timestamp) AS prev_input, \
-                    LAG(total_output) OVER (PARTITION BY session_id ORDER BY timestamp) AS prev_output, \
-                    LAG(total_cached) OVER (PARTITION BY session_id ORDER BY timestamp) AS prev_cached \
-                FROM token_events \
-             ), \
-             converted AS ( \
-                SELECT \
-                    timestamp, \
-                    session_id, \
-                    'codex' AS agent, \
-                    model, \
-                    NULL::VARCHAR AS project, \
-                    COALESCE(last_input, GREATEST(total_input - COALESCE(prev_input, 0), 0::BIGINT)) AS input_tokens, \
-                    COALESCE(last_output, GREATEST(total_output - COALESCE(prev_output, 0), 0::BIGINT)) AS output_tokens, \
-                    LEAST( \
-                        COALESCE(last_cached, GREATEST(total_cached - COALESCE(prev_cached, 0), 0::BIGINT)), \
-                        COALESCE(last_input, GREATEST(total_input - COALESCE(prev_input, 0), 0::BIGINT)) \
-                    ) AS cache_read_tokens, \
-                    0::BIGINT AS cache_creation_tokens, \
-                    NULL::DOUBLE AS cost_usd \
-                FROM with_lag \
-             ) \
-             SELECT \
-                timestamp, \
-                session_id, \
-                agent, \
-                model, \
-                project, \
-                input_tokens, \
-                output_tokens, \
-                cache_read_tokens, \
-                cache_creation_tokens, \
-                cost_usd \
-             FROM converted \
-             WHERE input_tokens > 0 \
-                OR output_tokens > 0 \
-                OR cache_read_tokens > 0",
+            r#"CREATE OR REPLACE VIEW codex_raw AS
+             SELECT
+                rtrim(line, chr(13)) AS line,
+                filename
+             FROM read_csv_auto(
+                '{}',
+                columns = {{'line': 'VARCHAR'}},
+                delim = '\0',
+                header = false,
+                filename = true,
+                ignore_errors = true,
+                quote = '',
+                escape = ''
+             );
+
+             CREATE OR REPLACE VIEW codex_token_events AS
+             SELECT
+                TRY_CAST(json_extract_string(line, '$.timestamp') AS TIMESTAMP) AS ts,
+                NULLIF(regexp_extract(filename, '.*/([^/]+)[.]jsonl$', 1), '') AS session_id,
+                json_extract_string(line, '$.type') AS type,
+                json_extract_string(line, '$.payload.type') AS payload_type,
+                json_extract_string(line, '$.payload.model') AS turn_model,
+                json_extract_string(line, '$.payload.info.model') AS event_model,
+                TRY_CAST(json_extract(line, '$.payload.info.last_token_usage.input_tokens') AS BIGINT) AS last_in,
+                TRY_CAST(json_extract(line, '$.payload.info.last_token_usage.output_tokens') AS BIGINT) AS last_out,
+                TRY_CAST(json_extract(line, '$.payload.info.last_token_usage.cached_input_tokens') AS BIGINT) AS last_cached,
+                TRY_CAST(json_extract(line, '$.payload.info.total_token_usage.input_tokens') AS BIGINT) AS tot_in,
+                TRY_CAST(json_extract(line, '$.payload.info.total_token_usage.output_tokens') AS BIGINT) AS tot_out,
+                TRY_CAST(json_extract(line, '$.payload.info.total_token_usage.cached_input_tokens') AS BIGINT) AS tot_cached,
+                filename
+             FROM codex_raw;
+
+             CREATE OR REPLACE VIEW codex_events AS
+             WITH with_carried_model AS (
+                SELECT
+                    *,
+                    LAST_VALUE(COALESCE(event_model, turn_model) IGNORE NULLS) OVER (
+                        PARTITION BY filename ORDER BY ts
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS current_model
+                FROM codex_token_events
+                WHERE ts IS NOT NULL
+             ),
+             with_delta AS (
+                SELECT
+                    *,
+                    COALESCE(
+                        last_in,
+                        GREATEST(
+                            tot_in - COALESCE(LAG(tot_in) OVER (PARTITION BY session_id ORDER BY ts), 0),
+                            0::BIGINT
+                        )
+                    ) AS input_delta,
+                    COALESCE(
+                        last_out,
+                        GREATEST(
+                            tot_out - COALESCE(LAG(tot_out) OVER (PARTITION BY session_id ORDER BY ts), 0),
+                            0::BIGINT
+                        )
+                    ) AS output_delta,
+                    COALESCE(
+                        last_cached,
+                        GREATEST(
+                            tot_cached - COALESCE(LAG(tot_cached) OVER (PARTITION BY session_id ORDER BY ts), 0),
+                            0::BIGINT
+                        )
+                    ) AS cached_delta
+                FROM with_carried_model
+                WHERE type = 'event_msg' AND payload_type = 'token_count'
+             )
+             SELECT
+                ts AS timestamp,
+                session_id,
+                'codex' AS agent,
+                NULLIF(NULLIF(current_model, ''), '<synthetic>') AS model,
+                NULL::VARCHAR AS project,
+                input_delta AS input_tokens,
+                output_delta AS output_tokens,
+                LEAST(cached_delta, input_delta) AS cache_read_tokens,
+                0::BIGINT AS cache_creation_tokens,
+                NULL::DOUBLE AS cost_usd
+             FROM with_delta
+             WHERE input_delta > 0 OR output_delta > 0 OR cached_delta > 0;"#,
             pattern
         );
         self.conn
@@ -1036,36 +1068,31 @@ mod tests {
     #[test]
     fn test_claude_events_from_fixture() {
         let tmp = TempDir::new().unwrap();
-        let claude_dir = tmp.path().join("claude/projects/spur");
+        let claude_root = tmp.path().join("claude");
+        let claude_dir = claude_root.join("projects/spur");
         std::fs::create_dir_all(&claude_dir).unwrap();
 
         // Write a Claude-style JSONL file
         let jsonl_path = claude_dir.join("2026-04-23.jsonl");
         let mut file = std::fs::File::create(&jsonl_path).unwrap();
-        writeln!(file, r#"{{"timestamp":"2026-04-23T10:00:00Z","sessionId":"sess-1","message":{{"usage":{{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}},"model":"claude-sonnet-4","id":"msg_1"}},"costUSD":0.05,"requestId":"req_1"}}"#).unwrap();
-        writeln!(file, r#"{{"timestamp":"2026-04-23T10:01:00Z","sessionId":"sess-1","message":{{"usage":{{"input_tokens":2000,"output_tokens":1000,"cache_creation_input_tokens":150,"cache_read_input_tokens":400}},"model":"claude-sonnet-4","id":"msg_2"}},"costUSD":0.10,"requestId":"req_2"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","timestamp":"2026-04-23T10:00:00Z","sessionId":"sess-1","message":{{"usage":{{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}},"model":"claude-sonnet-4","id":"msg_1"}},"costUSD":0.05,"requestId":"req_1"}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","timestamp":"2026-04-23T10:00:30Z","sessionId":"sess-1","message":{{"role":"user","content":"<redacted>"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","timestamp":"2026-04-23T10:01:00Z","sessionId":"sess-1","message":{{"usage":{{"input_tokens":2000,"output_tokens":1000,"cache_creation_input_tokens":150,"cache_read_input_tokens":400}},"model":"claude-sonnet-4","id":"msg_2"}},"costUSD":0.10,"requestId":"req_2"}}"#
+        )
+        .unwrap();
 
-        // Override the view to read from temp dir
         let engine = setup_engine();
-        engine
-            .conn
-            .execute_batch(&format!(
-                r#"CREATE OR REPLACE VIEW claude_events AS
-             SELECT
-                timestamp::TIMESTAMP AS timestamp,
-                sessionId AS session_id,
-                'claude' AS agent,
-                NULLIF(message.model, '<synthetic>') AS model,
-                NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
-                message.usage.input_tokens AS input_tokens,
-                message.usage.output_tokens AS output_tokens,
-                message.usage.cache_read_input_tokens AS cache_read_tokens,
-                message.usage.cache_creation_input_tokens AS cache_creation_tokens,
-                costUSD AS cost_usd
-             FROM read_json_auto('{}', filename = true, ignore_errors = true)"#,
-                jsonl_path.to_str().unwrap().replace('\\', "/")
-            ))
-            .unwrap();
+        engine.create_claude_view(&claude_root).unwrap();
 
         // Query the unified view
         let count: i64 = engine
@@ -1073,38 +1100,6 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM claude_events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2, "should have 2 claude events");
-
-        let (project, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens): (
-            String,
-            Option<String>,
-            i64,
-            i64,
-            i64,
-            i64,
-        ) = engine
-            .conn
-            .query_row(
-                "SELECT project, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens \
-                 FROM claude_events ORDER BY timestamp LIMIT 1",
-                [],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(project, "spur");
-        assert_eq!(model.as_deref(), Some("claude-sonnet-4"));
-        assert_eq!(input_tokens, 1000);
-        assert_eq!(output_tokens, 500);
-        assert_eq!(cache_read_tokens, 200);
-        assert_eq!(cache_creation_tokens, 100);
 
         // Query cost-enriched view
         let cost: f64 = engine
@@ -1125,10 +1120,11 @@ mod tests {
     #[test]
     fn test_codex_events_delta_logic() {
         let tmp = TempDir::new().unwrap();
-        let codex_dir = tmp.path().join("codex/sessions/spur");
+        let codex_root = tmp.path().join("codex");
+        let codex_dir = codex_root.join("sessions/spur");
         std::fs::create_dir_all(&codex_dir).unwrap();
 
-        // Write a real Codex JSONL file.
+        // Write a Codex-style JSONL file with token-count event envelopes.
         let jsonl_path = codex_dir.join("codex-session.jsonl");
         let mut file = std::fs::File::create(&jsonl_path).unwrap();
         writeln!(
@@ -1155,14 +1151,14 @@ mod tests {
         .unwrap();
 
         let engine = setup_engine();
-        engine.create_codex_view(&codex_dir).unwrap();
+        engine.create_codex_view(&codex_root).unwrap();
 
         // Verify delta computation
         let mut stmt = engine
             .conn
             .prepare(
                 "SELECT session_id, model, input_tokens, output_tokens, cache_read_tokens \
-                 FROM codex_events ORDER BY timestamp",
+             FROM codex_events ORDER BY timestamp",
             )
             .unwrap();
         let rows: Vec<(String, Option<String>, i64, i64, i64)> = stmt
