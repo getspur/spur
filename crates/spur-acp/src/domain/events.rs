@@ -513,6 +513,35 @@ pub enum SpurEventBody {
         brain_name: String,
         reason: String,
     },
+    /// Emitted at the start of `retire_active_brain` on the resume path.
+    /// `from` is the session being retired (None if no active brain).
+    /// `to` is the session the user asked to resume. Lets `SessionDetailView`
+    /// render a "Retiring previous session…" initial state.
+    SessionRetireStart {
+        from: Option<SessionId>,
+        to: SessionId,
+    },
+    /// Emitted when `retire_active_brain` completes (clean or forced).
+    SessionRetireComplete {
+        session: SessionId,
+    },
+    /// Emitted before `connect_brain` attempts to (re)spawn a brain process
+    /// on the resume path. Lets the UI show "Connecting to claude-code…"
+    /// while subprocess spawn (≥1s cold) is in flight.
+    BrainConnecting {
+        session: SessionId,
+        brain_name: String,
+    },
+    /// Emitted before `load_brain_session` issues its ACP `session/load`
+    /// RPC. Lets the UI show "Loading session history…".
+    SessionLoading {
+        session: SessionId,
+    },
+    /// Emitted after `load_brain_session` returns `Ok` and history replay
+    /// has been dispatched. Terminal state for a successful resume.
+    SessionLoaded {
+        session: SessionId,
+    },
     /// The agent subprocess reported that authentication is required
     /// (e.g. `authRequired` error code, "/login" prompt). The TUI renders
     /// this as a dismissable banner instructing the user to run
