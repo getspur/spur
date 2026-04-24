@@ -10,57 +10,72 @@ fn roundtrip(body: SpurEventBody) -> SpurEventBody {
 
 #[test]
 fn session_retire_start_roundtrips() {
-    let body = SpurEventBody::SessionRetireStart {
+    let original = SpurEventBody::SessionRetireStart {
         from: Some(SessionId("old".to_string())),
         to: SessionId("new".to_string()),
     };
-    assert!(matches!(
-        roundtrip(body),
-        SpurEventBody::SessionRetireStart { .. }
-    ));
+    let SpurEventBody::SessionRetireStart { from, to } = roundtrip(original) else {
+        panic!("roundtrip produced wrong variant");
+    };
+    assert_eq!(from, Some(SessionId("old".to_string())));
+    assert_eq!(to, SessionId("new".to_string()));
+}
+
+#[test]
+fn session_retire_start_roundtrips_with_no_prior_session() {
+    let original = SpurEventBody::SessionRetireStart {
+        from: None,
+        to: SessionId("fresh".to_string()),
+    };
+    let SpurEventBody::SessionRetireStart { from, to } = roundtrip(original) else {
+        panic!("roundtrip produced wrong variant");
+    };
+    assert_eq!(from, None);
+    assert_eq!(to, SessionId("fresh".to_string()));
 }
 
 #[test]
 fn session_retire_complete_roundtrips() {
-    let body = SpurEventBody::SessionRetireComplete {
+    let original = SpurEventBody::SessionRetireComplete {
         session: SessionId("s".to_string()),
     };
-    assert!(matches!(
-        roundtrip(body),
-        SpurEventBody::SessionRetireComplete { .. }
-    ));
+    let SpurEventBody::SessionRetireComplete { session } = roundtrip(original) else {
+        panic!("roundtrip produced wrong variant");
+    };
+    assert_eq!(session, SessionId("s".to_string()));
 }
 
 #[test]
 fn brain_connecting_roundtrips() {
-    let body = SpurEventBody::BrainConnecting {
+    let original = SpurEventBody::BrainConnecting {
         session: SessionId("s".to_string()),
         brain_name: "claude-code".into(),
     };
-    assert!(matches!(
-        roundtrip(body),
-        SpurEventBody::BrainConnecting { .. }
-    ));
+    let SpurEventBody::BrainConnecting { session, brain_name } = roundtrip(original) else {
+        panic!("roundtrip produced wrong variant");
+    };
+    assert_eq!(session, SessionId("s".to_string()));
+    assert_eq!(brain_name, "claude-code");
 }
 
 #[test]
 fn session_loading_roundtrips() {
-    let body = SpurEventBody::SessionLoading {
+    let original = SpurEventBody::SessionLoading {
         session: SessionId("s".to_string()),
     };
-    assert!(matches!(
-        roundtrip(body),
-        SpurEventBody::SessionLoading { .. }
-    ));
+    let SpurEventBody::SessionLoading { session } = roundtrip(original) else {
+        panic!("roundtrip produced wrong variant");
+    };
+    assert_eq!(session, SessionId("s".to_string()));
 }
 
 #[test]
 fn session_loaded_roundtrips() {
-    let body = SpurEventBody::SessionLoaded {
+    let original = SpurEventBody::SessionLoaded {
         session: SessionId("s".to_string()),
     };
-    assert!(matches!(
-        roundtrip(body),
-        SpurEventBody::SessionLoaded { .. }
-    ));
+    let SpurEventBody::SessionLoaded { session } = roundtrip(original) else {
+        panic!("roundtrip produced wrong variant");
+    };
+    assert_eq!(session, SessionId("s".to_string()));
 }
