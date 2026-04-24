@@ -54,11 +54,11 @@ A short-term mitigation (`MERGE_BUDGET_DEFAULT_BYTES: 4096 → 8192`) was commit
 ## 3. Architecture overview
 
 ```
-Worker completes
-  → spur-mcp collector receives DelegationResult
-  → invokes orchestrator-injected OutcomeMaterializer
+Worker completes (TWO entry paths — see §7.3)
+  ① Direct delegate_to_worker → spur-mcp::server::build_detached_continuation
+  ② Plan-mode submit_plan/execute_epic → spur-mcp::plan::reconciler
                             │
-                            ▼
+                            ▼ both paths invoke
        ┌────────────────────────────────────────────┐
        │ OutcomeMaterializer (in spur-core)         │
        │ uses OutcomeStore trait (in spur-blob-store)│
@@ -444,7 +444,37 @@ impl OutcomeMaterializer {
 
 The fallback ensures INV-α holds even when the store is unavailable.
 
-### 7.3 Extended `fetch_outcome_artifact` (with section pagination)
+### 7.3 Materializer call sites — TWO completion paths
+
+`OutcomeMaterializer::materialize` is invoked from **two distinct callsites** that both signal "worker delegation completed." Phase 3 must wire both, not just one.
+
+| # | Callsite | Trigger path | Available state |
+|---|---|---|---|
+| 1 | `crates/spur-mcp/src/server.rs::build_detached_continuation` (currently line 251) | Direct `delegate_to_worker` → MCP background collector receives `DelegationResult` | `DelegationResult`, `delegation_id`, `brain_session`, `attempt` |
+| 2 | `crates/spur-mcp/src/plan/reconciler.rs::persist_completion_result_and_notify` (currently line 421; called from `crates/spur-mcp/src/plan/mod.rs:998`) | Reconciler-driven plan-mode (`submit_plan` / `execute_epic`) detects completion via beads polling | `result_summary`, `worker_branch`, `delegation_id`, `plan_id`, `brain_session_id`, `attempt`, `completion_state` |
+
+Both call sites construct an `OutcomeKey { brain_session_id, delegation_id, attempt }`, persist via `OutcomeStore::put`, and build a lean `BrainContinuation`. Code path is identical; only the source of fields differs.
+
+**Fallback behavior is identical** at both sites: on `OutcomeStore::put` failure, fall through to the Plan-4 truncation-ladder fallback. Both sites emit the same `spur.metrics.outcome_persist_failed` event.
+
+**Why this is non-obvious:** the v3.1 design and earlier review rounds focused on the direct-delegation flow (callsite 1). The plan-mode flow (callsite 2) writes back through the reconciler, where the writeback is currently a beads audit comment posting `result_summary` (truncated string) — there is no artifact-store integration at that callsite today. Phase 3 must add it.
+
+### 7.4 Beads audit-comment composition (composition, not coupling)
+
+The reconciler currently calls `beads.add_comment` to post `[[spur-audit v1]] Completion` audit trails carrying `result_summary` and `worker_branch` as durable, user-visible records on the beads issue (per `crates/spur-pm/src/beads.rs:842-865`). This is **orthogonal to the artifact store** — beads is the audit/state-of-record system; the blob store is the blob byte system.
+
+Phase 3 adds a small extension: when `OutcomeMaterializer::materialize` succeeds, the resulting `OutcomeRef` URI is appended to the beads audit comment as a click-through link. Operators viewing the beads issue can resolve the URI to fetch the full payload via the same `fetch_outcome_artifact` MCP tool (or future direct ops tooling).
+
+```
+[[spur-audit v1]] Completion
+result_summary: <truncated>
+worker_branch: spur/worker-foo-abc
+artifact: spur://outcome/<brain_session>/<delegation>/<attempt>
+```
+
+This is **additive metadata in an existing comment**, not a new persistence path. No beads schema change. No new beads call.
+
+### 7.5 Extended `fetch_outcome_artifact` (with section pagination)
 
 Phase 3 adds the `section` parameter (per gemini's recommendation):
 
@@ -464,7 +494,7 @@ Section semantics:
 
 Brain calls the right section to avoid context bloat (gemini's concern about deferred context exhaustion). The MCP tool reads from `OutcomeStore::get` with the matching `Section` arg.
 
-### 7.4 GC integration
+### 7.6 GC integration
 
 The orchestrator gains a session-terminate hook:
 
@@ -485,7 +515,7 @@ let _report = self.outcome_store
 
 Manual ops escape: `spur gc outcomes [--dry-run] [--older-than=30d]` CLI subcommand (in `spur-cli`). Adds a wrapper around `OutcomeStore::sweep_older_than`.
 
-### 7.5 Truncation-ladder fallback (preserved from Plan-4)
+### 7.7 Truncation-ladder fallback (preserved from Plan-4)
 
 When `OutcomeMaterializer::materialize` fails to persist, it falls back to the truncation ladder defined in the superseded Plan-4 spec (`docs/superpowers/specs/2026-04-24-brain-continuation-producer-envelope-fit-design.md` §6). The full ladder definition is NOT re-stated here; reader is referred to that spec.
 
@@ -637,7 +667,7 @@ The Plan-4 spec file gets a header amendment:
 > **STATUS UPDATE (2026-04-25):** Superseded as primary by
 > `2026-04-25-brain-continuation-artifact-store-design.md`.
 > The truncation ladder defined here survives as the artifact-write-failure
-> fallback referenced from §7.5 of the superseding spec.
+> fallback referenced from §7.7 of the superseding spec.
 ```
 
 ## 13. Future integration with `spur-context` (2026-04-13 spec)
@@ -680,6 +710,7 @@ When ContextEngine Phase 1 ships, no spur-blob-store changes are required. The c
 | 5b | codex | 2026-04-25 | PROCEED-WITH-CHANGES | `map_worker_artifact_ref` metadata loss bug (MF1); ContinuationPayload missing `estimated_cost_usd` (MF3); schema_version → 3 (MF4); session-scoped GC (gemini-aligned). |
 | 5c | gemini | 2026-04-25 | PROCEED-WITH-CHANGES | Polymorphic Q2c rejected → flat-stable; explicit `fetch_hint`; `MockFailingOutcomeStore` for CI; section-paginated fetch tool. |
 | 5.5 | self (L9 + spur-context cross-check) | 2026-04-25 | — | Phase 1 brain-visible refinement (F1); persist-enqueue gap accepted (F2); separate `spur-blob-store` crate; ContextEngine integration hook. |
+| 5.6 | self (reconciler + beads cross-check) | 2026-04-25 | — | Found second materializer call site at `plan/reconciler.rs::persist_completion_result_and_notify` (§7.3); beads audit-comment composition (§7.4); section renumbering 7.4→7.6, 7.5→7.7. |
 
 ## 15. Appendix
 
