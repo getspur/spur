@@ -1290,6 +1290,7 @@ impl Orchestrator {
                             &mut scheduler,
                             &overflow_continuations,
                             spur_acp::domain::events::BrainRetireReason::UserClear,
+                            None,
                         )
                         .await;
                         if blocks.is_empty() {
@@ -1358,12 +1359,23 @@ impl Orchestrator {
                             &mut scheduler,
                             &overflow_continuations,
                             spur_acp::domain::events::BrainRetireReason::ResumeSwitch,
+                            Some(SessionId(session_id.clone())),
                         )
                         .await;
 
                         let (connection, brain_name) = match agent_connection.take() {
                             Some(existing) => existing,
                             None => {
+                                // Emit BrainConnecting before attempting spawn so the
+                                // UI can transition to a "connecting" loading state.
+                                let brain_name_hint = brain_override
+                                    .as_deref()
+                                    .unwrap_or("")
+                                    .to_string();
+                                self.emit(SpurEvent::now(SpurEventBody::BrainConnecting {
+                                    session: SessionId(session_id.clone()),
+                                    brain_name: brain_name_hint,
+                                }));
                                 match self
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
@@ -1383,6 +1395,11 @@ impl Orchestrator {
                         };
 
                         let original_session_id = session_id.clone();
+                        // Emit SessionLoading before the RPC so the UI can show a
+                        // "loading session" state while the brain retrieves history.
+                        self.emit(SpurEvent::now(SpurEventBody::SessionLoading {
+                            session: SessionId(session_id.clone()),
+                        }));
                         match self
                             .load_brain_session(
                                 connection,
@@ -1438,6 +1455,12 @@ impl Orchestrator {
                                         &overflow_continuations,
                                     );
                                 }
+                                // Session is fully loaded — history replayed, brain
+                                // installed.  Emit SessionLoaded so the UI can
+                                // transition out of the loading state.
+                                self.emit(SpurEvent::now(SpurEventBody::SessionLoaded {
+                                    session: spur_id.clone(),
+                                }));
                                 self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
                                     session: spur_id,
                                 }));
@@ -2180,8 +2203,27 @@ impl Orchestrator {
         scheduler: &mut crate::scheduler::BrainScheduler,
         overflow: &crate::continuation_bridge::OverflowBuf,
         reason: spur_acp::domain::events::BrainRetireReason,
+        resume_target: Option<SessionId>,
     ) {
-        let Some(mut b) = brain.take() else { return };
+        // Capture the current session id before taking the brain so we can
+        // reference it in both the SessionRetireStart and SessionRetireComplete
+        // events, regardless of whether a brain is actually held.
+        let from_session = brain.as_ref().map(|b| b.spur_session_id.clone());
+
+        // Emit SessionRetireStart on the resume path so the UI can begin
+        // displaying a loading state immediately.
+        if let Some(ref to) = resume_target {
+            self.emit(SpurEvent::now(SpurEventBody::SessionRetireStart {
+                from: from_session.clone(),
+                to: to.clone(),
+            }));
+        }
+
+        let Some(mut b) = brain.take() else {
+            // No active brain to retire — SessionRetireComplete is skipped
+            // because there is no "old" session being retired.
+            return;
+        };
 
         // 1. Emit BrainRetired BEFORE aborting handles. Broadcast emit is
         //    synchronous into the channel, so any post-abort stragglers
@@ -2231,6 +2273,15 @@ impl Orchestrator {
         )
         .await;
         *agent_connection = Some((b.connection, b.brain_name));
+
+        // 5. Emit SessionRetireComplete now that teardown is fully done.
+        //    `from_session` is guaranteed Some at this point (we would have
+        //    returned early above if brain was None).
+        if let Some(from) = from_session {
+            self.emit(SpurEvent::now(SpurEventBody::SessionRetireComplete {
+                session: from,
+            }));
+        }
     }
 
     /// Resolve and initialize a brain agent connection without starting a full session.
