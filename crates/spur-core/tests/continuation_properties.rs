@@ -363,7 +363,7 @@ fn oversized_drop_count_for_key(events: &[SpurEventBody], key: &DelegationKey) -
 fn run_scenario(arrivals: &[ArrivalSpec], steps: &[OutcomeStep]) -> (Vec<SpurEventBody>, HashSet<DelegationKey>, HashMap<DelegationKey, usize>) {
     let sink = Arc::new(RecordingSink::default());
     let session = SessionId("brain-proptest".into());
-    let mut scheduler = BrainScheduler::new(Some(session.clone()), sink.clone());
+    let mut scheduler = BrainScheduler::new(Some(session.clone().into()), sink.clone());
     let mut delivered_counts = HashMap::new();
     let mut pushed_keys = HashSet::new();
     let mut next_arrival = 0usize;
@@ -441,7 +441,7 @@ proptest! {
     ) {
         let sink = Arc::new(RecordingSink::default());
         let session = SessionId("brain-proptest".into());
-        let mut scheduler = BrainScheduler::new(Some(session.clone()), sink.clone());
+        let mut scheduler = BrainScheduler::new(Some(session.clone().into()), sink.clone());
         let mut delivered_counts = HashMap::new();
         let oversized_continuation = mk_cont(&oversized, &session);
         let oversized_key = DelegationKey::from(&oversized_continuation);

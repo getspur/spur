@@ -2966,7 +2966,9 @@ mod tests {
     fn continuation_dropped_event(delegation_id: &str) -> SpurEvent {
         SpurEvent::now(SpurEventBody::ContinuationDropped {
             delegation_id: delegation_id.into(),
-            reason: spur_acp::domain::events::ContinuationDropReason::SessionSwap,
+            attempt: 1,
+            brain_session: spur_acp::SessionId("test-brain-session".into()),
+            reason: spur_acp::domain::continuation::DropReason::SessionSwap,
         })
     }
 
