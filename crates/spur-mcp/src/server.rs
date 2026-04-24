@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -201,7 +201,7 @@ pub enum DetachedSourceKind {
 pub struct DetachedCompletionHandle {
     pub ctx: Arc<DetachedContinuationCtx>,
     pub source_kind: DetachedSourceKind,
-    pub attempt: u32,
+    pub attempt_tracker: Arc<AtomicU32>,
     pub brain_session: SessionId,
     pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
 }
@@ -228,6 +228,10 @@ fn clip_with_ellipsis(s: Option<String>, max_bytes: usize) -> (Option<String>, b
     let mut clipped = s[..end].to_string();
     clipped.push('…');
     (Some(clipped), true)
+}
+
+fn new_attempt_tracker() -> Arc<AtomicU32> {
+    Arc::new(AtomicU32::new(1))
 }
 
 fn map_worker_artifact_ref(
@@ -438,6 +442,7 @@ pub fn parse_parallel_tasks(
             brain_session_id: brain_session_id.clone(),
             delegation_plan,
             issue_id,
+            attempt_tracker: new_attempt_tracker(),
         });
     }
     Ok(out)
@@ -1700,11 +1705,12 @@ impl McpCallbackServer {
 
                 let DetachedCompletionHandle {
                     ctx,
-                    attempt,
+                    attempt_tracker,
                     brain_session,
                     event_sink,
                     ..
                 } = h;
+                let attempt = attempt_tracker.load(Ordering::SeqCst);
                 let cont = build_detached_continuation(
                     &delegation_id,
                     &result,
@@ -2260,6 +2266,7 @@ impl McpCallbackServer {
 
         let request_id = DelegationId::new();
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let attempt_tracker = new_attempt_tracker();
 
         let delegation = DelegationRequest {
             id: request_id.clone(),
@@ -2270,6 +2277,7 @@ impl McpCallbackServer {
             brain_session_id: self.brain_session_id.clone(),
             delegation_plan,
             issue_id,
+            attempt_tracker: Arc::clone(&attempt_tracker),
         };
 
         info!(agent = %agent, request_id = %request_id, "Sending delegation request");
@@ -2377,9 +2385,7 @@ impl McpCallbackServer {
                     Some(DetachedCompletionHandle {
                         ctx: Arc::clone(&self.continuation_ctx),
                         source_kind: DetachedSourceKind::BlockTimeout,
-                        // TODO(phase-5): thread the orchestrator retry-loop's
-                        // real attempt number into detached collectors.
-                        attempt: 1,
+                        attempt_tracker,
                         brain_session: self.brain_session_id.as_session_id().clone(),
                         event_sink: self.event_sink.clone(),
                     }),
@@ -2448,6 +2454,7 @@ impl McpCallbackServer {
         for (idx, mut skeleton) in skeletons.into_iter().enumerate() {
             let request_id = skeleton.id.clone();
             let agent = skeleton.agent.clone();
+            let attempt_tracker = Arc::clone(&skeleton.attempt_tracker);
             let (tx, rx) = tokio::sync::oneshot::channel();
             skeleton.respond_to = tx;
 
@@ -2462,11 +2469,11 @@ impl McpCallbackServer {
                 .lock()
                 .await
                 .insert(request_id.clone());
-            dispatched.push((idx, request_id, agent, rx));
+            dispatched.push((idx, request_id, agent, rx, attempt_tracker));
         }
 
         let mut waits = JoinSet::new();
-        for (idx, request_id, agent, rx) in dispatched {
+        for (idx, request_id, agent, rx, attempt_tracker) in dispatched {
             let active_delegations = Arc::clone(&self.active_delegations);
             let completed_delegations = Arc::clone(&self.completed_delegations);
             let continuation_ctx = Arc::clone(&self.continuation_ctx);
@@ -2524,9 +2531,7 @@ impl McpCallbackServer {
                             Some(DetachedCompletionHandle {
                                 ctx: continuation_ctx,
                                 source_kind: DetachedSourceKind::BlockTimeout,
-                                // TODO(phase-5): thread the orchestrator retry-loop's
-                                // real attempt number into detached collectors.
-                                attempt: 1,
+                                attempt_tracker,
                                 brain_session,
                                 event_sink,
                             }),
@@ -4435,6 +4440,7 @@ mod retirement_state_tests {
 #[cfg(test)]
 mod continuation_producer_tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicU32;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -4483,7 +4489,7 @@ mod continuation_producer_tests {
                 }),
             }),
             source_kind: super::DetachedSourceKind::BlockTimeout,
-            attempt,
+            attempt_tracker: Arc::new(AtomicU32::new(attempt)),
             brain_session,
             event_sink,
         });

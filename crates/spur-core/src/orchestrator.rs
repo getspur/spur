@@ -1,6 +1,9 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
@@ -36,6 +39,7 @@ use spur_worktree::WorktreeManager;
 
 use crate::lineage::ExecutorId;
 use crate::review_sink::{ReviewSink, ReviewSinkError};
+use crate::scheduler::TurnGuard;
 
 type McpGuarded<T> = (T, AbortOnDropHandle<()>);
 type BrainRunBootstrap = (
@@ -137,11 +141,13 @@ pub struct BrainSession {
     pub spur_session_id: SessionId,
     pub brain_name: String,
     pub delegation_handle: JoinHandle<()>,
-    /// Background task accepting connections on the HTTP MCP callback
-    /// listener. Must be aborted on session retire — otherwise the
-    /// listener keeps its port open and the task + TcpListener are
-    /// leaked for the lifetime of the process.
-    pub mcp_handle: AbortOnDropHandle<()>,
+    /// Phase 5: hold the server itself so retirement can invoke
+    /// `mark_retiring` / `cancel_in_flight_workers` / `shutdown`.
+    pub mcp_server: Option<Arc<McpCallbackServer>>,
+    /// Abort-on-drop guard returned by `McpCallbackServer::start`.
+    /// Awaited during retirement after the server has been shut down or
+    /// force-aborted so the background watcher task does not linger.
+    pub mcp_guard: Option<AbortOnDropHandle<()>>,
     /// Task that drains the connection's session-notification broadcast
     /// and republishes each item onto the `SpurEvent` bus. `None` for
     /// transports that return `None` from `subscribe_session_notifications`
@@ -175,6 +181,139 @@ where
             Err(error)
         }
     }
+}
+
+const MCP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+trait RetirableMcpServer: Send + Sync {
+    fn mark_retiring(&self);
+    fn cancel_in_flight_workers(&self);
+    fn force_abort(&self);
+    fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
+impl RetirableMcpServer for McpCallbackServer {
+    fn mark_retiring(&self) {
+        McpCallbackServer::mark_retiring(self);
+    }
+
+    fn cancel_in_flight_workers(&self) {
+        McpCallbackServer::cancel_in_flight_workers(self);
+    }
+
+    fn force_abort(&self) {
+        McpCallbackServer::force_abort(self);
+    }
+
+    fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(McpCallbackServer::shutdown(self))
+    }
+}
+
+async fn shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
+    funnel: &crate::event_funnel::FunnelHandle,
+    session: &SessionId,
+    mcp_server: &mut Option<Arc<S>>,
+    mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
+) {
+    let Some(server) = mcp_server.take() else {
+        if let Some(mcp_guard) = mcp_guard {
+            if let Some(guard) = mcp_guard.take() {
+                let _ = guard.await;
+            }
+        }
+        return;
+    };
+
+    server.mark_retiring();
+    server.cancel_in_flight_workers();
+
+    match tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, server.shutdown()).await {
+        Ok(_) => {
+            info!(session = %session, "MCP server shutdown clean");
+        }
+        Err(_timeout) => {
+            warn!(
+                session = %session,
+                timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                "MCP server shutdown timed out — forcing abort"
+            );
+            funnel.emit(SpurEventBody::McpShutdownTimeout {
+                session: session.clone(),
+                timeout_ms: MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+            });
+            server.force_abort();
+        }
+    }
+
+    if let Some(mcp_guard) = mcp_guard {
+        if let Some(guard) = mcp_guard.take() {
+            let _ = guard.await;
+        }
+    }
+}
+
+async fn retire_brain_session<S: RetirableMcpServer + ?Sized>(
+    funnel: &crate::event_funnel::FunnelHandle,
+    session: &SessionId,
+    mcp_server: &mut Option<Arc<S>>,
+    mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
+    scheduler: &mut crate::scheduler::BrainScheduler,
+    overflow: &crate::continuation_bridge::OverflowBuf,
+    new_active: Option<SessionId>,
+) {
+    shutdown_mcp_server(funnel, session, mcp_server, mcp_guard).await;
+    scheduler.note_session_swap(new_active, overflow);
+}
+
+fn take_rendered_batch(
+    drained_batch: &mut Option<crate::scheduler::DrainedBatch>,
+    render_outcome: &mut Option<crate::continuation_bridge::RenderOutcome>,
+) -> Option<(
+    crate::scheduler::DrainedBatch,
+    crate::continuation_bridge::RenderOutcome,
+)> {
+    drained_batch.take().map(|batch| {
+        let outcome = render_outcome
+            .take()
+            .expect("drained batch must carry render outcome");
+        (batch, outcome)
+    })
+}
+
+fn commit_rendered_batch(
+    scheduler: &mut crate::scheduler::BrainScheduler,
+    batch: crate::scheduler::DrainedBatch,
+    outcome: crate::continuation_bridge::RenderOutcome,
+) {
+    let dropped_terminal = outcome
+        .dropped_oversized
+        .into_iter()
+        .map(|(key, bytes)| {
+            (
+                key,
+                spur_acp::domain::DropReason::OversizedSingleItem {
+                    continuation_bytes: bytes,
+                    budget_bytes: crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                },
+            )
+        })
+        .collect();
+    let spilled_with_reason = Some(
+        outcome
+            .deferred_spill
+            .into_iter()
+            .map(|(continuation, reason)| {
+                (spur_acp::domain::DelegationKey::from(&continuation), reason)
+            })
+            .collect(),
+    );
+    scheduler.commit_partial(
+        batch,
+        outcome.delivered_keys,
+        dropped_terminal,
+        spilled_with_reason,
+    );
 }
 
 fn format_error_chain(error: &anyhow::Error) -> String {
@@ -1124,10 +1263,11 @@ impl Orchestrator {
                         self.retire_active_brain(
                             &mut brain,
                             &mut agent_connection,
+                            &mut scheduler,
+                            &overflow_continuations,
                             spur_acp::domain::events::BrainRetireReason::UserClear,
                         )
                         .await;
-                        scheduler.note_session_swap(None, &overflow_continuations);
                         if blocks.is_empty() {
                             info!("NewSessionWithMessage with empty blocks — spawn deferred to next Message");
                         } else {
@@ -1191,11 +1331,11 @@ impl Orchestrator {
                         self.retire_active_brain(
                             &mut brain,
                             &mut agent_connection,
+                            &mut scheduler,
+                            &overflow_continuations,
                             spur_acp::domain::events::BrainRetireReason::ResumeSwitch,
                         )
                         .await;
-                        // Evict stale continuations targeting the prior brain session.
-                        scheduler.note_session_swap(None, &overflow_continuations);
 
                         let (connection, brain_name) = match agent_connection.take() {
                             Some(existing) => existing,
@@ -1534,41 +1674,9 @@ impl Orchestrator {
             if !prompt_blocks.is_empty() || drained_batch.is_none() {
                 // normal prompt path continues below
             } else {
-                let batch = drained_batch
-                    .take()
+                let (batch, outcome) = take_rendered_batch(&mut drained_batch, &mut render_outcome)
                     .expect("empty prompt still owns a batch");
-                let outcome = render_outcome
-                    .take()
-                    .expect("empty prompt batch must carry render outcome");
-                let dropped_terminal = outcome
-                    .dropped_oversized
-                    .into_iter()
-                    .map(|(key, bytes)| {
-                        (
-                            key,
-                            spur_acp::domain::DropReason::OversizedSingleItem {
-                                continuation_bytes: bytes,
-                                budget_bytes:
-                                    crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
-                            },
-                        )
-                    })
-                    .collect();
-                let spilled_with_reason = Some(
-                    outcome
-                        .deferred_spill
-                        .into_iter()
-                        .map(|(continuation, reason)| {
-                            (spur_acp::domain::DelegationKey::from(&continuation), reason)
-                        })
-                        .collect(),
-                );
-                scheduler.commit_partial(
-                    batch,
-                    outcome.delivered_keys,
-                    dropped_terminal,
-                    spilled_with_reason,
-                );
+                commit_rendered_batch(&mut scheduler, batch, outcome);
                 continue;
             }
 
@@ -1646,47 +1754,21 @@ impl Orchestrator {
                 continuations_count: continuations_count,
             });
 
+            let _turn_guard = TurnGuard::arm(scheduler.turn_flag());
             let prompt_started_at = std::time::Instant::now();
             let mut stream = match b.connection.prompt(prompt_request).await {
                 Ok(s) => {
-                    if let Some(batch) = drained_batch.take() {
-                        let outcome = render_outcome
-                            .take()
-                            .expect("drained batch must carry render outcome");
-                        let dropped_terminal = outcome
-                            .dropped_oversized
-                            .into_iter()
-                            .map(|(key, bytes)| {
-                                (
-                                    key,
-                                    spur_acp::domain::DropReason::OversizedSingleItem {
-                                        continuation_bytes: bytes,
-                                        budget_bytes:
-                                            crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
-                                    },
-                                )
-                            })
-                            .collect();
-                        let spilled_with_reason = Some(
-                            outcome
-                                .deferred_spill
-                                .into_iter()
-                                .map(|(continuation, reason)| {
-                                    (spur_acp::domain::DelegationKey::from(&continuation), reason)
-                                })
-                                .collect(),
-                        );
-                        scheduler.commit_partial(
-                            batch,
-                            outcome.delivered_keys,
-                            dropped_terminal,
-                            spilled_with_reason,
-                        );
+                    if let Some((batch, outcome)) =
+                        take_rendered_batch(&mut drained_batch, &mut render_outcome)
+                    {
+                        commit_rendered_batch(&mut scheduler, batch, outcome);
                     }
                     s
                 }
                 Err(e) => {
-                    if let Some(batch) = drained_batch.take() {
+                    if let Some((batch, _outcome)) =
+                        take_rendered_batch(&mut drained_batch, &mut render_outcome)
+                    {
                         scheduler.rollback(batch);
                     }
                     let error_message = format_error_chain(&e);
@@ -1701,7 +1783,16 @@ impl Orchestrator {
                         if let Some(h) = dead.notification_pump_handle.take() {
                             h.abort();
                         }
-                        abort_mcp_handle(dead.mcp_handle).await;
+                        retire_brain_session(
+                            &self.funnel,
+                            &dead.spur_session_id,
+                            &mut dead.mcp_server,
+                            Some(&mut dead.mcp_guard),
+                            &mut scheduler,
+                            &overflow_continuations,
+                            None,
+                        )
+                        .await;
                         let _ = dead.connection.shutdown().await;
                         continue;
                     }
@@ -1733,19 +1824,22 @@ impl Orchestrator {
                     if let Some(h) = dead.notification_pump_handle.take() {
                         h.abort();
                     }
-                    abort_mcp_handle(dead.mcp_handle).await;
+                    retire_brain_session(
+                        &self.funnel,
+                        &dead.spur_session_id,
+                        &mut dead.mcp_server,
+                        Some(&mut dead.mcp_guard),
+                        &mut scheduler,
+                        &overflow_continuations,
+                        None,
+                    )
+                    .await;
                     let _ = dead.connection.shutdown().await;
                     continue;
                 }
             };
 
             // ── Stream output + check for interrupts ─────────────────────
-            // note_turn_started() / note_turn_finished() bracket the streaming
-            // loop. We call note_turn_started() here (before the loop) and
-            // note_turn_finished() unconditionally after the loop exits. All
-            // early-exit `continue` paths above skip this block entirely, so
-            // the scheduler never sees a spurious in-flight flag on error paths.
-            scheduler.note_turn_started();
             let mut cancel_deadline: Option<tokio::time::Instant> = None;
             let mut cancel_resolved = false;
             {
@@ -1840,8 +1934,6 @@ impl Orchestrator {
                     }
                 }
             }
-            // Unconditional: turn finished regardless of how the loop exited.
-            scheduler.note_turn_finished();
 
             // Fire the grace window if a cancel was ARMED during this turn, regardless
             // of whether the stream ended naturally or the deadline force-broke. Either
@@ -1864,7 +1956,16 @@ impl Orchestrator {
             if let Some(h) = b.notification_pump_handle.take() {
                 h.abort();
             }
-            abort_mcp_handle(b.mcp_handle).await;
+            retire_brain_session(
+                &self.funnel,
+                &b.spur_session_id,
+                &mut b.mcp_server,
+                Some(&mut b.mcp_guard),
+                &mut scheduler,
+                &overflow_continuations,
+                None,
+            )
+            .await;
             let _ = b.connection.shutdown().await;
         }
         // Drop any pre-connected but unused connection.
@@ -2032,9 +2133,11 @@ impl Orchestrator {
         &mut self,
         brain: &mut Option<BrainSession>,
         agent_connection: &mut Option<(Box<dyn spur_acp::AgentConnection>, String)>,
+        scheduler: &mut crate::scheduler::BrainScheduler,
+        overflow: &crate::continuation_bridge::OverflowBuf,
         reason: spur_acp::domain::events::BrainRetireReason,
     ) {
-        let Some(b) = brain.take() else { return };
+        let Some(mut b) = brain.take() else { return };
 
         // 1. Emit BrainRetired BEFORE aborting handles. Broadcast emit is
         //    synchronous into the channel, so any post-abort stragglers
@@ -2061,7 +2164,7 @@ impl Orchestrator {
         //    timeout, abort explicitly — dropping a `JoinHandle` does NOT
         //    cancel the task. `abort_handle` gives us a side-channel that
         //    survives moving the handle into `timeout`.
-        if let Some(h) = b.notification_pump_handle {
+        if let Some(h) = b.notification_pump_handle.take() {
             let abort = h.abort_handle();
             if tokio::time::timeout(std::time::Duration::from_millis(100), h)
                 .await
@@ -2073,7 +2176,16 @@ impl Orchestrator {
 
         // 4. Abort remaining handles and stash connection for reuse.
         b.delegation_handle.abort();
-        abort_mcp_handle(b.mcp_handle).await;
+        retire_brain_session(
+            &self.funnel,
+            &b.spur_session_id,
+            &mut b.mcp_server,
+            Some(&mut b.mcp_guard),
+            scheduler,
+            overflow,
+            None,
+        )
+        .await;
         *agent_connection = Some((b.connection, b.brain_name));
     }
 
@@ -2286,7 +2398,8 @@ impl Orchestrator {
             brain_name,
             delegation_handle,
             notification_pump_handle,
-            mcp_handle,
+            mcp_server: Some(mcp_server),
+            mcp_guard: Some(mcp_handle),
             started_at: std::time::Instant::now(),
         })
     }
@@ -2532,7 +2645,8 @@ impl Orchestrator {
             brain_name,
             delegation_handle,
             notification_pump_handle,
-            mcp_handle,
+            mcp_server: Some(mcp_server),
+            mcp_guard: Some(mcp_handle),
             started_at: std::time::Instant::now(),
         };
 
@@ -2563,7 +2677,7 @@ impl Orchestrator {
     /// `BrainReconnected` / `BrainReconnectFailed` after.
     async fn try_reconnect_brain(
         &mut self,
-        dead_brain: BrainSession,
+        mut dead_brain: BrainSession,
         permission_tx: Option<
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
@@ -2576,10 +2690,16 @@ impl Orchestrator {
 
         // Drop the dead session: abort helper tasks, close stdio.
         dead_brain.delegation_handle.abort();
-        if let Some(h) = dead_brain.notification_pump_handle {
+        if let Some(h) = dead_brain.notification_pump_handle.take() {
             h.abort();
         }
-        abort_mcp_handle(dead_brain.mcp_handle).await;
+        shutdown_mcp_server(
+            &self.funnel,
+            &dead_brain.spur_session_id,
+            &mut dead_brain.mcp_server,
+            Some(&mut dead_brain.mcp_guard),
+        )
+        .await;
         drop(dead_brain.connection);
 
         // Fresh connection + reattach.
@@ -3079,6 +3199,7 @@ impl Orchestrator {
                 brain_session_id,
                 delegation_plan,
                 issue_id,
+                attempt_tracker,
             } = request;
             // Phase 4: `DelegationRequest.id` is now a typed `DelegationId`
             // newtype. Downstream delegation plumbing (funnel events,
@@ -3209,6 +3330,7 @@ impl Orchestrator {
                         agent_configs,
                         funnel.clone(),
                         review_sink.clone(),
+                        attempt_tracker,
                     ) => r,
                 };
                 // Always clean up the token entry (avoids stale entries
@@ -3324,6 +3446,7 @@ impl Orchestrator {
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
+        attempt_tracker: Arc<std::sync::atomic::AtomicU32>,
     ) -> (DelegationResult, Option<ExecutorId>) {
         // Shadow `original_task` with the Relevant Files-prepended form
         // so retry loops at orchestrator.rs:3013 reuse the formatted
@@ -3399,6 +3522,7 @@ impl Orchestrator {
         let mut next_worker_session = first_worker_session;
 
         loop {
+            attempt_tracker.store(attempt_n, Ordering::SeqCst);
             let outcome = match run_one_worker_attempt(
                 next_worker_session.clone(),
                 &WorkerAttemptCtx {
@@ -5889,6 +6013,403 @@ mod interactive_input_tests {
             InteractiveInput::WarmConnect => (),
             _ => panic!("expected WarmConnect variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod phase5_orchestrator_finalization_tests {
+    use super::{commit_rendered_batch, retire_brain_session, TurnGuard};
+    use crate::continuation_bridge::{new_overflow_buf, ContinuationEventSink, RenderOutcome};
+    use crate::event_funnel::spawn_funnel;
+    use crate::scheduler::{BrainScheduler, ScheduledAction};
+    use chrono::Utc;
+    use futures::FutureExt;
+    use spur_acp::domain::delegation::DelegationStatus;
+    use spur_acp::domain::events::SpurEventBody;
+    use spur_acp::domain::{
+        BrainContinuation, ContinuationPayload, ContinuationSource, DeferReason, DelegationKey,
+        DropReason,
+    };
+    use spur_acp::types::SessionId;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    use tokio::sync::{broadcast, Notify};
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<SpurEventBody>>,
+    }
+
+    impl RecordingSink {
+        fn snapshot(&self) -> Vec<SpurEventBody> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl ContinuationEventSink for RecordingSink {
+        fn emit(&self, body: SpurEventBody) {
+            self.events.lock().unwrap().push(body);
+        }
+    }
+
+    fn mk_scheduler(active_session: Option<SessionId>) -> (BrainScheduler, Arc<RecordingSink>) {
+        let sink = Arc::new(RecordingSink::default());
+        let scheduler = BrainScheduler::new(active_session, sink.clone());
+        (scheduler, sink)
+    }
+
+    fn mk_cont(id: &str, attempt: u32, brain_session: &SessionId) -> BrainContinuation {
+        BrainContinuation {
+            delegation_id: id.into(),
+            attempt,
+            brain_session: brain_session.clone(),
+            source: ContinuationSource::AsyncRequested,
+            payload: ContinuationPayload {
+                status: DelegationStatus::Success,
+                summary: Some(format!("summary-{id}")),
+                diff_summary: None,
+                worker_branch: None,
+                artifact_ref: None,
+            },
+            created_at_wall: Utc::now(),
+            created_at_mono: Instant::now(),
+        }
+    }
+
+    fn continuation_batch(scheduler: &mut BrainScheduler) -> crate::scheduler::DrainedBatch {
+        match scheduler.next(Instant::now()) {
+            ScheduledAction::ContinuationPrompt(batch) => batch,
+            other => panic!("expected ContinuationPrompt, got {other:?}"),
+        }
+    }
+
+    fn test_funnel() -> (
+        crate::event_funnel::FunnelHandle,
+        broadcast::Receiver<spur_acp::domain::events::SpurEvent>,
+    ) {
+        let (tx, rx) = broadcast::channel(32);
+        let seq = Arc::new(AtomicU64::new(0));
+        (spawn_funnel(tx, seq), rx)
+    }
+
+    enum ShutdownMode {
+        Ready,
+        Wait(Arc<Notify>),
+    }
+
+    struct MockRetiringServer {
+        shutdown_mode: ShutdownMode,
+        mark_calls: AtomicUsize,
+        cancel_calls: AtomicUsize,
+        force_calls: AtomicUsize,
+        shutdown_calls: AtomicUsize,
+    }
+
+    impl MockRetiringServer {
+        fn ready() -> Self {
+            Self {
+                shutdown_mode: ShutdownMode::Ready,
+                mark_calls: AtomicUsize::new(0),
+                cancel_calls: AtomicUsize::new(0),
+                force_calls: AtomicUsize::new(0),
+                shutdown_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn blocked(notify: Arc<Notify>) -> Self {
+            Self {
+                shutdown_mode: ShutdownMode::Wait(notify),
+                mark_calls: AtomicUsize::new(0),
+                cancel_calls: AtomicUsize::new(0),
+                force_calls: AtomicUsize::new(0),
+                shutdown_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl super::RetirableMcpServer for MockRetiringServer {
+        fn mark_retiring(&self) {
+            self.mark_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn cancel_in_flight_workers(&self) {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn force_abort(&self) {
+            self.force_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+            match &self.shutdown_mode {
+                ShutdownMode::Ready => Box::pin(async {}),
+                ShutdownMode::Wait(notify) => {
+                    let notify = Arc::clone(notify);
+                    Box::pin(async move {
+                        notify.notified().await;
+                    })
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retire_brain_session_clean_shutdown() {
+        let old_session = SessionId("brain-old".into());
+        let new_session = SessionId("brain-new".into());
+        let (funnel, _rx) = test_funnel();
+        let (mut scheduler, _sink) = mk_scheduler(Some(old_session.clone()));
+        let overflow = new_overflow_buf();
+        let server = Arc::new(MockRetiringServer::ready());
+        let mut mcp_server = Some(server.clone());
+
+        retire_brain_session(
+            &funnel,
+            &old_session,
+            &mut mcp_server,
+            None,
+            &mut scheduler,
+            &overflow,
+            Some(new_session.clone()),
+        )
+        .await;
+
+        assert!(mcp_server.is_none());
+        assert_eq!(server.mark_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.cancel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.shutdown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.force_calls.load(Ordering::SeqCst), 0);
+
+        scheduler.push_continuation(mk_cont("post-retire", 1, &new_session));
+        assert_eq!(scheduler.pending_continuation_len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_retire_brain_session_timeout_force_aborts() {
+        let session = SessionId("brain-timeout".into());
+        let (funnel, _rx) = test_funnel();
+        let (mut scheduler, _sink) = mk_scheduler(Some(session.clone()));
+        let overflow = new_overflow_buf();
+        let server = Arc::new(MockRetiringServer::blocked(Arc::new(Notify::new())));
+        let mut mcp_server = Some(server.clone());
+
+        retire_brain_session(
+            &funnel,
+            &session,
+            &mut mcp_server,
+            None,
+            &mut scheduler,
+            &overflow,
+            None,
+        )
+        .await;
+
+        assert_eq!(server.mark_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.cancel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.shutdown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.force_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_retire_brain_session_emits_mcp_shutdown_timeout_event() {
+        let session = SessionId("brain-timeout-event".into());
+        let (funnel, mut rx) = test_funnel();
+        let (mut scheduler, _sink) = mk_scheduler(Some(session.clone()));
+        let overflow = new_overflow_buf();
+        let server = Arc::new(MockRetiringServer::blocked(Arc::new(Notify::new())));
+        let mut mcp_server = Some(server);
+
+        retire_brain_session(
+            &funnel,
+            &session,
+            &mut mcp_server,
+            None,
+            &mut scheduler,
+            &overflow,
+            None,
+        )
+        .await;
+
+        let event = rx.recv().await.expect("timeout event");
+        assert!(matches!(
+            event.body,
+            SpurEventBody::McpShutdownTimeout {
+                session: ref event_session,
+                timeout_ms: 5_000,
+            } if event_session == &session
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_retire_brain_session_note_session_swap_called_with_overflow() {
+        let old_session = SessionId("brain-old".into());
+        let new_session = SessionId("brain-new".into());
+        let (funnel, _rx) = test_funnel();
+        let (mut scheduler, sink) = mk_scheduler(Some(old_session.clone()));
+        let overflow = new_overflow_buf();
+        let server = Arc::new(MockRetiringServer::ready());
+        let mut mcp_server = Some(server);
+
+        scheduler.push_continuation(mk_cont("pending-1", 1, &old_session));
+        {
+            let mut guard = overflow.lock().await;
+            guard.push_back((old_session.clone(), mk_cont("overflow-1", 1, &old_session)));
+        }
+
+        retire_brain_session(
+            &funnel,
+            &old_session,
+            &mut mcp_server,
+            None,
+            &mut scheduler,
+            &overflow,
+            Some(new_session.clone()),
+        )
+        .await;
+
+        assert_eq!(scheduler.pending_continuation_len(), 0);
+        assert!(overflow.lock().await.is_empty());
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| matches!(
+            event,
+            SpurEventBody::ContinuationDropped {
+                reason: DropReason::SessionSwap,
+                ..
+            }
+        )));
+
+        scheduler.push_continuation(mk_cont("new-session-ok", 1, &new_session));
+        assert_eq!(scheduler.pending_continuation_len(), 1);
+    }
+
+    #[test]
+    fn test_dispatch_merged_commits_on_ok() {
+        let session = SessionId("brain-merged".into());
+        let (mut scheduler, sink) = mk_scheduler(Some(session.clone()));
+        let delivered = mk_cont("deliver-me", 1, &session);
+        let spilled = mk_cont("spill-me", 1, &session);
+        let delivered_key = DelegationKey::from(&delivered);
+        let spilled_key = DelegationKey::from(&spilled);
+        scheduler.push_continuation(delivered.clone());
+        scheduler.push_continuation(spilled.clone());
+        let batch = continuation_batch(&mut scheduler);
+
+        commit_rendered_batch(
+            &mut scheduler,
+            batch,
+            RenderOutcome {
+                blocks: vec![],
+                delivered_keys: vec![delivered_key.clone()],
+                deferred_spill: vec![(
+                    spilled.clone(),
+                    DeferReason::BudgetSpill {
+                        budget_bytes: 512,
+                        continuation_bytes: 900,
+                    },
+                )],
+                dropped_oversized: vec![],
+            },
+        );
+
+        scheduler.push_continuation(delivered);
+        assert_eq!(scheduler.pending_continuation_len(), 1);
+        let events = sink.snapshot();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SpurEventBody::ContinuationDeferred {
+                delegation_id,
+                reason: DeferReason::BudgetSpill { .. },
+                ..
+            } if delegation_id == spilled_key.delegation_id.as_str()
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SpurEventBody::ContinuationDropped {
+                delegation_id,
+                reason: DropReason::AlreadyDelivered,
+                ..
+            } if delegation_id == delivered_key.delegation_id.as_str()
+        )));
+    }
+
+    #[test]
+    fn test_dispatch_merged_rollbacks_on_err() {
+        let session = SessionId("brain-rollback".into());
+        let (mut scheduler, sink) = mk_scheduler(Some(session.clone()));
+        scheduler.push_continuation(mk_cont("rollback-me", 1, &session));
+        let batch = continuation_batch(&mut scheduler);
+
+        scheduler.rollback(batch);
+
+        assert_eq!(scheduler.pending_continuation_len(), 1);
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            SpurEventBody::ContinuationDeferred {
+                reason: DeferReason::PromptDispatchFailure,
+                requeue_count: 1,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_merged_turn_guard_clears_on_panic() {
+        let (scheduler, _sink) = mk_scheduler(Some(SessionId("brain-guard".into())));
+        let flag = scheduler.turn_flag();
+
+        let result = std::panic::AssertUnwindSafe(async {
+            let _guard = TurnGuard::arm(flag.clone());
+            panic!("boom");
+        })
+        .catch_unwind()
+        .await;
+
+        assert!(result.is_err());
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_dispatch_merged_oversized_dropped_via_commit_partial() {
+        let session = SessionId("brain-oversized".into());
+        let (mut scheduler, sink) = mk_scheduler(Some(session.clone()));
+        let oversized = mk_cont("too-large", 1, &session);
+        let oversized_key = DelegationKey::from(&oversized);
+        scheduler.push_continuation(oversized);
+        let batch = continuation_batch(&mut scheduler);
+
+        commit_rendered_batch(
+            &mut scheduler,
+            batch,
+            RenderOutcome {
+                blocks: vec![],
+                delivered_keys: vec![],
+                deferred_spill: vec![],
+                dropped_oversized: vec![(oversized_key.clone(), 9_999)],
+            },
+        );
+
+        assert_eq!(scheduler.pending_continuation_len(), 0);
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            SpurEventBody::ContinuationDropped {
+                delegation_id,
+                reason: DropReason::OversizedSingleItem {
+                    continuation_bytes: 9_999,
+                    ..
+                },
+                ..
+            } if delegation_id == oversized_key.delegation_id.as_str()
+        ));
     }
 }
 
