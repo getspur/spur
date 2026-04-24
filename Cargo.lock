@@ -4439,6 +4439,7 @@ dependencies = [
  "serde_json",
  "spur-acp",
  "spur-bot",
+ "spur-context",
  "spur-core",
  "spur-cost",
  "spur-interactive",

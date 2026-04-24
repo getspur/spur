@@ -83,7 +83,7 @@ pub fn apply_builtin_defaults(cfg: &mut AgentConfig) {
             if user.output_shape.is_none() {
                 user.output_shape = default.output_shape;
             }
-            tracing::info!(agent = %cfg.name, "applied built-in delegation descriptor");
+            tracing::debug!(agent = %cfg.name, "applied built-in delegation descriptor");
         }
         None => {
             // No built-in default. Thin-synthesize only if user config
@@ -98,7 +98,7 @@ pub fn apply_builtin_defaults(cfg: &mut AgentConfig) {
                 cfg.delegation.description =
                     Some(format!("{} agent (no descriptor configured)", cfg.name));
                 cfg.delegation.tier = Some(Tier::Generalist);
-                tracing::info!(agent = %cfg.name, "synthesized thin delegation descriptor");
+                tracing::debug!(agent = %cfg.name, "synthesized thin delegation descriptor");
             }
         }
     }
