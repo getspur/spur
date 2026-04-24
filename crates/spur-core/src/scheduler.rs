@@ -362,10 +362,53 @@ impl BrainScheduler {
     }
 
     /// Called on prompt-dispatch failure.
-    pub fn rollback(&mut self, batch: DrainedBatch) {
+    pub fn rollback(
+        &mut self,
+        batch: DrainedBatch,
+        dropped_terminal: Vec<(DelegationKey, DropReason)>,
+    ) {
         let items = batch.into_items();
-        if !items.is_empty() {
-            self.apply_requeue_command(RequeueCommand::Rolled { items });
+        let batch_keys: HashSet<_> = items.iter().map(PendingContinuation::key).collect();
+        let session_hint = self
+            .active_session
+            .clone()
+            .or_else(|| {
+                items
+                    .first()
+                    .map(|item| item.continuation.brain_session.clone())
+            })
+            .unwrap_or_else(SessionId::new);
+        let mut valid_dropped = HashMap::new();
+        let mut dropped_seen = HashSet::new();
+
+        for (key, reason) in dropped_terminal {
+            if !dropped_seen.insert(key.clone()) {
+                debug_assert!(
+                    false,
+                    "rollback dropped_terminal contains duplicate key: {:?}",
+                    key
+                );
+                continue;
+            }
+            if !batch_keys.contains(&key) {
+                debug_assert!(
+                    false,
+                    "rollback dropped_terminal contains unknown key: {:?}",
+                    key
+                );
+                self.emit_unknown_mismatched_drop(&key, &session_hint);
+                continue;
+            }
+            valid_dropped.insert(key, reason);
+        }
+
+        for item in items {
+            let key = item.key();
+            if let Some(reason) = valid_dropped.remove(&key) {
+                self.emit_drop(&item.continuation, reason);
+                continue;
+            }
+            self.requeue_immediately(item, DeferReason::PromptDispatchFailure);
         }
     }
 
@@ -488,11 +531,6 @@ impl BrainScheduler {
                 for item in items {
                     let reason = spill_reason(&item.continuation);
                     self.requeue_immediately(item, reason);
-                }
-            }
-            RequeueCommand::Rolled { items } => {
-                for item in items {
-                    self.requeue_immediately(item, DeferReason::PromptDispatchFailure);
                 }
             }
             RequeueCommand::Leaked { items } => {
@@ -641,7 +679,6 @@ impl Drop for DrainedBatch {
 
 pub(crate) enum RequeueCommand {
     Spilled { items: Vec<PendingContinuation> },
-    Rolled { items: Vec<PendingContinuation> },
     Leaked { items: Vec<PendingContinuation> },
 }
 
@@ -1163,7 +1200,7 @@ mod tests {
         scheduler.push_continuation(mk_cont("id-2", 1, &session));
 
         let batch = continuation_batch(&mut scheduler);
-        scheduler.rollback(batch);
+        scheduler.rollback(batch, vec![]);
 
         assert_eq!(scheduler.pending_continuation_len(), 2);
         let events = sink.snapshot();
@@ -1175,6 +1212,53 @@ mod tests {
                 reason: DeferReason::PromptDispatchFailure,
                 ..
             }
+        )));
+    }
+
+    #[test]
+    fn test_rollback_drops_terminal_and_requeues_remainder() {
+        let session = SessionId::new();
+        let (mut scheduler, sink) = mk_scheduler(Some(session.clone()));
+        let drop_me = mk_cont("drop-me", 1, &session);
+        let keep_me = mk_cont("keep-me", 1, &session);
+        let keep_key = DelegationKey::from(&keep_me);
+
+        scheduler.push_continuation(drop_me.clone());
+        scheduler.push_continuation(keep_me);
+
+        let batch = continuation_batch(&mut scheduler);
+        scheduler.rollback(
+            batch,
+            vec![(
+                DelegationKey::from(&drop_me),
+                DropReason::OversizedSingleItem {
+                    continuation_bytes: 9_999,
+                    budget_bytes: MERGE_BUDGET_DEFAULT_BYTES,
+                },
+            )],
+        );
+
+        assert_eq!(scheduler.pending_continuation_len(), 1);
+        assert_eq!(scheduler.pending_continuations[0].key(), keep_key);
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SpurEventBody::ContinuationDropped {
+                delegation_id,
+                reason: DropReason::OversizedSingleItem { .. },
+                ..
+            } if delegation_id == "drop-me"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SpurEventBody::ContinuationDeferred {
+                delegation_id,
+                reason: DeferReason::PromptDispatchFailure,
+                requeue_count: 1,
+                ..
+            } if delegation_id == "keep-me"
         )));
     }
 
@@ -1334,11 +1418,11 @@ mod tests {
 
         for _ in 0..MAX_REQUEUE_ATTEMPTS {
             let batch = continuation_batch(&mut scheduler);
-            scheduler.rollback(batch);
+            scheduler.rollback(batch, vec![]);
         }
 
         let final_batch = continuation_batch(&mut scheduler);
-        scheduler.rollback(final_batch);
+        scheduler.rollback(final_batch, vec![]);
 
         assert_eq!(scheduler.pending_continuation_len(), 0);
         let events = sink.snapshot();
