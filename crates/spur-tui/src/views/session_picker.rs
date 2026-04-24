@@ -1047,8 +1047,12 @@ impl View for SessionPickerView {
     }
 
     fn handle_spur_event(&mut self, _event: &SpurEvent, _ctx: &super::ViewContext) {
-        // SessionsListed and SessionsListError are handled by App,
-        // which calls set_sessions() or set_error() directly.
+        // Picker holds no async state (see Tranche 2 Task 3). Events arrive
+        // for completeness of the view dispatch architecture, but no
+        // immediate action is taken — list refresh is driven by explicit
+        // user intent or navigation. SessionsListed and SessionsListError
+        // are handled by App, which calls set_sessions() or set_error()
+        // directly.
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
