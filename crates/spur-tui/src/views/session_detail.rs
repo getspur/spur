@@ -1897,7 +1897,7 @@ impl SessionDetailView {
         flag_summary: Option<(usize, usize)>,
     ) {
         // Pre-ready render path: show a status label until LoadState::Ready.
-        match &self.load_state.clone() {
+        match &self.load_state {
             LoadState::Retiring => {
                 render_load_label(frame, area, "Retiring previous session…");
                 return;
