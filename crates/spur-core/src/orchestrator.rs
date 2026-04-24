@@ -1428,7 +1428,7 @@ impl Orchestrator {
                                 let error_message = format_error_chain(&e);
                                 error!(error = %error_message, "Failed to load brain session");
                                 self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                    session: SessionId::new(),
+                                    session: SessionId(original_session_id.clone()),
                                     message: error_message,
                                 }));
                             }

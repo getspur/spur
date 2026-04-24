@@ -136,3 +136,33 @@ async fn brain_error_on_resume_connect_failure_carries_requested_session_id() {
         result.0,
     );
 }
+
+// ── Task 3: load-failure path ─────────────────────────────────────────────────
+//
+// COVERAGE NOTE (DONE_WITH_CONCERNS):
+//
+// The fix at orchestrator.rs:1430-1433 changes `SessionId::new()` →
+// `SessionId(original_session_id.clone())` in the `load_brain_session` Err arm.
+//
+// Triggering that code path in an integration test requires:
+//   1. `connect_brain` to SUCCEED — which requires a real ACP subprocess to
+//      initialize (the registry lookup passes, then `connection.initialize()`
+//      calls the subprocess at orchestrator.rs:2247-2249).
+//   2. `load_brain_session` to then FAIL — which requires the subprocess to
+//      accept initialization but reject the session load.
+//
+// Without a mock ACP implementation (not present in this codebase), we cannot
+// construct a `build_orchestrator_with_failing_load` helper that makes step 1
+// succeed without a live agent process.
+//
+// What IS covered:
+//   - The connect-failure path (orchestrator.rs:1357-1360) is fully tested by
+//     `brain_error_on_resume_connect_failure_carries_requested_session_id` above.
+//   - Both emit sites share the same fix shape; the connect-failure test guards
+//     the broader invariant: BrainError.session must not be SessionId::new().
+//   - The fix at line 1430 is structurally identical to the fix at line 1358
+//     (already verified by Task 2's test), reducing the residual risk.
+//
+// If a MockAgentConnection trait implementation is added to the test harness in
+// the future, a load-failure test can be added here following the same pattern
+// as the connect-failure test above.
