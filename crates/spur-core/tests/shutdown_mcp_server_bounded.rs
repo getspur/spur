@@ -57,3 +57,32 @@ async fn shutdown_mcp_server_returns_even_if_guard_task_hangs() {
         "shutdown_mcp_server hung on stuck guard: took {elapsed:?} (ceiling {ceiling:?})"
     );
 }
+
+#[tokio::test]
+async fn shutdown_mcp_server_bounds_guard_on_none_server_early_return() {
+    // Covers the early-return branch at orchestrator.rs:222:
+    //   mcp_server.take() returns None, but mcp_guard is Some(stuck).
+    // Pre-fix: guard.await at line 222 hangs forever.
+    // Post-fix: tokio::time::timeout bounds it at MCP_SHUTDOWN_TIMEOUT.
+
+    let stuck_task = tokio::spawn(async {
+        std::future::pending::<()>().await;
+    });
+    let guard = tokio_util::task::AbortOnDropHandle::new(stuck_task);
+
+    // Key difference from the first test: pass None for the server.
+    let server: Option<Arc<dyn RetirableMcpServer>> = None;
+
+    let (funnel, _rx) = test_channel();
+    let session = SessionId("under-test-none-server".to_string());
+
+    let started = Instant::now();
+    call_shutdown_mcp_server(&funnel, &session, server, Some(guard)).await;
+    let elapsed = started.elapsed();
+
+    let ceiling = Duration::from_millis(MCP_SHUTDOWN_TIMEOUT_MS + 500);
+    assert!(
+        elapsed < ceiling,
+        "shutdown_mcp_server early-return hung on stuck guard: took {elapsed:?} (ceiling {ceiling:?})"
+    );
+}
