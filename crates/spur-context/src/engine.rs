@@ -467,11 +467,11 @@ impl AnalyticsEngine {
                 strftime(timestamp, '%Y-%m-%d') AS day,
                 agent,
                 COUNT(DISTINCT session_id) AS sessions,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
             FROM all_events_with_cost
             WHERE timestamp >= current_date - CAST(? || ' days' AS INTERVAL)
             GROUP BY day, agent
@@ -503,11 +503,11 @@ impl AnalyticsEngine {
                 strftime(date_trunc('week', timestamp), '%Y-%m-%d') AS week,
                 agent,
                 COUNT(DISTINCT session_id) AS sessions,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
             FROM all_events_with_cost
             WHERE timestamp >= current_date - CAST(? || ' weeks' AS INTERVAL)
             GROUP BY week, agent
@@ -539,11 +539,11 @@ impl AnalyticsEngine {
                 strftime(timestamp, '%Y-%m') AS month,
                 agent,
                 COUNT(DISTINCT session_id) AS sessions,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
             FROM all_events_with_cost
             WHERE timestamp >= current_date - CAST(? || ' months' AS INTERVAL)
             GROUP BY month, agent
@@ -575,11 +575,11 @@ impl AnalyticsEngine {
                 strftime(timestamp, '%Y-%m-%d') AS day,
                 agent,
                 COUNT(DISTINCT session_id) AS sessions,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
             FROM all_events_with_cost
             WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
             GROUP BY day, agent
@@ -613,11 +613,11 @@ impl AnalyticsEngine {
                 strftime(date_trunc('week', timestamp), '%Y-%m-%d') AS week,
                 agent,
                 COUNT(DISTINCT session_id) AS sessions,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
             FROM all_events_with_cost
             WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
             GROUP BY week, agent
@@ -655,11 +655,11 @@ impl AnalyticsEngine {
                 strftime(timestamp, '%Y-%m') AS month,
                 agent,
                 COUNT(DISTINCT session_id) AS sessions,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
             FROM all_events_with_cost
             WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
             GROUP BY month, agent
@@ -695,11 +695,11 @@ impl AnalyticsEngine {
                 model,
                 strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
                 strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS last_activity,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
                 COUNT(*) AS events
             FROM all_events_with_cost
             WHERE timestamp >= now() - CAST(? || ' minutes' AS INTERVAL)
@@ -735,10 +735,10 @@ impl AnalyticsEngine {
                 model,
                 agent,
                 COUNT(*) AS requests,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                ROUND(AVG(computed_cost_usd), 6) AS avg_cost,
-                ROUND(SUM(computed_cost_usd), 4) AS total_cost
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(ROUND(AVG(computed_cost_usd), 6), 0.0) AS avg_cost,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS total_cost
             FROM all_events_with_cost
             WHERE model IS NOT NULL
             GROUP BY model, agent
@@ -769,9 +769,9 @@ impl AnalyticsEngine {
                 COALESCE(project, '(none)') AS project,
                 agent,
                 COUNT(DISTINCT session_id) AS sessions,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
             FROM all_events_with_cost
             GROUP BY project, agent
             ORDER BY cost_usd DESC
@@ -803,11 +803,11 @@ impl AnalyticsEngine {
                 strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
                 strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS ended_at,
                 EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp)))::BIGINT AS duration_seconds,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
                 COUNT(*) AS events
             FROM all_events_with_cost
             WHERE session_id = ?
@@ -849,11 +849,11 @@ impl AnalyticsEngine {
                 model,
                 strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
                 strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS last_activity,
-                SUM(input_tokens) AS input_tokens,
-                SUM(output_tokens) AS output_tokens,
-                SUM(cache_read_tokens) AS cache_read_tokens,
-                SUM(cache_creation_tokens) AS cache_creation_tokens,
-                ROUND(SUM(computed_cost_usd), 4) AS cost_usd,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
                 COUNT(*) AS events
             FROM all_events_with_cost
             WHERE session_id = ?
