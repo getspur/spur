@@ -6,6 +6,7 @@
   - Code-level review — `docs/superpowers/reviews/2026-04-24-spur-cost-spur-context-l9-review.md`
   - Self-test verdict — `docs/superpowers/reviews/2026-04-24-spur-cost-self-test-verdict.md`
 - **This doc:** concrete solutions, each empirically grounded or reasoned from first principles. Per-finding remediation + test plan + dependencies.
+- **Review pass (v2, 2026-04-24):** first-principles review by kimi surfaced three concrete concerns (R1 needs a dash-boundary guard; 1A needs CRLF handling; 2A's in-memory engine open per invocation is unusable at 1.8 GB). All three incorporated below. New **Phase 2.5** added for persistent cache + incremental refresh — gates the user-facing ship.
 
 ## TL;DR
 
@@ -21,7 +22,7 @@ All 10 findings collapse to **four root causes**:
 - **C3 has a regression.** Real Claude model slug is `claude-haiku-4-5-20251001`; registry has `claude-haiku-4`. The old (nondeterministic) substring fallback happened to match via the `key.contains(k)` branch. My C3 fix removed it entirely. Net effect: Haiku 4.5 sessions now get `None` and fall to time-tier. **Before merging C3, add a deterministic longest-prefix match.** See Fix R1 below.
 - **C1 and C2 do not work on real data.** Even with my rewrite. DuckDB's schema inference over heterogeneous Claude JSONL rejects projected columns. **Revert C1 and C2.** Replace with Fix 1A.
 
-Minimum path to ship corrected cost to users: Phases 0 → 1 → 2 + MED-1 from Phase 3.
+Minimum path to ship corrected cost to users: Phases 0 → 1 → 2 → **2.5** + MED-1 from Phase 3. Phase 2 without 2.5 is a prototype, not a user-facing feature (rescans 1.8 GB per CLI invocation).
 
 ---
 
@@ -35,9 +36,14 @@ Minimum path to ship corrected cost to users: Phases 0 → 1 → 2 + MED-1 from 
 
 ```sql
 -- Step 1: read as VARCHAR (one JSONL line per row). NUL delimiter because
--- no ASCII NUL occurs inside JSONL.
+-- no ASCII NUL occurs inside JSONL. rtrim(chr(13)) strips any trailing CR
+-- on CRLF-terminated files (Windows-authored JSONL). Records are still
+-- split on \n regardless of delim; only field-splitting uses delim.
 CREATE OR REPLACE VIEW claude_raw AS
-SELECT * FROM read_csv_auto(
+SELECT
+    rtrim(line, chr(13)) AS line,
+    filename
+FROM read_csv_auto(
     '/path/to/.claude/projects/**/*.jsonl',
     columns = {'line': 'VARCHAR'},
     delim = '\0',
@@ -74,7 +80,10 @@ Empirical result: 492,524 rows parsed; sampled rows correctly return `type='assi
 
 ```sql
 CREATE OR REPLACE VIEW codex_raw AS
-SELECT * FROM read_csv_auto(
+SELECT
+    rtrim(line, chr(13)) AS line,
+    filename
+FROM read_csv_auto(
     '/path/to/.codex/sessions/**/*.jsonl',
     columns = {'line': 'VARCHAR'},
     delim = '\0', header = false, filename = true,
@@ -204,7 +213,122 @@ Once DuckDB reads tokens directly from JSONL, the orchestrator does not need to 
 
 **Dependency:** Requires Fix 1A (otherwise users see zero rows from the real JSONL).
 
-### Fix 2E (follow-up) — Retire SQLite cost reads once 2A is stable
+**⚠️ Constraint: this sketch is a prototype, not a shippable CLI.**
+`open_in_memory()` rebuilds all views and rescans the full JSONL globs on every
+invocation. Against the user's 1.8 GB Claude dataset that is multi-second
+latency for a command users expect to respond in under a second. **Do not ship
+Phase 2 without Phase 2.5** (persistent cache + incremental refresh) — ship
+2A behind a `--experimental` flag if you need to validate the SQL in users'
+hands before 2.5 lands, but don't make it the default.
+
+### Fix 2.5 — Persistent DuckDB cache + incremental refresh (gates user-facing ship)
+
+**Root cause:** Phase 2's `open_in_memory()` means every CLI invocation
+re-reads 1.8 GB of JSONL. Interactive CLI UX requires sub-second response;
+this design cannot deliver it.
+
+**Fix sketch:**
+
+```rust
+// crates/spur-context/src/engine.rs (additive)
+impl AnalyticsEngine {
+    /// Open the persistent analytics cache. Creates the file + base schema
+    /// on first use. Safe to re-open across processes (read lock only).
+    pub fn open_cache(cache_path: &Path) -> Result<Self> {
+        let conn = Connection::open(cache_path)?;
+        conn.execute_batch(CACHE_SCHEMA_SQL)?;
+        Ok(Self { conn })
+    }
+
+    /// Incrementally refresh the cache: for each JSONL file newer than its
+    /// recorded `loaded_at`, DELETE existing rows for that path and re-insert.
+    /// For a file with unchanged mtime, skip.
+    pub fn refresh_incremental(&self) -> Result<RefreshStats> {
+        let mut stats = RefreshStats::default();
+        for path in discover_all_agent_jsonl()? {
+            let mtime = fs::metadata(&path)?.modified()?;
+            let loaded_at: Option<SystemTime> = self.conn.query_row(
+                "SELECT loaded_at FROM scan_manifest WHERE path = ?",
+                [path.to_string_lossy()],
+                |r| r.get(0),
+            ).optional()?;
+            if loaded_at.map_or(true, |t| mtime > t) {
+                self.reload_file(&path)?;  // DELETE WHERE filename=? + INSERT
+                self.conn.execute(
+                    "INSERT INTO scan_manifest(path, mtime, loaded_at)
+                     VALUES (?, ?, now()) ON CONFLICT(path) DO UPDATE
+                     SET mtime=excluded.mtime, loaded_at=excluded.loaded_at",
+                    [path.to_string_lossy(), mtime_iso(&mtime)],
+                )?;
+                stats.reloaded += 1;
+            } else {
+                stats.skipped += 1;
+            }
+        }
+        Ok(stats)
+    }
+}
+```
+
+**Schema additions** (`src/sql/schema.sql`):
+```sql
+CREATE TABLE IF NOT EXISTS scan_manifest (
+    path      VARCHAR PRIMARY KEY,
+    mtime     TIMESTAMP NOT NULL,
+    loaded_at TIMESTAMP NOT NULL
+);
+
+-- events_cache shadows the extracted columns from claude_raw/codex_raw,
+-- eliminating the per-query json_extract cost after first load.
+CREATE TABLE IF NOT EXISTS events_cache (
+    filename        VARCHAR NOT NULL,
+    timestamp       TIMESTAMP,
+    session_id      VARCHAR,
+    agent           VARCHAR,
+    model           VARCHAR,
+    project         VARCHAR,
+    input_tokens    BIGINT,
+    output_tokens   BIGINT,
+    cache_read_tokens     BIGINT,
+    cache_creation_tokens BIGINT,
+    cost_usd        DOUBLE
+);
+CREATE INDEX IF NOT EXISTS idx_events_cache_ts ON events_cache(timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_cache_filename ON events_cache(filename);
+
+CREATE OR REPLACE VIEW all_events_with_cost AS
+SELECT e.*,
+  COALESCE(e.cost_usd, /* token × pricing fallback */ ) AS computed_cost_usd
+FROM events_cache e LEFT JOIN pricing p
+  ON /* same as before */;
+```
+
+**CLI integration** (updates Fix 2A):
+```rust
+let cache_dir = repo_root.join(".spur/cache");
+std::fs::create_dir_all(&cache_dir)?;
+let engine = AnalyticsEngine::open_cache(&cache_dir.join("cost.duckdb"))?;
+let stats = engine.refresh_incremental()?;
+tracing::debug!(?stats, "incremental cache refresh");
+let reporter = Reporter::new(engine);
+// ... render as before; now sub-second after first warm-up.
+```
+
+**Properties:**
+- Cold first run: still O(all JSONL) — unavoidable.
+- Subsequent runs: O(changed files) — typically zero in an idle session.
+- Crash safety: mtime check is idempotent; a partial INSERT is harmless because the next invocation re-reloads the file.
+- Multi-process: DuckDB's WAL mode permits concurrent readers; only one writer at a time (OK — CLI invocations are short).
+
+**Test plan:**
+- Unit: load fixture with N rows; call `refresh_incremental()`; assert N rows in `events_cache`. Touch the fixture (bump mtime); re-run; assert N rows still (not 2N — reload is DELETE-then-INSERT by filename).
+- E2E: measure `spur cost --engine duckdb` cold vs warm. Target warm < 200 ms on 1.8 GB corpus.
+
+**Effort:** ~250 LOC (schema, refresh logic, integration test, benchmark). One medium PR.
+
+**Dependency:** Fix 1A provides the extraction SQL that `reload_file` runs per file.
+
+### Fix 2E (follow-up) — Retire SQLite cost reads once 2A+2.5 are stable
 
 - Keep `CostTracker` for session lifecycle writes (start/end, status).
 - Drop `today_summary`, `week_summary`, `by_project`, `by_model`, `today_token_summary`, `week_token_summary`, `query_cost_today`, `query_cost_range`, `query_cost_by_model`, `query_cost_by_project` from the public API.
@@ -310,7 +434,8 @@ wrapped behind a schema-version check so it runs only once.
 
 **Root cause:** Real Claude model slug is `claude-haiku-4-5-20251001`. Registry has `claude-haiku-4`. The old substring fallback (nondeterministic) matched via the `key.contains(k)` branch. My C3 patch removed the fallback entirely. Haiku 4.5 now returns None → falls to time-tier. Net regression.
 
-**Fix:**
+**Fix (v2, adjusted after review):** the match must require the prefix end at a dash boundary or at end-of-string. Without the boundary guard a registered `"gpt-4"` would incorrectly match `"gpt-4o"` (a different model family). Invariant: *registered canonical is a dash-delimited prefix of the slug*.
+
 ```rust
 pub fn get(&self, model: &str) -> Option<&ModelPricing> {
     if model.is_empty() { return None; }
@@ -324,14 +449,22 @@ pub fn get(&self, model: &str) -> Option<&ModelPricing> {
         if let Some(p) = self.models.get(canon) { return Some(p); }
     }
 
-    // 3. deterministic longest-canonical-prefix match.
-    //    Real slug: "claude-haiku-4-5-20251001"
-    //    Registered: "claude-haiku-4-5", "claude-haiku-4"
-    //    Result: "claude-haiku-4-5" (longest) wins.
+    // 3. deterministic dash-bounded longest-prefix match.
+    //    Real slug:        "claude-haiku-4-5-20251001"
+    //    Registered:       "claude-haiku-4-5", "claude-haiku-4"
+    //    Result:           "claude-haiku-4-5" (longest) wins.
+    //    Non-match guard:  "gpt-4" does NOT match slug "gpt-4o"
+    //                      because byte after "gpt-4" is 'o', not '-'.
     let mut candidates: Vec<(&String, &ModelPricing)> = self.models.iter().collect();
     candidates.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()).then(a.cmp(b)));
     for (k, v) in candidates {
-        if key.starts_with(k.as_str()) { return Some(v); }
+        let kb = k.as_bytes();
+        if key.as_bytes().starts_with(kb)
+            && (key.len() == kb.len()
+                || key.as_bytes().get(kb.len()) == Some(&b'-'))
+        {
+            return Some(v);
+        }
     }
     None
 }
@@ -342,22 +475,32 @@ Properties:
 - `get("")` → None (guarded at top).
 - `get("claude-haiku-4-5-20251001")` → matches `claude-haiku-4-5` if present, else `claude-haiku-4`.
 - `get("gpt-5-codex-experimental-2026")` → matches `gpt-5-codex` before `gpt-5`.
-- `get("totally-unknown-model-xyz")` → None (no registered name is a prefix).
+- `get("gpt-4o")` → does NOT fall through to registered `"gpt-4"` (boundary guard rejects 'o' at position 5). `gpt-4o` must be registered explicitly.
+- `get("totally-unknown-model-xyz")` → None (no registered name is a dash-prefix).
 
 **Test plan:**
 ```rust
 #[test]
-fn test_registry_longest_prefix_match_versioned() {
+fn test_registry_dash_bounded_longest_prefix_match() {
     let reg = PricingRegistry::with_builtin_prices();
     assert!(reg.get("claude-haiku-4-5-20251001").is_some());
     assert!(reg.get("gpt-5-codex-2026-preview").is_some());
     assert!(reg.get("totally-unknown").is_none());
     assert!(reg.get("").is_none());
-    // Tie-break: register two prefixes, longest wins
+
+    // Tie-break: longest wins.
     let mut r2 = PricingRegistry::new();
-    r2.insert("foo", ModelPricing { /* A */ ..Default::default() });
-    r2.insert("foo-bar", ModelPricing { /* B */ ..Default::default() });
-    assert_eq!(r2.get("foo-bar-baz"), r2.get("foo-bar")); // longest
+    r2.insert("foo", /* A */);
+    r2.insert("foo-bar", /* B */);
+    assert_eq!(r2.get("foo-bar-baz"), r2.get("foo-bar"));
+
+    // Boundary guard: "gpt-4" must NOT match "gpt-4o".
+    let mut r3 = PricingRegistry::new();
+    r3.insert("gpt-4", /* A */);
+    assert!(r3.get("gpt-4o").is_none(),
+            "gpt-4 must not swallow gpt-4o (different family)");
+    assert!(r3.get("gpt-4-turbo").is_some(),
+            "gpt-4 should match gpt-4-turbo (dash-bounded)");
 }
 ```
 
@@ -437,16 +580,17 @@ Drop the `Result<>` wrapping; discovery is best-effort.
 
 ## Recommended sequencing & effort
 
-| Phase | Scope | Dependencies | Effort |
-|---|---|---|---|
-| **0** | Fix R1 (C3 longest-prefix match) + registered Haiku 4.5 etc. | none | S (30 LOC) |
-| **1** | Revert C1/C2; commit Fix 1A; commit real fixtures; integration test | 0 | M (300 LOC) |
-| **2** | Fix 2A (`spur cost --engine duckdb`); Fix 3B (log level) | 1 | M (150 LOC) |
-| **3** | Fix 3A (range breakdowns) + Fix 3C (agent normalize) | 2 | S (80 LOC) |
-| **4** | Fix 2E (retire SQLite cost reads) | 2 verified in user hands | L (crate API surface) |
-| **5** | Fix MED-2 (shared path resolver) + Fix LOW-2 (walkdir) | 1 | S+S (110 LOC) |
+| Phase | Scope | Dependencies | Effort | User-facing? |
+|---|---|---|---|---|
+| **0** | Fix R1 (C3 dash-bounded longest-prefix match) + registered Haiku/Opus/Sonnet 4.5 canonical roots | none | S (30 LOC) | n/a (library) |
+| **1** | Revert C1/C2; commit Fix 1A (`json_extract` + CRLF handling); commit real JSONL fixtures; integration test | 0 | M (300 LOC) | n/a (library) |
+| **2** | Fix 2A (`spur cost --engine duckdb`, **--experimental flag only**); Fix 3B (quiet default log) | 1 | M (150 LOC) | behind flag |
+| **2.5** | Fix 2.5 (persistent DuckDB cache + `scan_manifest` incremental refresh). **Gates user-facing ship.** | 2 | M (250 LOC) | yes — promotes 2A out of --experimental |
+| **3** | Fix 3A (range breakdowns) + Fix 3C (agent normalize) | 2.5 | S (80 LOC) | yes |
+| **4** | Fix 2E (retire SQLite cost reads as default) | 2.5 verified in user hands | L (crate API surface) | yes |
+| **5** | Fix MED-2 (shared path resolver) + Fix LOW-2 (walkdir) | 1 | S+S (110 LOC) | n/a (library) |
 
-Minimum viable correctness shipped to users: **Phases 0 + 1 + 2**. Everything else is polish that can land incrementally.
+Minimum viable correctness shipped to users: **Phases 0 + 1 + 2 + 2.5**. Phase 2 alone is a prototype (rescans 1.8 GB per invocation); do not promote it out of `--experimental` until 2.5 lands. Everything else is polish that can land incrementally.
 
 ---
 
