@@ -14,6 +14,46 @@ use tracing;
 
 const SCHEMA_SQL: &str = include_str!("sql/schema.sql");
 
+/// Cost-enrichment view.
+///
+/// For each event we find the **longest** pricing row whose canonical
+/// model name either equals `e.model` case-insensitively or is a prefix
+/// followed by a `-` or `.` boundary. That mirrors the dash-or-dot
+/// boundary used by `PricingRegistry::get()` in Rust, so the two paths
+/// agree on which pricing row applies to e.g. `gpt-5.4` → `gpt-5`,
+/// `claude-opus-4-6` → `claude-opus-4`, without requiring every
+/// post-cutoff variant to be registered as an alias.
+///
+/// The pricing table is small (O(100) rows), so the correlated LATERAL
+/// scan is effectively free; DuckDB runs it once per distinct model.
+const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
+    CREATE OR REPLACE VIEW all_events_with_cost AS
+    SELECT
+        e.*,
+        COALESCE(
+            e.cost_usd,
+            (e.input_tokens * p.input_price_per_1m / 1000000.0)
+            + (e.output_tokens * p.output_price_per_1m / 1000000.0)
+            + (e.cache_read_tokens * p.cache_read_price_per_1m / 1000000.0)
+            + (e.cache_creation_tokens * p.cache_creation_price_per_1m / 1000000.0)
+        ) AS computed_cost_usd
+    FROM all_events e
+    LEFT JOIN LATERAL (
+        SELECT pp.*
+        FROM pricing pp
+        WHERE e.model IS NOT NULL
+          AND (
+              lower(e.model) = lower(pp.model)
+              OR lower(e.model) LIKE lower(pp.model) || '-%'
+              OR lower(e.model) LIKE lower(pp.model) || '.%'
+          )
+          AND e.timestamp >= pp.effective_from
+          AND (pp.effective_to IS NULL OR e.timestamp < pp.effective_to)
+        ORDER BY length(pp.model) DESC, pp.model ASC
+        LIMIT 1
+    ) p ON TRUE;
+"#;
+
 // ─── Engine ───────────────────────────────────────────────────────────
 
 /// DuckDB-backed analytics engine.
@@ -130,27 +170,9 @@ impl AnalyticsEngine {
             "CREATE OR REPLACE VIEW all_events AS SELECT * FROM events_cache;",
         )?;
         // Rebuild all_events_with_cost so its underlying reference
-        // resolves to the cache-backed view. The JOIN against pricing
-        // is unchanged.
-        self.conn.execute_batch(
-            r#"
-            CREATE OR REPLACE VIEW all_events_with_cost AS
-            SELECT
-                e.*,
-                COALESCE(
-                    e.cost_usd,
-                    (e.input_tokens * p.input_price_per_1m / 1000000.0)
-                    + (e.output_tokens * p.output_price_per_1m / 1000000.0)
-                    + (e.cache_read_tokens * p.cache_read_price_per_1m / 1000000.0)
-                    + (e.cache_creation_tokens * p.cache_creation_price_per_1m / 1000000.0)
-                ) AS computed_cost_usd
-            FROM all_events e
-            LEFT JOIN pricing p
-                ON lower(e.model) = lower(p.model)
-                AND e.timestamp >= p.effective_from
-                AND (p.effective_to IS NULL OR e.timestamp < p.effective_to);
-            "#,
-        )?;
+        // resolves to the cache-backed view. The longest-prefix lateral
+        // matcher is unchanged — only the backing view differs.
+        self.conn.execute_batch(ALL_EVENTS_WITH_COST_VIEW)?;
         tracing::debug!("all_events view now backed by events_cache table");
         Ok(())
     }
@@ -505,7 +527,8 @@ impl AnalyticsEngine {
     }
 
     fn rebuild_unified_views(&self) -> Result<()> {
-        let sql = r#"
+        let sql = format!(
+            r#"
             CREATE OR REPLACE VIEW all_events AS
             SELECT * FROM claude_events
             UNION ALL
@@ -513,24 +536,12 @@ impl AnalyticsEngine {
             UNION ALL
             SELECT * FROM kiro_events;
 
-            CREATE OR REPLACE VIEW all_events_with_cost AS
-            SELECT
-                e.*,
-                COALESCE(
-                    e.cost_usd,
-                    (e.input_tokens * p.input_price_per_1m / 1000000.0)
-                    + (e.output_tokens * p.output_price_per_1m / 1000000.0)
-                    + (e.cache_read_tokens * p.cache_read_price_per_1m / 1000000.0)
-                    + (e.cache_creation_tokens * p.cache_creation_price_per_1m / 1000000.0)
-                ) AS computed_cost_usd
-            FROM all_events e
-            LEFT JOIN pricing p
-                ON lower(e.model) = lower(p.model)
-                AND e.timestamp >= p.effective_from
-                AND (p.effective_to IS NULL OR e.timestamp < p.effective_to);
-        "#;
+            {}
+            "#,
+            ALL_EVENTS_WITH_COST_VIEW
+        );
         self.conn
-            .execute_batch(sql)
+            .execute_batch(&sql)
             .context("failed to rebuild unified views")?;
         Ok(())
     }

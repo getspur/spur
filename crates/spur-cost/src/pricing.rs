@@ -276,12 +276,19 @@ impl PricingRegistry {
             }
         }
 
+        // Longest-prefix match with `-` or `.` (or end-of-string) as the
+        // boundary. Real-world model names use both: `gpt-5.4` (dot as a
+        // version separator) and `claude-opus-4-6` (dash). Accepting either
+        // keeps post-cutoff names like `gpt-5.4-mini` → `gpt-5` and
+        // `claude-opus-4-7` → `claude-opus-4` without requiring every
+        // variant to be registered as an alias.
         let mut candidates: Vec<(&String, &ModelPricing)> = self.models.iter().collect();
         candidates.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()).then(a.cmp(b)));
         for (k, v) in candidates {
             let kb = k.as_bytes();
             if key.as_bytes().starts_with(kb)
-                && (key.len() == kb.len() || key.as_bytes().get(kb.len()) == Some(&b'-'))
+                && (key.len() == kb.len()
+                    || matches!(key.as_bytes().get(kb.len()), Some(&b'-') | Some(&b'.')))
             {
                 return Some(v);
             }
@@ -563,10 +570,16 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_dash_bounded_longest_prefix_match() {
+    fn test_registry_longest_prefix_dash_or_dot_boundary() {
         let reg = PricingRegistry::with_builtin_prices();
         assert!(reg.get("claude-haiku-4-5-20251001").is_some());
         assert!(reg.get("gpt-5-codex-2026-preview").is_some());
+        // Real post-cutoff names using dot as a version separator.
+        assert!(reg.get("gpt-5.4").is_some(), "gpt-5.4 should match gpt-5");
+        assert!(
+            reg.get("gpt-5.4-mini").is_some(),
+            "gpt-5.4-mini should match gpt-5"
+        );
         assert!(reg.get("totally-unknown").is_none());
         assert!(reg.get("").is_none());
 
@@ -600,9 +613,14 @@ mod tests {
         r3.insert("gpt-4", gpt_4);
         assert!(
             r3.get("gpt-4o").is_none(),
-            "gpt-4 must not swallow gpt-4o (different family)"
+            "gpt-4 must not swallow gpt-4o (different family — no dash/dot boundary)"
         );
         assert_eq!(r3.get("gpt-4-turbo"), r3.models.get("gpt-4"));
+        assert_eq!(
+            r3.get("gpt-4.1"),
+            r3.models.get("gpt-4"),
+            "dot boundary should admit gpt-4.1 as a gpt-4 variant"
+        );
     }
 
     #[test]
