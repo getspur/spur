@@ -408,19 +408,32 @@ impl AnalyticsEngine {
 
              CREATE OR REPLACE VIEW claude_events AS
              SELECT
-                TRY_CAST(json_extract_string(line, '$.timestamp') AS TIMESTAMP) AS timestamp,
-                json_extract_string(line, '$.sessionId') AS session_id,
-                'claude' AS agent,
-                NULLIF(json_extract_string(line, '$.message.model'), '<synthetic>') AS model,
-                NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
-                TRY_CAST(json_extract(line, '$.message.usage.input_tokens') AS BIGINT) AS input_tokens,
-                TRY_CAST(json_extract(line, '$.message.usage.output_tokens') AS BIGINT) AS output_tokens,
-                TRY_CAST(json_extract(line, '$.message.usage.cache_read_input_tokens') AS BIGINT) AS cache_read_tokens,
-                TRY_CAST(json_extract(line, '$.message.usage.cache_creation_input_tokens') AS BIGINT) AS cache_creation_tokens,
-                TRY_CAST(json_extract(line, '$.costUSD') AS DOUBLE) AS cost_usd
-             FROM claude_raw
-             WHERE json_valid(line)
-               AND json_extract_string(line, '$.type') = 'assistant';"#,
+                timestamp, session_id, agent, model, project,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd
+             FROM (
+                SELECT
+                    TRY_CAST(json_extract_string(line, '$.timestamp') AS TIMESTAMP) AS timestamp,
+                    json_extract_string(line, '$.sessionId') AS session_id,
+                    'claude' AS agent,
+                    NULLIF(json_extract_string(line, '$.message.model'), '<synthetic>') AS model,
+                    NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
+                    TRY_CAST(json_extract(line, '$.message.usage.input_tokens') AS BIGINT) AS input_tokens,
+                    TRY_CAST(json_extract(line, '$.message.usage.output_tokens') AS BIGINT) AS output_tokens,
+                    TRY_CAST(json_extract(line, '$.message.usage.cache_read_input_tokens') AS BIGINT) AS cache_read_tokens,
+                    TRY_CAST(json_extract(line, '$.message.usage.cache_creation_input_tokens') AS BIGINT) AS cache_creation_tokens,
+                    TRY_CAST(json_extract(line, '$.costUSD') AS DOUBLE) AS cost_usd,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            json_extract_string(line, '$.sessionId'),
+                            COALESCE(json_extract_string(line, '$.requestId'), ''),
+                            COALESCE(json_extract_string(line, '$.message.id'), '')
+                        ORDER BY TRY_CAST(json_extract_string(line, '$.timestamp') AS TIMESTAMP)
+                    ) AS _dedup_rn
+                FROM claude_raw
+                WHERE json_valid(line)
+                  AND json_extract_string(line, '$.type') = 'assistant'
+             )
+             WHERE _dedup_rn = 1;"#,
             pattern
         );
         self.conn
