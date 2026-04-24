@@ -1355,7 +1355,7 @@ impl Orchestrator {
                                         let error_message = format_error_chain(&e);
                                         error!(error = %error_message, "Failed to connect brain for resume");
                                         self.emit(SpurEvent::now(SpurEventBody::BrainError {
-                                            session: SessionId::new(),
+                                            session: SessionId(session_id.clone()),
                                             message: error_message,
                                         }));
                                         continue;
