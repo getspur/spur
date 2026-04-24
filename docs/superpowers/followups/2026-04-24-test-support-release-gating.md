@@ -58,3 +58,12 @@ Option C: move `test_support` into its own crate `spur-core-testing` used only i
 ## Priority
 
 Medium. Not blocking Tranche 1 merge per the final reviewer, but should land before Tranche 2 expands `test_support` further.
+
+## Resolution
+
+Resolved in commit `0818bea` (2026-04-24). Applied Option B from the original follow-up:
+- `test-support` feature added to `crates/spur-core/Cargo.toml`.
+- `pub mod test_support` gated with `#[cfg(any(test, feature = "test-support"))]`.
+- Integration tests that depend on the module declared with `required-features`.
+
+Verified via `cargo build --release` — the module is no longer compiled into release artifacts.
