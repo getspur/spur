@@ -19,6 +19,7 @@
 //! `ReconcilerDispatchCtx`, so persisted plans are reclaimed and dispatched by
 //! the same loop that owns completion writeback.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +60,20 @@ pub(crate) async fn monitor_journal_appends(path: std::path::PathBuf, notify: Ar
         } else {
             last_len = next_len;
         }
+    }
+}
+
+fn issue_to_summary(issue: spur_pm::Issue) -> spur_pm::IssueSummary {
+    spur_pm::IssueSummary {
+        id: issue.id.clone(),
+        source: issue.source,
+        title: issue.title,
+        status: issue.status,
+        labels: issue.labels,
+        url: issue.url,
+        priority: issue.priority,
+        issue_type: issue.issue_type,
+        assignee: issue.assignee,
     }
 }
 
@@ -364,6 +379,7 @@ impl Reconciler {
                 brain_session_id: dispatch.brain_session_id.clone(),
                 delegation_plan: None,
                 issue_id: task.spec.issue_id.clone(),
+                attempt_tracker: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1)),
             };
 
             if let Err(error) = dispatch.delegation_tx.send(request).await {
@@ -762,19 +778,42 @@ impl Reconciler {
             .await?;
 
         let mut hydrated = Vec::with_capacity(summaries.len());
+        let mut seen_issue_ids = HashSet::new();
         for summary in summaries {
             let issue = self.pm.get_issue(&summary.id).await?;
-            hydrated.push(spur_pm::IssueSummary {
-                id: issue.id.clone(),
-                source: issue.source,
-                title: issue.title,
-                status: issue.status,
-                labels: issue.labels,
-                url: issue.url,
-                priority: issue.priority,
-                issue_type: issue.issue_type,
-                assignee: issue.assignee,
-            });
+            match issue.issue_type.as_deref() {
+                Some("task") => {
+                    if seen_issue_ids.insert(issue.id.clone()) {
+                        hydrated.push(issue_to_summary(issue));
+                    }
+                }
+                Some("epic") => {
+                    let Some(plan_id) = issue
+                        .labels
+                        .iter()
+                        .find_map(|label| crate::plan::labels::parse_plan_id(label))
+                    else {
+                        continue;
+                    };
+                    let projected =
+                        crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id)
+                            .await?;
+                    for task in projected.tasks {
+                        if !matches!(task.status, crate::plan::PlanTaskStatus::Ready) {
+                            continue;
+                        }
+                        let Some(issue_id) = task.spec.issue_id.as_ref() else {
+                            continue;
+                        };
+                        if !seen_issue_ids.insert(issue_id.clone()) {
+                            continue;
+                        }
+                        let task_issue = self.pm.get_issue(issue_id).await?;
+                        hydrated.push(issue_to_summary(task_issue));
+                    }
+                }
+                _ => {}
+            }
         }
 
         Ok(hydrated)

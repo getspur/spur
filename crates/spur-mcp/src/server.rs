@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -18,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info};
 
@@ -40,6 +42,7 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 /// The 60 s TTL is generous for any residual debug-injection use; the
 /// map is allowed to stay permanently empty in production.
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
@@ -99,6 +102,20 @@ impl JsonRpcResponse {
 
     fn internal_error(id: Value, msg: impl Into<String>) -> Self {
         Self::error(id, -32603, msg)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+enum DelegationDispatchError {
+    #[error("SessionRetiring")]
+    SessionRetiring,
+}
+
+impl DelegationDispatchError {
+    const JSONRPC_CODE: i64 = -32001;
+
+    fn into_response(self, id: Value) -> JsonRpcResponse {
+        JsonRpcResponse::error(id, Self::JSONRPC_CODE, self.to_string())
     }
 }
 
@@ -184,6 +201,90 @@ pub enum DetachedSourceKind {
 pub struct DetachedCompletionHandle {
     pub ctx: Arc<DetachedContinuationCtx>,
     pub source_kind: DetachedSourceKind,
+    pub attempt_tracker: Arc<AtomicU32>,
+    pub brain_session: SessionId,
+    pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+}
+
+fn clip_with_ellipsis(s: Option<String>, max_bytes: usize) -> (Option<String>, bool) {
+    let Some(s) = s else {
+        return (None, false);
+    };
+
+    if s.len() <= max_bytes {
+        return (Some(s), false);
+    }
+
+    const ELLIPSIS: &str = "…";
+    if max_bytes <= ELLIPSIS.len() {
+        return (Some(ELLIPSIS.to_string()), true);
+    }
+
+    let mut end = max_bytes - ELLIPSIS.len();
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut clipped = s[..end].to_string();
+    clipped.push('…');
+    (Some(clipped), true)
+}
+
+fn new_attempt_tracker() -> Arc<AtomicU32> {
+    Arc::new(AtomicU32::new(1))
+}
+
+fn map_worker_artifact_ref(
+    delegation_id: &DelegationId,
+    artifact: Option<&spur_acp::domain::artifact::WorkerArtifact>,
+) -> Option<spur_acp::domain::ArtifactRef> {
+    use spur_acp::domain::continuation::ArtifactKind as ContinuationArtifactKind;
+
+    artifact.map(|artifact| spur_acp::domain::ArtifactRef {
+        kind: ContinuationArtifactKind::Other("worker_artifact".into()),
+        uri: format!("spur://artifact/{}", delegation_id.as_str()),
+        byte_size: artifact.size_bytes as u64,
+        sha256: None,
+    })
+}
+
+fn build_detached_continuation(
+    delegation_id: &DelegationId,
+    result: &DelegationResult,
+    source: spur_acp::domain::ContinuationSource,
+    attempt: u32,
+    brain_session: SessionId,
+    event_sink: Option<&Arc<dyn crate::events::McpEventSink>>,
+) -> spur_acp::domain::BrainContinuation {
+    let original_summary = result.summary.clone();
+    let (summary, summary_truncated) =
+        clip_with_ellipsis(result.summary.clone(), PRODUCER_MAX_FIELD_BYTES);
+    if summary_truncated {
+        if let Some(event_sink) = event_sink {
+            event_sink.emit(SpurEventBody::ContinuationFieldTruncated {
+                delegation_id: delegation_id.clone(),
+                field: "summary".into(),
+                original_bytes: original_summary.as_ref().map(|s| s.len()).unwrap_or(0),
+                kept_bytes: summary.as_ref().map(|s| s.len()).unwrap_or(0),
+            });
+        }
+    }
+
+    spur_acp::domain::BrainContinuation {
+        delegation_id: delegation_id.clone(),
+        attempt,
+        brain_session,
+        source,
+        payload: spur_acp::domain::ContinuationPayload {
+            status: result.status.clone(),
+            summary,
+            diff_summary: result.diff_summary.clone(),
+            worker_branch: result.worker_branch.clone(),
+            artifact_ref: map_worker_artifact_ref(delegation_id, result.artifact.as_ref()),
+        },
+        created_at_wall: chrono::Utc::now(),
+        created_at_mono: std::time::Instant::now(),
+    }
 }
 
 // ─── McpCallbackServer ───────────────────────────────────────────────
@@ -235,6 +336,13 @@ pub struct McpCallbackServer {
     /// to the detached collector. Default `0` — pure async-first.
     /// Wired from `SpurConfig.delegation.inline_wait_ms`.
     inline_wait: std::time::Duration,
+    /// v3-c: set by `mark_retiring`; delegation entry points reject new
+    /// requests once retirement begins.
+    retiring: AtomicBool,
+    /// v3-c: parent cancellation token for in-flight collector tasks.
+    cancel_token: CancellationToken,
+    /// v3-c: handle to the root listener task so `force_abort` can stop it.
+    root_handle: Mutex<Option<JoinHandle<()>>>,
     /// v0a.3: if true, spawn the reconciler on server start. Default true
     /// for beads backends, false for github. Wired via `set_reconciler_enabled`.
     reconciler_enabled: bool,
@@ -334,6 +442,7 @@ pub fn parse_parallel_tasks(
             brain_session_id: brain_session_id.clone(),
             delegation_plan,
             issue_id,
+            attempt_tracker: new_attempt_tracker(),
         });
     }
     Ok(out)
@@ -1392,6 +1501,9 @@ impl McpCallbackServer {
             cancellation_control: None,
             continuation_ctx: Arc::new(continuation_ctx),
             inline_wait: std::time::Duration::from_millis(0),
+            retiring: AtomicBool::new(false),
+            cancel_token: CancellationToken::new(),
+            root_handle: Mutex::new(None),
             reconciler_enabled: false,
             reconciler_fast_forward: None,
             repo_root: None,
@@ -1417,6 +1529,21 @@ impl McpCallbackServer {
     /// `SpurConfig.delegation.inline_wait_ms` at server construction.
     pub fn set_inline_wait(&mut self, d: std::time::Duration) {
         self.inline_wait = d;
+    }
+
+    pub fn mark_retiring(&self) {
+        self.retiring.store(true, Ordering::SeqCst);
+    }
+
+    pub fn cancel_in_flight_workers(&self) {
+        self.cancel_token.cancel();
+    }
+
+    pub fn force_abort(&self) {
+        self.task_tracker.close();
+        if let Some(handle) = self.root_handle.lock().unwrap().take() {
+            handle.abort();
+        }
     }
 
     /// v0a.3: Enable the reconciler on server start. Must be called BEFORE
@@ -1446,6 +1573,14 @@ impl McpCallbackServer {
 
     pub fn fast_forward_reconciler(&self) {
         notify_fast_forward(&self.reconciler_fast_forward);
+    }
+
+    fn ensure_accepting_delegations(&self) -> std::result::Result<(), DelegationDispatchError> {
+        if self.retiring.load(Ordering::SeqCst) {
+            Err(DelegationDispatchError::SessionRetiring)
+        } else {
+            Ok(())
+        }
     }
 
     /// Set the repository root path. Required for pidfile acquisition.
@@ -1490,6 +1625,7 @@ impl McpCallbackServer {
         tracker: &TaskTracker,
         delegation_id: DelegationId,
         rx: tokio::sync::oneshot::Receiver<DelegationResult>,
+        cancel_token: CancellationToken,
         active: Arc<tokio::sync::Mutex<HashSet<DelegationId>>>,
         completed: Arc<
             tokio::sync::Mutex<HashMap<DelegationId, (DelegationResult, tokio::time::Instant)>>,
@@ -1497,11 +1633,24 @@ impl McpCallbackServer {
         detached: Option<DetachedCompletionHandle>,
     ) {
         tracker.spawn(async move {
-            let result = match rx.await {
-                Ok(r) => r,
-                Err(_) => DelegationResult {
-                    status: DelegationStatus::Failed {
-                        error: "Orchestrator disconnected".into(),
+            let result = tokio::select! {
+                res = rx => match res {
+                    Ok(r) => r,
+                    Err(_) => DelegationResult {
+                        status: DelegationStatus::Failed {
+                            error: "Orchestrator disconnected".into(),
+                        },
+                        diff: None,
+                        diff_summary: None,
+                        summary: None,
+                        estimated_cost_usd: 0.0,
+                        worker_branch: None,
+                        artifact: None,
+                    },
+                },
+                _ = cancel_token.cancelled() => DelegationResult {
+                    status: DelegationStatus::Cancelled {
+                        reason: "Brain session retiring".into(),
                     },
                     diff: None,
                     diff_summary: None,
@@ -1541,36 +1690,40 @@ impl McpCallbackServer {
             }
 
             if let Some(h) = detached {
-                use spur_acp::domain::{
-                    BrainContinuation, ContinuationPayload, ContinuationSource,
-                };
-
                 let source = if matches!(result.status, DelegationStatus::Cancelled { .. }) {
-                    ContinuationSource::Cancelled
+                    spur_acp::domain::ContinuationSource::Cancelled
                 } else {
                     match h.source_kind {
-                        DetachedSourceKind::AsyncRequested => ContinuationSource::AsyncRequested,
-                        DetachedSourceKind::BlockTimeout => ContinuationSource::BlockTimeout,
+                        DetachedSourceKind::AsyncRequested => {
+                            spur_acp::domain::ContinuationSource::AsyncRequested
+                        }
+                        DetachedSourceKind::BlockTimeout => {
+                            spur_acp::domain::ContinuationSource::BlockTimeout
+                        }
                     }
                 };
 
-                let cont = BrainContinuation {
-                    delegation_id: delegation_id.clone(),
+                let DetachedCompletionHandle {
+                    ctx,
+                    attempt_tracker,
+                    brain_session,
+                    event_sink,
+                    ..
+                } = h;
+                let attempt = attempt_tracker.load(Ordering::SeqCst);
+                let cont = build_detached_continuation(
+                    &delegation_id,
+                    &result,
                     source,
-                    payload: ContinuationPayload {
-                        status: result.status.clone(),
-                        summary: result.summary.clone(),
-                        diff_summary: result.diff_summary.clone(),
-                        worker_branch: result.worker_branch.clone(),
-                        artifact: result.artifact.clone(),
-                    },
-                    created_at: std::time::Instant::now(),
-                };
+                    attempt,
+                    brain_session,
+                    event_sink.as_ref(),
+                );
                 // Route the completion back to the orchestrator ingress via
                 // the injected callback (wired in spur-core to avoid a
                 // circular dependency). The delegation_id is used as a
                 // worker_session proxy for the DelegationCompleted UI event.
-                (h.ctx.on_complete)(cont, delegation_id.clone().into()).await;
+                (ctx.on_complete)(cont, delegation_id.clone().into()).await;
             }
         });
     }
@@ -1897,9 +2050,11 @@ impl McpCallbackServer {
             tracing::debug!("reconciler disabled: reconciler_enabled = false");
             None
         };
-        if reconciler_task.is_some() && has_reclaimed_plans {
+        if reconciler_task.is_some() {
             tokio::task::yield_now().await;
-            self.fast_forward_reconciler();
+            if has_reclaimed_plans {
+                self.fast_forward_reconciler();
+            }
         }
 
         let mut signal_watcher_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
@@ -1926,7 +2081,8 @@ impl McpCallbackServer {
 
         info!(url = %url, "MCP callback server listening (streamable HTTP)");
 
-        let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+        let (root_done_tx, root_done_rx) = tokio::sync::oneshot::channel();
+        let root_handle = tokio::spawn(async move {
             // I4: keep pidfile alive for the duration of the server.
             let _brain_pidfile = brain_pidfile;
             if let Err(error) = axum::serve(listener, router).await {
@@ -1945,6 +2101,29 @@ impl McpCallbackServer {
             if let Some(sh) = signal_watcher_task {
                 let _ = sh.await;
             }
+            let _ = root_done_tx.send(());
+        });
+        *self.root_handle.lock().unwrap() = Some(root_handle);
+
+        let server_for_drop = Arc::clone(&self);
+        struct AbortRootOnDrop {
+            server: Arc<McpCallbackServer>,
+        }
+
+        impl Drop for AbortRootOnDrop {
+            fn drop(&mut self) {
+                if let Some(handle) = self.server.root_handle.lock().unwrap().take() {
+                    handle.abort();
+                }
+            }
+        }
+
+        let drop_guard = AbortRootOnDrop {
+            server: server_for_drop,
+        };
+        let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+            let _guard = drop_guard;
+            let _ = root_done_rx.await;
         }));
 
         Ok((url, handle))
@@ -2060,6 +2239,9 @@ impl McpCallbackServer {
     // ─── Tool handlers ────────────────────────────────────────────────
 
     async fn handle_delegate_to_worker(&self, id: Value, args: Value) -> JsonRpcResponse {
+        if let Err(error) = self.ensure_accepting_delegations() {
+            return error.into_response(id);
+        }
         let bad_params = |message| JsonRpcResponse::invalid_params(id.clone(), message);
         let agent = match args.get("agent").and_then(|v| v.as_str()) {
             Some(a) => a.to_string(),
@@ -2084,6 +2266,7 @@ impl McpCallbackServer {
 
         let request_id = DelegationId::new();
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let attempt_tracker = new_attempt_tracker();
 
         let delegation = DelegationRequest {
             id: request_id.clone(),
@@ -2094,6 +2277,7 @@ impl McpCallbackServer {
             brain_session_id: self.brain_session_id.clone(),
             delegation_plan,
             issue_id,
+            attempt_tracker: Arc::clone(&attempt_tracker),
         };
 
         info!(agent = %agent, request_id = %request_id, "Sending delegation request");
@@ -2195,11 +2379,15 @@ impl McpCallbackServer {
                     &self.task_tracker,
                     request_id.clone(),
                     rx,
+                    self.cancel_token.child_token(),
                     Arc::clone(&self.active_delegations),
                     Arc::clone(&self.completed_delegations),
                     Some(DetachedCompletionHandle {
                         ctx: Arc::clone(&self.continuation_ctx),
                         source_kind: DetachedSourceKind::BlockTimeout,
+                        attempt_tracker,
+                        brain_session: self.brain_session_id.as_session_id().clone(),
+                        event_sink: self.event_sink.clone(),
                     }),
                 );
                 let payload = json!({
@@ -2229,6 +2417,9 @@ impl McpCallbackServer {
     }
 
     async fn handle_delegate_parallel(&self, id: Value, args: Value) -> JsonRpcResponse {
+        if let Err(error) = self.ensure_accepting_delegations() {
+            return error.into_response(id);
+        }
         if let Some(batch_plan) = args.get("delegation_plan") {
             tracing::info!(
                 batch_plan = %batch_plan,
@@ -2263,6 +2454,7 @@ impl McpCallbackServer {
         for (idx, mut skeleton) in skeletons.into_iter().enumerate() {
             let request_id = skeleton.id.clone();
             let agent = skeleton.agent.clone();
+            let attempt_tracker = Arc::clone(&skeleton.attempt_tracker);
             let (tx, rx) = tokio::sync::oneshot::channel();
             skeleton.respond_to = tx;
 
@@ -2277,15 +2469,18 @@ impl McpCallbackServer {
                 .lock()
                 .await
                 .insert(request_id.clone());
-            dispatched.push((idx, request_id, agent, rx));
+            dispatched.push((idx, request_id, agent, rx, attempt_tracker));
         }
 
         let mut waits = JoinSet::new();
-        for (idx, request_id, agent, rx) in dispatched {
+        for (idx, request_id, agent, rx, attempt_tracker) in dispatched {
             let active_delegations = Arc::clone(&self.active_delegations);
             let completed_delegations = Arc::clone(&self.completed_delegations);
             let continuation_ctx = Arc::clone(&self.continuation_ctx);
             let task_tracker = self.task_tracker.clone();
+            let cancel_token = self.cancel_token.child_token();
+            let event_sink = self.event_sink.clone();
+            let brain_session = self.brain_session_id.as_session_id().clone();
             waits.spawn(async move {
                 let mut rx = rx;
                 // Cancel-during-handoff (Risk R2): see
@@ -2330,11 +2525,15 @@ impl McpCallbackServer {
                             &task_tracker,
                             request_id.clone(),
                             rx,
+                            cancel_token,
                             active_delegations,
                             completed_delegations,
                             Some(DetachedCompletionHandle {
                                 ctx: continuation_ctx,
                                 source_kind: DetachedSourceKind::BlockTimeout,
+                                attempt_tracker,
+                                brain_session,
+                                event_sink,
                             }),
                         );
                         json!({
@@ -3459,7 +3658,10 @@ impl McpCallbackServer {
                 }
             }
             let update = spur_pm::IssueUpdate {
-                add_labels: vec![crate::plan::labels::plan_id(&plan_id)],
+                add_labels: vec![
+                    crate::plan::labels::plan_id(&plan_id),
+                    crate::plan::labels::PLAN_COMPLETE.to_string(),
+                ],
                 remove_labels,
                 ..Default::default()
             };
@@ -4084,6 +4286,382 @@ mod cancel_delegation_tests {
         // After remove, cancel returns NotFound.
         let outcome = cc.cancel("req-2").await;
         assert_eq!(outcome, CancelOutcome::NotFound);
+    }
+}
+
+#[cfg(test)]
+mod retirement_state_tests {
+    use std::future::pending;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use spur_acp::{BrainSessionId, SessionId};
+    use tokio::sync::Notify;
+
+    fn no_op_ctx() -> super::DetachedContinuationCtx {
+        super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_server_mark_retiring_rejects_new_delegations() {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, no_op_ctx());
+
+        server.mark_retiring();
+
+        let single = server
+            .__test_call_delegate_to_worker("codex", "should reject")
+            .await;
+        assert_eq!(single["error"]["message"], "SessionRetiring");
+
+        let parallel = server
+            .__test_call_delegate_parallel(vec![("codex", "parallel should reject")])
+            .await;
+        assert_eq!(parallel["error"]["message"], "SessionRetiring");
+    }
+
+    #[tokio::test]
+    async fn test_server_cancel_in_flight_signals_token() {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, no_op_ctx());
+
+        assert!(
+            !server.cancel_token.is_cancelled(),
+            "fresh servers must start with an active cancellation token"
+        );
+
+        server.cancel_in_flight_workers();
+
+        assert!(
+            server.cancel_token.is_cancelled(),
+            "cancel_in_flight_workers must signal the shared cancellation token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_force_abort_idempotent() {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, no_op_ctx());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(Notify::new());
+
+        *server.root_handle.lock().unwrap() = Some(tokio::spawn({
+            let dropped = Arc::clone(&dropped);
+            let started = Arc::clone(&started);
+            async move {
+                let _flag = DropFlag(dropped);
+                started.notify_one();
+                pending::<()>().await;
+            }
+        }));
+
+        started.notified().await;
+        server.force_abort();
+        server.force_abort();
+        tokio::time::timeout(Duration::from_millis(200), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("force_abort should eventually abort the stored root task");
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "force_abort must abort the stored root task"
+        );
+        assert!(
+            server.root_handle.lock().unwrap().is_none(),
+            "force_abort must take the root handle so repeated calls stay idempotent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_force_abort_after_shutdown_partial_progress() {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (server, _channel) =
+            super::McpCallbackServer::new(&session_id, None, None, no_op_ctx());
+        let server = Arc::new(server);
+
+        let release = Arc::new(Notify::new());
+        server.task_tracker.spawn({
+            let release = Arc::clone(&release);
+            async move {
+                release.notified().await;
+            }
+        });
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        *server.root_handle.lock().unwrap() = Some(tokio::spawn({
+            let dropped = Arc::clone(&dropped);
+            async move {
+                let _flag = DropFlag(dropped);
+                pending::<()>().await;
+            }
+        }));
+
+        let shutdown = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move {
+                server.shutdown().await;
+            }
+        });
+
+        tokio::task::yield_now().await;
+        server.force_abort();
+        release.notify_waiters();
+
+        tokio::time::timeout(Duration::from_millis(200), shutdown)
+            .await
+            .expect("shutdown should complete once tracked work finishes")
+            .expect("shutdown task must not panic");
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "force_abort must still abort the root task after shutdown has already started"
+        );
+    }
+}
+
+#[cfg(test)]
+mod continuation_producer_tests {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicU32;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    use chrono::Utc;
+    use spur_acp::domain::artifact::{ArtifactKind as WorkerArtifactKind, WorkerArtifact};
+    use spur_acp::domain::continuation::ArtifactKind as ContinuationArtifactKind;
+    use spur_acp::domain::events::{DiffSummary, SpurEventBody};
+    use spur_acp::domain::{
+        BrainContinuation, ContinuationSource, DelegationResult, DelegationStatus,
+    };
+    use spur_acp::{DelegationId, SessionId};
+    use tokio_util::sync::CancellationToken;
+    use tokio_util::task::TaskTracker;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<SpurEventBody>>,
+    }
+
+    impl crate::events::McpEventSink for RecordingSink {
+        fn emit(&self, event: SpurEventBody) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    async fn capture_continuation(
+        delegation_id: DelegationId,
+        result: DelegationResult,
+        attempt: u32,
+        brain_session: SessionId,
+        event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+    ) -> BrainContinuation {
+        let tracker = TaskTracker::new();
+        let active = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let completed = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured_for_ctx = Arc::clone(&captured);
+
+        let detached = Some(super::DetachedCompletionHandle {
+            ctx: Arc::new(super::DetachedContinuationCtx {
+                on_complete: Arc::new(move |cont, _worker_session| {
+                    let captured = Arc::clone(&captured_for_ctx);
+                    Box::pin(async move {
+                        captured.lock().await.push(cont);
+                    })
+                }),
+            }),
+            source_kind: super::DetachedSourceKind::BlockTimeout,
+            attempt_tracker: Arc::new(AtomicU32::new(attempt)),
+            brain_session,
+            event_sink,
+        });
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        super::McpCallbackServer::spawn_result_collector(
+            &tracker,
+            delegation_id,
+            rx,
+            CancellationToken::new(),
+            active,
+            completed,
+            detached,
+        );
+
+        tx.send(result).expect("send continuation result");
+        tracker.close();
+        tracker.wait().await;
+
+        let captured = captured.lock().await;
+        assert_eq!(
+            captured.len(),
+            1,
+            "collector should emit exactly one continuation"
+        );
+        captured[0].clone()
+    }
+
+    fn success_result(
+        summary: Option<String>,
+        diff_summary: Option<DiffSummary>,
+        artifact: Option<WorkerArtifact>,
+    ) -> DelegationResult {
+        DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary,
+            summary,
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker-test".into()),
+            artifact,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_producer_clips_oversized_summary_with_event() {
+        let delegation_id: DelegationId = "del-oversized".into();
+        let sink = Arc::new(RecordingSink::default());
+        let sink_obj: Arc<dyn crate::events::McpEventSink> = sink.clone();
+        let original_summary = "x".repeat(super::PRODUCER_MAX_FIELD_BYTES + 64);
+
+        let continuation = capture_continuation(
+            delegation_id.clone(),
+            success_result(Some(original_summary.clone()), None, None),
+            1,
+            SessionId("brain".into()),
+            Some(sink_obj),
+        )
+        .await;
+
+        let clipped = continuation
+            .payload
+            .summary
+            .as_ref()
+            .expect("summary should still be present after clipping");
+        assert!(
+            clipped.len() <= super::PRODUCER_MAX_FIELD_BYTES,
+            "clipped summary must stay within the producer byte budget"
+        );
+        assert!(
+            clipped.ends_with('…'),
+            "clipped summary should carry the ellipsis marker"
+        );
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one truncation event should be emitted"
+        );
+        match &events[0] {
+            SpurEventBody::ContinuationFieldTruncated {
+                delegation_id: emitted_id,
+                field,
+                original_bytes,
+                kept_bytes,
+            } => {
+                assert_eq!(emitted_id, &delegation_id);
+                assert_eq!(field, "summary");
+                assert_eq!(*original_bytes, original_summary.len());
+                assert_eq!(*kept_bytes, clipped.len());
+            }
+            other => panic!("unexpected event emitted for clipped summary: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_producer_diff_summary_handled() {
+        let sink = Arc::new(RecordingSink::default());
+        let sink_obj: Arc<dyn crate::events::McpEventSink> = sink.clone();
+        let diff_summary = DiffSummary {
+            files_changed: 2,
+            insertions: 8,
+            deletions: 3,
+            files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+        };
+
+        let continuation = capture_continuation(
+            "del-diff-summary".into(),
+            success_result(Some("ok".into()), Some(diff_summary.clone()), None),
+            1,
+            SessionId("brain".into()),
+            Some(sink_obj),
+        )
+        .await;
+
+        assert_eq!(continuation.payload.diff_summary, Some(diff_summary));
+        assert!(
+            sink.events.lock().unwrap().is_empty(),
+            "structured diff_summary should not emit truncation events when no string field is clipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continuation_construction_brain_session_attempt_created_at() {
+        let delegation_id: DelegationId = "del-cont-1".into();
+        let brain_session = SessionId("brain-session-7".into());
+        let before_wall = Utc::now();
+        let before_mono = Instant::now();
+
+        let continuation = capture_continuation(
+            delegation_id.clone(),
+            success_result(
+                Some("done".into()),
+                None,
+                Some(WorkerArtifact {
+                    object_ref: "refs/spur/artifacts/abc123".into(),
+                    blob_sha: "0".repeat(40),
+                    size_bytes: 1_234,
+                    kind: WorkerArtifactKind::Diagnostic,
+                }),
+            ),
+            7,
+            brain_session.clone(),
+            None,
+        )
+        .await;
+
+        let after_mono = Instant::now();
+        let after_wall = Utc::now();
+
+        assert_eq!(continuation.delegation_id, delegation_id);
+        assert_eq!(continuation.attempt, 7);
+        assert_eq!(continuation.brain_session, brain_session);
+        assert_eq!(continuation.source, ContinuationSource::BlockTimeout);
+        assert!(continuation.created_at_wall >= before_wall);
+        assert!(continuation.created_at_wall <= after_wall);
+        assert!(continuation.created_at_mono >= before_mono);
+        assert!(continuation.created_at_mono <= after_mono);
+
+        let artifact_ref = continuation
+            .payload
+            .artifact_ref
+            .as_ref()
+            .expect("worker artifacts should map to continuation artifact refs");
+        assert_eq!(
+            artifact_ref.kind,
+            ContinuationArtifactKind::Other("worker_artifact".into())
+        );
+        assert_eq!(artifact_ref.uri, "spur://artifact/del-cont-1");
+        assert_eq!(artifact_ref.byte_size, 1_234);
+        assert_eq!(artifact_ref.sha256, None);
     }
 }
 

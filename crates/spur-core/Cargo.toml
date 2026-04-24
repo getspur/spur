@@ -28,6 +28,7 @@ anyhow = { workspace = true }
 tempfile = "3"
 thiserror = { workspace = true }
 directories = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 # `start_paused = true` on `#[tokio::test]` + `tokio::time::advance` require

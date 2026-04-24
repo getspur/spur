@@ -1,8 +1,9 @@
 //! Bridge from MCP detached completion → orchestrator ingress.
 //! Enforces INV-C3 (UI event BEFORE model-visible continuation).
 
+use serde::Serialize;
 use spur_acp::domain::events::SpurEventBody;
-use spur_acp::domain::BrainContinuation;
+use spur_acp::domain::{BrainContinuation, DeferReason, DelegationKey};
 use spur_acp::types::SessionId;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -107,6 +108,7 @@ use agent_client_protocol::{
 };
 
 pub const MERGE_BUDGET_DEFAULT_BYTES: usize = 4096;
+pub const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 
 const MARKER_AUTONOMOUS: &str =
     "[SPUR:background] Detached delegation completed after tool call returned.";
@@ -114,22 +116,53 @@ const MARKER_SEPARATOR: &str =
     "[SPUR:background] The following blocks were injected by SPUR, not authored by the user.";
 const ACTION_HINT: &str = "Review the result and decide the next action.";
 
+#[derive(Debug)]
+pub struct RenderOutcome {
+    pub blocks: Vec<ContentBlock>,
+    pub delivered_keys: Vec<DelegationKey>,
+    pub deferred_spill: Vec<(BrainContinuation, DeferReason)>,
+    pub dropped_oversized: Vec<(DelegationKey, usize)>,
+}
+
 fn continuation_uri(id: &str) -> String {
     format!("spur://continuation/{id}")
 }
 
-fn continuation_resource_block(c: &BrainContinuation) -> ContentBlock {
-    // Serialize payload as JSON text inside an embedded resource.
-    let json = serde_json::json!({
-        "delegation_id": c.delegation_id,
-        "source": format!("{:?}", c.source),
-        "status": serde_json::to_value(&c.payload.status).unwrap_or(serde_json::Value::Null),
-        "summary": c.payload.summary,
-        "diff_summary": c.payload.diff_summary,
-        "worker_branch": c.payload.worker_branch,
-    })
-    .to_string();
+#[derive(Serialize)]
+struct ContinuationResourceBody<'a> {
+    schema_version: u8,
+    delegation_id: &'a spur_acp::domain::DelegationId,
+    attempt: u32,
+    brain_session: &'a SessionId,
+    source: &'a spur_acp::domain::ContinuationSource,
+    status: &'a spur_acp::domain::delegation::DelegationStatus,
+    summary: &'a Option<String>,
+    diff_summary: &'a Option<spur_acp::domain::events::DiffSummary>,
+    worker_branch: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_ref: &'a Option<spur_acp::domain::ArtifactRef>,
+    created_at_wall: &'a chrono::DateTime<chrono::Utc>,
+}
 
+fn continuation_resource_body(c: &BrainContinuation) -> ContinuationResourceBody<'_> {
+    ContinuationResourceBody {
+        schema_version: 2,
+        delegation_id: &c.delegation_id,
+        attempt: c.attempt,
+        brain_session: &c.brain_session,
+        source: &c.source,
+        status: &c.payload.status,
+        summary: &c.payload.summary,
+        diff_summary: &c.payload.diff_summary,
+        worker_branch: &c.payload.worker_branch,
+        artifact_ref: &c.payload.artifact_ref,
+        created_at_wall: &c.created_at_wall,
+    }
+}
+
+fn continuation_resource_block(c: &BrainContinuation) -> ContentBlock {
+    let json = serde_json::to_string(&continuation_resource_body(c))
+        .expect("continuation resource body must serialize");
     ContentBlock::Resource(EmbeddedResource::new(
         EmbeddedResourceResource::TextResourceContents(
             TextResourceContents::new(json, continuation_uri(c.delegation_id.as_str()))
@@ -142,82 +175,125 @@ fn text_block(s: &str) -> ContentBlock {
     ContentBlock::Text(TextContent::new(s))
 }
 
-/// Build an autonomous continuation-only turn.
-pub fn render_autonomous_continuation_turn(conts: &[BrainContinuation]) -> Vec<ContentBlock> {
-    let mut out = Vec::with_capacity(2 + conts.len());
-    out.push(text_block(MARKER_AUTONOMOUS));
+pub fn clip_with_ellipsis(s: Option<String>, max_bytes: usize) -> (Option<String>, bool) {
+    let Some(s) = s else {
+        return (None, false);
+    };
+
+    if s.len() <= max_bytes {
+        return (Some(s), false);
+    }
+
+    const ELLIPSIS: &str = "…";
+    if max_bytes <= ELLIPSIS.len() {
+        return (Some(ELLIPSIS.to_string()), true);
+    }
+
+    let mut end = max_bytes - ELLIPSIS.len();
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut clipped = s[..end].to_string();
+    clipped.push('…');
+    (Some(clipped), true)
+}
+
+struct PackedContinuations<'a> {
+    delivered: Vec<&'a BrainContinuation>,
+    delivered_keys: Vec<DelegationKey>,
+    deferred_spill: Vec<(BrainContinuation, DeferReason)>,
+    dropped_oversized: Vec<(DelegationKey, usize)>,
+}
+
+fn pack_continuations<'a>(
+    conts: &'a [BrainContinuation],
+    budget_bytes: usize,
+) -> PackedContinuations<'a> {
+    let mut remaining_budget = budget_bytes;
+    let mut delivered = Vec::new();
+    let mut delivered_keys = Vec::new();
+    let mut deferred_spill = Vec::new();
+    let mut dropped_oversized = Vec::new();
+
     for c in conts {
-        out.push(continuation_resource_block(c));
-    }
-    out.push(text_block(ACTION_HINT));
-    out
-}
-
-/// Build a merged user+continuation turn (no budget).
-pub fn render_merged_turn(
-    user_blocks: &[ContentBlock],
-    conts: &[BrainContinuation],
-) -> Vec<ContentBlock> {
-    let mut out: Vec<ContentBlock> = user_blocks.to_vec();
-    if !conts.is_empty() {
-        out.push(text_block(MARKER_SEPARATOR));
-        for c in conts {
-            out.push(continuation_resource_block(c));
+        let key = DelegationKey::from(c);
+        let cost = continuation_cost_bytes(c);
+        if cost > budget_bytes {
+            dropped_oversized.push((key, cost));
+            continue;
         }
+        if cost <= remaining_budget {
+            remaining_budget -= cost;
+            delivered_keys.push(key);
+            delivered.push(c);
+            continue;
+        }
+        deferred_spill.push((
+            c.clone(),
+            DeferReason::BudgetSpill {
+                budget_bytes,
+                continuation_bytes: cost,
+            },
+        ));
     }
-    out
+
+    PackedContinuations {
+        delivered,
+        delivered_keys,
+        deferred_spill,
+        dropped_oversized,
+    }
 }
 
-/// Build a merged turn enforcing a byte budget for injected content.
-/// Returns `(blocks, spilled_continuations)`. Continuations are delivered
-/// oldest-first; the first one that would overflow and every following
-/// continuation is returned for re-queueing.
-pub fn render_merged_turn_with_spill(
+fn continuation_cost_bytes(c: &BrainContinuation) -> usize {
+    block_byte_cost(&continuation_resource_block(c))
+}
+
+pub fn render_merged_turn_with_spill_v2(
     user_blocks: &[ContentBlock],
     conts: &[BrainContinuation],
     budget_bytes: usize,
-) -> (Vec<ContentBlock>, Vec<BrainContinuation>) {
-    let mut out: Vec<ContentBlock> = user_blocks.to_vec();
-    let mut injected_bytes = 0usize;
-    let separator_cost = MARKER_SEPARATOR.len();
+) -> RenderOutcome {
+    let packed = pack_continuations(conts, budget_bytes);
+    let mut blocks: Vec<ContentBlock> = user_blocks.to_vec();
 
-    let mut to_inject: Vec<&BrainContinuation> = Vec::new();
-    let mut spilled: Vec<BrainContinuation> = Vec::new();
-    let mut separator_accounted = false;
-
-    for c in conts {
-        if !spilled.is_empty() {
-            // Oldest-first strict: once one continuation spills, all subsequent
-            // continuations must also spill to preserve delivery order.
-            spilled.push(c.clone());
-            continue;
-        }
-        let block = continuation_resource_block(c);
-        let cost = block_byte_cost(&block);
-        let with_sep_if_first = if !separator_accounted {
-            separator_cost
-        } else {
-            0
-        };
-        if injected_bytes + cost + with_sep_if_first > budget_bytes {
-            spilled.push(c.clone());
-        } else {
-            if !separator_accounted {
-                injected_bytes += separator_cost;
-                separator_accounted = true;
-            }
-            injected_bytes += cost;
-            to_inject.push(c);
+    if !packed.delivered.is_empty() {
+        blocks.push(text_block(MARKER_SEPARATOR));
+        for continuation in &packed.delivered {
+            blocks.push(continuation_resource_block(continuation));
         }
     }
 
-    if !to_inject.is_empty() {
-        out.push(text_block(MARKER_SEPARATOR));
-        for c in to_inject {
-            out.push(continuation_resource_block(c));
-        }
+    RenderOutcome {
+        blocks,
+        delivered_keys: packed.delivered_keys,
+        deferred_spill: packed.deferred_spill,
+        dropped_oversized: packed.dropped_oversized,
     }
-    (out, spilled)
+}
+
+pub fn render_autonomous_turn_with_spill_v2(
+    conts: &[BrainContinuation],
+    budget_bytes: usize,
+) -> RenderOutcome {
+    let packed = pack_continuations(conts, budget_bytes);
+    let mut blocks = Vec::new();
+
+    if !packed.delivered.is_empty() {
+        blocks.push(text_block(MARKER_AUTONOMOUS));
+        for continuation in &packed.delivered {
+            blocks.push(continuation_resource_block(continuation));
+        }
+        blocks.push(text_block(ACTION_HINT));
+    }
+
+    RenderOutcome {
+        blocks,
+        delivered_keys: packed.delivered_keys,
+        deferred_spill: packed.deferred_spill,
+        dropped_oversized: packed.dropped_oversized,
+    }
 }
 
 fn block_byte_cost(b: &ContentBlock) -> usize {
@@ -239,22 +315,37 @@ fn block_byte_cost(b: &ContentBlock) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::{ContentBlock, TextContent};
+    use chrono::{TimeZone, Utc};
+    use serde_json::{json, Value};
     use spur_acp::domain::delegation::DelegationStatus;
-    use spur_acp::domain::{ContinuationPayload, ContinuationSource};
+    use spur_acp::domain::events::DiffSummary;
+    use spur_acp::domain::{
+        continuation::ArtifactKind, ArtifactRef, ContinuationPayload, ContinuationSource,
+        DeferReason, DelegationKey,
+    };
     use std::time::Instant;
 
-    fn mk_cont(id: &str) -> BrainContinuation {
+    fn mk_cont(
+        id: &str,
+        attempt: u32,
+        source: ContinuationSource,
+        summary: Option<String>,
+    ) -> BrainContinuation {
         BrainContinuation {
             delegation_id: id.into(),
-            source: ContinuationSource::AsyncRequested,
+            attempt,
+            brain_session: SessionId("brain-session-1".into()),
+            source,
             payload: ContinuationPayload {
                 status: DelegationStatus::Success,
-                summary: None,
+                summary,
                 diff_summary: None,
                 worker_branch: None,
-                artifact: None,
+                artifact_ref: None,
             },
-            created_at: Instant::now(),
+            created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
+            created_at_mono: Instant::now(),
         }
     }
 
@@ -270,7 +361,7 @@ mod tests {
         .unwrap();
 
         let sid = SessionId::new();
-        let c = mk_cont("id-overflow-1");
+        let c = mk_cont("id-overflow-1", 1, ContinuationSource::AsyncRequested, None);
         let input = InteractiveInput::SystemContinuation {
             session: sid.clone(),
             continuation: c.clone(),
@@ -283,113 +374,371 @@ mod tests {
         }
         assert_eq!(buf.lock().await.len(), 1);
     }
-}
 
-#[cfg(test)]
-mod builder_tests {
-    use super::*;
-    use agent_client_protocol::ContentBlock;
-
-    fn mk_cont(id: &str, summary: &str) -> BrainContinuation {
-        use spur_acp::domain::delegation::DelegationStatus;
-        use spur_acp::domain::{ContinuationPayload, ContinuationSource};
-        use std::time::Instant;
-        BrainContinuation {
-            delegation_id: id.into(),
-            source: ContinuationSource::AsyncRequested,
-            payload: ContinuationPayload {
-                status: DelegationStatus::Success,
-                summary: Some(summary.into()),
-                diff_summary: None,
-                worker_branch: None,
-                artifact: None,
-            },
-            created_at: Instant::now(),
-        }
+    fn continuation_cost(continuation: &BrainContinuation) -> usize {
+        block_byte_cost(&continuation_resource_block(continuation))
     }
 
-    #[test]
-    fn autonomous_turn_has_marker_and_resource_blocks() {
-        let blocks = render_autonomous_continuation_turn(&[mk_cont("id-1", "done")]);
-        // Block 0: SPUR:background marker text.
-        match &blocks[0] {
-            ContentBlock::Text(t) => assert!(t.text.starts_with("[SPUR:background]")),
-            _ => panic!("block 0 must be text marker"),
-        }
-        // Block 1: resource with spur://continuation/{id-1} URI.
-        match &blocks[1] {
-            ContentBlock::Resource(r) => {
-                let uri_has_id = format!("{:?}", r).contains("spur://continuation/id-1");
-                assert!(uri_has_id, "resource URI must contain delegation id");
+    fn continuation_with_cost_between(
+        id: &str,
+        min_exclusive: usize,
+        max_inclusive: usize,
+    ) -> BrainContinuation {
+        for len in 0..16_384 {
+            let candidate = mk_cont(
+                id,
+                1,
+                ContinuationSource::AsyncRequested,
+                Some("x".repeat(len)),
+            );
+            let cost = continuation_cost(&candidate);
+            if cost > min_exclusive && cost <= max_inclusive {
+                return candidate;
             }
-            _ => panic!("block 1 must be resource"),
         }
-        // Last block: trailing action hint text.
-        assert!(matches!(blocks.last(), Some(ContentBlock::Text(_))));
+        panic!("no continuation cost found between {min_exclusive} and {max_inclusive} bytes");
+    }
+
+    fn continuation_with_cost_above(id: &str, min_exclusive: usize) -> BrainContinuation {
+        for len in 0..16_384 {
+            let candidate = mk_cont(
+                id,
+                1,
+                ContinuationSource::AsyncRequested,
+                Some("x".repeat(len)),
+            );
+            if continuation_cost(&candidate) > min_exclusive {
+                return candidate;
+            }
+        }
+        panic!("no continuation cost found above {min_exclusive} bytes");
+    }
+
+    fn first_resource_json(blocks: &[ContentBlock]) -> Value {
+        let resource = blocks
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Resource(resource) => Some(resource),
+                _ => None,
+            })
+            .expect("expected a resource block");
+
+        match &resource.resource {
+            EmbeddedResourceResource::TextResourceContents(text) => {
+                serde_json::from_str(&text.text).expect("resource JSON must parse")
+            }
+            other => panic!("expected text resource contents, got {other:?}"),
+        }
+    }
+
+    fn deferred_keys_with_reason(outcome: &RenderOutcome) -> Vec<(DelegationKey, DeferReason)> {
+        outcome
+            .deferred_spill
+            .iter()
+            .map(|(continuation, reason)| (DelegationKey::from(continuation), reason.clone()))
+            .collect()
     }
 
     #[test]
-    fn merged_turn_preserves_user_blocks_byte_exact_at_front() {
-        let user_blocks = vec![ContentBlock::Text(agent_client_protocol::TextContent::new(
-            "hello world",
-        ))];
-        let merged = render_merged_turn(&user_blocks, &[mk_cont("id-1", "done")]);
-        assert_eq!(
-            merged[0], user_blocks[0],
-            "user block must be first, byte-exact"
+    fn test_render_merged_user_blocks_byte_exact() {
+        let user_blocks = vec![
+            ContentBlock::Text(TextContent::new("hello")),
+            ContentBlock::Text(TextContent::new("world")),
+        ];
+        let continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
         );
-        // Block 1: separator text marker.
-        match &merged[1] {
-            ContentBlock::Text(t) => {
-                assert!(t.text.contains("[SPUR:background]"));
-            }
-            _ => panic!("separator must follow user blocks"),
-        }
-        // Block 2: resource.
-        assert!(matches!(merged[2], ContentBlock::Resource(_)));
-    }
-
-    #[test]
-    fn merged_turn_spills_when_over_budget() {
-        let user_blocks = vec![ContentBlock::Text(agent_client_protocol::TextContent::new(
-            "hi",
-        ))];
-        // 10 continuations × big summary each.
-        let big = "x".repeat(4096);
-        let conts: Vec<_> = (0..10).map(|i| mk_cont(&format!("id-{i}"), &big)).collect();
-        let (merged, spilled) = render_merged_turn_with_spill(&user_blocks, &conts, 4096);
-        assert!(!spilled.is_empty(), "budget should force spill");
-        // User block still present and still byte-exact.
-        assert_eq!(merged[0], user_blocks[0]);
-    }
-
-    #[test]
-    fn merged_turn_spill_is_oldest_first_strict() {
-        let user_blocks = vec![ContentBlock::Text(agent_client_protocol::TextContent::new(
-            "hi",
-        ))];
-        // Continuation order: tiny, huge, tiny. With strict oldest-first,
-        // once the huge one overflows, the following tiny must ALSO spill —
-        // no gap-fill delivery out of order.
-        let small1 = mk_cont("id-small-1", "x");
-        let huge = mk_cont("id-huge", &"y".repeat(4096));
-        let small2 = mk_cont("id-small-2", "z");
-
-        // Budget leaves room for the small blocks individually but not for huge.
-        let (merged, spilled) = render_merged_turn_with_spill(
+        let outcome = render_merged_turn_with_spill_v2(
             &user_blocks,
-            &[small1, huge, small2],
-            /* budget_bytes = */ 1024,
+            std::slice::from_ref(&continuation),
+            continuation_cost(&continuation),
         );
 
-        // small-1 delivers; huge spills; small-2 ALSO spills (oldest-first strict).
-        assert_eq!(spilled.len(), 2);
-        assert_eq!(spilled[0].delegation_id, "id-huge");
-        assert_eq!(spilled[1].delegation_id, "id-small-2");
+        assert_eq!(&outcome.blocks[..user_blocks.len()], user_blocks.as_slice());
+        assert_eq!(
+            outcome.delivered_keys,
+            vec![DelegationKey::from(&continuation)]
+        );
+        assert!(outcome.deferred_spill.is_empty());
+        assert!(outcome.dropped_oversized.is_empty());
+    }
 
-        // Merged output must contain small-1's resource but NOT small-2's.
-        let joined = format!("{:?}", merged);
-        assert!(joined.contains("spur://continuation/id-small-1"));
-        assert!(!joined.contains("spur://continuation/id-small-2"));
+    #[test]
+    fn test_render_merged_oversized_goes_to_dropped() {
+        let user_blocks = vec![ContentBlock::Text(TextContent::new("hello"))];
+        let continuation = continuation_with_cost_above("id-huge", 256);
+        let key = DelegationKey::from(&continuation);
+        let cost = continuation_cost(&continuation);
+
+        let outcome =
+            render_merged_turn_with_spill_v2(&user_blocks, std::slice::from_ref(&continuation), cost - 1);
+
+        assert_eq!(outcome.blocks, user_blocks);
+        assert!(outcome.delivered_keys.is_empty());
+        assert!(outcome.deferred_spill.is_empty());
+        assert_eq!(outcome.dropped_oversized, vec![(key, cost)]);
+    }
+
+    #[test]
+    fn test_render_merged_best_fit_skips_oversized_but_packs_later_small() {
+        let user_blocks = vec![ContentBlock::Text(TextContent::new("hello"))];
+        let small_first = mk_cont(
+            "id-small-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("a".into()),
+        );
+        let small_later = mk_cont(
+            "id-small-2",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("b".into()),
+        );
+        let budget = continuation_cost(&small_first) + continuation_cost(&small_later);
+        let oversized = continuation_with_cost_above("id-oversized", budget);
+        let oversized_cost = continuation_cost(&oversized);
+
+        let outcome = render_merged_turn_with_spill_v2(
+            &user_blocks,
+            &[small_first.clone(), oversized.clone(), small_later.clone()],
+            budget,
+        );
+
+        assert_eq!(
+            outcome.delivered_keys,
+            vec![
+                DelegationKey::from(&small_first),
+                DelegationKey::from(&small_later),
+            ]
+        );
+        assert!(outcome.deferred_spill.is_empty());
+        assert_eq!(
+            outcome.dropped_oversized,
+            vec![(DelegationKey::from(&oversized), oversized_cost)]
+        );
+    }
+
+    #[test]
+    fn test_render_merged_spill_carries_defer_reason_with_budget() {
+        let user_blocks = vec![ContentBlock::Text(TextContent::new("hello"))];
+        let first = mk_cont(
+            "id-first",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("a".into()),
+        );
+        let later = mk_cont(
+            "id-later",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("b".into()),
+        );
+        let budget = continuation_cost(&first) + continuation_cost(&later);
+        let spill = continuation_with_cost_between("id-spill", continuation_cost(&later), budget);
+        let spill_cost = continuation_cost(&spill);
+
+        let outcome = render_merged_turn_with_spill_v2(
+            &user_blocks,
+            &[first.clone(), spill.clone(), later.clone()],
+            budget,
+        );
+
+        assert_eq!(
+            outcome.delivered_keys,
+            vec![DelegationKey::from(&first), DelegationKey::from(&later)]
+        );
+        assert_eq!(
+            deferred_keys_with_reason(&outcome),
+            vec![(
+                DelegationKey::from(&spill),
+                DeferReason::BudgetSpill {
+                    budget_bytes: budget,
+                    continuation_bytes: spill_cost,
+                },
+            )]
+        );
+        assert!(outcome.dropped_oversized.is_empty());
+    }
+
+    #[test]
+    fn test_render_autonomous_marker_and_action_hint() {
+        let continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
+        );
+        let outcome = render_autonomous_turn_with_spill_v2(
+            std::slice::from_ref(&continuation),
+            continuation_cost(&continuation),
+        );
+
+        assert_eq!(
+            outcome.delivered_keys,
+            vec![DelegationKey::from(&continuation)]
+        );
+        assert!(matches!(
+            outcome.blocks.first(),
+            Some(ContentBlock::Text(text)) if text.text == MARKER_AUTONOMOUS
+        ));
+        assert!(matches!(
+            outcome.blocks.last(),
+            Some(ContentBlock::Text(text)) if text.text == ACTION_HINT
+        ));
+    }
+
+    #[test]
+    fn test_render_autonomous_same_budget_as_merged() {
+        let first = mk_cont(
+            "id-first",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("a".into()),
+        );
+        let later = mk_cont(
+            "id-later",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("b".into()),
+        );
+        let budget = continuation_cost(&first) + continuation_cost(&later);
+        let spill = continuation_with_cost_between("id-spill", continuation_cost(&later), budget);
+
+        let merged = render_merged_turn_with_spill_v2(
+            &[ContentBlock::Text(TextContent::new("hello"))],
+            &[first.clone(), spill.clone(), later.clone()],
+            budget,
+        );
+        let autonomous = render_autonomous_turn_with_spill_v2(
+            &[first.clone(), spill.clone(), later.clone()],
+            budget,
+        );
+
+        assert_eq!(merged.delivered_keys, autonomous.delivered_keys);
+        assert_eq!(
+            deferred_keys_with_reason(&merged),
+            deferred_keys_with_reason(&autonomous)
+        );
+        assert_eq!(merged.dropped_oversized, autonomous.dropped_oversized);
+    }
+
+    #[test]
+    fn test_wire_json_schema_version_2() {
+        let continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
+        );
+        let outcome = render_autonomous_turn_with_spill_v2(
+            std::slice::from_ref(&continuation),
+            continuation_cost(&continuation),
+        );
+        let json = first_resource_json(&outcome.blocks);
+
+        assert_eq!(json["schema_version"], Value::from(2));
+    }
+
+    #[test]
+    fn test_wire_json_snake_case_source() {
+        let continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
+        );
+        let outcome = render_autonomous_turn_with_spill_v2(
+            std::slice::from_ref(&continuation),
+            continuation_cost(&continuation),
+        );
+        let json = first_resource_json(&outcome.blocks);
+
+        assert_eq!(json["source"], json!({ "kind": "async_requested" }));
+    }
+
+    #[test]
+    fn test_wire_json_attempt_1_based() {
+        let continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
+        );
+        let outcome = render_autonomous_turn_with_spill_v2(
+            std::slice::from_ref(&continuation),
+            continuation_cost(&continuation),
+        );
+        let json = first_resource_json(&outcome.blocks);
+
+        assert_eq!(json["attempt"], Value::from(1));
+    }
+
+    #[test]
+    fn test_wire_json_created_at_wall_present_mono_absent() {
+        let continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
+        );
+        let outcome = render_autonomous_turn_with_spill_v2(
+            std::slice::from_ref(&continuation),
+            continuation_cost(&continuation),
+        );
+        let json = first_resource_json(&outcome.blocks);
+
+        assert!(json.get("created_at_wall").is_some());
+        assert!(json.get("created_at_mono").is_none());
+    }
+
+    #[test]
+    fn test_wire_json_artifact_ref_serialized() {
+        let mut continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
+        );
+        continuation.payload.diff_summary = Some(DiffSummary {
+            files_changed: 3,
+            insertions: 42,
+            deletions: 7,
+            files: vec![],
+        });
+        continuation.payload.worker_branch = Some("spur/worker-codex-123".into());
+        continuation.payload.artifact_ref = Some(ArtifactRef {
+            kind: ArtifactKind::Patch,
+            uri: "spur://artifact/abc".into(),
+            byte_size: 123_456,
+            sha256: Some("a".repeat(64)),
+        });
+
+        let outcome = render_autonomous_turn_with_spill_v2(
+            std::slice::from_ref(&continuation),
+            continuation_cost(&continuation),
+        );
+        let json = first_resource_json(&outcome.blocks);
+
+        assert_eq!(
+            json["artifact_ref"],
+            json!({
+                "kind": "patch",
+                "uri": "spur://artifact/abc",
+                "byte_size": 123456,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            })
+        );
+    }
+
+    #[test]
+    fn test_clip_with_ellipsis_utf8_safe() {
+        let input = Some("éééé".to_string());
+        let (clipped, truncated) = clip_with_ellipsis(input, 5);
+
+        assert_eq!(clipped.as_deref(), Some("é…"));
+        assert!(truncated);
     }
 }

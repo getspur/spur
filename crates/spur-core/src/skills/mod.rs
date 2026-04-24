@@ -573,7 +573,6 @@ mod tests {
 
     #[test]
     fn brainstorming_description_contains_trigger_phrases() {
-        let fake = PathBuf::from("/nonexistent");
         let raw = all_bundled_raw().get("brainstorming").unwrap();
         let parsed = frontmatter::parse_source(raw);
         let desc = parsed.description.unwrap_or("");
@@ -585,7 +584,6 @@ mod tests {
 
     #[test]
     fn writing_plans_description_contains_trigger_phrases() {
-        let fake = PathBuf::from("/nonexistent");
         let raw = all_bundled_raw().get("writing-plans").unwrap();
         let parsed = frontmatter::parse_source(raw);
         let desc = parsed.description.unwrap_or("");

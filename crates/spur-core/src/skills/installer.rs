@@ -490,7 +490,7 @@ mod tests {
             "---\nname: brain-only\ndescription: test\nrole: brain\n---\nMy body\n",
         )
         .unwrap();
-        let summary = run(dir.path()).unwrap();
+        let _summary = run(dir.path()).unwrap();
 
         // Should render to SpurHermetic (.spur/skills/) for brain prompt injection.
         let spur_path = dir.path().join(".spur/skills/brain-only/SKILL.md");
