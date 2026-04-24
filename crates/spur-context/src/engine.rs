@@ -39,6 +39,11 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
     CREATE OR REPLACE VIEW all_events_with_cost AS
     SELECT
         e.*,
+        CASE
+            WHEN e.cost_usd IS NOT NULL THEN 'native'
+            WHEN p.model IS NOT NULL THEN 'priced'
+            ELSE 'unpriced'
+        END AS cost_source,
         COALESCE(
             e.cost_usd,
             (e.input_tokens * p.input_price_per_1m / 1000000.0)
@@ -525,7 +530,12 @@ impl AnalyticsEngine {
                 'codex' AS agent,
                 NULLIF(NULLIF(current_model, ''), '<synthetic>') AS model,
                 NULL::VARCHAR AS project,
-                input_delta AS input_tokens,
+                -- P0.4: Codex reports input_tokens as a SUPERSET of cached_input_tokens
+                -- (verified 2026-04-24 against 13,499 live token_count rows:
+                -- sum_in + sum_out = sum_total exactly, so cached ⊂ input). Subtract
+                -- the cached portion so `input_tokens` means billable non-cached input
+                -- consistently across Claude and Codex.
+                GREATEST(input_delta - LEAST(cached_delta, input_delta), 0::BIGINT) AS input_tokens,
                 output_delta AS output_tokens,
                 LEAST(cached_delta, input_delta) AS cache_read_tokens,
                 0::BIGINT AS cache_creation_tokens,
@@ -1705,13 +1715,86 @@ mod tests {
 
         assert_eq!(rows.len(), 2, "zero-delta row should be excluded");
 
+        // After P0.4 fix: input_tokens is billable-non-cached input, so the
+        // cached portion is subtracted. Event 1 raw: input=1000, cached=200 →
+        // billable input=800, cache_read=200.
         assert_eq!(rows[0].0, "codex-session");
         assert_eq!(rows[0].1.as_deref(), Some("gpt-5"));
-        assert_eq!((rows[0].2, rows[0].3, rows[0].4), (1000, 500, 200));
+        assert_eq!((rows[0].2, rows[0].3, rows[0].4), (800, 500, 200));
 
+        // Event 2 delta: input=1000, cached_delta=100 → billable=900, cache=100.
         assert_eq!(rows[1].0, "codex-session");
         assert_eq!(rows[1].1.as_deref(), Some("gpt-5"));
-        assert_eq!((rows[1].2, rows[1].3, rows[1].4), (1000, 300, 100));
+        assert_eq!((rows[1].2, rows[1].3, rows[1].4), (900, 300, 100));
+    }
+
+    #[test]
+    fn test_cost_source_column_values() {
+        let engine = AnalyticsEngine::open_in_memory().unwrap();
+        engine.initialize().unwrap();
+
+        // Load pricing for one known model.
+        engine
+            .conn
+            .execute_batch(
+                "INSERT INTO pricing VALUES \
+                 ('claude-opus-4', 15.0, 75.0, 1.5, 18.75, '2020-01-01', NULL);",
+            )
+            .unwrap();
+
+        // Override all_events with three manual rows covering each provenance.
+        engine
+            .conn
+            .execute_batch(
+                "CREATE OR REPLACE VIEW all_events AS \
+                 SELECT * FROM (VALUES \
+                    (TIMESTAMP '2026-04-20 10:00:00', 'sess-native', 'claude', 'claude-opus-4', 'proj', \
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, 0.05::DOUBLE), \
+                    (TIMESTAMP '2026-04-20 10:05:00', 'sess-priced', 'claude', 'claude-opus-4', 'proj', \
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, NULL::DOUBLE), \
+                    (TIMESTAMP '2026-04-20 10:10:00', 'sess-unpriced', 'claude', 'ghost-model-xyz', 'proj', \
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, NULL::DOUBLE) \
+                 ) AS t(timestamp, session_id, agent, model, project, \
+                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd);",
+            )
+            .unwrap();
+
+        let rows: Vec<(String, String)> = {
+            let mut stmt = engine
+                .conn
+                .prepare(
+                    "SELECT session_id, cost_source FROM all_events_with_cost \
+                     ORDER BY session_id",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], ("sess-native".to_string(), "native".to_string()));
+        assert_eq!(rows[1], ("sess-priced".to_string(), "priced".to_string()));
+        assert_eq!(
+            rows[2],
+            ("sess-unpriced".to_string(), "unpriced".to_string())
+        );
+
+        // Unpriced events must yield NULL computed_cost — no silent $0.
+        let unpriced_cost: Option<f64> = engine
+            .conn
+            .query_row(
+                "SELECT computed_cost_usd FROM all_events_with_cost \
+                 WHERE session_id = 'sess-unpriced'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            unpriced_cost.is_none(),
+            "unpriced event should have NULL computed_cost, not silent $0"
+        );
     }
 
     #[test]
