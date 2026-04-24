@@ -21,6 +21,13 @@ use tracing;
 
 #[cfg(feature = "duckdb")]
 const SCHEMA_SQL: &str = include_str!("sql/schema.sql");
+const DAILY_REPORT_SQL: &str = include_str!("sql/daily_report.sql");
+const WEEKLY_REPORT_SQL: &str = include_str!("sql/weekly_report.sql");
+const MONTHLY_REPORT_SQL: &str = include_str!("sql/monthly_report.sql");
+const MODEL_BREAKDOWN_SQL: &str = include_str!("sql/model_breakdown.sql");
+const PROJECT_BREAKDOWN_SQL: &str = include_str!("sql/project_breakdown.sql");
+const SESSION_DETAIL_SQL: &str = include_str!("sql/session_detail.sql");
+const LIVE_SNAPSHOT_SQL: &str = include_str!("sql/live_session_snapshot.sql");
 
 /// Cost-enrichment view.
 ///
@@ -982,23 +989,7 @@ impl AnalyticsEngine {
 
     /// Daily cost report for a specific date range.
     pub fn daily_report_range(&self, start: NaiveDate, end: NaiveDate) -> Result<Vec<DailyRow>> {
-        let sql = r#"
-            SELECT
-                strftime(timestamp, '%Y-%m-%d') AS day,
-                agent,
-                COUNT(DISTINCT session_id) AS sessions,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
-            FROM all_events_with_cost
-            WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
-            GROUP BY day, agent
-            ORDER BY day DESC, cost_usd DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(DAILY_REPORT_SQL)?;
         let start_str = start.format("%Y-%m-%d").to_string();
         let end_str = end.format("%Y-%m-%d").to_string();
         let rows = stmt.query_map([&start_str, &end_str], |row| {
@@ -1020,23 +1011,7 @@ impl AnalyticsEngine {
 
     /// Weekly cost report for a specific date range.
     pub fn weekly_report_range(&self, start: NaiveDate, end: NaiveDate) -> Result<Vec<WeeklyRow>> {
-        let sql = r#"
-            SELECT
-                strftime(date_trunc('week', timestamp), '%Y-%m-%d') AS week,
-                agent,
-                COUNT(DISTINCT session_id) AS sessions,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
-            FROM all_events_with_cost
-            WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
-            GROUP BY week, agent
-            ORDER BY week DESC, cost_usd DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(WEEKLY_REPORT_SQL)?;
         let start_str = start.format("%Y-%m-%d").to_string();
         let end_str = end.format("%Y-%m-%d").to_string();
         let rows = stmt.query_map([&start_str, &end_str], |row| {
@@ -1062,23 +1037,7 @@ impl AnalyticsEngine {
         start: NaiveDate,
         end: NaiveDate,
     ) -> Result<Vec<MonthlyRow>> {
-        let sql = r#"
-            SELECT
-                strftime(timestamp, '%Y-%m') AS month,
-                agent,
-                COUNT(DISTINCT session_id) AS sessions,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
-            FROM all_events_with_cost
-            WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
-            GROUP BY month, agent
-            ORDER BY month DESC, cost_usd DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(MONTHLY_REPORT_SQL)?;
         let start_str = start.format("%Y-%m-%d").to_string();
         let end_str = end.format("%Y-%m-%d").to_string();
         let rows = stmt.query_map([&start_str, &end_str], |row| {
@@ -1142,22 +1101,7 @@ impl AnalyticsEngine {
 
     /// Model cost breakdown.
     pub fn model_breakdown(&self) -> Result<Vec<ModelRow>> {
-        let sql = r#"
-            SELECT
-                model,
-                agent,
-                COUNT(*) AS requests,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(ROUND(AVG(computed_cost_usd), 6), 0.0) AS avg_cost,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS total_cost
-            FROM all_events_with_cost
-            WHERE model IS NOT NULL
-            GROUP BY model, agent
-            ORDER BY total_cost DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(MODEL_BREAKDOWN_SQL)?;
         let rows = stmt.query_map([], |row| {
             Ok(ModelRow {
                 model: row.get(0)?,
@@ -1176,20 +1120,7 @@ impl AnalyticsEngine {
 
     /// Project cost breakdown.
     pub fn project_breakdown(&self) -> Result<Vec<ProjectRow>> {
-        let sql = r#"
-            SELECT
-                COALESCE(project, '(none)') AS project,
-                agent,
-                COUNT(DISTINCT session_id) AS sessions,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
-            FROM all_events_with_cost
-            GROUP BY project, agent
-            ORDER BY cost_usd DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(PROJECT_BREAKDOWN_SQL)?;
         let rows = stmt.query_map([], |row| {
             Ok(ProjectRow {
                 project: row.get(0)?,
@@ -1207,26 +1138,7 @@ impl AnalyticsEngine {
 
     /// Detail for a single session.
     pub fn session_detail(&self, session_id: &str) -> Result<Option<SessionRow>> {
-        let sql = r#"
-            SELECT
-                session_id,
-                agent,
-                model,
-                strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
-                strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS ended_at,
-                EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp)))::BIGINT AS duration_seconds,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
-                COUNT(*) AS events
-            FROM all_events_with_cost
-            WHERE session_id = ?
-            GROUP BY session_id, agent, model
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(SESSION_DETAIL_SQL)?;
         let mut rows = stmt.query_map([session_id], |row| {
             Ok(SessionRow {
                 session_id: row.get(0)?,
@@ -1254,25 +1166,7 @@ impl AnalyticsEngine {
     ///
     /// This is optimized for frequent polling (every 1-5 seconds).
     pub fn live_session_snapshot(&self, session_id: &str) -> Result<Option<LiveSnapshot>> {
-        let sql = r#"
-            SELECT
-                session_id,
-                agent,
-                model,
-                strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
-                strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS last_activity,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
-                COUNT(*) AS events
-            FROM all_events_with_cost
-            WHERE session_id = ?
-            GROUP BY session_id, agent, model
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(LIVE_SNAPSHOT_SQL)?;
         let mut rows = stmt.query_map([session_id], |row| {
             Ok(LiveSnapshot {
                 session_id: row.get(0)?,
@@ -2017,6 +1911,34 @@ mod tests {
         assert!(
             report.is_empty(),
             "model breakdown should be empty with no data"
+        );
+    }
+
+    #[test]
+    fn report_sql_files_include_cache_columns() {
+        assert!(
+            DAILY_REPORT_SQL.contains("cache_read_tokens"),
+            "daily_report.sql must include cache_read_tokens"
+        );
+        assert!(
+            DAILY_REPORT_SQL.contains("cache_creation_tokens"),
+            "daily_report.sql must include cache_creation_tokens"
+        );
+        assert!(
+            WEEKLY_REPORT_SQL.contains("cache_read_tokens"),
+            "weekly_report.sql must include cache_read_tokens (was missing)"
+        );
+        assert!(
+            WEEKLY_REPORT_SQL.contains("cache_creation_tokens"),
+            "weekly_report.sql must include cache_creation_tokens (was missing)"
+        );
+        assert!(
+            MONTHLY_REPORT_SQL.contains("cache_read_tokens"),
+            "monthly_report.sql must include cache_read_tokens (was missing)"
+        );
+        assert!(
+            MONTHLY_REPORT_SQL.contains("cache_creation_tokens"),
+            "monthly_report.sql must include cache_creation_tokens (was missing)"
         );
     }
 }
