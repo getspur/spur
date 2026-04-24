@@ -23,10 +23,10 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 axum = { workspace = true }
 rmcp = { workspace = true }
 parking_lot = "0.12"
+chrono = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }
-chrono = { workspace = true }
 tempfile = "3"
 # start_paused = true on #[tokio::test] requires test-util feature.
 tokio = { version = "1", features = ["full", "test-util"] }

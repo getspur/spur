@@ -11,6 +11,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use spur_acp::domain::delegation::DelegationStatus;
 use spur_acp::domain::events::{SpurEvent, SpurEventBody};
 use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
@@ -21,18 +22,21 @@ use spur_core::orchestrator::InteractiveInput;
 use spur_core::scheduler::{BrainScheduler, ScheduledAction};
 use tokio::sync::{broadcast, mpsc};
 
-fn mk_cont(id: &str) -> BrainContinuation {
+fn mk_cont(id: &str, brain_session: &SessionId) -> BrainContinuation {
     BrainContinuation {
         delegation_id: id.into(),
+        attempt: 1,
+        brain_session: brain_session.clone(),
         source: ContinuationSource::AsyncRequested,
         payload: ContinuationPayload {
             status: DelegationStatus::Success,
             summary: Some("worker done".into()),
             diff_summary: None,
             worker_branch: None,
-            artifact: None,
+            artifact_ref: None,
         },
-        created_at: Instant::now(),
+        created_at_wall: Utc::now(),
+        created_at_mono: Instant::now(),
     }
 }
 
@@ -79,11 +83,10 @@ async fn invc3_delegation_completed_precedes_prompt_dispatched_in_seq_order() {
 
     let (ingress_tx, mut ingress_rx) = mpsc::channel::<InteractiveInput>(64);
     let overflow = new_overflow_buf();
-    let mut scheduler = BrainScheduler::new(Some(SessionId::new()));
-
     let brain_session = SessionId::new();
+    let mut scheduler = BrainScheduler::new(Some(brain_session.clone()), Arc::new(funnel.clone()));
     let worker_session = SessionId::new();
-    let cont = mk_cont("delegation-invc3-1");
+    let cont = mk_cont("delegation-invc3-1", &brain_session);
 
     // ── Act ───────────────────────────────────────────────────────────
     // Step 1: execute_delegation upstream emits DelegationCompleted
