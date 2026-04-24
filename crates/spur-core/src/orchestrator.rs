@@ -5205,6 +5205,67 @@ pub mod test_support {
         .await
     }
 
+    // ─── MCP shutdown helpers ─────────────────────────────────────────
+    // Test-only. Expose the private `shutdown_mcp_server` function and
+    // its dependencies so integration tests can call them directly.
+
+    use std::sync::Arc;
+    use tokio_util::task::AbortOnDropHandle;
+
+    /// Mirror of the private `RetirableMcpServer` trait for integration
+    /// tests. Implement this on fake servers to drive `shutdown_mcp_server`.
+    ///
+    /// **Test-only.**
+    pub trait RetirableMcpServer: Send + Sync {
+        fn mark_retiring(&self);
+        fn cancel_in_flight_workers(&self);
+        fn force_abort(&self);
+        fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+    }
+
+    /// Adapts the public `test_support::RetirableMcpServer` trait to the
+    /// private `super::RetirableMcpServer` trait.
+    struct RetirableMcpServerAdapter<S: RetirableMcpServer + ?Sized>(Arc<S>);
+
+    impl<S: RetirableMcpServer + ?Sized> super::RetirableMcpServer for RetirableMcpServerAdapter<S> {
+        fn mark_retiring(&self) {
+            self.0.mark_retiring();
+        }
+        fn cancel_in_flight_workers(&self) {
+            self.0.cancel_in_flight_workers();
+        }
+        fn force_abort(&self) {
+            self.0.force_abort();
+        }
+        fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            self.0.shutdown()
+        }
+    }
+
+    /// The MCP shutdown timeout constant (5 s).
+    ///
+    /// **Test-only** — used by `shutdown_mcp_server_bounded` to set the
+    /// assertion epsilon.
+    #[doc(hidden)]
+    pub const MCP_SHUTDOWN_TIMEOUT_MS: u64 = super::MCP_SHUTDOWN_TIMEOUT.as_millis() as u64;
+
+    /// Call `shutdown_mcp_server` with a fake `RetirableMcpServer`.
+    ///
+    /// **Test-only.**
+    pub async fn call_shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
+        funnel: &crate::event_funnel::FunnelHandle,
+        session: &spur_acp::types::SessionId,
+        mcp_server: Option<Arc<S>>,
+        mcp_guard: Option<AbortOnDropHandle<()>>,
+    ) {
+        // Wrap the public-trait server in the adapter so it satisfies
+        // the private `super::RetirableMcpServer` bound.
+        let mut adapted: Option<Arc<dyn super::RetirableMcpServer>> = mcp_server
+            .map(|s| Arc::new(RetirableMcpServerAdapter(s)) as Arc<dyn super::RetirableMcpServer>);
+        let mut guard_slot: Option<AbortOnDropHandle<()>> = mcp_guard;
+        super::shutdown_mcp_server(funnel, session, &mut adapted, Some(&mut guard_slot)).await;
+    }
+
     /// Wraps `register_gate` + `wait_gate` in a retry loop.
     ///
     /// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
