@@ -67,8 +67,7 @@ fn build_orchestrator_with_failing_connect() -> (
     tokio::spawn(async move {
         let _ = orch
             .run_interactive(
-                input_rx,
-                None, // brain_override: use config default
+                input_rx, None, // brain_override: use config default
                 None, // permission_tx
                 overflow,
             )
@@ -167,7 +166,11 @@ async fn resume_emits_brain_connecting_before_connect_fails() {
             Err(_) => continue,
         };
 
-        if let SpurEventBody::BrainConnecting { session, brain_name } = &ev.body {
+        if let SpurEventBody::BrainConnecting {
+            session,
+            brain_name,
+        } = &ev.body
+        {
             assert_eq!(
                 *session, target,
                 "BrainConnecting.session must match the resume target"

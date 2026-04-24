@@ -1209,8 +1209,7 @@ mod current_session_shortcut_tests {
         );
         let after_cursor = picker.debug_cursor();
         assert_ne!(
-            before_cursor,
-            after_cursor,
+            before_cursor, after_cursor,
             "picker ignored input — resuming flag likely still present"
         );
     }

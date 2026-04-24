@@ -148,8 +148,7 @@ impl SessionMetadataStore {
         };
         let now = chrono::Utc::now();
         let diff = now.signed_duration_since(dt);
-        diff.num_seconds() >= 0
-            && diff.to_std().map(|d| d <= max_age).unwrap_or(false)
+        diff.num_seconds() >= 0 && diff.to_std().map(|d| d <= max_age).unwrap_or(false)
     }
 
     /// Returns true if any session entry exists in metadata.

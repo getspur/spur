@@ -248,7 +248,13 @@ impl App {
         license_state: LicenseStateEvent,
         landing: crate::landing::LandingDecision,
     ) -> Self {
-        Self::build_with_license_state(user_input_tx, start_in_picker, config, license_state, landing)
+        Self::build_with_license_state(
+            user_input_tx,
+            start_in_picker,
+            config,
+            license_state,
+            landing,
+        )
     }
 
     pub fn new_with_config(
@@ -1568,9 +1574,8 @@ impl App {
                 // a pre-ready SessionDetailView so LoadState renders correctly
                 // while the resume pipeline is in flight (Tranche 2 Task 5).
                 let sid = SessionId(session_id.clone());
-                self.session_detail = Some(
-                    crate::views::session_detail::SessionDetailView::for_session(sid.clone()),
-                );
+                self.session_detail =
+                    Some(crate::views::session_detail::SessionDetailView::for_session(sid.clone()));
                 self.current_view = ViewId::SessionDetail(sid);
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumeSession { session_id });
@@ -2349,7 +2354,13 @@ pub async fn run_tui_with_license(
     landing: crate::landing::LandingDecision,
 ) -> anyhow::Result<()> {
     let mut terminal = tui::setup()?;
-    let mut app = App::new_with_license(user_input_tx, start_in_picker, config, license_state, landing);
+    let mut app = App::new_with_license(
+        user_input_tx,
+        start_in_picker,
+        config,
+        license_state,
+        landing,
+    );
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
     let mut event_rx = event_rx;

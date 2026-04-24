@@ -41,8 +41,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use spur_acp::domain::delegation::DelegationStatus;
 use spur_acp::domain::continuation::DropReason;
+use spur_acp::domain::delegation::DelegationStatus;
 use spur_acp::domain::events::{SpurEvent, SpurEventBody};
 use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
 use spur_acp::types::SessionId;
@@ -104,8 +104,10 @@ async fn scheduler_seeded_with_spur_session_id_accepts_continuation() {
     //
     // These NEVER match in production.
     let spur_session_id = SessionId::new();
-    let acp_session_id =
-        format!("acp-returned-{}-distinct-from-spur", spur_session_id.0.len());
+    let acp_session_id = format!(
+        "acp-returned-{}-distinct-from-spur",
+        spur_session_id.0.len()
+    );
     assert_ne!(
         spur_session_id.0, acp_session_id,
         "precondition: spur_session_id and acp_session_id must be distinct to exercise the bug"
@@ -201,8 +203,10 @@ async fn scheduler_seeded_with_spur_session_id_accepts_continuation() {
 #[tokio::test(flavor = "current_thread")]
 async fn scheduler_seeded_with_acp_session_id_drops_continuation_as_stale() {
     let spur_session_id = SessionId::new();
-    let acp_session_id =
-        format!("acp-returned-{}-distinct-from-spur", spur_session_id.0.len());
+    let acp_session_id = format!(
+        "acp-returned-{}-distinct-from-spur",
+        spur_session_id.0.len()
+    );
 
     let (bcast_tx, mut bcast_rx) = broadcast::channel(256);
     let seq = Arc::new(AtomicU64::new(0));

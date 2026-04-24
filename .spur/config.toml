@@ -6,6 +6,7 @@ fallback = [
     "codex",
     "gemini",
     "opencode",
+    "kimi",
 ]
 
 [brain.prompt]
@@ -113,7 +114,7 @@ name = "claude-code"
 command = "npx"
 args = [
     "--yes",
-    "@agentclientprotocol/claude-agent-acp@0.26.0",
+    "@agentclientprotocol/claude-agent-acp@0.30.0",
 ]
 transport = "acp"
 kind = "claude-code-acp"
@@ -158,7 +159,7 @@ name = "codex"
 command = "npx"
 args = [
     "--yes",
-    "@zed-industries/codex-acp@0.11.1",
+    "@zed-industries/codex-acp@0.12.0",
 ]
 transport = "acp"
 kind = "codex-acp"

@@ -44,7 +44,10 @@ impl spur_mcp::McpEventSink for FunnelHandle {
 /// tests that need a `FunnelHandle` but do not care about the broadcast
 /// side.
 #[doc(hidden)]
-pub fn test_channel() -> (FunnelHandle, tokio::sync::mpsc::UnboundedReceiver<SpurEventBody>) {
+pub fn test_channel() -> (
+    FunnelHandle,
+    tokio::sync::mpsc::UnboundedReceiver<SpurEventBody>,
+) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     (FunnelHandle { tx }, rx)
 }

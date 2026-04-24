@@ -3,7 +3,7 @@
 - **Date:** 2026-04-25
 - **Status:** Draft (ready for human review)
 - **Authors:** Kevin Truong (kevin.truong.ds@gmail.com), with Claude Opus 4.7 as design pair
-- **Reviewers:** codex (rounds 1–2 + round 5), kimi (rounds 3–4 + round 5), gemini (round 5)
+- **Reviewers:** codex (rounds 1–2, 5b, 6a, 7), kimi (rounds 3–4, 5a, 6b), gemini (rounds 5c, 7)
 - **Supersedes:** `docs/superpowers/specs/2026-04-24-brain-continuation-producer-envelope-fit-design.md` (Plan-4 truncation-ladder approach)
 - **Related:**
   - `docs/superpowers/specs/2026-04-24-brain-continuation-delivery-guarantees.md` (v3.1, merge `6b1e6980`)
@@ -60,18 +60,22 @@ Worker completes (TWO entry paths — see §7.3)
                             │
                             ▼ both paths invoke
        ┌────────────────────────────────────────────┐
-       │ OutcomeMaterializer (in spur-core)         │
+       │ OutcomeMaterializer (in spur-mcp)          │
        │ uses OutcomeStore trait (in spur-blob-store)│
+       │ + clip_status_strings + clip_diff_files    │
+       │   (Plan-4 helpers, run unconditionally on  │
+       │    every success path — INV-D8 by clip)    │
        └────────────────────┬───────────────────────┘
                             │
                             ├── 1. Persist FULL DelegationResult to OutcomeStore
                             │    (key: brain_session/delegation/attempt; sha256 dedup)
                             │
                             ├── 2. Build LEAN BrainContinuation v3:
-                            │    - status, summary (capped 512B), diff_summary (counts),
-                            │      worker_branch (capped 256B), estimated_cost_usd,
+                            │    - clipped_status (DelegationStatus with bounded inline strings),
+                            │      summary (capped 512B), diff_stats (counts only, no file list),
+                            │      worker_branch (capped 256B), estimated_cost_micros (u64),
                             │      artifact_id (Some if backing artifact exists),
-                            │      fetch_hint (explicit recovery instruction)
+                            │      fetch_hint (explicit recovery instruction, capped 256B)
                             │
                             └── 3. push_continuation through existing v3.1 ingress
                                  (envelope bounded by construction → INV-D8 holds)
@@ -91,11 +95,17 @@ Background sweeper
 
 ## 4. Invariants
 
-### INV-D8 (this spec, structural)
+### INV-D8 (this spec, enforced-by-clip)
 
-> For every `BrainContinuation` delivered to `pack_continuations`, the post-`OutcomeMaterializer` envelope satisfies `continuation_cost_bytes(cont) ≤ MERGE_BUDGET_DEFAULT_BYTES` by construction.
+> For every `BrainContinuation` produced by `OutcomeMaterializer`, the envelope satisfies `continuation_cost_bytes(cont) ≤ MERGE_BUDGET_DEFAULT_BYTES`. Enforcement is procedural: the materializer is the **single producer** of `BrainContinuation` on the success path, and it unconditionally calls `clip_status_strings` + `clip_diff_files` (Plan-4 helpers) before constructing the lean payload — regardless of whether persistence succeeded.
 
-The lean payload's fixed-cap fields total ~768 B inline; the artifact reference is a small content-addressed handle. Any single delegation's content beyond the cap lives in the artifact store, fetched on demand. The merger's `OversizedSingleItem` branch becomes unreachable for `OutcomeMaterializer`-produced continuations.
+**Why "enforced-by-clip" not "by construction":** the wire types `DelegationStatus` and `DiffSummary` carry unbounded fields (`Failed.error: String`, `Conflict.files: Vec<PathBuf>`, `diff_summary.files: Vec<PathBuf>`, etc.) for the artifact-store path's full-fidelity persistence. The lean continuation reuses these types so the brain sees a familiar shape, but every variant's String/Vec fields are clipped to a fixed budget at the materializer boundary.
+
+**Bound:** clipped status + clipped diff_summary (counts + capped file list, max 16 entries × 128 B paths) + capped summary (512 B) + capped worker_branch (256 B) + capped fetch_hint (256 B) + ArtifactRef (~400 B) + OutcomeKey (~200 B) ≤ ~3.5 KB inline, comfortably under `MERGE_BUDGET_DEFAULT_BYTES = 8192`.
+
+**Enforcement test** (in `crates/spur-mcp/tests/`): proptest with `arb_delegation_status` (every variant with adversarial-large strings) → call `OutcomeMaterializer::materialize` → assert `continuation_cost_bytes(cont) ≤ MERGE_BUDGET_DEFAULT_BYTES` for 1024 cases. **CI gate.** Co-located with INV-D9's exhaustive-match proptest.
+
+The merger's `OversizedSingleItem` branch becomes unreachable for `OutcomeMaterializer`-produced continuations. Other producers (none expected post-Plan-5) remain subject to the merger fallback.
 
 ### INV-D9 (preserved from Plan-4 superseded spec, schema-evolution guard)
 
@@ -444,16 +454,25 @@ Property-based (`crates/spur-blob-store/tests/proptest_invariants.rs`):
 // in spur-acp/src/domain/continuation.rs
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationPayload {
+    /// Inline status. Materializer applies `clip_status_strings` so that all
+    /// String / Vec<PathBuf> fields inside variants (Failed.error, Conflict.files,
+    /// Rejected.reason, Modified.reviewer_note, Cancelled.reason,
+    /// TimedOut.fallback.Reject.reason) are bounded at the materializer boundary.
+    /// Full unclipped status lives in OutcomeStore; brain fetches via section='status_only'.
     pub status: DelegationStatus,
     /// Always inline. Capped at 512 B with "…" sentinel if longer.
     pub summary: Option<String>,
-    /// Counts only — no `files` path list inline. Full file list via fetch_outcome_artifact.
+    /// Inline diff summary. Materializer applies `clip_diff_files` so that
+    /// `files: Vec<PathBuf>` is capped at 16 entries × 128 B each.
+    /// Full file list via fetch_outcome_artifact(section='diff_only').
     pub diff_summary: Option<DiffSummary>,
     /// Always inline. Capped at 256 B.
     pub worker_branch: Option<String>,
-    /// NEW field (round 6 / codex MF3) — required for cost-aware brain reasoning.
+    /// NEW (round 8 / MF3) — cost in micro-USD (1e-6 USD).
+    /// `u64` chosen over `f64` so `ContinuationPayload` keeps deriving `Eq`
+    /// (f64 does not impl Eq). Brain converts to display USD as needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_cost_usd: Option<f64>,
+    pub estimated_cost_micros: Option<u64>,
     /// EXISTING (Phase 1 enriched) — reference to oversized stdout artifact (legacy narrow scope).
     /// Coexists with artifact_id during transition; deprecated after stabilization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -464,36 +483,62 @@ pub struct ContinuationPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<OutcomeKey>,
     /// Explicit human-readable hint when artifact_id is Some.
-    /// Example: "Full diff truncated. Call fetch_outcome_artifact(delegation_id, section='diff_only')."
+    /// Capped at 256 B. Example:
+    /// "Full diff truncated. Call fetch_outcome_artifact(delegation_id, section='diff_only')."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_hint: Option<String>,
 }
 ```
+
+**Round 8 (MF2/MF3) — design changes:**
+
+- **Clipping is mandatory on every materializer entrypoint, not just the truncation-fallback path.** The success path persists the full `DelegationResult` to OutcomeStore (preserves fidelity for brain-fetch), then constructs the lean continuation by **calling the same Plan-4 clip helpers** that the fallback path uses. INV-D8 holds because the materializer is the single producer (§7.2). The Plan-4 truncation ladder remains the persist-failure fallback only (§7.7).
+- **`estimated_cost_micros: Option<u64>`** replaces the round-6 `estimated_cost_usd: Option<f64>`. Rationale: `f64` does not implement `Eq`, which would break `#[derive(Eq)]` on `ContinuationPayload` (used by `DelegationKey`'s eq/hash). Cost is fundamentally integer (LLM token pricing is denominated in fractions of cents); micros gives 6-digit precision without floats. Conversion is a trivial `cost_usd = cost_micros as f64 / 1_000_000.0` at display time.
+
+**Why keep DelegationStatus inline rather than introduce a `LeanStatus` enum:**
+
+A round-7 alternative considered was replacing `status: DelegationStatus` with a structurally bounded `LeanStatus { Success, Failed, Conflict, ... }` (no inline String fields). This would make INV-D8 "true by construction" (no clipping needed). Rejected for two reasons:
+
+1. **Variant duplication.** Every new variant requires double-write (DelegationStatus + LeanStatus), inviting drift.
+2. **Brain UX regression.** Brains read `Failed.error` / `Rejected.reason` as inline signal *all the time* — not just when fetching the artifact. A LeanStatus that carried zero error context would force a fetch on every failure, defeating the lean payload's purpose.
+
+Clipping at the materializer boundary preserves brain UX (clipped error string is still the most important inline signal) while bounding the envelope. INV-D9's exhaustive-match proptest enforces that every new variant gets a clipping rule, eliminating bit-rot risk.
 
 **Schema bump rationale (per codex MF4):** ops-debug visibility, not wire-protocol break. LLMs are tolerant of optional fields via serde defaults; this bump is for log/dashboard correlation when investigating brain behavior pre/post Plan-5.
 
 **Renderer change:** `crates/spur-core/src/continuation_bridge.rs:149` updates `ContinuationResourceBody.schema_version` constant from `2` to `3`.
 
-**SF6 (round 6) — `ContinuationPayload` direct-construction sites that need updating** when `estimated_cost_usd` and `artifact_id` are added (all are additive `Option<>` with `#[serde(default)]`, but Rust struct literals must still include the new fields):
+**SF6 (round 6) — `ContinuationPayload` direct-construction sites that need updating** when `estimated_cost_micros`, `artifact_id`, and `fetch_hint` are added (all are additive `Option<>` with `#[serde(default)]`, but Rust struct literals must still include the new fields):
 
 - `crates/spur-acp/src/domain/continuation.rs:184-231` — round-trip serialization test.
 - `crates/spur-acp/src/domain/continuation.rs:240-269` — `delegation_key_equality_and_hashing_use_attempt` test (constructs `ContinuationPayload` literals).
 - `crates/spur-mcp/src/server.rs:273` — `build_detached_continuation` (production callsite).
 - Plan-writers must `grep -rn 'ContinuationPayload {' crates/` after Phase 3 lands to catch any newly-added construction sites and update them.
 
-### 7.2 `OutcomeMaterializer` (in spur-core)
+### 7.2 `OutcomeMaterializer` (in spur-mcp)
+
+**Round 8 (MF1) — relocated from spur-core to spur-mcp.** The round-6 spec placed the materializer in `spur-core`, but `spur-core` already depends on `spur-mcp` (existing edge: `crates/spur-core/Cargo.toml`); wiring the materializer into `spur-mcp` callsites (§7.3) would have forced `spur-mcp → spur-core`, creating a cycle.
+
+`spur-mcp` is the natural home: both completion callsites (`server.rs::build_detached_continuation` and `plan/mod.rs::persist_completion_result_and_notify`) live there, `McpEventSink` is defined there, and `spur-mcp` already depends on `spur-acp` (for `DelegationResult`/`BrainContinuation`/`OutcomeKey`) and on `spur-worktree`. Phase 2 adds `spur-mcp → spur-blob-store` as one new workspace dep. The orchestrator at `spur-core/orchestrator.rs:4755` reaches the materializer through its existing `spur-core → spur-mcp` edge. No cycles.
 
 ```rust
-// crates/spur-core/src/outcome_materializer.rs (new module)
+// crates/spur-mcp/src/outcome_materializer.rs (new module)
+use spur_acp::domain::{ContinuationPayload, DelegationResult, OutcomeKey};
+use spur_blob_store::{OutcomeStore, OutcomeMetadata, ContentType};
+
 pub struct OutcomeMaterializer {
     store: Arc<dyn OutcomeStore>,
     summary_cap_bytes: usize,        // = 512
     worker_branch_cap_bytes: usize,  // = 256
+    fetch_hint_cap_bytes: usize,     // = 256
+    diff_files_cap_count: usize,     // = 16  (per-file path cap = 128 B)
+    status_string_cap_bytes: usize,  // = 512 (Failed.error, Rejected.reason, etc.)
 }
 
 impl OutcomeMaterializer {
-    /// Build the lean BrainContinuation. Persists full payload to store
-    /// BEFORE returning the lean handle. If persist fails, falls through
-    /// to the truncation-ladder fallback (Plan-4 spec §6).
+    /// Single entrypoint. Both callsites (§7.3) have full `DelegationResult`
+    /// available at runtime — the round-6 dual-entrypoint design was based
+    /// on a stale read of reconciler.rs:409 (rx.await yields full result).
     pub async fn materialize(
         &self,
         result: DelegationResult,
@@ -502,45 +547,53 @@ impl OutcomeMaterializer {
         brain_session: BrainSessionId,
         source: ContinuationSource,
         event_sink: Option<&Arc<dyn McpEventSink>>,
-    ) -> BrainContinuation { ... }
+    ) -> BrainContinuation { /* see persist-then-clip-then-build below */ }
 }
 ```
 
-**Persist-then-build sequence:**
+**Persist-then-clip-then-build sequence (success path):**
 
-1. Serialize the full `DelegationResult` (status + diff + summary + diff_summary + worker_branch + artifact + estimated_cost_usd) to JSON bytes.
-2. Call `store.put(&key, &bytes, &metadata).await`.
-3. On success: build lean `BrainContinuation` with `artifact_id: Some(key)` and a `fetch_hint`.
-4. On failure: emit `tracing::error!(target: "spur.metrics.outcome_persist_failed", ...)`; fall through to truncation-ladder fallback (Plan-4 spec §6 unchanged); produce a fitted `BrainContinuation` with `artifact_id: None`.
+1. **Build OutcomeKey** from `(brain_session, delegation_id, attempt)`.
+2. **Serialize** the full `DelegationResult` (untouched, full fidelity) to JSON bytes.
+3. **Store.put** — `store.put(&key, &bytes, &metadata).await`.
+4. **On store success**: clip a *copy* of the relevant fields (do NOT mutate the persisted full version):
+   - `clipped_status = clip_status_strings(&result.status, status_string_cap_bytes)`
+   - `clipped_diff = result.diff_summary.as_ref().map(|d| clip_diff_files(d, diff_files_cap_count))`
+   - `clipped_summary = clip(&result.summary, summary_cap_bytes)` with "…" sentinel
+   - `clipped_branch = clip(&result.worker_branch, worker_branch_cap_bytes)`
+   - `fetch_hint = build_fetch_hint(&clipped_status, &clipped_diff)` (≤ 256 B)
+5. **Build lean `BrainContinuation`** with `artifact_id: Some(key)`, `artifact_ref: legacy_artifact_ref(&result)` (Phase 1 backcompat), and the clipped fields above.
+6. **Debug-assert envelope size** (panic in test/debug, INV-D9 proptest catches violations in CI):
+   ```rust
+   debug_assert!(continuation_cost_bytes(&cont) <= MERGE_BUDGET_DEFAULT_BYTES);
+   ```
+7. **Emit telemetry** — `tracing::info!(target: "spur.metrics.outcome_persisted", ...)`.
 
-The fallback ensures INV-α holds even when the store is unavailable.
+**On store failure** (persist-then-clip-then-build aborts at step 3):
 
-### 7.3 Materializer call sites — TWO completion paths
+1. Emit `tracing::error!(target: "spur.metrics.outcome_persist_failed", ...)`.
+2. **Fall through to the Plan-4 truncation-ladder fallback** (§7.7). The ladder runs its own clipping + emergency steps and produces a fitted `BrainContinuation` with `artifact_id: None`.
 
-`OutcomeMaterializer::materialize` is invoked from **two distinct callsites** that both signal "worker delegation completed." Phase 3 must wire both, not just one.
+INV-α holds either way. The success path's clipping helpers are the *same functions* the fallback uses; one set of clip rules to maintain.
 
-| # | Callsite | Trigger path | Available state |
+**Clipping helpers — moved from spur-core to spur-acp::domain::clip (round 8):**
+
+The clip helpers (`clip_status_strings`, `clip_diff_files`) are needed by both the materializer (in spur-mcp) and the truncation-ladder fallback. Round-6's spec placed them in spur-core. Round 8 moves them to `spur-acp::domain::clip` so both consumers (spur-mcp materializer + spur-core continuation_bridge fallback) can call them without a back-edge. spur-acp gains no new deps (clip helpers are pure functions over its own domain types). The Plan-4 spec §6 ladder is amended to reference `spur_acp::domain::clip::*` instead of its current local helpers.
+
+**Persist-failure metrics** include the truncation events from the fallback, so operators see both "store failed" and "fallback engaged" in a single trace event group.
+
+### 7.3 Materializer call sites — TWO completion paths, ONE entrypoint
+
+`OutcomeMaterializer::materialize` is invoked from **two distinct callsites** that both signal "worker delegation completed." Both paths have the **full `DelegationResult` in scope at runtime** — round 6's design assumed the reconciler had reduced state, but inspection of `crates/spur-mcp/src/plan/reconciler.rs:409` confirms `rx.await` yields the complete `DelegationResult` before the closure forwards it to `persist_completion_result_and_notify`. **Round 8 simplifies to a single materializer entrypoint.** The reduced-fidelity `materialize_metadata_only` from round 6 is dropped.
+
+| # | Callsite | Trigger path | State at runtime |
 |---|---|---|---|
-| 1 | `crates/spur-mcp/src/server.rs::build_detached_continuation` (currently line 251) | Direct `delegate_to_worker` → MCP background collector receives `DelegationResult` | `DelegationResult`, `delegation_id`, `brain_session`, `attempt` |
-| 2 | `crates/spur-mcp/src/plan/reconciler.rs::persist_completion_result_and_notify` (currently line 421; called from `crates/spur-mcp/src/plan/mod.rs:998`) | Reconciler-driven plan-mode (`submit_plan` / `execute_epic`) detects completion via beads polling | `result_summary`, `worker_branch`, `delegation_id`, `plan_id`, `brain_session_id`, `attempt`, `completion_state` |
-
-**MF2 (round 6):** the two callsites have **asymmetric available state** — callsite 1 has the full `DelegationResult`; callsite 2 has only what beads polling surfaces (status + summary + worker_branch). They must use different materializer entrypoints.
-
-```rust
-impl OutcomeMaterializer {
-    // Callsite 1 — full fidelity. Persists complete DelegationResult.
-    pub async fn materialize(&self, result: DelegationResult, key: OutcomeKey, ...) -> BrainContinuation;
-
-    // Callsite 2 — reduced fidelity. Persists status + summary + worker_branch only.
-    // Brain uses worker_branch to retrieve diff via `git diff` against the worktree.
-    pub async fn materialize_metadata_only(&self, status: DelegationStatus, summary: Option<String>,
-        worker_branch: Option<String>, key: OutcomeKey, ...) -> BrainContinuation;
-}
-```
+| 1 | `crates/spur-mcp/src/server.rs::build_detached_continuation` (currently line 251) | Direct `delegate_to_worker` → MCP background collector receives `DelegationResult` | full `DelegationResult`, `delegation_id`, `brain_session`, `attempt` |
+| 2 | `crates/spur-mcp/src/plan/reconciler.rs:409` → `crates/spur-mcp/src/plan/mod.rs::persist_completion_result_and_notify` (currently line 998) | Reconciler-driven plan-mode (`submit_plan` / `execute_epic`); reconciler awaits the same completion `oneshot::Receiver` as callsite 1 | full `DelegationResult`, `delegation_id`, `plan_id`, `brain_session_id`, `attempt`, `completion_state` |
 
 **State plumbing for callsite 2:**
 
-The reconciler's `ReconcilerDispatchCtx` (at `crates/spur-mcp/src/plan/reconciler.rs:152`) already carries `brain_session_id`. `task.attempt` is in scope at the dispatch site (line 361). Both must be **captured into the closure** that flows to `persist_completion_result_and_notify`. Concretely, the function signature gets two new parameters:
+The reconciler's `ReconcilerDispatchCtx` (at `crates/spur-mcp/src/plan/reconciler.rs:155`) already carries `brain_session_id`. `task.attempt` is in scope at the dispatch site. Both are captured into the spawned task closure that calls `persist_completion_result_and_notify`. The function signature gains a `&DelegationResult` parameter (replacing the existing `worker_branch: Option<&str>` + `result_summary: Option<&str>` pair, which become projections of the new param) plus the materializer:
 
 ```rust
 // crates/spur-mcp/src/plan/mod.rs:998 — Phase 3 amended signature
@@ -550,21 +603,20 @@ pub(crate) async fn persist_completion_result_and_notify(
     plan_id: &str,
     delegation_id: &str,
     completion_state: CompletionState,
-    worker_branch: Option<&str>,
-    result_summary: Option<&str>,
     fast_forward: &Option<Arc<tokio::sync::Notify>>,
     // NEW for Phase 3:
-    brain_session_id: &BrainSessionId,
+    result: &spur_acp::domain::DelegationResult,    // replaces worker_branch + result_summary
+    brain_session_id: &spur_acp::BrainSessionId,
     attempt: u32,
     materializer: &OutcomeMaterializer,
 ) -> anyhow::Result<()>;
 ```
 
-Runtime callsite at `plan/mod.rs:1166` and test callsite at `plan/mod.rs:3487` are updated accordingly.
+Production callsite at `reconciler.rs:421` passes `&result` (already in scope from `rx.await` at line 409). Test callsites in `crates/spur-mcp/tests/*` (e.g., `submit_plan_persist.rs`, `epic_completion.rs`, `reconciler_tick.rs`) construct a `DelegationResult` literal — these are easy to update because they currently construct `result_summary`/`worker_branch` literals already. Plan-writers must `grep -rn 'persist_completion_result_and_notify' crates/spur-mcp/` after Phase 3 lands.
 
-**Fallback behavior is identical** at both sites: on `OutcomeStore::put` failure, fall through to the Plan-4 truncation-ladder fallback. Both sites emit the same `spur.metrics.outcome_persist_failed` event.
+**Fallback behavior is identical at both sites:** on `OutcomeStore::put` failure, the materializer falls through to the Plan-4 truncation-ladder fallback. Both sites emit `spur.metrics.outcome_persist_failed` via the materializer's internal telemetry path.
 
-**Why this is non-obvious:** the v3.1 design and earlier review rounds focused on the direct-delegation flow (callsite 1). The plan-mode flow (callsite 2) writes back through the reconciler, where the writeback is currently a beads audit comment posting `result_summary` (truncated string) — there is no artifact-store integration at that callsite today. Phase 3 must add it.
+**Why the round-6 dual-entrypoint design was unnecessary:** the assumption was that callsite 2 saw only beads-polled metadata (status + summary + worker_branch as strings). In fact, the reconciler awaits the same `oneshot::Receiver<DelegationResult>` that callsite 1 receives — beads is the *durable audit log*, but the *runtime completion signal* travels through the same in-memory channel. Single materializer entrypoint is cleaner, easier to test, and matches the data flow.
 
 ### 7.4 Beads audit-comment composition (composition, not coupling)
 
@@ -586,7 +638,7 @@ Completion {
 },
 ```
 
-Reconciler populates `artifact_uri` when `OutcomeMaterializer::materialize_metadata_only` succeeds. Field is additive + serde-default — no parser changes needed for existing comments without it.
+Reconciler populates `artifact_uri` from the `BrainContinuation.payload.artifact_id` returned by `OutcomeMaterializer::materialize` (single entrypoint per round 8 §7.3) when `Some(_)`. Field is additive + serde-default — no parser changes needed for existing comments without it.
 
 Concrete shape (post-encode):
 ```
@@ -596,23 +648,26 @@ Concrete shape (post-encode):
 
 Operators viewing the beads issue can extract `artifact_uri` from the JSON and resolve via `fetch_outcome_artifact`. **Additive JSON field, no encoder/parser changes beyond the variant struct field.**
 
-### 7.5 Extended `fetch_outcome_artifact` (with section pagination)
+### 7.5 Extended `fetch_outcome_artifact` (with section pagination + attempt)
 
-Phase 3 adds the `section` parameter (per gemini's recommendation):
+Phase 3 adds the `section` parameter (per gemini's recommendation) and the `attempt` parameter (round 8 / codex SF8 — disambiguates retried delegations):
 
 ```rust
 // JSON-RPC tool args:
 // {
 //   "delegation_id": String,
+//   "attempt": Option<u32>,    // default = latest known attempt for this delegation
 //   "section": Option<"status_only" | "summary" | "diff_only" | "full">  // default "full"
 // }
 ```
 
 Section semantics:
-- `status_only` — just `{ status, attempt, brain_session, estimated_cost_usd }` (~100 B).
+- `status_only` — just `{ status, attempt, brain_session, estimated_cost_micros }` (~100 B).
 - `summary` — adds full `summary` field (no cap).
 - `diff_only` — adds full `diff` text + `diff_summary` with file list.
 - `full` — entire `DelegationResult`.
+
+**Why `attempt` is needed:** `OutcomeKey { brain_session_id, delegation_id, attempt }` is the actual storage key. A delegation that retried (attempt 1 → attempt 2) has two artifacts. Without `attempt`, the tool either (a) silently returns the latest, masking earlier failures the brain may want to inspect, or (b) requires the brain to manage attempt selection through some other channel. Default behavior is "latest known attempt" so existing callers (Phase 1) continue working; Phase-3 brains can pin a specific attempt for forensic queries.
 
 Brain calls the right section to avoid context bloat (gemini's concern about deferred context exhaustion). The MCP tool reads from `OutcomeStore::get` with the matching `Section` arg.
 
@@ -851,6 +906,9 @@ When ContextEngine Phase 1 ships, no spur-blob-store changes are required. The c
 | 6a | codex (round-6 parallel) | 2026-04-25 | APPROVE-WITH-CHANGES | 4 MUST-FIX: cycle on `OutcomeKey` placement (MF1), callsite-2 signature gap (MF2), beads parser regression on raw URI (MF3), `WorkerArtifact` adapter (MF4). Plus 2 SHOULD-FIX (schema struct-construction sites, citation drift `:998`→`:1166`) and 1 NIT (encoder example shape). |
 | 6b | kimi (round-6 parallel) | 2026-04-25 | APPROVE-WITH-CHANGES | Round 5.6 amendment soundness: insufficient at callsite 2 (confirms codex MF2). §15.2 dep graph arrow direction reversed (SF8). `artifact_ref` vs `artifact_id` coexistence ambiguity (MF5). Phase 1 unbounded fetch sharp edge (SF9 backport). Brain-crash auth wall + concurrent fetch-during-GC race (NIT11/NIT12). ContextEngine schema `attempt` column coordination. |
 | 6.5 | self (round-6 amendment fold) | 2026-04-25 | — | Folded all MF1–MF5, SF6–SF9, NIT11/NIT12 into spec; type ownership split (§6.3); dual-callsite signatures (§7.3); JSON-field beads composition (§7.4); WorkerArtifact adapter (§6.5); coexistence clarification (§7.1); construction-site list (§7.1); Phase 1 section backport (§5.2); dep graph arrow fix (§15.2); failure-mode §9.6/§9.7 added; ContextEngine coordination note (§13). |
+| 7a | gemini (round-7 verification) | 2026-04-25 | REJECT-WITH-MUST-FIX | INV-D8 still false on success path: `DelegationStatus::Failed.error` and `Conflict.files`/`diff_summary.files` are unbounded inline; lean payload can carry MB-scale stderr. Round-6 "lean by construction" claim was wrong. Plus 1 SHOULD-FIX (Phase-1↔3 fetch tool content-type discontinuity) and 1 NIT (legacy WorkerArtifactKind caller note). |
+| 7b | codex (round-7 verification) | 2026-04-25 | REJECT-WITH-MUST-FIX | (1) MF1 only moved key types; `OutcomeMaterializer` in spur-core still creates `spur-mcp → spur-core` cycle once §7.3 wires it into spur-mcp callsites. (2) INV-D8 still false on success path (same finding as gemini). (3) `ContinuationPayload` derives `Eq` but `estimated_cost_usd: Option<f64>` does not impl Eq → won't compile. Plus SF7/SF8 (reconciler runtime path has full `DelegationResult`; fetch tool needs `attempt`). |
+| 8 | self (round-7 fold) | 2026-04-25 | — | **MF1**: relocate `OutcomeMaterializer` to spur-mcp (single hop downstream of all callers; no cycle). **MF2**: clipping is mandatory on every materializer success path — same Plan-4 helpers as fallback; INV-D8 reframed as "enforced-by-clip" (single producer; debug_assert + CI proptest). Move `clip_status_strings`/`clip_diff_files` to `spur-acp::domain::clip` so both materializer and fallback share them. **MF3**: `estimated_cost_usd: Option<f64>` → `estimated_cost_micros: Option<u64>`; restores `Eq` derive. **SF7**: drop `materialize_metadata_only`; reconciler has full `DelegationResult` from `rx.await`; single materializer entrypoint with `&DelegationResult` parameter. **SF8**: `fetch_outcome_artifact` accepts `attempt: Option<u32>` (default = latest). **NITs**: `fetch_hint` gains `#[serde(default, skip_serializing_if)]`. |
 
 ## 15. Appendix
 
@@ -874,19 +932,34 @@ crates/spur-blob-store/
 Arrows point from consumer → dependency (i.e. "depends on"):
 
 ```
-            spur-worktree   spur-mcp   spur-core
-                  │             │         │
-                  ▼             ▼         ▼
-              spur-blob-store (NEW)
-                       │
-                       ▼
-                   spur-acp
-                       │
-                       ▼
-              agent-client-protocol
+                spur-core
+                    │
+                    ▼ (existing edge — orchestrator calls spur-mcp)
+                spur-mcp ──────► spur-worktree
+                    │                 │
+                    │                 ▼
+                    └──────► spur-blob-store (NEW)
+                                  │
+                                  ▼
+                              spur-acp
+                                  │
+                                  ▼
+                          agent-client-protocol
 ```
 
-`spur-acp` retains its position as the leaf-domain crate. `spur-blob-store` sits between consumers (`spur-worktree`, `spur-mcp`, `spur-core`) and `spur-acp`. No cycles. `OutcomeKey` / `OutcomeRef` / `BackendTag` types live in `spur-acp::domain::outcome` (per MF1 fix in §6.3); `spur-blob-store` imports them.
+**Round 8 (MF1) — materializer location:** `OutcomeMaterializer` lives in **`spur-mcp`** (not `spur-core` as round 6 had it). This avoids the `spur-mcp → spur-core` back-edge that would have been created by exposing `&OutcomeMaterializer` (a spur-core type) to the spur-mcp callsites in `server.rs::build_detached_continuation` and `plan/mod.rs::persist_completion_result_and_notify`. With the materializer in spur-mcp, both callsites use it directly; the orchestrator at `spur-core/orchestrator.rs:4755` reaches it through the existing `spur-core → spur-mcp` edge.
+
+**Type ownership** (post-round-8):
+
+| Crate | Owns |
+|---|---|
+| `spur-acp` | `ContinuationPayload`, `BrainContinuation`, `DelegationResult`, `DelegationStatus`, `DiffSummary`, `OutcomeKey`, `OutcomeRef`, `BackendTag`, `clip_status_strings` / `clip_diff_files` (round 8 — pure helpers) |
+| `spur-blob-store` (NEW Phase 2) | `OutcomeStore` trait, `OutcomeMetadata`, `Section`, `StoreError`, `FsOutcomeStore`, `MemoryOutcomeStore`, `MeasuredOutcomeStore` |
+| `spur-worktree` | `GitBlobOutcomeStore` (impls trait from spur-blob-store) |
+| `spur-mcp` (round 8) | `OutcomeMaterializer`, `McpEventSink`, MCP tool handlers (incl. `fetch_outcome_artifact`) |
+| `spur-core` | orchestrator wiring, scheduler GC hook, continuation_bridge fallback (calls clip helpers from spur-acp) |
+
+`spur-acp` retains its position as the leaf-domain crate. No cycles.
 
 ### 15.3 Configuration surface
 
