@@ -618,7 +618,9 @@ impl DashboardView {
             Line::from(""),
             Line::from(Span::styled(
                 "Try asking:",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(vec![
                 Span::styled("-> ", Style::default().fg(Color::DarkGray)),
@@ -626,8 +628,14 @@ impl DashboardView {
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("[Tab] cycle examples  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("[s] browse sessions  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "[Tab] cycle examples  ",
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    "[s] browse sessions  ",
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled("[?] help", Style::default().fg(Color::DarkGray)),
             ]),
         ];
@@ -703,7 +711,9 @@ impl DashboardView {
             Line::from(""),
             Line::from(Span::styled(
                 "SPUR",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
@@ -721,7 +731,10 @@ impl DashboardView {
             )),
             Line::from(vec![
                 Span::styled("|  ", Style::default().fg(Color::Yellow)),
-                Span::styled("! No agents configured. Run this in another terminal:", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    "! No agents configured. Run this in another terminal:",
+                    Style::default().fg(Color::Yellow),
+                ),
                 Span::styled("  |", Style::default().fg(Color::Yellow)),
             ]),
             Line::from(Span::styled(
@@ -730,8 +743,16 @@ impl DashboardView {
             )),
             Line::from(vec![
                 Span::styled("|     ", Style::default().fg(Color::Yellow)),
-                Span::styled("spur init", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled("                                               |", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    "spur init",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "                                               |",
+                    Style::default().fg(Color::Yellow),
+                ),
             ]),
             Line::from(Span::styled(
                 "|                                                             |",
@@ -739,8 +760,14 @@ impl DashboardView {
             )),
             Line::from(vec![
                 Span::styled("|  ", Style::default().fg(Color::Yellow)),
-                Span::styled("Then restart `spur tui` to begin.", Style::default().fg(Color::Yellow)),
-                Span::styled("                          |", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    "Then restart `spur tui` to begin.",
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    "                          |",
+                    Style::default().fg(Color::Yellow),
+                ),
             ]),
             Line::from(Span::styled(
                 "+-------------------------------------------------------------+",
@@ -792,7 +819,6 @@ impl DashboardView {
             },
         );
     }
-
 }
 
 /// Who owns the next keystroke.
@@ -919,36 +945,31 @@ impl DashboardView {
             }
             // ── Direct tab jumping (focused node, Ctrl modifier) ──────────
             KeyCode::Char('1')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.focused_node.is_some() =>
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Stream);
                 None
             }
             KeyCode::Char('2')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.focused_node.is_some() =>
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Artifacts);
                 None
             }
             KeyCode::Char('3')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.focused_node.is_some() =>
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Attempts);
                 None
             }
             KeyCode::Char('4')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.focused_node.is_some() =>
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Task);
                 None
             }
             KeyCode::Char('5')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.focused_node.is_some() =>
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Review);
                 None
@@ -1075,9 +1096,8 @@ impl DashboardView {
                             }
                             Some(Action::ScrollUp)
                         }
-                        'r'
-                            if !(self.focused_node.is_some()
-                                && self.detail_pane.current_tab == DetailTab::Review) =>
+                        'r' if !(self.focused_node.is_some()
+                            && self.detail_pane.current_tab == DetailTab::Review) =>
                         {
                             Some(Action::JumpToReview)
                         }
@@ -1189,9 +1209,8 @@ impl DashboardView {
                         }
                         Some(Action::ScrollUp)
                     }
-                    'r'
-                        if !(self.focused_node.is_some()
-                            && self.detail_pane.current_tab == DetailTab::Review) =>
+                    'r' if !(self.focused_node.is_some()
+                        && self.detail_pane.current_tab == DetailTab::Review) =>
                     {
                         Some(Action::JumpToReview)
                     }

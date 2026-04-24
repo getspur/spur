@@ -1034,7 +1034,11 @@ fn run_cost_duckdb(
     );
     println!("{}", "-".repeat(70));
     let mut rows: Vec<_> = by_agent.into_iter().collect();
-    rows.sort_by(|a, b| b.1.cost.partial_cmp(&a.1.cost).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.1.cost
+            .partial_cmp(&a.1.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for (agent, a) in rows {
         println!(
             "{:<18} ${:>9.4} {:>10} {:>14} {:>14}",
@@ -1048,11 +1052,7 @@ fn run_cost_duckdb(
     Ok(())
 }
 
-fn parse_range(
-    range: Option<&str>,
-    today: bool,
-    _week: bool,
-) -> Result<spur_context::ReportRange> {
+fn parse_range(range: Option<&str>, today: bool, _week: bool) -> Result<spur_context::ReportRange> {
     use anyhow::Context;
     use chrono::{DateTime, NaiveDate, Utc};
     use spur_context::ReportRange;
@@ -1061,9 +1061,9 @@ fn parse_range(
     // Defaulting to last-7-days matches user expectation for an interactive
     // cost summary; pass --today to recover the prior single-day scope.
     if let Some(s) = range {
-        let (from, to) = s.split_once("..").with_context(|| {
-            format!("invalid --range '{}': expected YYYY-MM-DD..YYYY-MM-DD", s)
-        })?;
+        let (from, to) = s
+            .split_once("..")
+            .with_context(|| format!("invalid --range '{}': expected YYYY-MM-DD..YYYY-MM-DD", s))?;
         let from_date = NaiveDate::parse_from_str(from.trim(), "%Y-%m-%d")
             .with_context(|| format!("invalid --range start date '{}'", from))?;
         let to_date = NaiveDate::parse_from_str(to.trim(), "%Y-%m-%d")
@@ -1076,7 +1076,10 @@ fn parse_range(
             .and_hms_opt(0, 0, 0)
             .context("bad end date conversion")?
             .and_utc();
-        return Ok(ReportRange { from: from_dt, to: to_dt });
+        return Ok(ReportRange {
+            from: from_dt,
+            to: to_dt,
+        });
     }
     if today {
         return Ok(ReportRange::today());

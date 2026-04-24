@@ -360,7 +360,14 @@ fn oversized_drop_count_for_key(events: &[SpurEventBody], key: &DelegationKey) -
         .count()
 }
 
-fn run_scenario(arrivals: &[ArrivalSpec], steps: &[OutcomeStep]) -> (Vec<SpurEventBody>, HashSet<DelegationKey>, HashMap<DelegationKey, usize>) {
+fn run_scenario(
+    arrivals: &[ArrivalSpec],
+    steps: &[OutcomeStep],
+) -> (
+    Vec<SpurEventBody>,
+    HashSet<DelegationKey>,
+    HashMap<DelegationKey, usize>,
+) {
     let sink = Arc::new(RecordingSink::default());
     let session = SessionId("brain-proptest".into());
     let mut scheduler = BrainScheduler::new(Some(session.clone().into()), sink.clone());

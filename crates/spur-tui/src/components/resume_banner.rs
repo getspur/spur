@@ -137,7 +137,11 @@ impl ResumeBanner {
             _ => 1.0,
         };
         // ratatui doesn't support true alpha; simulate with color intensity
-        let fg = if alpha < 0.5 { Color::DarkGray } else { Color::White };
+        let fg = if alpha < 0.5 {
+            Color::DarkGray
+        } else {
+            Color::White
+        };
 
         let line = Line::from(vec![
             Span::styled(" Resumed: ", Style::default().fg(Color::Green)),

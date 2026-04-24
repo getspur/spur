@@ -30,10 +30,14 @@ pub enum LoadState {
     /// Default initial state when SessionDetail is entered via
     /// optimistic navigation from the picker.
     Retiring,
-    Connecting { brain_name: String },
+    Connecting {
+        brain_name: String,
+    },
     Loading,
     Ready,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
 /// Full-screen view of a brain session's ReAct trace with chat input.
@@ -332,9 +336,10 @@ impl SessionDetailView {
     /// this view's session id.
     fn apply_milestone_event(&mut self, event: &SpurEvent) {
         match &event.body {
-            SpurEventBody::BrainConnecting { session, brain_name }
-                if session.0 == self.session_id.0 =>
-            {
+            SpurEventBody::BrainConnecting {
+                session,
+                brain_name,
+            } if session.0 == self.session_id.0 => {
                 self.load_state = LoadState::Connecting {
                     brain_name: brain_name.clone(),
                 };

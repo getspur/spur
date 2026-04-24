@@ -109,7 +109,7 @@ fn render_agentskills(skill: &SkillPayload, target_root: &Path, name_prefix: &st
     let bytes = format!(
         "---\nname: {id}\ndescription: {desc}\n{role_line}---\n{marker}{body}",
         id = id,
-        desc = skill.description,
+        desc = yaml_double_quoted(&skill.description),
         role_line = role_line,
         marker = marker.render(),
         body = body,
@@ -131,7 +131,7 @@ fn render_codex(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
     let bytes = format!(
         "---\nname: {id}\ndescription: {desc}\n---\n{marker}{body}",
         id = id,
-        desc = skill.description,
+        desc = yaml_double_quoted(&skill.description),
         marker = marker.render(),
         body = body,
     )
@@ -150,12 +150,29 @@ fn render_cursor(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
     };
     let bytes = format!(
         "---\ndescription: {desc}\nalwaysApply: true\n---\n{marker}{body}",
-        desc = skill.description,
+        desc = yaml_double_quoted(&skill.description),
         marker = marker.render(),
         body = skill.body,
     )
     .into_bytes();
     RenderedFile { path, bytes }
+}
+
+fn yaml_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Single per-run steering file that points Kiro's default agent at
@@ -219,7 +236,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/repo/.spur/skills/tdd/SKILL.md"),
         );
         let s = std::str::from_utf8(&rf.bytes).unwrap();
-        assert!(s.starts_with("---\nname: tdd\ndescription: Use for TDD\nrole: both\n---\n"));
+        assert!(s.starts_with("---\nname: tdd\ndescription: \"Use for TDD\"\nrole: both\n---\n"));
         assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=tdd sha256="));
         assert!(s.trim_end().ends_with("Write the test first."));
     }
@@ -257,7 +274,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/repo/.codex/skills/spurpower-tdd/SKILL.md"),
         );
         let s = std::str::from_utf8(&rf.bytes).unwrap();
-        assert!(s.starts_with("---\nname: spurpower-tdd\ndescription: Use for TDD\n---\n"));
+        assert!(s.starts_with("---\nname: spurpower-tdd\ndescription: \"Use for TDD\"\n---\n"));
         assert!(
             s.contains("<!-- SPUR-MANAGED v=1 skill=spurpower-tdd sha256="),
             "marker must be present, got: {s:?}",
@@ -275,7 +292,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/repo/.cursor/rules/spurpower-tdd.mdc"),
         );
         let s = std::str::from_utf8(&rf.bytes).unwrap();
-        assert!(s.starts_with("---\ndescription: Use for TDD\nalwaysApply: true\n---\n"));
+        assert!(s.starts_with("---\ndescription: \"Use for TDD\"\nalwaysApply: true\n---\n"));
         assert!(!s.contains("globs:"));
         assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=spurpower-tdd sha256="));
         assert!(s.contains("Write the test first."));

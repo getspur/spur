@@ -51,7 +51,11 @@ fn brain_connecting_roundtrips() {
         session: SessionId("s".to_string()),
         brain_name: "claude-code".into(),
     };
-    let SpurEventBody::BrainConnecting { session, brain_name } = roundtrip(original) else {
+    let SpurEventBody::BrainConnecting {
+        session,
+        brain_name,
+    } = roundtrip(original)
+    else {
         panic!("roundtrip produced wrong variant");
     };
     assert_eq!(session, SessionId("s".to_string()));

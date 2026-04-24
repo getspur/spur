@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use spur_acp::types::SessionId;
 use spur_core::event_funnel::test_channel;
-use spur_core::test_support::{call_shutdown_mcp_server, RetirableMcpServer, MCP_SHUTDOWN_TIMEOUT_MS};
+use spur_core::test_support::{
+    call_shutdown_mcp_server, RetirableMcpServer, MCP_SHUTDOWN_TIMEOUT_MS,
+};
 
 /// Fake MCP server whose `shutdown()` resolves instantly.
 /// Isolates the bug to the `guard.await` line, not `server.shutdown()`.

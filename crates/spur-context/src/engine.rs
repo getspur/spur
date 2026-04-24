@@ -119,15 +119,17 @@ impl AnalyticsEngine {
                 [],
                 |r| {
                     r.get::<_, Option<f64>>(0).map(|v| {
-                        v.map(|secs| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs))
+                        v.map(|secs| {
+                            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs)
+                        })
                     })
                 },
             )
             .unwrap_or(None);
         let fresh = match (max_mtime, loaded_at) {
             (Some(m), Some(l)) => m <= l,
-            (None, Some(_)) => true,   // no files to load
-            _ => false,                 // never loaded or no manifest yet
+            (None, Some(_)) => true, // no files to load
+            _ => false,              // never loaded or no manifest yet
         };
         if fresh {
             let count: i64 = self
@@ -166,9 +168,8 @@ impl AnalyticsEngine {
     /// materialized `events_cache` table. Call after `refresh_cache()`
     /// to make subsequent report queries sub-second.
     pub fn use_cached_events(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "CREATE OR REPLACE VIEW all_events AS SELECT * FROM events_cache;",
-        )?;
+        self.conn
+            .execute_batch("CREATE OR REPLACE VIEW all_events AS SELECT * FROM events_cache;")?;
         // Rebuild all_events_with_cost so its underlying reference
         // resolves to the cache-backed view. The longest-prefix lateral
         // matcher is unchanged — only the backing view differs.
@@ -647,10 +648,7 @@ impl AnalyticsEngine {
     fn extract_opencode_rows(db_path: &Path) -> Result<Vec<OpenCodeRow>> {
         // `mode=ro` + `immutable=1` avoids creating WAL sidecar files and is
         // safe even if the user's opencode process has the DB open for writes.
-        let uri = format!(
-            "file:{}?mode=ro&immutable=1",
-            db_path.to_string_lossy()
-        );
+        let uri = format!("file:{}?mode=ro&immutable=1", db_path.to_string_lossy());
         let conn = rusqlite::Connection::open_with_flags(
             uri,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
@@ -667,9 +665,7 @@ impl AnalyticsEngine {
         )?;
 
         let raw: Vec<(i64, String, String, String)> = stmt
-            .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut out = Vec::with_capacity(raw.len());
@@ -677,10 +673,16 @@ impl AnalyticsEngine {
             let Ok(data) = serde_json::from_str::<serde_json::Value>(&data_json) else {
                 continue;
             };
-            let tokens = data.get("tokens").cloned().unwrap_or(serde_json::Value::Null);
+            let tokens = data
+                .get("tokens")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             let input = tokens.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
             let output = tokens.get("output").and_then(|v| v.as_i64()).unwrap_or(0);
-            let reasoning = tokens.get("reasoning").and_then(|v| v.as_i64()).unwrap_or(0);
+            let reasoning = tokens
+                .get("reasoning")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             let cache_read = tokens
                 .get("cache")
                 .and_then(|c| c.get("read"))
@@ -1696,17 +1698,27 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(rows.len(), 2, "user + zero-token assistant must be filtered");
+        assert_eq!(
+            rows.len(),
+            2,
+            "user + zero-token assistant must be filtered"
+        );
         assert_eq!(rows[0].0, "s1");
         assert_eq!(rows[0].1, "opencode");
         assert_eq!(rows[0].2.as_deref(), Some("z-ai/glm-5.1"));
         assert_eq!(rows[0].3.as_deref(), Some("spur"));
-        assert_eq!((rows[0].4, rows[0].5, rows[0].6, rows[0].7), (7650, 12, 8192, 0));
+        assert_eq!(
+            (rows[0].4, rows[0].5, rows[0].6, rows[0].7),
+            (7650, 12, 8192, 0)
+        );
         assert!((rows[0].8.unwrap() - 0.01289272).abs() < 1e-9);
 
         assert_eq!(rows[1].2.as_deref(), Some("moonshotai/kimi-k2.6"));
         // reasoning folds into output_tokens
-        assert_eq!((rows[1].4, rows[1].5, rows[1].6, rows[1].7), (3000, 600, 0, 1024));
+        assert_eq!(
+            (rows[1].4, rows[1].5, rows[1].6, rows[1].7),
+            (3000, 600, 0, 1024)
+        );
 
         // all_events_with_cost must use data.cost as-is (pass-through, no reprice)
         let total_cost: f64 = engine
@@ -1759,7 +1771,10 @@ mod tests {
             "smoke: rows={} input={:?} output={:?} cost={:?}",
             rows, in_sum, out_sum, cost_sum
         );
-        assert!(rows > 0, "expected at least one opencode row on this dev machine");
+        assert!(
+            rows > 0,
+            "expected at least one opencode row on this dev machine"
+        );
     }
 
     #[test]
