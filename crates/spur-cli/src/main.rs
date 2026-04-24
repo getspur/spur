@@ -38,7 +38,10 @@ fn init_tracing(
             EnvFilter::new(if verbose {
                 "info"
             } else {
-                "warn,spur_acp::agents::defaults=warn"
+                // Silence config-hygiene lints emitted on every invocation;
+                // they fire from spur_acp::registry's lint pass and aren't
+                // actionable from a user-facing subcommand.
+                "warn,spur_acp::agents::defaults=warn,spur_acp::registry=error"
             })
         });
         tracing_subscriber::fmt()
