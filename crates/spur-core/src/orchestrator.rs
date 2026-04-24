@@ -1757,7 +1757,7 @@ impl Orchestrator {
             self.funnel.emit(SpurEventBody::PromptDispatched {
                 session: spur_sid_for_log.clone(),
                 turn_kind: turn_kind.to_string(),
-                continuations_count: continuations_count,
+                continuations_count,
             });
 
             let _turn_guard = TurnGuard::arm(scheduler.turn_flag());
