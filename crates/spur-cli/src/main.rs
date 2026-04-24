@@ -153,7 +153,11 @@ enum Commands {
     },
     /// Show cost summary
     Cost {
-        /// Show weekly breakdown
+        /// Restrict to today only (DuckDB engine). Without --today, --week,
+        /// or --range, the default window is the last 7 days.
+        #[arg(long)]
+        today: bool,
+        /// Show the last 7 days (default for DuckDB engine).
         #[arg(long)]
         week: bool,
         /// Group by dimension
@@ -171,7 +175,7 @@ enum Commands {
         #[arg(long)]
         experimental: bool,
         /// Date range `YYYY-MM-DD..YYYY-MM-DD` (DuckDB engine only;
-        /// overrides --week).
+        /// overrides --today / --week).
         #[arg(long, value_name = "RANGE")]
         range: Option<String>,
     },
@@ -450,6 +454,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Cost {
+            today,
             week,
             by,
             export,
@@ -467,7 +472,7 @@ async fn main() -> Result<()> {
                     eprintln!("      invocation until Phase 2.5 (persistent cache) ships.");
                     std::process::exit(2);
                 }
-                run_cost_duckdb(week, range.as_deref(), export.as_deref())
+                run_cost_duckdb(today, week, range.as_deref(), export.as_deref())
             }
             other => {
                 eprintln!(
@@ -942,7 +947,12 @@ fn run_cost_sqlite(
     Ok(())
 }
 
-fn run_cost_duckdb(week: bool, range: Option<&str>, export: Option<&str>) -> Result<()> {
+fn run_cost_duckdb(
+    today: bool,
+    week: bool,
+    range: Option<&str>,
+    export: Option<&str>,
+) -> Result<()> {
     use chrono::NaiveDate;
     use spur_context::{AnalyticsEngine, Reporter};
 
@@ -973,7 +983,7 @@ fn run_cost_duckdb(week: bool, range: Option<&str>, export: Option<&str>) -> Res
         );
     }
 
-    let range = parse_range(range, week)?;
+    let range = parse_range(range, today, week)?;
     let reporter = Reporter::new(engine);
     let reports = reporter.daily_report(range)?;
 
@@ -1038,11 +1048,18 @@ fn run_cost_duckdb(week: bool, range: Option<&str>, export: Option<&str>) -> Res
     Ok(())
 }
 
-fn parse_range(range: Option<&str>, week: bool) -> Result<spur_context::ReportRange> {
+fn parse_range(
+    range: Option<&str>,
+    today: bool,
+    _week: bool,
+) -> Result<spur_context::ReportRange> {
     use anyhow::Context;
     use chrono::{DateTime, NaiveDate, Utc};
     use spur_context::ReportRange;
 
+    // Precedence: explicit --range > --today > (--week or default) = last 7 days.
+    // Defaulting to last-7-days matches user expectation for an interactive
+    // cost summary; pass --today to recover the prior single-day scope.
     if let Some(s) = range {
         let (from, to) = s.split_once("..").with_context(|| {
             format!("invalid --range '{}': expected YYYY-MM-DD..YYYY-MM-DD", s)
@@ -1061,9 +1078,8 @@ fn parse_range(range: Option<&str>, week: bool) -> Result<spur_context::ReportRa
             .and_utc();
         return Ok(ReportRange { from: from_dt, to: to_dt });
     }
-    Ok(if week {
-        ReportRange::last_days(7)
-    } else {
-        ReportRange::today()
-    })
+    if today {
+        return Ok(ReportRange::today());
+    }
+    Ok(ReportRange::last_days(7))
 }
