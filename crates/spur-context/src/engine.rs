@@ -58,6 +58,126 @@ impl AnalyticsEngine {
         Ok(())
     }
 
+    // ─── Phase 2.5: persistent cache / incremental refresh ─────────────
+
+    /// Refresh `events_cache` if any agent JSONL file is newer than the
+    /// last-recorded load time. Returns the number of rows materialized
+    /// (zero if the cache was up-to-date).
+    ///
+    /// Staleness detection is coarse: if the newest mtime across the
+    /// discovered directories exceeds any agent's `loaded_at` in
+    /// `scan_manifest`, the entire cache is rebuilt. This keeps the
+    /// implementation simple; per-file incremental refresh can be added
+    /// as a future refinement.
+    pub fn refresh_cache(&self) -> Result<i64> {
+        use std::time::SystemTime;
+        let max_mtime = Self::newest_agent_mtime();
+        let loaded_at: Option<SystemTime> = self
+            .conn
+            .query_row(
+                "SELECT epoch(MIN(loaded_at))::DOUBLE FROM scan_manifest",
+                [],
+                |r| {
+                    r.get::<_, Option<f64>>(0).map(|v| {
+                        v.map(|secs| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs))
+                    })
+                },
+            )
+            .unwrap_or(None);
+        let fresh = match (max_mtime, loaded_at) {
+            (Some(m), Some(l)) => m <= l,
+            (None, Some(_)) => true,   // no files to load
+            _ => false,                 // never loaded or no manifest yet
+        };
+        if fresh {
+            let count: i64 = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM events_cache", [], |r| r.get(0))
+                .unwrap_or(0);
+            tracing::debug!("events_cache is fresh ({} rows)", count);
+            return Ok(0);
+        }
+
+        // Stale — TRUNCATE + INSERT.
+        self.conn.execute_batch(
+            r#"
+            DELETE FROM events_cache;
+            INSERT INTO events_cache
+              SELECT timestamp, session_id, agent, model, project,
+                     input_tokens, output_tokens, cache_read_tokens,
+                     cache_creation_tokens, cost_usd
+              FROM all_events;
+            DELETE FROM scan_manifest;
+            "#,
+        )?;
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM events_cache", [], |r| r.get(0))?;
+        self.conn.execute(
+            "INSERT INTO scan_manifest (agent, loaded_at, row_count)
+             SELECT agent, now(), COUNT(*) FROM events_cache GROUP BY agent",
+            [],
+        )?;
+        tracing::debug!("materialized {} rows into events_cache", total);
+        Ok(total)
+    }
+
+    /// Point `all_events` (and thus `all_events_with_cost`) at the
+    /// materialized `events_cache` table. Call after `refresh_cache()`
+    /// to make subsequent report queries sub-second.
+    pub fn use_cached_events(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE OR REPLACE VIEW all_events AS SELECT * FROM events_cache;",
+        )?;
+        // Rebuild all_events_with_cost so its underlying reference
+        // resolves to the cache-backed view. The JOIN against pricing
+        // is unchanged.
+        self.conn.execute_batch(
+            r#"
+            CREATE OR REPLACE VIEW all_events_with_cost AS
+            SELECT
+                e.*,
+                COALESCE(
+                    e.cost_usd,
+                    (e.input_tokens * p.input_price_per_1m / 1000000.0)
+                    + (e.output_tokens * p.output_price_per_1m / 1000000.0)
+                    + (e.cache_read_tokens * p.cache_read_price_per_1m / 1000000.0)
+                    + (e.cache_creation_tokens * p.cache_creation_price_per_1m / 1000000.0)
+                ) AS computed_cost_usd
+            FROM all_events e
+            LEFT JOIN pricing p
+                ON lower(e.model) = lower(p.model)
+                AND e.timestamp >= p.effective_from
+                AND (p.effective_to IS NULL OR e.timestamp < p.effective_to);
+            "#,
+        )?;
+        tracing::debug!("all_events view now backed by events_cache table");
+        Ok(())
+    }
+
+    fn newest_agent_mtime() -> Option<std::time::SystemTime> {
+        let mut newest: Option<std::time::SystemTime> = None;
+        for dir in [
+            Self::discover_claude_dir(),
+            Self::discover_codex_dir(),
+            Self::discover_kiro_dir(),
+        ] {
+            if let Ok(files) = Self::find_jsonl_files(&dir) {
+                for f in files {
+                    if let Ok(meta) = std::fs::metadata(&f) {
+                        if let Ok(m) = meta.modified() {
+                            newest = Some(match newest {
+                                Some(cur) if cur >= m => cur,
+                                _ => m,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        newest
+    }
+
     /// Create agent convert views by discovering agent data directories.
     ///
     /// For each agent, checks whether its data directory exists.

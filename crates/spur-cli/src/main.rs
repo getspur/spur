@@ -946,15 +946,32 @@ fn run_cost_duckdb(week: bool, range: Option<&str>, export: Option<&str>) -> Res
     use chrono::NaiveDate;
     use spur_context::{AnalyticsEngine, Reporter};
 
-    eprintln!(
-        "[spur] --engine duckdb is experimental: rescans all agent JSONL \
-         per invocation (Phase 2.5 will add a persistent cache)."
-    );
+    // Phase 2.5: use a persistent cache under ~/.spur/cache/cost.duckdb so
+    // warm invocations are sub-second. Cold first run still scans all JSONL.
+    let cache_dir = directories::BaseDirs::new()
+        .map(|b| b.home_dir().join(".spur").join("cache"))
+        .unwrap_or_else(|| PathBuf::from(".spur/cache"));
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = cache_dir.join("cost.duckdb");
 
-    let engine = AnalyticsEngine::open_in_memory()?;
+    let engine = AnalyticsEngine::open(&cache_path)?;
     engine.initialize()?;
     let status = engine.create_agent_views()?;
     engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;
+    let materialized = engine.refresh_cache()?;
+    engine.use_cached_events()?;
+    if materialized > 0 {
+        eprintln!(
+            "[spur] materialized {} rows into cache at {}",
+            materialized,
+            cache_path.display()
+        );
+    } else {
+        eprintln!(
+            "[spur] cache at {} is up-to-date (no JSONL files newer than last refresh)",
+            cache_path.display()
+        );
+    }
 
     let range = parse_range(range, week)?;
     let reporter = Reporter::new(engine);
