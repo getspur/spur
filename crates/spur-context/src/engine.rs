@@ -247,8 +247,14 @@ impl AnalyticsEngine {
     }
 
     fn discover_claude_dir() -> PathBuf {
+        // Probe in order: $CLAUDE_CONFIG_DIR → ~/.claude/projects → ~/.config/claude/projects.
+        // First existing directory wins. Real Claude Code writes to ~/.claude/projects;
+        // the XDG-style path is an older convention kept as a last-resort fallback.
         if let Ok(path) = env::var("CLAUDE_CONFIG_DIR") {
-            return PathBuf::from(path);
+            let p = PathBuf::from(path);
+            if p.is_dir() {
+                return p;
+            }
         }
         #[cfg(test)]
         {
@@ -256,9 +262,21 @@ impl AnalyticsEngine {
         }
         #[cfg(not(test))]
         {
-            directories::BaseDirs::new()
-                .map(|b| b.home_dir().join(".config/claude/projects"))
-                .unwrap_or_else(|| PathBuf::from("~/.config/claude/projects"))
+            let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+            if let Some(h) = home.as_ref() {
+                let native = h.join(".claude/projects");
+                if native.is_dir() {
+                    return native;
+                }
+                let xdg = h.join(".config/claude/projects");
+                if xdg.is_dir() {
+                    return xdg;
+                }
+                // Nothing exists — return the native-convention path so downstream
+                // has_jsonl_files() returns false and a stub view is created.
+                return native;
+            }
+            PathBuf::from("~/.claude/projects")
         }
     }
 
@@ -349,7 +367,8 @@ impl AnalyticsEngine {
                 TRY_CAST(json_extract(line, '$.message.usage.cache_creation_input_tokens') AS BIGINT) AS cache_creation_tokens,
                 TRY_CAST(json_extract(line, '$.costUSD') AS DOUBLE) AS cost_usd
              FROM claude_raw
-             WHERE json_extract_string(line, '$.type') = 'assistant';"#,
+             WHERE json_valid(line)
+               AND json_extract_string(line, '$.type') = 'assistant';"#,
             pattern
         );
         self.conn
@@ -394,7 +413,8 @@ impl AnalyticsEngine {
                 TRY_CAST(json_extract(line, '$.payload.info.total_token_usage.output_tokens') AS BIGINT) AS tot_out,
                 TRY_CAST(json_extract(line, '$.payload.info.total_token_usage.cached_input_tokens') AS BIGINT) AS tot_cached,
                 filename
-             FROM codex_raw;
+             FROM codex_raw
+             WHERE json_valid(line);
 
              CREATE OR REPLACE VIEW codex_events AS
              WITH with_carried_model AS (
