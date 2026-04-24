@@ -56,7 +56,11 @@ rmcp = { version = "1.4", features = [
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
-duckdb = { version = "1.10502.0" }
+# `bundled` makes duckdb-rs compile libduckdb from source and link it
+# statically. This drops the runtime `libduckdb.dylib` dependency and lets
+# `cargo install --path crates/spur-cli` work without any system package.
+# Cost: a cold release build of duckdb ~4 minutes on macOS.
+duckdb = { version = "1.10502.0", features = ["bundled"] }
 
 # Logging
 tracing = "0.1"
