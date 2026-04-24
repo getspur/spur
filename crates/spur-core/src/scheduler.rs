@@ -219,7 +219,7 @@ impl BrainScheduler {
                     .first()
                     .map(|item| item.continuation.brain_session.clone())
             })
-            .unwrap_or_else(SessionId::new);
+            .unwrap_or_default();
 
         let mut valid_delivered = HashSet::new();
         let mut valid_dropped = HashMap::new();
@@ -377,7 +377,7 @@ impl BrainScheduler {
                     .first()
                     .map(|item| item.continuation.brain_session.clone())
             })
-            .unwrap_or_else(SessionId::new);
+            .unwrap_or_default();
         let mut valid_dropped = HashMap::new();
         let mut dropped_seen = HashSet::new();
 
@@ -516,12 +516,8 @@ impl BrainScheduler {
     }
 
     fn drain_requeue_channel(&mut self) {
-        loop {
-            match self.requeue_rx.try_recv() {
-                Ok(command) => self.apply_requeue_command(command),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-            }
+        while let Ok(command) = self.requeue_rx.try_recv() {
+            self.apply_requeue_command(command);
         }
     }
 
@@ -631,6 +627,10 @@ impl DrainedBatch {
 
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
     pub(crate) fn into_items(mut self) -> Vec<PendingContinuation> {

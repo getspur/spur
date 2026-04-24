@@ -318,7 +318,7 @@ fn drop_counts(events: &[SpurEventBody]) -> HashMap<DelegationKey, usize> {
         {
             *counts
                 .entry(DelegationKey {
-                    delegation_id: delegation_id.clone().into(),
+                    delegation_id: delegation_id.clone(),
                     attempt: *attempt,
                 })
                 .or_default() += 1;
