@@ -44,6 +44,11 @@ WHERE FALSE;
 CREATE OR REPLACE VIEW all_events_with_cost AS
 SELECT
     e.*,
+    CASE
+        WHEN e.cost_usd IS NOT NULL THEN 'native'
+        WHEN p.model IS NOT NULL THEN 'priced'
+        ELSE 'unpriced'
+    END AS cost_source,
     COALESCE(
         e.cost_usd,
         (e.input_tokens * p.input_price_per_1m / 1000000.0)
