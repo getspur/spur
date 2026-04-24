@@ -262,6 +262,24 @@ impl AnalyticsEngine {
             tracing::debug!("created empty kiro_events stub");
         }
 
+        // ─── OpenCode ───────────────────────────────────────────
+        let opencode_db = Self::discover_opencode_db();
+        if Self::has_opencode_db(&opencode_db) {
+            match self.create_opencode_view(&opencode_db) {
+                Ok(()) => {
+                    status.opencode = true;
+                    tracing::debug!(db = %opencode_db.display(), "created opencode_events view");
+                }
+                Err(e) => {
+                    tracing::warn!(db = %opencode_db.display(), error = %e, "failed to create opencode_events view, using stub");
+                    self.create_empty_stub("opencode_events")?;
+                }
+            }
+        } else {
+            self.create_empty_stub("opencode_events")?;
+            tracing::debug!("created empty opencode_events stub");
+        }
+
         // ─── Rebuild unified views ─────────────────────────────
         self.rebuild_unified_views()?;
 
@@ -502,6 +520,211 @@ impl AnalyticsEngine {
         self.create_empty_stub("kiro_events")
     }
 
+    /// Discover the OpenCode SQLite database path.
+    ///
+    /// Probe order: `$OPENCODE_DATA_DIR/opencode.db` → XDG `~/.local/share/opencode/opencode.db`.
+    /// Returns the path even if the file doesn't exist so `has_opencode_db()` can
+    /// discriminate; callers must check existence before opening.
+    fn discover_opencode_db() -> PathBuf {
+        if let Ok(path) = env::var("OPENCODE_DATA_DIR") {
+            let p = PathBuf::from(path);
+            // Allow either a directory containing opencode.db or the db path itself.
+            if p.is_file() {
+                return p;
+            }
+            return p.join("opencode.db");
+        }
+        #[cfg(test)]
+        {
+            PathBuf::from("__spur_context_test_missing__/opencode.db")
+        }
+        #[cfg(not(test))]
+        {
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".local/share/opencode/opencode.db"))
+                .unwrap_or_else(|| PathBuf::from("~/.local/share/opencode/opencode.db"))
+        }
+    }
+
+    fn has_opencode_db(path: &Path) -> bool {
+        path.is_file()
+    }
+
+    /// Populate `opencode_events` by extracting assistant messages from the
+    /// OpenCode SQLite database.
+    ///
+    /// Unlike JSONL-based agents, OpenCode stores sessions in SQLite (Drizzle
+    /// ORM). We use `rusqlite` to read rows and push them into a DuckDB
+    /// materialized table via the appender API, then expose it as a view.
+    /// Cost is passed through verbatim — OpenCode computes it from the
+    /// upstream provider's `usage` block per response and that value is
+    /// authoritative; we do NOT re-apply pricing.
+    ///
+    /// Rows with all-zero token fields (typically failed API calls) are
+    /// skipped to match the semantics of `codex_events`.
+    fn create_opencode_view(&self, db_path: &Path) -> Result<()> {
+        // Fresh materialized table — drop any prior contents so re-runs are
+        // idempotent and the view reflects current DB state.
+        // Underlying table stores timestamp as BIGINT milliseconds-since-epoch
+        // because the DuckDB appender doesn't accept a raw i64 into a TIMESTAMP
+        // column. The exposed view casts it back to a proper TIMESTAMP so the
+        // UNION in `all_events` stays type-compatible.
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS opencode_events_table;
+            CREATE TABLE opencode_events_table (
+                timestamp_ms          BIGINT,
+                session_id            VARCHAR,
+                agent                 VARCHAR,
+                model                 VARCHAR,
+                project               VARCHAR,
+                input_tokens          BIGINT,
+                output_tokens         BIGINT,
+                cache_read_tokens     BIGINT,
+                cache_creation_tokens BIGINT,
+                cost_usd              DOUBLE
+            );
+            "#,
+        )?;
+
+        let rows = Self::extract_opencode_rows(db_path)
+            .with_context(|| format!("failed to read opencode db at {}", db_path.display()))?;
+
+        if !rows.is_empty() {
+            let mut appender = self
+                .conn
+                .appender("opencode_events_table")
+                .context("failed to open opencode_events_table appender")?;
+            for r in &rows {
+                appender
+                    .append_row(params![
+                        r.timestamp_ms,
+                        r.session_id,
+                        "opencode",
+                        r.model,
+                        r.project,
+                        r.input_tokens,
+                        r.output_tokens,
+                        r.cache_read_tokens,
+                        r.cache_creation_tokens,
+                        r.cost_usd,
+                    ])
+                    .context("failed to append opencode row")?;
+            }
+            appender
+                .flush()
+                .context("failed to flush opencode appender")?;
+        }
+
+        // Expose as a view with an explicit TIMESTAMP cast so the UNION in
+        // `all_events` is type-compatible with the other agents.
+        self.conn.execute_batch(
+            r#"
+            CREATE OR REPLACE VIEW opencode_events AS
+            SELECT
+                epoch_ms(timestamp_ms) AS timestamp,
+                session_id,
+                agent,
+                model,
+                project,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd
+            FROM opencode_events_table;
+            "#,
+        )?;
+
+        tracing::debug!(
+            path = %db_path.display(),
+            rows = rows.len(),
+            "populated opencode_events"
+        );
+        Ok(())
+    }
+
+    fn extract_opencode_rows(db_path: &Path) -> Result<Vec<OpenCodeRow>> {
+        // `mode=ro` + `immutable=1` avoids creating WAL sidecar files and is
+        // safe even if the user's opencode process has the DB open for writes.
+        let uri = format!(
+            "file:{}?mode=ro&immutable=1",
+            db_path.to_string_lossy()
+        );
+        let conn = rusqlite::Connection::open_with_flags(
+            uri,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT m.time_created, m.session_id, p.worktree, m.data
+            FROM message m
+            JOIN session s ON s.id = m.session_id
+            JOIN project p ON p.id = s.project_id
+            WHERE json_extract(m.data, '$.role') = 'assistant'
+            "#,
+        )?;
+
+        let raw: Vec<(i64, String, String, String)> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut out = Vec::with_capacity(raw.len());
+        for (ts_ms, session_id, worktree, data_json) in raw {
+            let Ok(data) = serde_json::from_str::<serde_json::Value>(&data_json) else {
+                continue;
+            };
+            let tokens = data.get("tokens").cloned().unwrap_or(serde_json::Value::Null);
+            let input = tokens.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
+            let output = tokens.get("output").and_then(|v| v.as_i64()).unwrap_or(0);
+            let reasoning = tokens.get("reasoning").and_then(|v| v.as_i64()).unwrap_or(0);
+            let cache_read = tokens
+                .get("cache")
+                .and_then(|c| c.get("read"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let cache_write = tokens
+                .get("cache")
+                .and_then(|c| c.get("write"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+
+            // Skip all-zero rows — typically failed API calls with an error
+            // payload and no real usage.
+            if input == 0 && output == 0 && reasoning == 0 && cache_read == 0 && cache_write == 0 {
+                continue;
+            }
+
+            let model = data
+                .get("modelID")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let cost = data.get("cost").and_then(|v| v.as_f64());
+            let project = std::path::Path::new(&worktree)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string());
+
+            out.push(OpenCodeRow {
+                timestamp_ms: ts_ms,
+                session_id,
+                model,
+                project,
+                input_tokens: input,
+                // Reasoning tokens are billed as output by OpenRouter / most
+                // upstream providers; fold them in to match that accounting.
+                output_tokens: output + reasoning,
+                cache_read_tokens: cache_read,
+                cache_creation_tokens: cache_write,
+                cost_usd: cost,
+            });
+        }
+        Ok(out)
+    }
+
     fn create_empty_stub(&self, view_name: &str) -> Result<()> {
         let sql = format!(
             "CREATE OR REPLACE VIEW {} AS \
@@ -534,7 +757,9 @@ impl AnalyticsEngine {
             UNION ALL
             SELECT * FROM codex_events
             UNION ALL
-            SELECT * FROM kiro_events;
+            SELECT * FROM kiro_events
+            UNION ALL
+            SELECT * FROM opencode_events;
 
             {}
             "#,
@@ -1153,6 +1378,22 @@ pub struct AgentViewStatus {
     pub claude: bool,
     pub codex: bool,
     pub kiro: bool,
+    pub opencode: bool,
+}
+
+/// Intermediate row shape used when copying OpenCode messages from SQLite
+/// into DuckDB via the appender. Not part of the public API.
+#[derive(Debug)]
+struct OpenCodeRow {
+    timestamp_ms: i64,
+    session_id: String,
+    model: Option<String>,
+    project: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_creation_tokens: i64,
+    cost_usd: Option<f64>,
 }
 
 /// Live session block row for recent activity.
@@ -1329,6 +1570,196 @@ mod tests {
         assert_eq!(rows[1].0, "codex-session");
         assert_eq!(rows[1].1.as_deref(), Some("gpt-5"));
         assert_eq!((rows[1].2, rows[1].3, rows[1].4), (1000, 300, 100));
+    }
+
+    #[test]
+    fn test_opencode_events_from_sqlite_fixture() {
+        // Build a miniature opencode.db mirroring the real Drizzle schema
+        // (columns narrowed to what our extractor reads).
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("opencode.db");
+        {
+            let sconn = rusqlite::Connection::open(&db_path).unwrap();
+            sconn
+                .execute_batch(
+                    r#"
+                    CREATE TABLE project (
+                        id TEXT PRIMARY KEY,
+                        worktree TEXT NOT NULL,
+                        name TEXT,
+                        time_created INTEGER NOT NULL,
+                        time_updated INTEGER NOT NULL,
+                        sandboxes TEXT NOT NULL
+                    );
+                    CREATE TABLE session (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL,
+                        directory TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        version TEXT NOT NULL,
+                        time_created INTEGER NOT NULL,
+                        time_updated INTEGER NOT NULL
+                    );
+                    CREATE TABLE message (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        time_created INTEGER NOT NULL,
+                        time_updated INTEGER NOT NULL,
+                        data TEXT NOT NULL
+                    );
+                    "#,
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO project VALUES ('p1', '/Volumes/Projects/spur', 'spur', 1, 1, '[]')",
+                    [],
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO session VALUES ('s1', 'p1', '/Volumes/Projects/spur', 't', 'v1', 1, 1)",
+                    [],
+                )
+                .unwrap();
+            // Two real assistant turns with nonzero cost + one zero-token turn
+            // that the extractor must filter out (matches opencode's failed-call shape).
+            let m1 = r#"{"role":"assistant","cost":0.01289272,"tokens":{"input":7650,"output":12,"reasoning":0,"cache":{"read":8192,"write":0}},"modelID":"z-ai/glm-5.1","providerID":"openrouter"}"#;
+            let m2 = r#"{"role":"assistant","cost":0.0245,"tokens":{"input":3000,"output":500,"reasoning":100,"cache":{"read":0,"write":1024}},"modelID":"moonshotai/kimi-k2.6","providerID":"openrouter"}"#;
+            let m_empty = r#"{"role":"assistant","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"z-ai/glm-5.1","providerID":"openrouter"}"#;
+            let m_user = r#"{"role":"user"}"#;
+            let base_ms: i64 = 1776580000000; // any realistic unix-ms value
+            sconn
+                .execute(
+                    "INSERT INTO message VALUES ('m1','s1',?1,?1,?2)",
+                    rusqlite::params![base_ms, m1],
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO message VALUES ('m2','s1',?1,?1,?2)",
+                    rusqlite::params![base_ms + 60_000, m2],
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO message VALUES ('m3','s1',?1,?1,?2)",
+                    rusqlite::params![base_ms + 120_000, m_empty],
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO message VALUES ('m4','s1',?1,?1,?2)",
+                    rusqlite::params![base_ms + 180_000, m_user],
+                )
+                .unwrap();
+        }
+
+        let engine = setup_engine();
+        engine.create_opencode_view(&db_path).unwrap();
+
+        let mut stmt = engine
+            .conn
+            .prepare(
+                "SELECT session_id, agent, model, project, \
+                        input_tokens, output_tokens, cache_read_tokens, \
+                        cache_creation_tokens, cost_usd \
+                 FROM opencode_events ORDER BY timestamp",
+            )
+            .unwrap();
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<f64>,
+        )> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 2, "user + zero-token assistant must be filtered");
+        assert_eq!(rows[0].0, "s1");
+        assert_eq!(rows[0].1, "opencode");
+        assert_eq!(rows[0].2.as_deref(), Some("z-ai/glm-5.1"));
+        assert_eq!(rows[0].3.as_deref(), Some("spur"));
+        assert_eq!((rows[0].4, rows[0].5, rows[0].6, rows[0].7), (7650, 12, 8192, 0));
+        assert!((rows[0].8.unwrap() - 0.01289272).abs() < 1e-9);
+
+        assert_eq!(rows[1].2.as_deref(), Some("moonshotai/kimi-k2.6"));
+        // reasoning folds into output_tokens
+        assert_eq!((rows[1].4, rows[1].5, rows[1].6, rows[1].7), (3000, 600, 0, 1024));
+
+        // all_events_with_cost must use data.cost as-is (pass-through, no reprice)
+        let total_cost: f64 = engine
+            .conn
+            .query_row(
+                "SELECT SUM(computed_cost_usd) FROM all_events_with_cost WHERE agent='opencode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!((total_cost - (0.01289272 + 0.0245)).abs() < 1e-9);
+    }
+
+    /// Smoke test against the developer's real `~/.local/share/opencode/opencode.db`.
+    ///
+    /// Ignored by default — run with `cargo test -p spur-context --lib
+    /// smoke_opencode_real_db -- --ignored --nocapture` on a machine that
+    /// actually uses OpenCode.
+    #[test]
+    #[ignore]
+    fn smoke_opencode_real_db() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            eprintln!("HOME unset; skipping");
+            return;
+        };
+        let db = home.join(".local/share/opencode/opencode.db");
+        if !db.is_file() {
+            eprintln!("no opencode db at {}; skipping", db.display());
+            return;
+        }
+
+        let engine = AnalyticsEngine::open_in_memory().unwrap();
+        engine.initialize().unwrap();
+        engine
+            .load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())
+            .unwrap();
+        engine.create_opencode_view(&db).unwrap();
+
+        let (rows, in_sum, out_sum, cost_sum): (i64, Option<i64>, Option<i64>, Option<f64>) =
+            engine
+                .conn
+                .query_row(
+                    "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cost_usd) \
+                     FROM opencode_events",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+        eprintln!(
+            "smoke: rows={} input={:?} output={:?} cost={:?}",
+            rows, in_sum, out_sum, cost_sum
+        );
+        assert!(rows > 0, "expected at least one opencode row on this dev machine");
     }
 
     #[test]
