@@ -3,7 +3,7 @@
 > **STATUS UPDATE (2026-04-25):** Superseded as primary by
 > [`2026-04-25-brain-continuation-artifact-store-design.md`](2026-04-25-brain-continuation-artifact-store-design.md).
 > The truncation ladder defined here survives as the artifact-write-failure
-> fallback path, referenced from §7.5 of the superseding spec.
+> fallback path, referenced from §7.7 of the superseding spec.
 > Original status retained below for review-history continuity.
 
 - **Date:** 2026-04-24
