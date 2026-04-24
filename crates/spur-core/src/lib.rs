@@ -24,6 +24,7 @@ pub use lineage::{
     Attempt, AttemptStatus, ExecutorId, ExecutorLineage, ExecutorNode, ReviewRequest,
     WorkerStreamEntry, WorkerStreamKind,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use orchestrator::test_support;
 pub use orchestrator::{
     review_dispatcher_loop, BrainSession, InteractiveInput, Orchestrator, RunOpts, RunResult,
