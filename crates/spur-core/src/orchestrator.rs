@@ -301,7 +301,10 @@ fn take_rendered_batch(
 
 fn dropped_terminal_from_render_outcome(
     outcome: &crate::continuation_bridge::RenderOutcome,
-) -> Vec<(spur_acp::domain::DelegationKey, spur_acp::domain::DropReason)> {
+) -> Vec<(
+    spur_acp::domain::DelegationKey,
+    spur_acp::domain::DropReason,
+)> {
     outcome
         .dropped_oversized
         .iter()

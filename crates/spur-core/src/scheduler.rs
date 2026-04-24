@@ -132,7 +132,10 @@ impl BrainScheduler {
     pub fn push_continuation(&mut self, c: BrainContinuation) {
         let key = DelegationKey::from(&c);
 
-        if self.active_session.as_ref().map(BrainSessionId::as_session_id)
+        if self
+            .active_session
+            .as_ref()
+            .map(BrainSessionId::as_session_id)
             != Some(&c.brain_session)
         {
             tracing::debug!(
@@ -1392,7 +1395,10 @@ mod tests {
 
         assert_eq!(scheduler.pending_continuation_len(), 0);
         assert!(overflow.try_lock().unwrap().is_empty());
-        assert_eq!(scheduler.active_session, Some(BrainSessionId::from(new_session)));
+        assert_eq!(
+            scheduler.active_session,
+            Some(BrainSessionId::from(new_session))
+        );
 
         let events = sink.snapshot();
         assert_eq!(events.len(), 4);

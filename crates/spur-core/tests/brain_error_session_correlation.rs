@@ -47,8 +47,7 @@ use tokio::sync::mpsc;
 ///
 /// `run_interactive` is spawned as a background task; it will terminate
 /// when the ingress sender is dropped.
-fn build_orchestrator_with_failing_connect()
--> (
+fn build_orchestrator_with_failing_connect() -> (
     mpsc::Sender<InteractiveInput>,
     tokio::sync::broadcast::Receiver<spur_acp::domain::events::SpurEvent>,
 ) {
@@ -71,9 +70,8 @@ fn build_orchestrator_with_failing_connect()
     tokio::spawn(async move {
         let _ = orch
             .run_interactive(
-                input_rx,
-                None,          // brain_override: use config default
-                None,          // permission_tx
+                input_rx, None, // brain_override: use config default
+                None, // permission_tx
                 overflow,
             )
             .await;

@@ -185,6 +185,72 @@ fn override_body_flows_into_every_adapter() {
 }
 
 #[test]
+fn folded_override_description_renders_valid_codex_frontmatter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let override_dir = tmp.path().join(".spur/skills/my-skill");
+    std::fs::create_dir_all(&override_dir).unwrap();
+    std::fs::write(
+        override_dir.join("SKILL.md"),
+        "---\nname: my-skill\ndescription: >\n  First sentence.\n  Second sentence.\nrole: both\n---\nMY OVERRIDE BODY\n",
+    )
+    .unwrap();
+
+    run(tmp.path()).unwrap();
+
+    let codex_skill =
+        std::fs::read_to_string(tmp.path().join(".codex/skills/spurpower-my-skill/SKILL.md"))
+            .unwrap();
+    assert!(
+        codex_skill.starts_with(
+            "---\nname: spurpower-my-skill\ndescription: \"First sentence. Second sentence.\"\n---\n"
+        ),
+        "unexpected Codex frontmatter:\n{codex_skill}"
+    );
+}
+
+#[test]
+fn stale_managed_worker_adapter_file_for_brain_skill_is_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stale_path = tmp
+        .path()
+        .join(".codex/skills/spurpower-brain-delegation-codex/SKILL.md");
+    std::fs::create_dir_all(stale_path.parent().unwrap()).unwrap();
+    let body = "# Codex — Brain Role\n\n\
+                ## Constraint\n\n\
+                - Your context window is limited. Delegate early and aggressively.\n\
+                - Prefer `delegate_parallel` when subtasks are independent — do not\n\
+                  serialize what can run concurrently.\n\
+                - Keep your own work to investigation and review; delegate implementation.\n\
+                \n\
+                ## Routing self-awareness\n";
+    let hash = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(body.as_bytes());
+        format!("{digest:x}")
+    };
+    std::fs::write(
+        &stale_path,
+        format!(
+            "---\nname: spurpower-brain-delegation-codex\ndescription: >\n---\n\
+             <!-- SPUR-MANAGED v=1 skill=spurpower-brain-delegation-codex sha256={hash} -->\n\
+             {body}"
+        ),
+    )
+    .unwrap();
+
+    let summary = run(tmp.path()).unwrap();
+
+    assert!(
+        !stale_path.exists(),
+        "stale brain-only worker adapter file should be removed"
+    );
+    assert!(
+        summary.removed.contains(&stale_path),
+        "removed file should be reported in summary"
+    );
+}
+
+#[test]
 fn cross_version_upgrade_updates_unedited_files() {
     let tmp = tempfile::tempdir().unwrap();
     run(tmp.path()).unwrap();
