@@ -1,7 +1,13 @@
 # Brain continuation — producer envelope fit design (Plan-4)
 
+> **STATUS UPDATE (2026-04-25):** Superseded as primary by
+> [`2026-04-25-brain-continuation-artifact-store-design.md`](2026-04-25-brain-continuation-artifact-store-design.md).
+> The truncation ladder defined here survives as the artifact-write-failure
+> fallback path, referenced from §7.5 of the superseding spec.
+> Original status retained below for review-history continuity.
+
 - **Date:** 2026-04-24
-- **Status:** Draft (ready for human review)
+- **Status:** Superseded (truncation ladder retained as fallback)
 - **Authors:** Kevin Truong (kevin.truong.ds@gmail.com), with Claude Opus 4.6 as design pair
 - **Reviewers:** codex (rounds 1–2), kimi (round 3) — see `docs/rca/log.md`
 - **Supersedes / extends:** `docs/superpowers/specs/2026-04-24-brain-continuation-delivery-guarantees.md` (v3.1, merge `6b1e6980`)
