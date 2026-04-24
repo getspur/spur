@@ -996,6 +996,7 @@ impl Orchestrator {
         let mut brain: Option<BrainSession> = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
             None, // active_session set when first brain spawns
+            Arc::new(self.funnel.clone()),
         );
         // Pre-connected (initialized) agent connection, ready for create_brain_session
         // or load_brain_session without re-running connect_brain.
@@ -1048,10 +1049,22 @@ impl Orchestrator {
             let action = scheduler.next(now);
 
             // ── (c) Idle: recv next input and dispatch immediately ───────
-            if matches!(action, crate::scheduler::ScheduledAction::Idle) {
-                let raw = match user_input_rx.recv().await {
-                    Some(i) => i,
-                    None => break, // channel closed — shutdown
+            if let crate::scheduler::ScheduledAction::IdleUntil { deadline } = action {
+                let raw = match deadline {
+                    Some(deadline) => {
+                        let deadline = tokio::time::Instant::from_std(deadline);
+                        tokio::select! {
+                            maybe = user_input_rx.recv() => match maybe {
+                                Some(input) => input,
+                                None => break,
+                            },
+                            _ = tokio::time::sleep_until(deadline) => continue,
+                        }
+                    }
+                    None => match user_input_rx.recv().await {
+                        Some(i) => i,
+                        None => break, // channel closed — shutdown
+                    },
                 };
 
                 match raw {
@@ -1114,14 +1127,7 @@ impl Orchestrator {
                             spur_acp::domain::events::BrainRetireReason::UserClear,
                         )
                         .await;
-                        let evicted = scheduler.note_session_swap(None);
-                        for c in evicted {
-                            self.funnel.emit(SpurEventBody::ContinuationDropped {
-                                delegation_id: c.delegation_id.into(),
-                                reason:
-                                    spur_acp::domain::events::ContinuationDropReason::SessionSwap,
-                            });
-                        }
+                        scheduler.note_session_swap(None, &overflow_continuations);
                         if blocks.is_empty() {
                             info!("NewSessionWithMessage with empty blocks — spawn deferred to next Message");
                         } else {
@@ -1189,14 +1195,7 @@ impl Orchestrator {
                         )
                         .await;
                         // Evict stale continuations targeting the prior brain session.
-                        let evicted = scheduler.note_session_swap(None);
-                        for c in evicted {
-                            self.funnel.emit(SpurEventBody::ContinuationDropped {
-                                delegation_id: c.delegation_id.into(),
-                                reason:
-                                    spur_acp::domain::events::ContinuationDropReason::SessionSwap,
-                            });
-                        }
+                        scheduler.note_session_swap(None, &overflow_continuations);
 
                         let (connection, brain_name) = match agent_connection.take() {
                             Some(existing) => existing,
@@ -1263,9 +1262,10 @@ impl Orchestrator {
                                 // No eviction emission here — the note_session_swap(None)
                                 // above already drained any stale continuations.
                                 if let Some(ref b) = brain {
-                                    scheduler.note_session_swap(Some(SessionId(
-                                        b.acp_session_id.clone(),
-                                    )));
+                                    scheduler.note_session_swap(
+                                        Some(SessionId(b.acp_session_id.clone())),
+                                        &overflow_continuations,
+                                    );
                                 }
                                 self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
                                     session: spur_id,
@@ -1460,58 +1460,117 @@ impl Orchestrator {
             }
 
             // ── (d) Scheduler returned a prompt action — fire the brain turn ──
-            //
-            // Decompose the ScheduledAction into (user_input_opt, continuations).
-            let (user_input_opt, continuations): (
-                Option<InteractiveInput>,
-                Vec<spur_acp::domain::BrainContinuation>,
-            ) = match action {
-                crate::scheduler::ScheduledAction::UserPrompt(u) => (Some(u), vec![]),
-                crate::scheduler::ScheduledAction::MergedPrompt {
-                    user,
-                    continuations,
-                } => (Some(user), continuations),
-                crate::scheduler::ScheduledAction::ContinuationPrompt(cs) => (None, cs),
-                crate::scheduler::ScheduledAction::Idle => unreachable!("handled above"),
-            };
+            let mut user_input_opt: Option<InteractiveInput> = None;
+            let mut drained_batch: Option<crate::scheduler::DrainedBatch> = None;
+            let mut render_outcome: Option<crate::continuation_bridge::RenderOutcome> = None;
 
             // ── Build the blocks for this turn ─────────────────────────
-            let prompt_blocks: Vec<ContentBlock> = match &user_input_opt {
-                Some(InteractiveInput::Message { blocks, interrupt }) => {
-                    let base = if *interrupt {
-                        strip_bang_prefix(blocks.clone())
-                    } else {
-                        blocks.clone()
-                    };
-                    if continuations.is_empty() {
-                        base
-                    } else {
-                        let (merged, spilled) =
-                            crate::continuation_bridge::render_merged_turn_with_spill(
-                                &base,
-                                &continuations,
-                                crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
-                            );
-                        for c in spilled {
-                            scheduler.push_continuation(c);
+            let prompt_blocks: Vec<ContentBlock> = match action {
+                crate::scheduler::ScheduledAction::UserPrompt(user) => {
+                    user_input_opt = Some(user);
+                    match user_input_opt.as_ref() {
+                        Some(InteractiveInput::Message { blocks, interrupt }) => {
+                            if *interrupt {
+                                strip_bang_prefix(blocks.clone())
+                            } else {
+                                blocks.clone()
+                            }
                         }
-                        merged
+                        Some(other) => {
+                            tracing::warn!(
+                                ?other,
+                                "unexpected non-Message variant dequeued from scheduler; skipping turn"
+                            );
+                            continue;
+                        }
+                        None => unreachable!("user prompt must retain its input"),
                     }
                 }
-                None => {
-                    // Autonomous continuation-only turn.
-                    crate::continuation_bridge::render_autonomous_continuation_turn(&continuations)
-                }
-                Some(other) => {
-                    // Defensive: unexpected variant in scheduler (e.g. a non-Message
-                    // that somehow got pushed). Log and skip.
-                    tracing::warn!(
-                        ?other,
-                        "unexpected non-Message variant dequeued from scheduler; skipping turn"
+                crate::scheduler::ScheduledAction::MergedPrompt { user, batch } => {
+                    user_input_opt = Some(user);
+                    let base = match user_input_opt.as_ref() {
+                        Some(InteractiveInput::Message { blocks, interrupt }) => {
+                            if *interrupt {
+                                strip_bang_prefix(blocks.clone())
+                            } else {
+                                blocks.clone()
+                            }
+                        }
+                        Some(other) => {
+                            tracing::warn!(
+                                ?other,
+                                "unexpected non-Message variant dequeued from scheduler; rolling back batch"
+                            );
+                            scheduler.rollback(batch);
+                            continue;
+                        }
+                        None => unreachable!("merged prompt must retain its input"),
+                    };
+                    let outcome = crate::continuation_bridge::render_merged_turn_with_spill_v2(
+                        &base,
+                        batch.items(),
+                        crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
                     );
-                    continue;
+                    let blocks = outcome.blocks.clone();
+                    drained_batch = Some(batch);
+                    render_outcome = Some(outcome);
+                    blocks
+                }
+                crate::scheduler::ScheduledAction::ContinuationPrompt(batch) => {
+                    let outcome = crate::continuation_bridge::render_autonomous_turn_with_spill_v2(
+                        batch.items(),
+                        crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                    );
+                    let blocks = outcome.blocks.clone();
+                    drained_batch = Some(batch);
+                    render_outcome = Some(outcome);
+                    blocks
+                }
+                crate::scheduler::ScheduledAction::IdleUntil { .. } => {
+                    unreachable!("handled above")
                 }
             };
+
+            if !prompt_blocks.is_empty() || drained_batch.is_none() {
+                // normal prompt path continues below
+            } else {
+                let batch = drained_batch
+                    .take()
+                    .expect("empty prompt still owns a batch");
+                let outcome = render_outcome
+                    .take()
+                    .expect("empty prompt batch must carry render outcome");
+                let dropped_terminal = outcome
+                    .dropped_oversized
+                    .into_iter()
+                    .map(|(key, bytes)| {
+                        (
+                            key,
+                            spur_acp::domain::DropReason::OversizedSingleItem {
+                                continuation_bytes: bytes,
+                                budget_bytes:
+                                    crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                            },
+                        )
+                    })
+                    .collect();
+                let spilled_with_reason = Some(
+                    outcome
+                        .deferred_spill
+                        .into_iter()
+                        .map(|(continuation, reason)| {
+                            (spur_acp::domain::DelegationKey::from(&continuation), reason)
+                        })
+                        .collect(),
+                );
+                scheduler.commit_partial(
+                    batch,
+                    outcome.delivered_keys,
+                    dropped_terminal,
+                    spilled_with_reason,
+                );
+                continue;
+            }
 
             // ── Lazy-spawn brain on first turn (or after crash) ─────────
             if brain.is_none() {
@@ -1530,14 +1589,7 @@ impl Orchestrator {
                     Ok(b) => {
                         // Wire the new session into the scheduler.
                         let new_sid = Some(SessionId(b.acp_session_id.clone()));
-                        let evicted = scheduler.note_session_swap(new_sid);
-                        for c in evicted {
-                            self.funnel.emit(SpurEventBody::ContinuationDropped {
-                                delegation_id: c.delegation_id.into(),
-                                reason:
-                                    spur_acp::domain::events::ContinuationDropReason::SessionSwap,
-                            });
-                        }
+                        scheduler.note_session_swap(new_sid, &overflow_continuations);
                         brain = Some(b);
                     }
                     Err(e) => {
@@ -1563,18 +1615,22 @@ impl Orchestrator {
             // ── Send prompt ──────────────────────────────────────────────
             let prompt_request = PromptRequest::new(b.acp_session_id.clone(), prompt_blocks);
             let spur_sid_for_log = b.spur_session_id.clone();
+            let continuations_count = render_outcome
+                .as_ref()
+                .map(|outcome| outcome.delivered_keys.len())
+                .unwrap_or(0);
 
-            let turn_kind = match (&user_input_opt, continuations.is_empty()) {
-                (Some(_), true) => "user_only",
-                (Some(_), false) => "merged",
-                (None, false) => "continuation_only",
-                (None, true) => "empty_defensive",
+            let turn_kind = match (&user_input_opt, drained_batch.is_some()) {
+                (Some(_), false) => "user_only",
+                (Some(_), true) => "merged",
+                (None, true) => "continuation_only",
+                (None, false) => "empty_defensive",
             };
             tracing::debug!(
                 continuation_probe = true,
                 site = "D_prompt_dispatch",
                 turn_kind = turn_kind,
-                continuations = continuations.len(),
+                continuations = continuations_count,
                 acp_session = %b.acp_session_id,
                 spur_session = %spur_sid_for_log,
                 "orchestrator: dispatching session/prompt"
@@ -1587,13 +1643,52 @@ impl Orchestrator {
             self.funnel.emit(SpurEventBody::PromptDispatched {
                 session: spur_sid_for_log.clone(),
                 turn_kind: turn_kind.to_string(),
-                continuations_count: continuations.len(),
+                continuations_count: continuations_count,
             });
 
             let prompt_started_at = std::time::Instant::now();
             let mut stream = match b.connection.prompt(prompt_request).await {
-                Ok(s) => s,
+                Ok(s) => {
+                    if let Some(batch) = drained_batch.take() {
+                        let outcome = render_outcome
+                            .take()
+                            .expect("drained batch must carry render outcome");
+                        let dropped_terminal = outcome
+                            .dropped_oversized
+                            .into_iter()
+                            .map(|(key, bytes)| {
+                                (
+                                    key,
+                                    spur_acp::domain::DropReason::OversizedSingleItem {
+                                        continuation_bytes: bytes,
+                                        budget_bytes:
+                                            crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                                    },
+                                )
+                            })
+                            .collect();
+                        let spilled_with_reason = Some(
+                            outcome
+                                .deferred_spill
+                                .into_iter()
+                                .map(|(continuation, reason)| {
+                                    (spur_acp::domain::DelegationKey::from(&continuation), reason)
+                                })
+                                .collect(),
+                        );
+                        scheduler.commit_partial(
+                            batch,
+                            outcome.delivered_keys,
+                            dropped_terminal,
+                            spilled_with_reason,
+                        );
+                    }
+                    s
+                }
                 Err(e) => {
+                    if let Some(batch) = drained_batch.take() {
+                        scheduler.rollback(batch);
+                    }
                     let error_message = format_error_chain(&e);
                     error!(error = %error_message, "Brain prompt failed");
                     if Self::is_auth_required_error(&e) {
@@ -5754,6 +5849,7 @@ mod context_files_wiring_tests {
 #[cfg(test)]
 mod interactive_input_tests {
     use super::InteractiveInput;
+    use chrono::Utc;
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::domain::{BrainContinuation, ContinuationPayload, ContinuationSource};
     use spur_acp::types::SessionId;
@@ -5763,15 +5859,18 @@ mod interactive_input_tests {
     fn system_continuation_variant_constructs() {
         let c = BrainContinuation {
             delegation_id: "abc".into(),
+            attempt: 1,
+            brain_session: SessionId("brain-session-1".into()),
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
                 status: DelegationStatus::Success,
                 summary: None,
                 diff_summary: None,
                 worker_branch: None,
-                artifact: None,
+                artifact_ref: None,
             },
-            created_at: Instant::now(),
+            created_at_wall: Utc::now(),
+            created_at_mono: Instant::now(),
         };
         let input = InteractiveInput::SystemContinuation {
             session: SessionId::new(),

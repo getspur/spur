@@ -184,6 +184,8 @@ pub enum DetachedSourceKind {
 pub struct DetachedCompletionHandle {
     pub ctx: Arc<DetachedContinuationCtx>,
     pub source_kind: DetachedSourceKind,
+    pub attempt: u32,
+    pub brain_session: SessionId,
 }
 
 // ─── McpCallbackServer ───────────────────────────────────────────────
@@ -1556,15 +1558,18 @@ impl McpCallbackServer {
 
                 let cont = BrainContinuation {
                     delegation_id: delegation_id.clone(),
+                    attempt: h.attempt,
+                    brain_session: h.brain_session.clone(),
                     source,
                     payload: ContinuationPayload {
                         status: result.status.clone(),
                         summary: result.summary.clone(),
                         diff_summary: result.diff_summary.clone(),
                         worker_branch: result.worker_branch.clone(),
-                        artifact: result.artifact.clone(),
+                        artifact_ref: None,
                     },
-                    created_at: std::time::Instant::now(),
+                    created_at_wall: chrono::Utc::now(),
+                    created_at_mono: std::time::Instant::now(),
                 };
                 // Route the completion back to the orchestrator ingress via
                 // the injected callback (wired in spur-core to avoid a
@@ -2200,6 +2205,8 @@ impl McpCallbackServer {
                     Some(DetachedCompletionHandle {
                         ctx: Arc::clone(&self.continuation_ctx),
                         source_kind: DetachedSourceKind::BlockTimeout,
+                        attempt: 1,
+                        brain_session: self.brain_session_id.as_session_id().clone(),
                     }),
                 );
                 let payload = json!({
@@ -2286,6 +2293,7 @@ impl McpCallbackServer {
             let completed_delegations = Arc::clone(&self.completed_delegations);
             let continuation_ctx = Arc::clone(&self.continuation_ctx);
             let task_tracker = self.task_tracker.clone();
+            let brain_session = self.brain_session_id.as_session_id().clone();
             waits.spawn(async move {
                 let mut rx = rx;
                 // Cancel-during-handoff (Risk R2): see
@@ -2335,6 +2343,8 @@ impl McpCallbackServer {
                             Some(DetachedCompletionHandle {
                                 ctx: continuation_ctx,
                                 source_kind: DetachedSourceKind::BlockTimeout,
+                                attempt: 1,
+                                brain_session,
                             }),
                         );
                         json!({
