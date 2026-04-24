@@ -1143,7 +1143,7 @@ impl AnalyticsEngine {
             Ok(SessionRow {
                 session_id: row.get(0)?,
                 agent: row.get(1)?,
-                model: row.get(2)?,
+                models: row.get(2)?,
                 started_at: row.get(3)?,
                 ended_at: row.get(4)?,
                 duration_seconds: row.get(5)?,
@@ -1171,7 +1171,7 @@ impl AnalyticsEngine {
             Ok(LiveSnapshot {
                 session_id: row.get(0)?,
                 agent: row.get(1)?,
-                model: row.get(2)?,
+                models: row.get(2)?,
                 started_at: row.get(3)?,
                 last_activity: row.get(4)?,
                 input_tokens: row.get(5)?,
@@ -1401,11 +1401,15 @@ pub struct ProjectRow {
 }
 
 /// Session detail row.
+///
+/// `models` is a comma-separated list of distinct model names that ran in
+/// this session (was a single `Option<String>`; P0.8 changed it to surface
+/// all models when a session switched mid-run).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionRow {
     pub session_id: String,
     pub agent: String,
-    pub model: Option<String>,
+    pub models: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub duration_seconds: Option<i64>,
@@ -1459,11 +1463,13 @@ pub struct LiveBlockRow {
 }
 
 /// Live session snapshot.
+///
+/// `models` is a comma-separated list of distinct models (see SessionRow).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiveSnapshot {
     pub session_id: String,
     pub agent: String,
-    pub model: Option<String>,
+    pub models: Option<String>,
     pub started_at: Option<String>,
     pub last_activity: Option<String>,
     pub input_tokens: i64,
