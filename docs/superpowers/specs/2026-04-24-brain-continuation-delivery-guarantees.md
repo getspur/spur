@@ -9,7 +9,9 @@
 ## Revision history
 
 - **v1 (initial draft)** — two-phase checkout/commit handshake, session-scoped continuations, typed drop events.
-- **v3.1 (this document)** — micro-patch surfaced by `worker:kimi` v3 review (APPROVE): `commit_partial` invariants now require intra-list uniqueness in `delivered_keys` and `dropped_terminal`. Without this, duplicate keys in `dropped_terminal` would emit multiple `ContinuationDropped` events for the same `(delegation_id, attempt)` — violating INV-D1 "exactly one terminal state per continuation". Fix is a 5-line invariant extension plus two dedup tests (`test_v3_1_dropped_terminal_duplicate_key`, `test_v3_1_delivered_keys_duplicate`). No code-shape changes.
+- **v3.1.2 (this document)** — micro-patch surfaced by phase-6 property-based testing (`inv_d6_oversized_never_requeues` FAILED on v3.1.1): `rollback` gains a `dropped_terminal: Vec<(DelegationKey, DropReason)>` parameter parallel to `commit_partial`. Oversized items are now dropped on dispatch failure too, preserving INV-D6's "oversized never enters requeue loop" guarantee. **Rationale:** oversized items are classified terminal by the renderer *before* the prompt call; they never appear in `blocks`; therefore a prompt `Err` cannot have "shown" them to the brain, and requeueing them on dispatch failure is semantically unjustified. The v3 spec at the former "Rollback vs oversized" section explicitly flagged this as a trade-off with a known alternative; proptest rendered a verdict. Delivered items still conservatively requeue on dispatch failure (brain may have partially received); spilled items still conservatively requeue (spill decision may have been budget-specific); only oversized flip to unconditional drop.
+- **v3.1.1** — micro-patch surfaced during phase-3 implementation review (`worker:kimi` APPROVE-WITH-CHANGES): `RenderOutcome.deferred_spill` is now `Vec<(BrainContinuation, DeferReason)>` rather than `Vec<BrainContinuation>`. This is a cascade effect of the Option-A resolution of the FIX-IN-P3 deviation chosen during phase-3 implementation — `commit_partial` gained an `Option<Vec<(DelegationKey, DeferReason)>>` parameter so the renderer's actual `budget_bytes`/`continuation_bytes` values can land in the `ContinuationDeferred(BudgetSpill{...})` event. Without per-item reason attachment, the scheduler would fall back to a default budget and the event's `budget_bytes` field would be misleading. No invariant changes. Scheduler test suite updated to assert the new signature.
+- **v3.1** — micro-patch surfaced by `worker:kimi` v3 review (APPROVE): `commit_partial` invariants now require intra-list uniqueness in `delivered_keys` and `dropped_terminal`. Without this, duplicate keys in `dropped_terminal` would emit multiple `ContinuationDropped` events for the same `(delegation_id, attempt)` — violating INV-D1 "exactly one terminal state per continuation". Fix is a 5-line invariant extension plus two dedup tests (`test_v3_1_dropped_terminal_duplicate_key`, `test_v3_1_delivered_keys_duplicate`). No code-shape changes.
 - **v3** — amended to fix 4 residual issues identified by the v2-review round (`worker:codex` REWORK): the unreachable `OversizedSingleItem` terminal state, INV-D7 being claimed rather than enforced, retirement protocol backing-field ambiguity, and a compile error in the dispatch sample. v3 deltas:
   - **v3-a: `commit_partial` signature gains `dropped_terminal: Vec<(DelegationKey, DropReason)>`.** The renderer's `dropped_oversized` partition now has a real landing site on the scheduler side. Items in `dropped_terminal` are removed without requeue and fire `ContinuationDropped(reason)`. Closes v2 BUG B5 (phantom `OversizedSingleItem` state).
   - **v3-b: Requeue channel made bounded** (`mpsc::channel(REQUEUE_CHANNEL_CAPACITY)`, default `DRAIN_CAP * 4 = 128`). New `DropReason::RequeueChannelFull` fires on `try_send` fail in `DrainedBatch::Drop`. Converts v2's unbounded-leak failure mode into bounded-loss. INV-D7 now structurally enforced.
@@ -398,14 +400,25 @@ impl BrainScheduler {
     /// Shorthand for `commit_partial(batch, all_keys, vec![])`. Consumes the batch.
     pub fn commit(&mut self, batch: DrainedBatch);
 
-    /// Called on prompt-dispatch failure. All items in the batch are
-    /// requeued to the BACK of `pending_continuations` via `push_internal`
-    /// with `requeue_count += 1`. Emits one
-    /// `ContinuationDeferred(PromptDispatchFailure)` event per item.
-    /// Items that have exceeded `MAX_REQUEUE_ATTEMPTS` are instead dropped
-    /// with `ContinuationDropped(MaxRequeueExceeded)`.
+    /// Called on prompt-dispatch failure. Partitions batch into:
+    /// - keys in `dropped_terminal` → dropped with the supplied reason
+    ///   (no requeue; preserves INV-D6 for oversized items that were
+    ///   classified terminal by the renderer BEFORE the prompt call and
+    ///   therefore could not have been "seen" by the brain regardless of
+    ///   dispatch outcome). v3.1.2 amendment — was unconditionally-requeue
+    ///   in v3.1.1; property-based testing (inv_d6_oversized_never_requeues)
+    ///   caught the INV-D6 violation under the old semantics.
+    /// - all other items → requeued to BACK of `pending_continuations` via
+    ///   `push_internal` with `requeue_count += 1`. Emits one
+    ///   `ContinuationDeferred(PromptDispatchFailure)` event per item.
+    ///   Items that have exceeded `MAX_REQUEUE_ATTEMPTS` are instead dropped
+    ///   with `ContinuationDropped(MaxRequeueExceeded)`.
     /// Consumes the batch.
-    pub fn rollback(&mut self, batch: DrainedBatch);
+    pub fn rollback(
+        &mut self,
+        batch: DrainedBatch,
+        dropped_terminal: Vec<(DelegationKey, DropReason)>,
+    );
 
     /// Called on brain-session retirement.
     /// 1. Drains `pending_continuations`; each item emits
@@ -667,11 +680,12 @@ async fn dispatch_merged(
         Ok(_) => self.scheduler.commit_partial(batch, delivered_keys, dropped_terminal),
         Err(e) => {
             tracing::error!(?e, "prompt dispatch failed");
-            // rollback ignores dropped_terminal — on dispatch failure we don't
-            // know whether the brain saw anything, so we conservatively requeue
-            // everything with Deferred(PromptDispatchFailure). A subsequent turn
-            // will re-encounter the oversized items and terminal-drop them there.
-            self.scheduler.rollback(batch);
+            // v3.1.2: rollback takes dropped_terminal. Oversized items were
+            // classified terminal BEFORE the prompt; they never appeared in
+            // blocks; a prompt Err cannot have exposed them. Pass
+            // dropped_terminal so they drop on first observation (INV-D6).
+            // Delivered + spilled items still conservatively requeue.
+            self.scheduler.rollback(batch, dropped_terminal);
         }
     }
 }
@@ -683,9 +697,11 @@ Key invariants enforced:
 - Oversized terminal drops are committed **inside the scheduler** via `commit_partial`'s `dropped_terminal` parameter — NOT by the dispatcher emitting events before the prompt call. This is the v3-a fix: the v2 draft had the dispatcher emitting events while the items were still inside `batch.items()`, so `commit_partial` later requeued them as spill. With v3-a, the scheduler authoritatively removes them.
 - `render_merged_turn_with_spill_v2` returns `RenderOutcome` (struct, not tuple): `blocks` to dispatch, `delivered_keys` the dispatcher expects to send, `deferred_spill` (informational only — the scheduler rederives this from set subtraction), and `dropped_oversized` (key + byte count for the dispatcher to convert to `DropReason`).
 
-### Rollback vs oversized: subtle semantic note
+### Rollback vs oversized: resolved by v3.1.2
 
-On dispatch failure, v3 chooses to requeue **all** items (including those the renderer had classified oversized) because the dispatcher cannot know whether the prompt partially succeeded. The oversized items will be terminal-dropped on the next successful dispatch (or the next `MaxRequeueExceeded` trip). Alternative: `rollback` could also accept a `dropped_terminal` arg and drop oversized items even on failure. The current choice is conservative — prefer to lose budget to a re-encounter than silently drop items on an ambiguous dispatch state.
+v3-era drafts of this spec documented a "conservative requeue" choice that requeued oversized items on dispatch failure. Phase-6 property-based testing caught this as an INV-D6 violation: `inv_d6_oversized_never_requeues` failed under a minimal counterexample (oversized item → drained → prompt Err → rollback requeues → next turn dispatch → terminal-drop).
+
+**Resolution (v3.1.2):** `rollback` now accepts a `dropped_terminal` arg parallel to `commit_partial`. Oversized items are dropped unconditionally on dispatch failure. Rationale: the renderer classifies oversized items as terminal BEFORE the prompt attempt; they never appear in `blocks`; a prompt `Err` cannot have exposed them to the brain. Delivered items and spilled items remain conservatively requeued on failure — those classifications interact with actual prompt content.
 
 ### MCP server shutdown on brain retirement — v2 full protocol
 
@@ -871,10 +887,16 @@ pub struct RenderOutcome {
     pub blocks: Vec<ContentBlock>,
     /// Keys the dispatcher should pass to commit_partial on success.
     pub delivered_keys: Vec<DelegationKey>,
-    /// Items to defer (BudgetSpill). Scheduler requeues on commit_partial.
-    pub deferred_spill: Vec<BrainContinuation>,
-    /// Items to drop terminally (OversizedSingleItem). Dispatcher emits
-    /// ContinuationDropped events; these items never return to the queue.
+    /// Items to defer (BudgetSpill). Each tuple carries the continuation
+    /// plus the fully-populated DeferReason (including actual budget_bytes
+    /// and continuation_bytes). Dispatcher maps these to DelegationKey and
+    /// passes as `spilled_with_reason: Option<Vec<(DelegationKey, DeferReason)>>`
+    /// to `commit_partial`. v3.1.1 amendment — was `Vec<BrainContinuation>`
+    /// in v3.1; the tuple form is required by Option-A resolution of FIX-IN-P3.
+    pub deferred_spill: Vec<(BrainContinuation, DeferReason)>,
+    /// Items to drop terminally (OversizedSingleItem). Dispatcher converts
+    /// these to (DelegationKey, DropReason) and passes to commit_partial's
+    /// dropped_terminal parameter; these items never return to the queue.
     pub dropped_oversized: Vec<(DelegationKey, usize /* bytes */)>,
 }
 
