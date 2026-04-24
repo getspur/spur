@@ -175,7 +175,16 @@ async fn handle_fetch_outcome_artifact(&self, args: &Value) -> Result<String, St
 
 **Authorization scoping (per codex SF3):** the tool reads `self.brain_session_id` from `McpCallbackServer` (server.rs:301), NOT from a user-supplied argument. Cross-session reads rejected.
 
-**Phase 1 scope:** read-only access to the existing git-blob-backed `WorkerArtifact` payloads. Section pagination NOT yet supported (deferred to Phase 3 when section-aware blob layout is introduced).
+**Phase 1 scope:** read-only access to the existing git-blob-backed `WorkerArtifact` payloads.
+
+**SF9 (round 6) — backport `section` parameter to Phase 1.** Original phasing deferred section pagination to Phase 3, but kimi flagged the sharp edge: a brain calling `fetch_outcome_artifact` against a 512 KiB stdout blob blows its own context. Cheap fix — add the `section` parameter in Phase 1 with a single supported value `Full` (current behavior). Phase 3 widens the supported sections (`StatusOnly`, `Summary`, `DiffOnly`). The wire schema is forward-compatible:
+
+```rust
+// Phase 1 args: { "delegation_id": String, "section": Option<"full"> }   // default "full"
+// Phase 3 args: { "delegation_id": String, "section": Option<...all sections...> }
+```
+
+Brains running against Phase 1 see `section=full` only; Phase 3 brains gain pagination. No breaking change between phases.
 
 ### 5.3 Tests
 
@@ -234,13 +243,44 @@ tempfile = "3"
 proptest = "1"
 ```
 
-### 6.3 Public API
+### 6.3 Public API — type ownership split (MF1: avoids spur-acp ↔ spur-blob-store cycle)
+
+The wire-shape types (`OutcomeKey`, `OutcomeRef`, `BackendTag`) live in **`spur-acp/src/domain/outcome.rs`** so that `ContinuationPayload.artifact_id: Option<OutcomeKey>` can reference them without forcing `spur-acp → spur-blob-store`. The trait, store-only types, and impls stay in `spur-blob-store`.
+
+**Owned by `spur-acp/src/domain/outcome.rs` (NEW module):**
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OutcomeKey {
+    pub brain_session_id: BrainSessionId,
+    pub delegation_id: DelegationId,
+    pub attempt: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomeRef {
+    pub key: OutcomeKey,
+    pub sha256: String,                       // 64-char hex
+    pub byte_size: u64,
+    pub backend: BackendTag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackendTag {
+    Fs,
+    GitBlob,
+    // Future: S3, GCS, ...
+}
+```
+
+**Owned by `spur-blob-store` (trait + store-internal types):**
 
 ```rust
 // trait_def.rs
+use spur_acp::domain::outcome::{OutcomeKey, OutcomeRef, BackendTag};
+
 #[async_trait::async_trait]
 pub trait OutcomeStore: Send + Sync {
-    /// Persist a payload. Returns OutcomeRef with content addressing.
     /// Idempotent: same key + same content → same OutcomeRef, no rewrite.
     async fn put(
         &self,
@@ -250,8 +290,6 @@ pub trait OutcomeStore: Send + Sync {
     ) -> Result<OutcomeRef, StoreError>;
 
     /// Retrieve content by key, optionally narrowed to a section.
-    /// Phase 2: section is ignored (returns full payload).
-    /// Phase 3: section-aware retrieval avoids context bloat.
     async fn get(
         &self,
         key: &OutcomeKey,
@@ -259,39 +297,22 @@ pub trait OutcomeStore: Send + Sync {
     ) -> Result<OutcomeContent, StoreError>;
 
     /// Drop all artifacts for a brain_session. Called on session terminate.
-    /// Returns count of artifacts dropped.
     async fn delete_namespace(
         &self,
         brain_session_id: &BrainSessionId,
     ) -> Result<usize, StoreError>;
 
     /// Sweep namespaces whose newest artifact is older than `ttl`.
-    /// Crash-recovery + ops fallback. Returns sweep report.
     async fn sweep_older_than(&self, ttl: Duration) -> Result<SweepReport, StoreError>;
 }
 
-// types.rs
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OutcomeKey {
-    pub brain_session_id: BrainSessionId,
-    pub delegation_id: DelegationId,
-    pub attempt: u32,
-}
-
+// types.rs (store-internal only)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutcomeMetadata {
     pub created_at: DateTime<Utc>,
     pub content_type: ContentType,           // Diff | Stdout | Stderr | Json
     pub original_byte_size: u64,
     pub stored_byte_size: u64,                // post-truncation if applicable
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutcomeRef {
-    pub key: OutcomeKey,
-    pub sha256: String,                       // 64-char hex
-    pub byte_size: u64,
-    pub backend: BackendTag,                  // Fs | GitBlob (+ future: S3, etc.)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -352,6 +373,40 @@ let artifact_ref = ArtifactRef::from_outcome_ref(outcome_ref);   // populates gi
 
 `worktrees.persist_artifact` retains its public signature for in-place use during the transition window; the trait wrapper is the new orchestrator entrypoint. Deprecation of the direct call is Phase 3 cleanup.
 
+**MF4 fix (round 6) — backcompat adapter for `DelegationResult.artifact`:**
+
+The existing orchestrator at `crates/spur-core/src/orchestrator.rs:4755-4773` consumes `Result<WorkerArtifact, String>` and stores into `DelegationResult.artifact: Option<WorkerArtifact>`. Phase 2's switch to `OutcomeStore::put -> OutcomeRef` must preserve that shape. Adapter lives in `spur-acp/src/domain/outcome.rs` (next to `OutcomeRef`):
+
+```rust
+// spur-acp/src/domain/outcome.rs
+impl OutcomeRef {
+    /// Backcompat adapter: project a GitBlob-backed OutcomeRef into the
+    /// legacy WorkerArtifact shape. Returns None for non-git backends.
+    /// Phase 2 callers use this to preserve DelegationResult.artifact behavior
+    /// during transition; Phase 3 cleanup may remove or deprecate.
+    pub fn as_worker_artifact(&self, kind: WorkerArtifactKind) -> Option<WorkerArtifact> {
+        match self.backend {
+            BackendTag::GitBlob => Some(WorkerArtifact {
+                object_ref: format!("refs/spur/artifacts/{}", self.key.brain_session_id),
+                blob_sha: self.sha256.clone(),
+                size_bytes: self.byte_size as usize,
+                kind,
+            }),
+            _ => None,
+        }
+    }
+}
+```
+
+Orchestrator call site at `:4755` becomes:
+```rust
+let outcome_ref = store.put(&key, output_text.as_bytes(), &metadata).await?;
+let worker_artifact = outcome_ref.as_worker_artifact(legacy_kind);
+// store into DelegationResult.artifact as before — observable behavior preserved
+```
+
+Phase 2 tests verify byte-exact equivalence between the wrapped path and the direct `worktrees.persist_artifact` path for the existing call sites.
+
 ### 6.6 Tests
 
 Unit (`crates/spur-blob-store/src/*.rs` inline `#[cfg(test)]`):
@@ -383,6 +438,8 @@ Property-based (`crates/spur-blob-store/tests/proptest_invariants.rs`):
 
 ### 7.1 Lean `BrainContinuation` payload (schema_version: 3)
 
+**MF5 (round 6) — coexistence of `artifact_ref` and `artifact_id`:** the existing `artifact_ref: Option<ArtifactRef>` field (currently at `crates/spur-acp/src/domain/continuation.rs:67-68`, narrow scope = oversized worker stdout via git blob) and the new `artifact_id: Option<OutcomeKey>` field (broad scope = full delegation outcome) **coexist during transition**. Semantically `artifact_id` supersedes `artifact_ref`; for backward compat, both are populated where applicable. Phase 1's `artifact_ref` enrichment (`git_object_ref`, `git_blob_sha`) keeps working; Phase 3 brains check `artifact_id` first, fall back to `artifact_ref`. Cleanup of `artifact_ref` deferred to a future release after one stabilization cycle.
+
 ```rust
 // in spur-acp/src/domain/continuation.rs
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,10 +451,17 @@ pub struct ContinuationPayload {
     pub diff_summary: Option<DiffSummary>,
     /// Always inline. Capped at 256 B.
     pub worker_branch: Option<String>,
-    /// NEW field — required for cost-aware brain reasoning.
+    /// NEW field (round 6 / codex MF3) — required for cost-aware brain reasoning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_usd: Option<f64>,
-    /// Reference to a backing artifact when full payload exceeds inline capacity.
+    /// EXISTING (Phase 1 enriched) — reference to oversized stdout artifact (legacy narrow scope).
+    /// Coexists with artifact_id during transition; deprecated after stabilization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<ArtifactRef>,
+    /// NEW (Phase 3) — reference to full delegation outcome in OutcomeStore.
     /// Some(_) ⇒ brain may call fetch_outcome_artifact for fuller context.
+    /// Brains check artifact_id FIRST, fall back to artifact_ref if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<OutcomeKey>,
     /// Explicit human-readable hint when artifact_id is Some.
     /// Example: "Full diff truncated. Call fetch_outcome_artifact(delegation_id, section='diff_only')."
@@ -408,6 +472,13 @@ pub struct ContinuationPayload {
 **Schema bump rationale (per codex MF4):** ops-debug visibility, not wire-protocol break. LLMs are tolerant of optional fields via serde defaults; this bump is for log/dashboard correlation when investigating brain behavior pre/post Plan-5.
 
 **Renderer change:** `crates/spur-core/src/continuation_bridge.rs:149` updates `ContinuationResourceBody.schema_version` constant from `2` to `3`.
+
+**SF6 (round 6) — `ContinuationPayload` direct-construction sites that need updating** when `estimated_cost_usd` and `artifact_id` are added (all are additive `Option<>` with `#[serde(default)]`, but Rust struct literals must still include the new fields):
+
+- `crates/spur-acp/src/domain/continuation.rs:184-231` — round-trip serialization test.
+- `crates/spur-acp/src/domain/continuation.rs:240-269` — `delegation_key_equality_and_hashing_use_attempt` test (constructs `ContinuationPayload` literals).
+- `crates/spur-mcp/src/server.rs:273` — `build_detached_continuation` (production callsite).
+- Plan-writers must `grep -rn 'ContinuationPayload {' crates/` after Phase 3 lands to catch any newly-added construction sites and update them.
 
 ### 7.2 `OutcomeMaterializer` (in spur-core)
 
@@ -453,7 +524,43 @@ The fallback ensures INV-α holds even when the store is unavailable.
 | 1 | `crates/spur-mcp/src/server.rs::build_detached_continuation` (currently line 251) | Direct `delegate_to_worker` → MCP background collector receives `DelegationResult` | `DelegationResult`, `delegation_id`, `brain_session`, `attempt` |
 | 2 | `crates/spur-mcp/src/plan/reconciler.rs::persist_completion_result_and_notify` (currently line 421; called from `crates/spur-mcp/src/plan/mod.rs:998`) | Reconciler-driven plan-mode (`submit_plan` / `execute_epic`) detects completion via beads polling | `result_summary`, `worker_branch`, `delegation_id`, `plan_id`, `brain_session_id`, `attempt`, `completion_state` |
 
-Both call sites construct an `OutcomeKey { brain_session_id, delegation_id, attempt }`, persist via `OutcomeStore::put`, and build a lean `BrainContinuation`. Code path is identical; only the source of fields differs.
+**MF2 (round 6):** the two callsites have **asymmetric available state** — callsite 1 has the full `DelegationResult`; callsite 2 has only what beads polling surfaces (status + summary + worker_branch). They must use different materializer entrypoints.
+
+```rust
+impl OutcomeMaterializer {
+    // Callsite 1 — full fidelity. Persists complete DelegationResult.
+    pub async fn materialize(&self, result: DelegationResult, key: OutcomeKey, ...) -> BrainContinuation;
+
+    // Callsite 2 — reduced fidelity. Persists status + summary + worker_branch only.
+    // Brain uses worker_branch to retrieve diff via `git diff` against the worktree.
+    pub async fn materialize_metadata_only(&self, status: DelegationStatus, summary: Option<String>,
+        worker_branch: Option<String>, key: OutcomeKey, ...) -> BrainContinuation;
+}
+```
+
+**State plumbing for callsite 2:**
+
+The reconciler's `ReconcilerDispatchCtx` (at `crates/spur-mcp/src/plan/reconciler.rs:152`) already carries `brain_session_id`. `task.attempt` is in scope at the dispatch site (line 361). Both must be **captured into the closure** that flows to `persist_completion_result_and_notify`. Concretely, the function signature gets two new parameters:
+
+```rust
+// crates/spur-mcp/src/plan/mod.rs:998 — Phase 3 amended signature
+pub(crate) async fn persist_completion_result_and_notify(
+    pm: &dyn PmLike,
+    issue_id: &str,
+    plan_id: &str,
+    delegation_id: &str,
+    completion_state: CompletionState,
+    worker_branch: Option<&str>,
+    result_summary: Option<&str>,
+    fast_forward: &Option<Arc<tokio::sync::Notify>>,
+    // NEW for Phase 3:
+    brain_session_id: &BrainSessionId,
+    attempt: u32,
+    materializer: &OutcomeMaterializer,
+) -> anyhow::Result<()>;
+```
+
+Runtime callsite at `plan/mod.rs:1166` and test callsite at `plan/mod.rs:3487` are updated accordingly.
 
 **Fallback behavior is identical** at both sites: on `OutcomeStore::put` failure, fall through to the Plan-4 truncation-ladder fallback. Both sites emit the same `spur.metrics.outcome_persist_failed` event.
 
@@ -461,18 +568,33 @@ Both call sites construct an `OutcomeKey { brain_session_id, delegation_id, atte
 
 ### 7.4 Beads audit-comment composition (composition, not coupling)
 
-The reconciler currently calls `beads.add_comment` to post `[[spur-audit v1]] Completion` audit trails carrying `result_summary` and `worker_branch` as durable, user-visible records on the beads issue (per `crates/spur-pm/src/beads.rs:842-865`). This is **orthogonal to the artifact store** — beads is the audit/state-of-record system; the blob store is the blob byte system.
+The reconciler currently calls `beads.add_comment` to post `[[spur-audit v1]] Completion` audit trails carrying `result_summary` and `worker_branch` as durable, user-visible records on the beads issue (`crates/spur-pm/src/beads.rs:842-865`; comment composed in `crates/spur-mcp/src/plan/mod.rs:686-708::emit_completion_audit`). The encoder shape is `{prefix}\n{json}` (`audit_sentinel.rs:160-167`), and the parser does `serde_json::from_str` over the JSON body (`audit_sentinel.rs:172-176`). This is **orthogonal to the artifact store** — beads is the audit/state-of-record system; the blob store is the blob byte system.
 
-Phase 3 adds a small extension: when `OutcomeMaterializer::materialize` succeeds, the resulting `OutcomeRef` URI is appended to the beads audit comment as a click-through link. Operators viewing the beads issue can resolve the URI to fetch the full payload via the same `fetch_outcome_artifact` MCP tool (or future direct ops tooling).
+**MF3 fix (round 6):** Plan-5's earlier proposal to append a raw URI line after the JSON would **break `parse_comment`** because `serde_json::from_str` rejects trailing non-JSON content. The clean fix is to add a JSON field to the `Completion` variant in `crates/spur-mcp/src/plan/audit_sentinel.rs`:
 
+```rust
+// audit_sentinel.rs — AuditSentinelKind enum, Completion variant amendment
+Completion {
+    delegation_id: String,
+    completion_state: CompletionState,
+    superseded: bool,
+    worker_branch: Option<String>,
+    result_summary: Option<String>,
+    // NEW — Some(_) when OutcomeMaterializer succeeded; carries OutcomeKey-derived URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_uri: Option<String>,
+},
 ```
-[[spur-audit v1]] Completion
-result_summary: <truncated>
-worker_branch: spur/worker-foo-abc
-artifact: spur://outcome/<brain_session>/<delegation>/<attempt>
+
+Reconciler populates `artifact_uri` when `OutcomeMaterializer::materialize_metadata_only` succeeds. Field is additive + serde-default — no parser changes needed for existing comments without it.
+
+Concrete shape (post-encode):
+```
+[[spur-audit v1]]
+{"kind":"completion","delegation_id":"<uuid>","completion_state":"awaiting_review","superseded":false,"worker_branch":"spur/worker-foo-abc","result_summary":"<truncated>","artifact_uri":"spur://outcome/<brain_session>/<delegation>/<attempt>"}
 ```
 
-This is **additive metadata in an existing comment**, not a new persistence path. No beads schema change. No new beads call.
+Operators viewing the beads issue can extract `artifact_uri` from the JSON and resolve via `fetch_outcome_artifact`. **Additive JSON field, no encoder/parser changes beyond the variant struct field.**
 
 ### 7.5 Extended `fetch_outcome_artifact` (with section pagination)
 
@@ -598,6 +720,21 @@ Existing `WorkerArtifact` git blobs are capped at 512 KiB (`SPUR_ARTIFACT_MAX_BY
 
 **Spec is honest about this:** "Artifact store preserves bounded full content" — not "preserves unlimited content." Operators tune `SPUR_OUTCOME_MAX_BYTES` if larger payloads are required.
 
+### 9.6 Brain-session crash auth wall (round 6 / kimi NIT)
+
+Artifacts are scoped to `brain_session_id`; `fetch_outcome_artifact` rejects cross-session reads (per §10 + codex SF3). Consequence: if the brain process crashes and a NEW brain session starts, prior artifacts are unreadable from the new session. This is a **deliberate trade-off** prioritizing cross-session security over crash recovery — accepting brief data loss is preferable to leaking artifacts across unrelated sessions.
+
+Operator escape (deferred to a future ops-tooling phase): `spur outcomes copy --from <session> --to <session>` CLI to migrate artifacts across sessions when needed. Not in Plan-5 scope; documented as a known boundary.
+
+### 9.7 Concurrent fetch-during-GC race (round 6 / kimi NIT)
+
+When `OutcomeStore::delete_namespace` runs on session terminate, an in-flight `fetch_outcome_artifact` for the same namespace may race the cleanup. Behavior differs by backend:
+
+- **`FsOutcomeStore`**: directory walking + atomic file reads tolerate concurrent deletes (Linux/Darwin POSIX semantics — open file handles survive unlink). Fetch sees either the file or `NotFound`; both are clean outcomes.
+- **`GitBlobOutcomeStore`**: `git update-ref -d <ref>` and `git cat-file -p <blob_sha>` race window. Blobs survive ref deletion until git GC (typically days), so `cat-file -p <blob_sha>` succeeds even after `update-ref -d`. The race is benign.
+
+Operator-visible behavior: in-flight fetch during session terminate **may succeed or return `StoreError::NotFound`**; clients should retry on transient error, treat persistent `NotFound` as terminal. Spec acknowledges; no implementation work required.
+
 ## 10. Observability
 
 ### 10.1 Structured tracing events
@@ -689,7 +826,7 @@ The 2026-04-13 spec at `docs/superpowers/specs/2026-04-13-spur-context-engine-de
 
 **Integration hook (for ContextEngine spec author to consume):**
 
-- `OutcomeKey { brain_session_id, delegation_id, attempt }` aligns 1:1 with what `observations.session_id` + `observations.decision_id` will reference.
+- `OutcomeKey { brain_session_id, delegation_id, attempt }` aligns with what `observations.session_id` + `observations.decision_id` will reference. **Coordination note (round 6 / kimi):** ContextEngine's `observations` schema (2026-04-13 spec §Phase 1 Schema, line 422-430) does NOT currently include an `attempt` column. Either (a) add `attempt INTEGER NOT NULL DEFAULT 1` to `observations`, or (b) embed `attempt` in `observations.artifacts_json` payload via `OutcomeRef` serialization. Option (b) is non-breaking for Phase 1 of either spec; option (a) is cleaner long-term. **Decision deferred to ContextEngine Phase 1 implementation;** Plan-5 makes no assumption about which is chosen.
 - `OutcomeRef { key, sha256, byte_size, backend }` is JSON-serializable. ContextEngine's `observations.artifacts_json` field (per 2026-04-13 spec line 436) is "a JSON array of file paths, diffs, or other artifacts." A blob ref slots in cleanly.
 - `observations.content` stays as the inline summary text (short); `observations.artifacts_json` carries blob references for full payload retrieval via `OutcomeStore::get`.
 - Future Phase 2+ MCP tools (`recall_context`, `query_history` per ContextEngine spec) can join on blob refs to retrieve full historical payloads.
@@ -711,6 +848,9 @@ When ContextEngine Phase 1 ships, no spur-blob-store changes are required. The c
 | 5c | gemini | 2026-04-25 | PROCEED-WITH-CHANGES | Polymorphic Q2c rejected → flat-stable; explicit `fetch_hint`; `MockFailingOutcomeStore` for CI; section-paginated fetch tool. |
 | 5.5 | self (L9 + spur-context cross-check) | 2026-04-25 | — | Phase 1 brain-visible refinement (F1); persist-enqueue gap accepted (F2); separate `spur-blob-store` crate; ContextEngine integration hook. |
 | 5.6 | self (reconciler + beads cross-check) | 2026-04-25 | — | Found second materializer call site at `plan/reconciler.rs::persist_completion_result_and_notify` (§7.3); beads audit-comment composition (§7.4); section renumbering 7.4→7.6, 7.5→7.7. |
+| 6a | codex (round-6 parallel) | 2026-04-25 | APPROVE-WITH-CHANGES | 4 MUST-FIX: cycle on `OutcomeKey` placement (MF1), callsite-2 signature gap (MF2), beads parser regression on raw URI (MF3), `WorkerArtifact` adapter (MF4). Plus 2 SHOULD-FIX (schema struct-construction sites, citation drift `:998`→`:1166`) and 1 NIT (encoder example shape). |
+| 6b | kimi (round-6 parallel) | 2026-04-25 | APPROVE-WITH-CHANGES | Round 5.6 amendment soundness: insufficient at callsite 2 (confirms codex MF2). §15.2 dep graph arrow direction reversed (SF8). `artifact_ref` vs `artifact_id` coexistence ambiguity (MF5). Phase 1 unbounded fetch sharp edge (SF9 backport). Brain-crash auth wall + concurrent fetch-during-GC race (NIT11/NIT12). ContextEngine schema `attempt` column coordination. |
+| 6.5 | self (round-6 amendment fold) | 2026-04-25 | — | Folded all MF1–MF5, SF6–SF9, NIT11/NIT12 into spec; type ownership split (§6.3); dual-callsite signatures (§7.3); JSON-field beads composition (§7.4); WorkerArtifact adapter (§6.5); coexistence clarification (§7.1); construction-site list (§7.1); Phase 1 section backport (§5.2); dep graph arrow fix (§15.2); failure-mode §9.6/§9.7 added; ContextEngine coordination note (§13). |
 
 ## 15. Appendix
 
@@ -731,18 +871,22 @@ crates/spur-blob-store/
 
 ### 15.2 Updated workspace dependency graph
 
+Arrows point from consumer → dependency (i.e. "depends on"):
+
 ```
-                       spur-blob-store ◀── NEW
-                       ┌───────┬───────┐
-                       ↓       ↓       ↓
-            spur-worktree  spur-mcp  spur-core
-                ↓             ↓        ↓
-              spur-acp ◀─ depends on ──┘
-                ↓
-        agent-client-protocol
+            spur-worktree   spur-mcp   spur-core
+                  │             │         │
+                  ▼             ▼         ▼
+              spur-blob-store (NEW)
+                       │
+                       ▼
+                   spur-acp
+                       │
+                       ▼
+              agent-client-protocol
 ```
 
-No cycles. `spur-blob-store` is a sibling leaf to `spur-acp`, depending only on it for typed identifiers.
+`spur-acp` retains its position as the leaf-domain crate. `spur-blob-store` sits between consumers (`spur-worktree`, `spur-mcp`, `spur-core`) and `spur-acp`. No cycles. `OutcomeKey` / `OutcomeRef` / `BackendTag` types live in `spur-acp::domain::outcome` (per MF1 fix in §6.3); `spur-blob-store` imports them.
 
 ### 15.3 Configuration surface
 
