@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use crate::domain::delegation::DelegationStatus;
+use crate::domain::continuation::{DeferReason, DropReason};
+use crate::domain::delegation::{DelegationId, DelegationStatus};
 use crate::types::{CancelMode, SessionId};
 use agent_client_protocol::{SessionInfo, SessionNotification};
 
@@ -286,16 +288,6 @@ pub enum LicensePlan {
     Team,
     Enterprise,
     Unknown,
-}
-
-/// Reason a pending system continuation was evicted without being delivered.
-/// See async-continuation design spec §Failure Cases.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ContinuationDropReason {
-    BrainDisconnected,
-    SessionSwap,
-    Shutdown,
 }
 
 /// Why a brain session was retired. Companion to [`SpurEventBody::BrainRetired`].
@@ -689,11 +681,35 @@ pub enum SpurEventBody {
         plan_id: String,
     },
 
-    /// A pending system continuation was evicted without being delivered
-    /// to the brain. See async-continuation design spec §Failure Cases.
+    /// A continuation reached a terminal non-delivered state.
     ContinuationDropped {
-        delegation_id: String,
-        reason: ContinuationDropReason,
+        delegation_id: DelegationId,
+        attempt: u32,
+        brain_session: SessionId,
+        reason: DropReason,
+    },
+
+    /// A continuation was requeued for a later delivery attempt.
+    ContinuationDeferred {
+        delegation_id: DelegationId,
+        attempt: u32,
+        brain_session: SessionId,
+        requeue_count: u32,
+        reason: DeferReason,
+    },
+
+    /// A producer field was clipped before constructing a continuation body.
+    ContinuationFieldTruncated {
+        delegation_id: DelegationId,
+        field: Cow<'static, str>,
+        original_bytes: usize,
+        kept_bytes: usize,
+    },
+
+    /// Graceful shutdown timed out and the MCP server had to be force-aborted.
+    McpShutdownTimeout {
+        session: SessionId,
+        timeout_ms: u64,
     },
 
     /// Emitted immediately before the orchestrator calls
@@ -889,6 +905,144 @@ mod delegation_requested_tests {
                 delegation_plan, ..
             } => {
                 assert!(delegation_plan.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod continuation_event_tests {
+    use super::*;
+    use crate::domain::continuation::{DeferReason, DropReason};
+    use crate::domain::DelegationId;
+    use crate::SessionId;
+
+    fn delegation_id() -> DelegationId {
+        DelegationId("del-1".into())
+    }
+
+    fn session_id() -> SessionId {
+        SessionId("brain-session-1".into())
+    }
+
+    #[test]
+    fn continuation_dropped_event_round_trips() {
+        let body = SpurEventBody::ContinuationDropped {
+            delegation_id: delegation_id(),
+            attempt: 2,
+            brain_session: session_id(),
+            reason: DropReason::MismatchedCommitKeys,
+        };
+
+        let json = serde_json::to_string(&body).unwrap();
+        let leaked: &'static str = Box::leak(json.into_boxed_str());
+        let back: SpurEventBody = serde_json::from_str(leaked).unwrap();
+
+        match back {
+            SpurEventBody::ContinuationDropped {
+                delegation_id,
+                attempt,
+                brain_session,
+                reason,
+            } => {
+                assert_eq!(delegation_id, DelegationId("del-1".into()));
+                assert_eq!(attempt, 2);
+                assert_eq!(brain_session, SessionId("brain-session-1".into()));
+                assert!(matches!(reason, DropReason::MismatchedCommitKeys));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn continuation_deferred_event_round_trips() {
+        let body = SpurEventBody::ContinuationDeferred {
+            delegation_id: delegation_id(),
+            attempt: 3,
+            brain_session: session_id(),
+            requeue_count: 4,
+            reason: DeferReason::BudgetSpill {
+                budget_bytes: 4096,
+                continuation_bytes: 1024,
+            },
+        };
+
+        let json = serde_json::to_string(&body).unwrap();
+        let leaked: &'static str = Box::leak(json.into_boxed_str());
+        let back: SpurEventBody = serde_json::from_str(leaked).unwrap();
+
+        match back {
+            SpurEventBody::ContinuationDeferred {
+                delegation_id,
+                attempt,
+                brain_session,
+                requeue_count,
+                reason,
+            } => {
+                assert_eq!(delegation_id, DelegationId("del-1".into()));
+                assert_eq!(attempt, 3);
+                assert_eq!(brain_session, SessionId("brain-session-1".into()));
+                assert_eq!(requeue_count, 4);
+                assert!(matches!(
+                    reason,
+                    DeferReason::BudgetSpill {
+                        budget_bytes: 4096,
+                        continuation_bytes: 1024
+                    }
+                ));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn continuation_field_truncated_event_round_trips() {
+        let body = SpurEventBody::ContinuationFieldTruncated {
+            delegation_id: delegation_id(),
+            field: "summary".into(),
+            original_bytes: 16_384,
+            kept_bytes: 8_192,
+        };
+
+        let json = serde_json::to_string(&body).unwrap();
+        let leaked: &'static str = Box::leak(json.into_boxed_str());
+        let back: SpurEventBody = serde_json::from_str(leaked).unwrap();
+
+        match back {
+            SpurEventBody::ContinuationFieldTruncated {
+                delegation_id,
+                field,
+                original_bytes,
+                kept_bytes,
+            } => {
+                assert_eq!(delegation_id, DelegationId("del-1".into()));
+                assert_eq!(field, "summary");
+                assert_eq!(original_bytes, 16_384);
+                assert_eq!(kept_bytes, 8_192);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn mcp_shutdown_timeout_event_round_trips() {
+        let body = SpurEventBody::McpShutdownTimeout {
+            session: session_id(),
+            timeout_ms: 5_000,
+        };
+
+        let json = serde_json::to_string(&body).unwrap();
+        let leaked: &'static str = Box::leak(json.into_boxed_str());
+        let back: SpurEventBody = serde_json::from_str(leaked).unwrap();
+
+        match back {
+            SpurEventBody::McpShutdownTimeout {
+                session,
+                timeout_ms,
+            } => {
+                assert_eq!(session, SessionId("brain-session-1".into()));
+                assert_eq!(timeout_ms, 5_000);
             }
             _ => panic!("wrong variant"),
         }
