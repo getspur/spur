@@ -39,6 +39,16 @@ impl spur_mcp::McpEventSink for FunnelHandle {
     }
 }
 
+/// Create a `FunnelHandle` backed by a plain unbounded channel whose
+/// receiver is returned to the caller. Intended for unit / integration
+/// tests that need a `FunnelHandle` but do not care about the broadcast
+/// side.
+#[doc(hidden)]
+pub fn test_channel() -> (FunnelHandle, tokio::sync::mpsc::UnboundedReceiver<SpurEventBody>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (FunnelHandle { tx }, rx)
+}
+
 /// Spawn the singleton funnel task. The returned `FunnelHandle` is
 /// given to every emitter inside the orchestrator.
 pub fn spawn_funnel(
