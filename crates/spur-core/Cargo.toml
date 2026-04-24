@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 rand = "0.8"
 regex = { workspace = true }
@@ -38,3 +41,23 @@ tempfile = "3"
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 spur-license = { workspace = true, features = ["test-support"] }
 proptest = "1"
+
+[[test]]
+name = "shutdown_mcp_server_bounded"
+path = "tests/shutdown_mcp_server_bounded.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "review_loopback_e2e"
+path = "tests/review_loopback_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "review_gate_integration"
+path = "tests/review_gate_integration.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "retry_reflexion"
+path = "tests/retry_reflexion.rs"
+required-features = ["test-support"]

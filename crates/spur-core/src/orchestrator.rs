@@ -5102,6 +5102,7 @@ fn dirs_home() -> Option<String> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_string_lossy().to_string())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support {
     //! Public shims for integration tests. Not part of the stable API.
