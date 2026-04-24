@@ -126,6 +126,49 @@ impl PricingRegistry {
                 tiered: None,
             },
         );
+        // TODO: verify 4.5 pricing differs from 4
+        reg.insert(
+            "claude-opus-4-5",
+            ModelPricing {
+                input_cost_per_token: 15.0 / 1_000_000.0,
+                output_cost_per_token: 75.0 / 1_000_000.0,
+                cache_creation_input_token_cost: 18.75 / 1_000_000.0,
+                cache_read_input_token_cost: 1.50 / 1_000_000.0,
+                tiered: Some(TieredPricing {
+                    threshold: 200_000,
+                    input_cost_per_token_above: 30.0 / 1_000_000.0,
+                    output_cost_per_token_above: 150.0 / 1_000_000.0,
+                    cache_creation_input_token_cost_above: 37.50 / 1_000_000.0,
+                    cache_read_input_token_cost_above: 3.00 / 1_000_000.0,
+                }),
+            },
+        );
+        reg.insert(
+            "claude-sonnet-4-5",
+            ModelPricing {
+                input_cost_per_token: 3.0 / 1_000_000.0,
+                output_cost_per_token: 15.0 / 1_000_000.0,
+                cache_creation_input_token_cost: 3.75 / 1_000_000.0,
+                cache_read_input_token_cost: 0.30 / 1_000_000.0,
+                tiered: Some(TieredPricing {
+                    threshold: 200_000,
+                    input_cost_per_token_above: 6.0 / 1_000_000.0,
+                    output_cost_per_token_above: 22.50 / 1_000_000.0,
+                    cache_creation_input_token_cost_above: 7.50 / 1_000_000.0,
+                    cache_read_input_token_cost_above: 0.60 / 1_000_000.0,
+                }),
+            },
+        );
+        reg.insert(
+            "claude-haiku-4-5",
+            ModelPricing {
+                input_cost_per_token: 0.50 / 1_000_000.0,
+                output_cost_per_token: 2.50 / 1_000_000.0,
+                cache_creation_input_token_cost: 0.625 / 1_000_000.0,
+                cache_read_input_token_cost: 0.05 / 1_000_000.0,
+                tiered: None,
+            },
+        );
 
         // ─── OpenAI / GPT ───────────────────────────────────────────
         reg.insert(
@@ -218,17 +261,29 @@ impl PricingRegistry {
     /// The lookup is case-insensitive. If the exact model is not found,
     /// registered aliases are tried. Unknown models return `None`.
     pub fn get(&self, model: &str) -> Option<&ModelPricing> {
+        if model.is_empty() {
+            return None;
+        }
         let key = model.to_lowercase();
 
-        // Exact match
         if let Some(p) = self.models.get(&key) {
             return Some(p);
         }
 
-        // Alias resolution
-        if let Some(canonical) = self.aliases.get(&key) {
-            if let Some(p) = self.models.get(canonical) {
+        if let Some(canon) = self.aliases.get(&key) {
+            if let Some(p) = self.models.get(canon) {
                 return Some(p);
+            }
+        }
+
+        let mut candidates: Vec<(&String, &ModelPricing)> = self.models.iter().collect();
+        candidates.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()).then(a.cmp(b)));
+        for (k, v) in candidates {
+            let kb = k.as_bytes();
+            if key.as_bytes().starts_with(kb)
+                && (key.len() == kb.len() || key.as_bytes().get(kb.len()) == Some(&b'-'))
+            {
+                return Some(v);
             }
         }
 
@@ -508,11 +563,46 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_requires_exact_or_alias_match() {
+    fn test_registry_dash_bounded_longest_prefix_match() {
         let reg = PricingRegistry::with_builtin_prices();
-        assert!(reg.get("sonnet").is_none());
+        assert!(reg.get("claude-haiku-4-5-20251001").is_some());
+        assert!(reg.get("gpt-5-codex-2026-preview").is_some());
+        assert!(reg.get("totally-unknown").is_none());
         assert!(reg.get("").is_none());
-        assert!(reg.get("claude-sonnet").is_some());
+
+        let foo = ModelPricing {
+            input_cost_per_token: 1.0,
+            output_cost_per_token: 2.0,
+            cache_creation_input_token_cost: 3.0,
+            cache_read_input_token_cost: 4.0,
+            tiered: None,
+        };
+        let foo_bar = ModelPricing {
+            input_cost_per_token: 5.0,
+            output_cost_per_token: 6.0,
+            cache_creation_input_token_cost: 7.0,
+            cache_read_input_token_cost: 8.0,
+            tiered: None,
+        };
+        let mut r2 = PricingRegistry::new();
+        r2.insert("foo", foo);
+        r2.insert("foo-bar", foo_bar);
+        assert_eq!(r2.get("foo-bar-baz"), r2.models.get("foo-bar"));
+
+        let gpt_4 = ModelPricing {
+            input_cost_per_token: 9.0,
+            output_cost_per_token: 10.0,
+            cache_creation_input_token_cost: 11.0,
+            cache_read_input_token_cost: 12.0,
+            tiered: None,
+        };
+        let mut r3 = PricingRegistry::new();
+        r3.insert("gpt-4", gpt_4);
+        assert!(
+            r3.get("gpt-4o").is_none(),
+            "gpt-4 must not swallow gpt-4o (different family)"
+        );
+        assert_eq!(r3.get("gpt-4-turbo"), r3.models.get("gpt-4"));
     }
 
     #[test]
