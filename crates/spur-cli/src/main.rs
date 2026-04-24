@@ -941,7 +941,7 @@ fn run_cost_sqlite(
 
 fn run_cost_duckdb(week: bool, range: Option<&str>, export: Option<&str>) -> Result<()> {
     use chrono::NaiveDate;
-    use spur_context::{AnalyticsEngine, ReportRange, Reporter};
+    use spur_context::{AnalyticsEngine, Reporter};
 
     eprintln!(
         "[spur] --engine duckdb is experimental: rescans all agent JSONL \
