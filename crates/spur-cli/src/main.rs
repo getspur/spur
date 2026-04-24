@@ -19,6 +19,8 @@ fn init_tracing(
     tui_mode: bool,
     repo_root: &Path,
 ) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+    use tracing_subscriber::EnvFilter;
+
     if tui_mode {
         let log_dir = repo_root.join(".spur").join("logs");
         std::fs::create_dir_all(&log_dir)?;
@@ -29,7 +31,20 @@ fn init_tracing(
             .init();
         Ok(Some(guard))
     } else {
-        tracing_subscriber::fmt::init();
+        // Quiet default for user-facing subcommands. `--verbose`/`-v` or
+        // explicit `RUST_LOG` raises the level.
+        let verbose = std::env::args().any(|a| a == "--verbose" || a == "-v");
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(if verbose {
+                "info"
+            } else {
+                "warn,spur_acp::agents::defaults=warn"
+            })
+        });
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
         Ok(None)
     }
 }
@@ -144,6 +159,18 @@ enum Commands {
         /// Export format
         #[arg(long, value_name = "FORMAT")]
         export: Option<String>,
+        /// Data engine — "sqlite" (default, time-based from cost.db) or
+        /// "duckdb" (token-based, reads agent JSONL). DuckDB requires
+        /// --experimental until Phase 2.5 ships a persistent cache.
+        #[arg(long, value_name = "ENGINE", default_value = "sqlite")]
+        engine: String,
+        /// Opt in to experimental DuckDB engine path.
+        #[arg(long)]
+        experimental: bool,
+        /// Date range `YYYY-MM-DD..YYYY-MM-DD` (DuckDB engine only;
+        /// overrides --week).
+        #[arg(long, value_name = "RANGE")]
+        range: Option<String>,
     },
     /// Authenticate with a PM tool
     Connect {
@@ -419,60 +446,34 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Cost { week, by, export } => {
-            let orch = load_orchestrator(repo_root)?;
-            if let Some(ref ct) = orch.cost_tracker {
-                let summaries = if week {
-                    ct.week_summary()?
-                } else {
-                    ct.today_summary()?
-                };
-                if summaries.is_empty() {
-                    println!("No cost data recorded yet.");
-                } else if export.as_deref() == Some("csv") {
-                    println!("agent,cost_usd,sessions,duration_seconds");
-                    for s in &summaries {
-                        println!(
-                            "{},{:.2},{},{}",
-                            s.agent, s.total_cost_usd, s.session_count, s.total_duration_seconds,
-                        );
-                    }
-                } else {
-                    let total: f64 = summaries.iter().map(|s| s.total_cost_usd).sum();
-                    println!(
-                        "{:<15} {:>10} {:>8} {:>10}",
-                        "Agent", "Cost", "Sessions", "Duration"
+        Commands::Cost {
+            week,
+            by,
+            export,
+            engine,
+            experimental,
+            range,
+        } => match engine.as_str() {
+            "sqlite" => run_cost_sqlite(&repo_root, week, by.as_deref(), export.as_deref()),
+            "duckdb" => {
+                if !experimental {
+                    eprintln!(
+                        "Error: --engine duckdb is experimental; pass --experimental to opt in."
                     );
-                    println!("{}", "-".repeat(47));
-                    for s in &summaries {
-                        println!(
-                            "{:<15} ${:>9.2} {:>8} {:>8}m",
-                            s.agent,
-                            s.total_cost_usd,
-                            s.session_count,
-                            s.total_duration_seconds / 60,
-                        );
-                    }
-                    println!("{}", "-".repeat(47));
-                    println!("{:<15} ${:>9.2}", "Total", total);
-
-                    if let Some(ref dim) = by {
-                        if dim == "project" {
-                            println!("\nBy project:");
-                            for p in ct.by_project()? {
-                                println!(
-                                    "  {}: ${:.2} ({} sessions)",
-                                    p.project, p.total_cost_usd, p.session_count
-                                );
-                            }
-                        }
-                    }
+                    eprintln!("Note: the DuckDB engine rescans all agent JSONL on every");
+                    eprintln!("      invocation until Phase 2.5 (persistent cache) ships.");
+                    std::process::exit(2);
                 }
-            } else {
-                println!("Cost tracking not available.");
+                run_cost_duckdb(week, range.as_deref(), export.as_deref())
             }
-            Ok(())
-        }
+            other => {
+                eprintln!(
+                    "Error: unknown --engine '{}'. Expected 'sqlite' or 'duckdb'.",
+                    other
+                );
+                std::process::exit(2);
+            }
+        },
         Commands::Connect { service } => {
             match service.as_str() {
                 "github" => {
@@ -872,4 +873,177 @@ fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
     let config = load_config()?;
     let license = SpurLicense::from_env_or_disabled();
     Orchestrator::new(repo_root, config, Some(license.feature_gate()))
+}
+
+// ─── cost subcommand helpers ──────────────────────────────────────────
+
+fn run_cost_sqlite(
+    repo_root: &Path,
+    week: bool,
+    by: Option<&str>,
+    export: Option<&str>,
+) -> Result<()> {
+    let orch = load_orchestrator(repo_root.to_path_buf())?;
+    let Some(ref ct) = orch.cost_tracker else {
+        println!("Cost tracking not available.");
+        return Ok(());
+    };
+    let summaries = if week {
+        ct.week_summary()?
+    } else {
+        ct.today_summary()?
+    };
+    if summaries.is_empty() {
+        println!("No cost data recorded yet.");
+        return Ok(());
+    }
+    if export == Some("csv") {
+        println!("agent,cost_usd,sessions,duration_seconds");
+        for s in &summaries {
+            println!(
+                "{},{:.2},{},{}",
+                s.agent, s.total_cost_usd, s.session_count, s.total_duration_seconds,
+            );
+        }
+        return Ok(());
+    }
+    let total: f64 = summaries.iter().map(|s| s.total_cost_usd).sum();
+    println!(
+        "{:<15} {:>10} {:>8} {:>10}",
+        "Agent", "Cost", "Sessions", "Duration"
+    );
+    println!("{}", "-".repeat(47));
+    for s in &summaries {
+        println!(
+            "{:<15} ${:>9.2} {:>8} {:>8}m",
+            s.agent,
+            s.total_cost_usd,
+            s.session_count,
+            s.total_duration_seconds / 60,
+        );
+    }
+    println!("{}", "-".repeat(47));
+    println!("{:<15} ${:>9.2}", "Total", total);
+
+    if let Some(dim) = by {
+        if dim == "project" {
+            println!("\nBy project:");
+            for p in ct.by_project()? {
+                println!(
+                    "  {}: ${:.2} ({} sessions)",
+                    p.project, p.total_cost_usd, p.session_count
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_cost_duckdb(week: bool, range: Option<&str>, export: Option<&str>) -> Result<()> {
+    use chrono::NaiveDate;
+    use spur_context::{AnalyticsEngine, ReportRange, Reporter};
+
+    eprintln!(
+        "[spur] --engine duckdb is experimental: rescans all agent JSONL \
+         per invocation (Phase 2.5 will add a persistent cache)."
+    );
+
+    let engine = AnalyticsEngine::open_in_memory()?;
+    engine.initialize()?;
+    let status = engine.create_agent_views()?;
+    engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;
+
+    let range = parse_range(range, week)?;
+    let reporter = Reporter::new(engine);
+    let reports = reporter.daily_report(range)?;
+
+    // Collapse per-day × agent rows into per-agent totals for the chosen range.
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct AgentAgg {
+        cost: f64,
+        sessions: i64,
+        input: i64,
+        output: i64,
+    }
+    let mut by_agent: BTreeMap<String, AgentAgg> = BTreeMap::new();
+    for r in &reports {
+        for row in &r.agent_rows {
+            let a = by_agent.entry(row.agent.clone()).or_default();
+            a.cost += row.cost_usd;
+            a.sessions += row.sessions;
+            a.input += row.input_tokens;
+            a.output += row.output_tokens;
+        }
+    }
+
+    if by_agent.is_empty() {
+        let status_hint = format!(
+            "(engine views: claude={}, codex={}, kiro={})",
+            status.claude, status.codex, status.kiro,
+        );
+        println!("No cost data found for the selected range. {}", status_hint);
+        return Ok(());
+    }
+
+    if export == Some("csv") {
+        println!("agent,cost_usd,sessions,input_tokens,output_tokens");
+        for (agent, a) in &by_agent {
+            println!(
+                "{},{:.4},{},{},{}",
+                agent, a.cost, a.sessions, a.input, a.output
+            );
+        }
+        return Ok(());
+    }
+
+    let total: f64 = by_agent.values().map(|a| a.cost).sum();
+    println!(
+        "{:<18} {:>10} {:>10} {:>14} {:>14}",
+        "Agent", "Cost", "Sessions", "Input tokens", "Output tokens"
+    );
+    println!("{}", "-".repeat(70));
+    let mut rows: Vec<_> = by_agent.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cost.partial_cmp(&a.1.cost).unwrap_or(std::cmp::Ordering::Equal));
+    for (agent, a) in rows {
+        println!(
+            "{:<18} ${:>9.4} {:>10} {:>14} {:>14}",
+            agent, a.cost, a.sessions, a.input, a.output,
+        );
+    }
+    println!("{}", "-".repeat(70));
+    println!("{:<18} ${:>9.4}", "Total", total);
+    // Return unused-variable silence for NaiveDate import when feature-gated.
+    let _ = NaiveDate::from_ymd_opt;
+    Ok(())
+}
+
+fn parse_range(range: Option<&str>, week: bool) -> Result<spur_context::ReportRange> {
+    use anyhow::Context;
+    use chrono::{DateTime, NaiveDate, Utc};
+    use spur_context::ReportRange;
+
+    if let Some(s) = range {
+        let (from, to) = s.split_once("..").with_context(|| {
+            format!("invalid --range '{}': expected YYYY-MM-DD..YYYY-MM-DD", s)
+        })?;
+        let from_date = NaiveDate::parse_from_str(from.trim(), "%Y-%m-%d")
+            .with_context(|| format!("invalid --range start date '{}'", from))?;
+        let to_date = NaiveDate::parse_from_str(to.trim(), "%Y-%m-%d")
+            .with_context(|| format!("invalid --range end date '{}'", to))?;
+        let from_dt: DateTime<Utc> = from_date
+            .and_hms_opt(0, 0, 0)
+            .context("bad start date conversion")?
+            .and_utc();
+        let to_dt: DateTime<Utc> = to_date
+            .and_hms_opt(0, 0, 0)
+            .context("bad end date conversion")?
+            .and_utc();
+        return Ok(ReportRange { from: from_dt, to: to_dt });
+    }
+    Ok(if week {
+        ReportRange::last_days(7)
+    } else {
+        ReportRange::today()
+    })
 }
