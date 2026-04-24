@@ -1,15 +1,16 @@
 # Brain Continuation — Delivery Guarantees & Handshake Redesign
 
-- **Date:** 2026-04-24 (v3 — amended post-v2-review)
+- **Date:** 2026-04-24 (v3.1 — kimi APPROVE with micro-patch)
 - **Status:** Solution design — ready for implementation
 - **Supersedes / amends:** `docs/superpowers/specs/2026-04-19-brain-async-continuation-design.md` (invariants INV-C1…C7 remain; this spec adds INV-D1…D7 below them and changes the scheduler↔dispatcher handshake)
 - **Root-cause reference:** `docs/superpowers/reviews/2026-04-24-brain-continuation-rca.md`
-- **Authored from:** 3-POV RCA (primary + `worker:kimi` + `worker:codex`) + multi-round first-principles analysis + 2 rounds of `worker:kimi` + `worker:codex` spec review (v1→v2 and v2→v3)
+- **Authored from:** 3-POV RCA (primary + `worker:kimi` + `worker:codex`) + multi-round first-principles analysis + 3 rounds of worker spec review (v1→v2 kimi+codex, v2→v3 kimi+codex, v3→v3.1 kimi APPROVE)
 
 ## Revision history
 
 - **v1 (initial draft)** — two-phase checkout/commit handshake, session-scoped continuations, typed drop events.
-- **v3 (this document)** — amended to fix 4 residual issues identified by the v2-review round (`worker:codex` REWORK): the unreachable `OversizedSingleItem` terminal state, INV-D7 being claimed rather than enforced, retirement protocol backing-field ambiguity, and a compile error in the dispatch sample. v3 deltas:
+- **v3.1 (this document)** — micro-patch surfaced by `worker:kimi` v3 review (APPROVE): `commit_partial` invariants now require intra-list uniqueness in `delivered_keys` and `dropped_terminal`. Without this, duplicate keys in `dropped_terminal` would emit multiple `ContinuationDropped` events for the same `(delegation_id, attempt)` — violating INV-D1 "exactly one terminal state per continuation". Fix is a 5-line invariant extension plus two dedup tests (`test_v3_1_dropped_terminal_duplicate_key`, `test_v3_1_delivered_keys_duplicate`). No code-shape changes.
+- **v3** — amended to fix 4 residual issues identified by the v2-review round (`worker:codex` REWORK): the unreachable `OversizedSingleItem` terminal state, INV-D7 being claimed rather than enforced, retirement protocol backing-field ambiguity, and a compile error in the dispatch sample. v3 deltas:
   - **v3-a: `commit_partial` signature gains `dropped_terminal: Vec<(DelegationKey, DropReason)>`.** The renderer's `dropped_oversized` partition now has a real landing site on the scheduler side. Items in `dropped_terminal` are removed without requeue and fire `ContinuationDropped(reason)`. Closes v2 BUG B5 (phantom `OversizedSingleItem` state).
   - **v3-b: Requeue channel made bounded** (`mpsc::channel(REQUEUE_CHANNEL_CAPACITY)`, default `DRAIN_CAP * 4 = 128`). New `DropReason::RequeueChannelFull` fires on `try_send` fail in `DrainedBatch::Drop`. Converts v2's unbounded-leak failure mode into bounded-loss. INV-D7 now structurally enforced.
   - **v3-c: Retirement backing fields specified.** `McpCallbackServer` fields pinned: `retiring: AtomicBool`, `cancel_token: CancellationToken`, `task_tracker: TaskTracker`, `root_handle: Mutex<Option<JoinHandle<()>>>`. Each new method's implementation contract documented.
@@ -374,10 +375,16 @@ impl BrainScheduler {
     /// - Every key in `delivered_keys` MUST correspond to an item in `batch`.
     /// - Every key in `dropped_terminal` MUST correspond to an item in `batch`.
     /// - `delivered_keys` and `dropped_terminal` MUST be disjoint.
+    /// - `delivered_keys` MUST have no internal duplicates.
+    /// - `dropped_terminal` MUST have no internal duplicates
+    ///   (v3.1 amendment — otherwise INV-D1 "exactly one terminal state per
+    ///   continuation" would be violated by multiple `ContinuationDropped`
+    ///   events for the same `(delegation_id, attempt)`).
     /// Violations:
-    /// - debug build: `debug_assert!` panics
-    /// - release build: emits `ContinuationDropped(MismatchedCommitKeys)` for
-    ///   the offending key; unknown-key entries are otherwise ignored
+    /// - debug build: `debug_assert!` panics on the first violation encountered
+    /// - release build: emits `ContinuationDropped(MismatchedCommitKeys)` once
+    ///   for the offending key; duplicate-within-list entries are deduplicated
+    ///   to the first occurrence; unknown-key entries are otherwise ignored
     ///
     /// Consumes the batch. DrainedBatch::Drop is therefore a no-op on the
     /// leaked path because `into_items` was called inside this method.
@@ -1012,6 +1019,8 @@ proptest! {
 - **test_g_oversized_single_item_dropped_terminally** *(v2, v3-revised)* — push a continuation whose own cost > `BUDGET`; drain into `DrainedBatch`; call `commit_partial(batch, vec![], vec![(key, OversizedSingleItem{..})])`; assert exactly one `Dropped(OversizedSingleItem)` event fires; assert `pending_continuations` is empty (item NOT requeued); assert subsequent `push_continuation` of the same `(id, attempt)` is dropped with `AlreadyDelivered` because the key is now in `delivered_ids`… wait, it should NOT be in `delivered_ids` because it was dropped terminally, not delivered. **Assert: subsequent push of same key goes through to pending_continuations** (terminal-dropped keys are NOT in `delivered_ids`; they're just gone).
 - **test_v3a_commit_partial_three_way_partition** *(v3)* — construct batch with 3 items {A, B, C}; call `commit_partial(batch, [A], [(C, OversizedSingleItem{..})])`; assert: A moves to `delivered_ids`; C fires `Dropped(OversizedSingleItem)`; B gets `Deferred(BudgetSpill)` and is in `pending_continuations`; no events for A.
 - **test_v3a_commit_partial_disjoint_lists_violation** *(v3)* — pass the same key in both `delivered_keys` and `dropped_terminal`; assert `debug_assert!` panic in debug build; `Dropped(MismatchedCommitKeys)` in release.
+- **test_v3_1_dropped_terminal_duplicate_key** *(v3.1)* — pass `dropped_terminal = [(K, R1), (K, R2)]` for some `K` present in batch; assert exactly ONE `Dropped` event fires (for the first occurrence); in debug build, assert `debug_assert!` panic instead. Ensures INV-D1 "exactly one terminal state" holds under adversarial caller input.
+- **test_v3_1_delivered_keys_duplicate** *(v3.1)* — pass `delivered_keys = [K, K]`; assert `K` lands in `delivered_ids` exactly once (the second occurrence is a no-op after dedup); in debug build, assert `debug_assert!` panic.
 - **test_v3b_requeue_channel_full_drops_terminally** *(v3)* — construct scheduler with `REQUEUE_CHANNEL_CAPACITY = 2`; force 3 leaked batches (don't drain `requeue_rx` between them); assert the 3rd batch's Drop emits `Dropped(RequeueChannelFull)` for each of its items; assert `requeue_depth()` is saturated.
 - **test_h_retry_attempt_not_deduped** — commit continuation with `(id=X, attempt=1)`; push `(id=X, attempt=2)`; assert enqueued, not dropped. Note attempt numbering is 1-based per v2 amendment #8.
 - **test_amendment_11_commit_partial_unknown_key** *(v2)* — call `commit_partial(batch, [key_not_in_batch])`; in debug build, assert panic via `debug_assert!`; in release, assert `Dropped(MismatchedCommitKeys)` event for the offending key.
