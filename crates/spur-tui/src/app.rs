@@ -1247,6 +1247,9 @@ impl App {
             flag_summary: self.flag_summary,
         };
         self.dashboard.handle_spur_event(&event, &ctx);
+        if let Some(ref mut picker) = self.session_picker {
+            picker.handle_spur_event(&event, &ctx);
+        }
         if let Some(ref mut detail) = self.session_detail {
             detail.handle_spur_event(&event, &ctx);
         }
