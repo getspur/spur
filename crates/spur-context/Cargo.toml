@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 spur-cost = { workspace = true }
 duckdb = { workspace = true }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
