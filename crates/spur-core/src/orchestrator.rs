@@ -1368,13 +1368,9 @@ impl Orchestrator {
                             None => {
                                 // Emit BrainConnecting before attempting spawn so the
                                 // UI can transition to a "connecting" loading state.
-                                let brain_name_hint = brain_override
-                                    .as_deref()
-                                    .unwrap_or("")
-                                    .to_string();
                                 self.emit(SpurEvent::now(SpurEventBody::BrainConnecting {
                                     session: SessionId(session_id.clone()),
-                                    brain_name: brain_name_hint,
+                                    brain_name: self.selected_brain_name(brain_override.as_deref()),
                                 }));
                                 match self
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
@@ -2210,11 +2206,13 @@ impl Orchestrator {
         // events, regardless of whether a brain is actually held.
         let from_session = brain.as_ref().map(|b| b.spur_session_id.clone());
 
-        // Emit SessionRetireStart on the resume path so the UI can begin
-        // displaying a loading state immediately.
-        if let Some(ref to) = resume_target {
+        // Emit SessionRetireStart only when there IS an active brain to retire
+        // AND a resume target is present.  This guarantees the Start/Complete
+        // pair either both fire (warm resume) or neither fires (cold resume),
+        // preventing subscribers from hanging on a Start with no matching Complete.
+        if let (Some(ref from), Some(ref to)) = (&from_session, &resume_target) {
             self.emit(SpurEvent::now(SpurEventBody::SessionRetireStart {
-                from: from_session.clone(),
+                from: Some(from.clone()),
                 to: to.clone(),
             }));
         }
