@@ -1560,6 +1560,12 @@ impl App {
             }
 
             Action::ResumeSession { session_id } => {
+                // Optimistic navigation: move to SessionDetail immediately so
+                // the picker dismisses in the same tick (FP-6). SessionDetail
+                // starts in its initial LoadState and derives its label from
+                // incoming resume-pipeline milestone events (Tranche 2 Task 5).
+                let sid = SessionId(session_id.clone());
+                self.current_view = ViewId::SessionDetail(sid);
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumeSession { session_id });
                 }
