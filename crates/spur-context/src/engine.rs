@@ -207,6 +207,7 @@ impl AnalyticsEngine {
             Self::discover_claude_dir(),
             Self::discover_codex_dir(),
             Self::discover_kiro_dir(),
+            Self::discover_kimi_dir(),
         ] {
             if let Ok(files) = Self::find_jsonl_files(&dir) {
                 for f in files {
@@ -302,6 +303,24 @@ impl AnalyticsEngine {
         } else {
             self.create_empty_stub("opencode_events")?;
             tracing::debug!("created empty opencode_events stub");
+        }
+
+        // ─── Kimi ───────────────────────────────────────────────
+        let kimi_dir = Self::discover_kimi_dir();
+        if kimi_dir.is_dir() {
+            match self.create_kimi_view(&kimi_dir) {
+                Ok(()) => {
+                    status.kimi = true;
+                    tracing::debug!(dir = %kimi_dir.display(), "created kimi_events view");
+                }
+                Err(e) => {
+                    tracing::warn!(dir = %kimi_dir.display(), error = %e, "failed to create kimi_events view, using stub");
+                    self.create_empty_stub("kimi_events")?;
+                }
+            }
+        } else {
+            self.create_empty_stub("kimi_events")?;
+            tracing::debug!("created empty kimi_events stub");
         }
 
         // ─── Rebuild unified views ─────────────────────────────
@@ -588,6 +607,25 @@ impl AnalyticsEngine {
         }
     }
 
+    /// Discover the Kimi sessions directory.
+    ///
+    /// Probe order: `$KIMI_HOME/sessions` → `~/.kimi/sessions`.
+    fn discover_kimi_dir() -> PathBuf {
+        if let Ok(path) = env::var("KIMI_HOME") {
+            return PathBuf::from(path).join("sessions");
+        }
+        #[cfg(test)]
+        {
+            PathBuf::from("__spur_context_test_missing__/kimi")
+        }
+        #[cfg(not(test))]
+        {
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".kimi/sessions"))
+                .unwrap_or_else(|| PathBuf::from("~/.kimi/sessions"))
+        }
+    }
+
     fn has_opencode_db(path: &Path) -> bool {
         path.is_file()
     }
@@ -684,6 +722,201 @@ impl AnalyticsEngine {
             "populated opencode_events"
         );
         Ok(())
+    }
+
+    /// Populate `kimi_events` from Kimi session JSONL files.
+    ///
+    /// `sessions_root` is the `.kimi/sessions` directory. We walk
+    /// `<project_hash>/<session_uuid>/context.jsonl`, pair odd/even `_usage`
+    /// rows per turn, and emit one event per assistant turn. File mtime is
+    /// used as the base timestamp with a back-dating offset so intra-session
+    /// ordering is preserved.
+    fn create_kimi_view(&self, sessions_root: &Path) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS kimi_events_table;
+            CREATE TABLE kimi_events_table (
+                timestamp_ms          BIGINT,
+                session_id            VARCHAR,
+                agent                 VARCHAR,
+                model                 VARCHAR,
+                project               VARCHAR,
+                input_tokens          BIGINT,
+                output_tokens         BIGINT,
+                cache_read_tokens     BIGINT,
+                cache_creation_tokens BIGINT,
+                cost_usd              DOUBLE
+            );
+            "#,
+        )?;
+
+        let rows = Self::extract_kimi_rows(sessions_root).with_context(|| {
+            format!(
+                "failed to scan kimi sessions at {}",
+                sessions_root.display()
+            )
+        })?;
+
+        if !rows.is_empty() {
+            let mut appender = self
+                .conn
+                .appender("kimi_events_table")
+                .context("failed to open kimi_events_table appender")?;
+            for r in &rows {
+                appender
+                    .append_row(params![
+                        r.timestamp_ms,
+                        r.session_id,
+                        "kimi",
+                        "kimi-for-coding",
+                        r.project,
+                        r.input_tokens,
+                        r.output_tokens,
+                        0_i64,
+                        0_i64,
+                        None::<f64>,
+                    ])
+                    .context("failed to append kimi row")?;
+            }
+            appender.flush().context("failed to flush kimi appender")?;
+        }
+
+        self.conn.execute_batch(
+            r#"
+            CREATE OR REPLACE VIEW kimi_events AS
+            SELECT
+                epoch_ms(timestamp_ms) AS timestamp,
+                session_id,
+                agent,
+                model,
+                project,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd
+            FROM kimi_events_table;
+            "#,
+        )?;
+
+        tracing::debug!(
+            root = %sessions_root.display(),
+            rows = rows.len(),
+            "populated kimi_events"
+        );
+        Ok(())
+    }
+
+    fn extract_kimi_rows(sessions_root: &Path) -> Result<Vec<KimiRow>> {
+        use std::io::BufRead;
+
+        let mut out = Vec::new();
+        if !sessions_root.is_dir() {
+            return Ok(out);
+        }
+        for project_entry in std::fs::read_dir(sessions_root)? {
+            let project_entry = project_entry?;
+            if !project_entry.path().is_dir() {
+                continue;
+            }
+            let project = project_entry.file_name().to_string_lossy().to_string();
+            for session_entry in std::fs::read_dir(project_entry.path())? {
+                let session_entry = session_entry?;
+                let session_dir = session_entry.path();
+                let ctx = session_dir.join("context.jsonl");
+                if !ctx.is_file() {
+                    continue;
+                }
+                let session_id = session_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let mtime_ms = std::fs::metadata(&ctx)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+
+                let file = std::fs::File::open(&ctx)
+                    .with_context(|| format!("failed to open {}", ctx.display()))?;
+                let mut usage: Vec<u64> = Vec::new();
+                let mut assistant_turns: usize = 0;
+                for line in std::io::BufReader::new(file).lines() {
+                    let line = line?;
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
+                    let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    match role {
+                        "_usage" => {
+                            if let Some(t) = row.get("token_count").and_then(|v| v.as_u64()) {
+                                usage.push(t);
+                            }
+                        }
+                        "assistant" => assistant_turns += 1,
+                        _ => {}
+                    }
+                }
+
+                let pair_ok = usage.len() == assistant_turns * 2 && !usage.is_empty();
+                if pair_ok {
+                    let turns = usage.len() / 2;
+                    let mut prev_post: Option<u64> = None;
+                    for t in 0..turns {
+                        let pre = usage[t * 2];
+                        let post = usage[t * 2 + 1];
+                        let output = post.saturating_sub(pre);
+                        let input = match prev_post {
+                            Some(p) => pre.saturating_sub(p),
+                            None => pre,
+                        };
+                        prev_post = Some(post);
+                        if output == 0 && input == 0 {
+                            continue;
+                        }
+                        let ts_offset_ms = ((turns - t - 1) as i64) * 1000;
+                        out.push(KimiRow {
+                            timestamp_ms: mtime_ms.saturating_sub(ts_offset_ms),
+                            session_id: session_id.clone(),
+                            project: Some(project.clone()),
+                            input_tokens: input as i64,
+                            output_tokens: output as i64,
+                        });
+                    }
+                } else {
+                    // Fallback: cumulative diffs as input tokens only. Still useful volume.
+                    tracing::warn!(
+                        file = %ctx.display(),
+                        usage_count = usage.len(),
+                        assistant_count = assistant_turns,
+                        "kimi _usage/assistant count mismatch; falling back to input-only deltas"
+                    );
+                    let mut prev = 0u64;
+                    let total = usage.len();
+                    for (i, &cur) in usage.iter().enumerate() {
+                        let delta = cur.saturating_sub(prev);
+                        prev = cur;
+                        if delta == 0 {
+                            continue;
+                        }
+                        let ts_offset_ms = ((total - i - 1) as i64) * 1000;
+                        out.push(KimiRow {
+                            timestamp_ms: mtime_ms.saturating_sub(ts_offset_ms),
+                            session_id: session_id.clone(),
+                            project: Some(project.clone()),
+                            input_tokens: delta as i64,
+                            output_tokens: 0,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn extract_opencode_rows(db_path: &Path) -> Result<Vec<OpenCodeRow>> {
@@ -802,7 +1035,9 @@ impl AnalyticsEngine {
             UNION ALL
             SELECT * FROM kiro_events
             UNION ALL
-            SELECT * FROM opencode_events;
+            SELECT * FROM opencode_events
+            UNION ALL
+            SELECT * FROM kimi_events;
 
             {}
             "#,
@@ -1428,6 +1663,7 @@ pub struct AgentViewStatus {
     pub codex: bool,
     pub kiro: bool,
     pub opencode: bool,
+    pub kimi: bool,
 }
 
 /// Intermediate row shape used when copying OpenCode messages from SQLite
@@ -1444,6 +1680,17 @@ struct OpenCodeRow {
     cache_read_tokens: i64,
     cache_creation_tokens: i64,
     cost_usd: Option<f64>,
+}
+
+/// Intermediate row shape used when copying Kimi _usage events from JSONL
+/// into DuckDB via the appender. Not part of the public API.
+#[derive(Debug)]
+struct KimiRow {
+    timestamp_ms: i64,
+    session_id: String,
+    project: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
 }
 
 /// Live session block row for recent activity.
@@ -1898,6 +2145,138 @@ mod tests {
             rows > 0,
             "expected at least one opencode row on this dev machine"
         );
+    }
+
+    #[test]
+    fn test_kimi_events_pair_pre_post() {
+        let tmp = TempDir::new().unwrap();
+        let sessions = tmp.path().join("kimi").join("sessions");
+        let session_dir = sessions.join("projhash").join("sess-uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut f = std::fs::File::create(session_dir.join("context.jsonl")).unwrap();
+        for line in [
+            r#"{"role":"_system_prompt","content":"sys"}"#,
+            r#"{"role":"user","content":"hi"}"#,
+            r#"{"role":"_usage","token_count":13000}"#,
+            r#"{"role":"assistant","content":"hello"}"#,
+            r#"{"role":"_usage","token_count":13500}"#,
+            r#"{"role":"tool","content":"t"}"#,
+            r#"{"role":"_usage","token_count":14000}"#,
+            r#"{"role":"assistant","content":"second"}"#,
+            r#"{"role":"_usage","token_count":14100}"#,
+        ] {
+            writeln!(f, "{}", line).unwrap();
+        }
+
+        let engine = setup_engine();
+        engine.create_kimi_view(&sessions).unwrap();
+
+        let mut stmt = engine
+            .conn
+            .prepare(
+                "SELECT session_id, agent, model, project, input_tokens, output_tokens, cost_usd \
+                 FROM kimi_events ORDER BY timestamp",
+            )
+            .unwrap();
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            Option<f64>,
+        )> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "sess-uuid");
+        assert_eq!(rows[0].1, "kimi");
+        assert_eq!(rows[0].2.as_deref(), Some("kimi-for-coding"));
+        assert_eq!(rows[0].3.as_deref(), Some("projhash"));
+        // Turn 1: pre=13000, post=13500 -> input=13000 (first), output=500
+        assert_eq!((rows[0].4, rows[0].5), (13000, 500));
+        // Turn 2: pre=14000, post=14100 -> input=500 (14000-13500), output=100
+        assert_eq!((rows[1].4, rows[1].5), (500, 100));
+        assert!(
+            rows.iter().all(|r| r.6.is_none()),
+            "cost must be NULL for kimi"
+        );
+    }
+
+    #[test]
+    fn test_kimi_events_fallback_on_count_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let sessions = tmp.path().join("kimi").join("sessions");
+        let session_dir = sessions.join("ph").join("sess");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut f = std::fs::File::create(session_dir.join("context.jsonl")).unwrap();
+        // 3 _usage for 1 assistant -> invariant broken, expect fallback path.
+        for line in [
+            r#"{"role":"user","content":"x"}"#,
+            r#"{"role":"_usage","token_count":100}"#,
+            r#"{"role":"_usage","token_count":150}"#,
+            r#"{"role":"assistant","content":"y"}"#,
+            r#"{"role":"_usage","token_count":200}"#,
+        ] {
+            writeln!(f, "{}", line).unwrap();
+        }
+        let engine = setup_engine();
+        engine.create_kimi_view(&sessions).unwrap();
+        let rows: Vec<(i64, i64)> = engine
+            .conn
+            .prepare("SELECT input_tokens, output_tokens FROM kimi_events ORDER BY timestamp")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        // Cumulative diffs: 100, 50, 50 -> all as input tokens.
+        assert_eq!(
+            rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+            vec![100, 50, 50]
+        );
+        assert!(rows.iter().all(|r| r.1 == 0));
+    }
+
+    #[test]
+    #[ignore]
+    fn smoke_kimi_real_dir() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let sessions = home.join(".kimi/sessions");
+        if !sessions.is_dir() {
+            return;
+        }
+        let engine = AnalyticsEngine::open_in_memory().unwrap();
+        engine.initialize().unwrap();
+        engine.create_kimi_view(&sessions).unwrap();
+        let (n, i, o): (i64, Option<i64>, Option<i64>) = engine
+            .conn
+            .query_row(
+                "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM kimi_events",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        eprintln!("kimi smoke: rows={} input={:?} output={:?}", n, i, o);
+        assert!(n > 0, "expected kimi data on this dev machine");
     }
 
     #[test]
