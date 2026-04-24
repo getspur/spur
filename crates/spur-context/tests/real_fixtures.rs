@@ -51,7 +51,22 @@ fn real_fixtures_exercise_heterogeneous_views() -> Result<()> {
         engine
             .conn()
             .query_row("SELECT COUNT(*) FROM claude_events", [], |row| row.get(0))?;
-    assert_eq!(claude_count, 2, "assistant rows should survive the filter");
+    assert_eq!(
+        claude_count, 2,
+        "after dedup: two rows share requestId+message.id (collapsed to 1) + one unique = 2"
+    );
+
+    let raw_assistant_count: i64 = engine.conn().query_row(
+        "SELECT COUNT(*) FROM claude_raw
+         WHERE json_valid(line)
+           AND json_extract_string(line, '$.type') = 'assistant'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        raw_assistant_count, 3,
+        "fixture has 3 assistant rows; dedup must reduce claude_events to 2"
+    );
 
     let codex_count: i64 =
         engine
@@ -65,8 +80,10 @@ fn real_fixtures_exercise_heterogeneous_views() -> Result<()> {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-    assert_eq!(claude_input_sum, Some(12));
-    assert_eq!(claude_output_sum, Some(188));
+    // After dedup: earlier-timestamp row of the duplicate pair (input=6, output=8)
+    // survives; the distinct third row contributes (input=7, output=100).
+    assert_eq!(claude_input_sum, Some(13));
+    assert_eq!(claude_output_sum, Some(108));
 
     let codex_session_id: String =
         engine
