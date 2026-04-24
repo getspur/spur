@@ -37,7 +37,6 @@ enum PickerState {
         agent: String,
         sessions: Vec<SessionInfo>,
         cursor: usize,
-        resuming: bool,
         search_focused: bool,
         filter: String,
     },
@@ -174,7 +173,6 @@ impl SessionPickerView {
             agent,
             sessions,
             cursor: clamped_cursor,
-            resuming: false,
             search_focused: false,
             filter: prev_filter,
         };
@@ -440,7 +438,6 @@ impl SessionPickerView {
         agent: &str,
         sessions: &[SessionInfo],
         cursor: usize,
-        resuming: bool,
         search_focused: bool,
         filter: &str,
     ) {
@@ -535,9 +532,7 @@ impl SessionPickerView {
                 .map(Self::relative_time)
                 .unwrap_or_default();
 
-            let suffix = if is_selected && resuming {
-                " loading...".to_string()
-            } else if show_cwd {
+            let suffix = if show_cwd {
                 format!("  {}/", Self::cwd_basename(&session.cwd))
             } else {
                 String::new()
@@ -793,6 +788,14 @@ impl SessionPickerView {
         );
         render_footer_hint(frame, chunks[2]);
     }
+
+    #[cfg(test)]
+    pub(super) fn debug_cursor(&self) -> Option<usize> {
+        match &self.state {
+            PickerState::Populated { cursor, .. } => Some(*cursor),
+            _ => None,
+        }
+    }
 }
 
 impl View for SessionPickerView {
@@ -887,15 +890,10 @@ impl View for SessionPickerView {
                 PickerState::Populated {
                     sessions,
                     cursor,
-                    resuming,
                     search_focused,
                     filter,
                     ..
                 } => {
-                    if *resuming {
-                        return None;
-                    }
-
                     if *search_focused {
                         match key.code {
                             KeyCode::Esc => {
@@ -987,7 +985,6 @@ impl View for SessionPickerView {
                                             );
                                             None
                                         } else {
-                                            *resuming = true;
                                             Some(Action::ResumeSession { session_id: sid })
                                         }
                                     }
@@ -1063,7 +1060,6 @@ impl View for SessionPickerView {
                 agent,
                 sessions,
                 cursor,
-                resuming,
                 search_focused,
                 filter,
             } => self.render_populated(
@@ -1074,7 +1070,6 @@ impl View for SessionPickerView {
                 agent,
                 sessions,
                 *cursor,
-                *resuming,
                 *search_focused,
                 filter,
             ),
@@ -1167,5 +1162,52 @@ mod current_session_shortcut_tests {
             }
             other => panic!("expected ResumeSession(B), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn enter_on_non_current_session_does_not_wedge_picker_into_pending_state() {
+        // Populated with 3 sessions, no "current session" so every row is
+        // a resume candidate.
+        let mut picker = SessionPickerView::new();
+        picker.set_sessions(
+            "test-brain".into(),
+            vec![make_session("X"), make_session("Y"), make_session("Z")],
+        );
+        // No current session id set — all rows are resume candidates.
+
+        // Move cursor to row 1 (first session row, past [+ New]).
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &test_ctx(),
+        );
+
+        // First Enter: must return ResumeSession.
+        let action1 = picker.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &test_ctx(),
+        );
+        assert!(
+            matches!(action1, Some(Action::ResumeSession { .. })),
+            "expected ResumeSession, got {:?}",
+            action1
+        );
+
+        // Second Down in the same frame: must NOT be silently eaten
+        // by a pending-flag guard (the pre-fix behavior where `*resuming`
+        // caused an unconditional early `None` return that swallowed all
+        // subsequent input).
+        //
+        // We assert positively: the picker still processes cursor motion.
+        let before_cursor = picker.debug_cursor();
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &test_ctx(),
+        );
+        let after_cursor = picker.debug_cursor();
+        assert_ne!(
+            before_cursor,
+            after_cursor,
+            "picker ignored input — resuming flag likely still present"
+        );
     }
 }
