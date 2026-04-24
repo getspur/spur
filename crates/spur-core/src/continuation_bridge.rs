@@ -107,7 +107,7 @@ use agent_client_protocol::{
     ContentBlock, EmbeddedResource, EmbeddedResourceResource, TextContent, TextResourceContents,
 };
 
-pub const MERGE_BUDGET_DEFAULT_BYTES: usize = 4096;
+pub const MERGE_BUDGET_DEFAULT_BYTES: usize = 8192;
 pub const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 
 const MARKER_AUTONOMOUS: &str =
@@ -473,8 +473,11 @@ mod tests {
         let key = DelegationKey::from(&continuation);
         let cost = continuation_cost(&continuation);
 
-        let outcome =
-            render_merged_turn_with_spill_v2(&user_blocks, std::slice::from_ref(&continuation), cost - 1);
+        let outcome = render_merged_turn_with_spill_v2(
+            &user_blocks,
+            std::slice::from_ref(&continuation),
+            cost - 1,
+        );
 
         assert_eq!(outcome.blocks, user_blocks);
         assert!(outcome.delivered_keys.is_empty());
