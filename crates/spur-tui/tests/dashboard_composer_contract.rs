@@ -105,7 +105,7 @@ fn empty_review_tab_decision_routes_pre_key() {
     dashboard.detail_pane_mut().jump_to_tab(DetailTab::Review);
 
     let action = dashboard.handle_key(
-        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE),
         &spur_tui::test_support::test_view_ctx(&lineage),
     );
 
@@ -233,7 +233,7 @@ fn vim_normal_review_tab_decision_routes_to_view() {
     dashboard.detail_pane_mut().jump_to_tab(DetailTab::Review);
 
     let action = dashboard.handle_key(
-        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE),
         &spur_tui::test_support::test_view_ctx(&lineage),
     );
 
@@ -253,7 +253,7 @@ fn vim_normal_review_tab_decision_routes_to_view() {
         ),
     }
 
-    // InputBar must remain untouched — the 'a' key was routed to the review
+    // InputBar must remain untouched — the 'A' key was routed to the review
     // card, not into Vim insert mode.
     assert_eq!(dashboard.input_bar_text_for_test(), "");
 }

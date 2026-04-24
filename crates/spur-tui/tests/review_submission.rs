@@ -11,13 +11,13 @@ fn test_ctx_with_lineage(
 
 #[test]
 fn approve_key_maps_to_approve_decision() {
-    let d = decision_for_key('a', None);
+    let d = decision_for_key('A', None);
     assert!(matches!(d, Some(ReviewDecision::Approve)));
 }
 
 #[test]
 fn deny_key_with_reason_maps_to_reject() {
-    let d = decision_for_key('d', Some("bad".into()));
+    let d = decision_for_key('D', Some("bad".into()));
     match d {
         Some(ReviewDecision::Reject { reason }) => assert_eq!(reason, "bad"),
         other => panic!("expected Reject, got {:?}", other),
@@ -26,7 +26,7 @@ fn deny_key_with_reason_maps_to_reject() {
 
 #[test]
 fn modify_key_maps_to_modify() {
-    let d = decision_for_key('m', Some("add tests".into()));
+    let d = decision_for_key('M', Some("add tests".into()));
     assert!(matches!(d, Some(ReviewDecision::Modify { .. })));
 }
 
@@ -107,11 +107,11 @@ fn dashboard_reads_attempt_n_from_lineage_on_submit() {
     dashboard.set_focused_node(Some(ExecutorId::new("e1")));
     dashboard.detail_pane_mut().jump_to_tab(DetailTab::Review);
 
-    // Simulate pressing 'a' — InputBar appends the char, then the review-key
+    // Simulate pressing 'A' — InputBar appends the char, then the review-key
     // intercept emits Action::SubmitReview. The attempt_n MUST be read from
     // the lineage's pending_review (3), not the unwrap_or(1) fallback.
     let action = dashboard.handle_key(
-        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE),
         &test_ctx_with_lineage(&lineage),
     );
 
