@@ -281,24 +281,30 @@ fn take_rendered_batch(
     })
 }
 
+fn dropped_terminal_from_render_outcome(
+    outcome: &crate::continuation_bridge::RenderOutcome,
+) -> Vec<(spur_acp::domain::DelegationKey, spur_acp::domain::DropReason)> {
+    outcome
+        .dropped_oversized
+        .iter()
+        .map(|(key, bytes)| {
+            (
+                key.clone(),
+                spur_acp::domain::DropReason::OversizedSingleItem {
+                    continuation_bytes: *bytes,
+                    budget_bytes: crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                },
+            )
+        })
+        .collect()
+}
+
 fn commit_rendered_batch(
     scheduler: &mut crate::scheduler::BrainScheduler,
     batch: crate::scheduler::DrainedBatch,
     outcome: crate::continuation_bridge::RenderOutcome,
 ) {
-    let dropped_terminal = outcome
-        .dropped_oversized
-        .into_iter()
-        .map(|(key, bytes)| {
-            (
-                key,
-                spur_acp::domain::DropReason::OversizedSingleItem {
-                    continuation_bytes: bytes,
-                    budget_bytes: crate::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
-                },
-            )
-        })
-        .collect();
+    let dropped_terminal = dropped_terminal_from_render_outcome(&outcome);
     let spilled_with_reason = Some(
         outcome
             .deferred_spill
@@ -1641,7 +1647,7 @@ impl Orchestrator {
                                 ?other,
                                 "unexpected non-Message variant dequeued from scheduler; rolling back batch"
                             );
-                            scheduler.rollback(batch);
+                            scheduler.rollback(batch, vec![]);
                             continue;
                         }
                         None => unreachable!("merged prompt must retain its input"),
@@ -1766,10 +1772,11 @@ impl Orchestrator {
                     s
                 }
                 Err(e) => {
-                    if let Some((batch, _outcome)) =
+                    if let Some((batch, outcome)) =
                         take_rendered_batch(&mut drained_batch, &mut render_outcome)
                     {
-                        scheduler.rollback(batch);
+                        let dropped_terminal = dropped_terminal_from_render_outcome(&outcome);
+                        scheduler.rollback(batch, dropped_terminal);
                     }
                     let error_message = format_error_chain(&e);
                     error!(error = %error_message, "Brain prompt failed");
@@ -6345,7 +6352,7 @@ mod phase5_orchestrator_finalization_tests {
         scheduler.push_continuation(mk_cont("rollback-me", 1, &session));
         let batch = continuation_batch(&mut scheduler);
 
-        scheduler.rollback(batch);
+        scheduler.rollback(batch, vec![]);
 
         assert_eq!(scheduler.pending_continuation_len(), 1);
         let events = sink.snapshot();
