@@ -56,7 +56,7 @@ impl<'a> LiveSessionTracker<'a> {
             .unwrap_or_else(|| LiveSnapshot {
                 session_id: self.session_id.clone(),
                 agent: self.agent.clone(),
-                model: None,
+                models: None,
                 started_at: None,
                 last_activity: None,
                 input_tokens: 0,
