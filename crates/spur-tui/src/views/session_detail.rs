@@ -21,6 +21,21 @@ use super::View;
 
 const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts a fresh brain.";
 
+/// Derived render state for a session the user has navigated to but
+/// whose resume pipeline may not yet be complete. Each variant is a
+/// projection of the most recent milestone event received for this
+/// view's session id (FP-2, FP-4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadState {
+    /// Default initial state when SessionDetail is entered via
+    /// optimistic navigation from the picker.
+    Retiring,
+    Connecting { brain_name: String },
+    Loading,
+    Ready,
+    Failed { message: String },
+}
+
 /// Full-screen view of a brain session's ReAct trace with chat input.
 pub struct SessionDetailView {
     session_id: SessionId,
@@ -121,6 +136,12 @@ pub struct SessionDetailView {
     /// `resume_banner` when the view has been cleared. Cleared by
     /// construction of the next view (replacement drops it naturally).
     ready_banner: Option<String>,
+
+    /// Derived load state for this session. Transitions from `Retiring`
+    /// through `Connecting` → `Loading` → `Ready` as resume-pipeline
+    /// milestone events arrive. Set to `Failed` on `BrainError`.
+    /// Drives the pre-ready render path (Tranche 2 Task 5).
+    pub load_state: LoadState,
 }
 
 impl SessionDetailView {
@@ -177,6 +198,7 @@ impl SessionDetailView {
             known_worker_names,
             cleared: false,
             ready_banner: None,
+            load_state: LoadState::Ready,
         }
     }
 
@@ -235,6 +257,99 @@ impl SessionDetailView {
             known_worker_names: std::collections::HashSet::new(),
             cleared: false,
             ready_banner: None,
+            load_state: LoadState::Ready,
+        }
+    }
+
+    /// Construct a pre-ready `SessionDetailView` for a session that has been
+    /// navigated to optimistically (before the resume pipeline completes).
+    /// Starts in `LoadState::Retiring`. Transitions via `handle_spur_event`
+    /// as milestone events arrive (Tranche 2 Task 5).
+    pub fn for_session(session_id: SessionId) -> Self {
+        let mention_registry = crate::mentions::MentionRegistry::for_direct_session();
+        let agent_cfg = std::sync::Arc::new(spur_acp::AgentConfig::with_defaults(""));
+        let command_registry =
+            crate::commands::CommandRegistry::from_configs(std::slice::from_ref(&*agent_cfg));
+        Self {
+            session_id,
+            agent_name: String::new(),
+            role: String::new(),
+            agent_cfg,
+            react_trace: crate::components::react_trace::ReactTrace::with_kind(
+                spur_acp::AgentKind::Generic,
+            ),
+            input_bar: InputBar::new(),
+            cost: 0.0,
+            started_at: std::time::Instant::now(),
+            current_mode: None,
+            command_registry,
+            context_used: None,
+            context_size: None,
+            auth_error: None,
+            trigger_detector: crate::components::completion_trigger::TriggerDetector::new(),
+            mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
+            cwd: std::path::PathBuf::from("."),
+            #[cfg(feature = "markdown")]
+            mermaid_registry: std::collections::HashMap::new(),
+            #[cfg(feature = "markdown")]
+            pending_fence_actions: std::collections::VecDeque::new(),
+            #[cfg(feature = "markdown")]
+            render_picker: None,
+            last_draft_change_at: None,
+            last_persisted_draft: String::new(),
+            resume_banner: None,
+            stream_in_flight: false,
+            cancelling_in_flight: false,
+            cancel_mode: None,
+            picker_shell: None,
+            workers_panel_collapsed: false,
+            tool_depth: std::collections::HashMap::new(),
+            known_worker_names: std::collections::HashSet::new(),
+            cleared: false,
+            ready_banner: None,
+            load_state: LoadState::Retiring,
+        }
+    }
+
+    /// Return the current `LoadState` for this view.
+    pub fn load_state(&self) -> &LoadState {
+        &self.load_state
+    }
+
+    /// Update `load_state` from a milestone event scoped to this view's
+    /// session id. Intended for tests that exercise the pre-ready load
+    /// pipeline without a full `ViewContext`.
+    ///
+    /// The full `View::handle_spur_event` trait method also calls
+    /// `apply_milestone_event` internally; this is the test-facing entry
+    /// point.
+    pub fn apply_spur_event(&mut self, event: &SpurEvent) {
+        self.apply_milestone_event(event);
+    }
+
+    /// Inner projection: update `load_state` from a milestone event scoped to
+    /// this view's session id.
+    fn apply_milestone_event(&mut self, event: &SpurEvent) {
+        match &event.body {
+            SpurEventBody::BrainConnecting { session, brain_name }
+                if session.0 == self.session_id.0 =>
+            {
+                self.load_state = LoadState::Connecting {
+                    brain_name: brain_name.clone(),
+                };
+            }
+            SpurEventBody::SessionLoading { session } if session.0 == self.session_id.0 => {
+                self.load_state = LoadState::Loading;
+            }
+            SpurEventBody::SessionLoaded { session } if session.0 == self.session_id.0 => {
+                self.load_state = LoadState::Ready;
+            }
+            SpurEventBody::BrainError { session, message } if session.0 == self.session_id.0 => {
+                self.load_state = LoadState::Failed {
+                    message: message.clone(),
+                };
+            }
+            _ => {}
         }
     }
 
@@ -1378,6 +1493,9 @@ impl View for SessionDetailView {
     }
 
     fn handle_spur_event(&mut self, event: &SpurEvent, ctx: &super::ViewContext) {
+        // Update LoadState from milestone events (Tranche 2 Task 5).
+        self.apply_milestone_event(event);
+
         match &event.body {
             SpurEventBody::AgentNotification {
                 session,
@@ -1778,6 +1896,34 @@ impl SessionDetailView {
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
     ) {
+        // Pre-ready render path: show a status label until LoadState::Ready.
+        match &self.load_state.clone() {
+            LoadState::Retiring => {
+                render_load_label(frame, area, "Retiring previous session…");
+                return;
+            }
+            LoadState::Connecting { brain_name } => {
+                let label = if brain_name.is_empty() {
+                    "Connecting to brain…".to_string()
+                } else {
+                    format!("Connecting to {brain_name}…")
+                };
+                render_load_label(frame, area, &label);
+                return;
+            }
+            LoadState::Loading => {
+                render_load_label(frame, area, "Loading session history…");
+                return;
+            }
+            LoadState::Failed { message } => {
+                render_error_label(frame, area, message);
+                return;
+            }
+            LoadState::Ready => {
+                // Fall through to the full render path below.
+            }
+        }
+
         let elapsed = self.elapsed();
 
         // Reserve the top row for the (non-blocking) resume banner when
@@ -2009,6 +2155,47 @@ impl SessionDetailView {
     pub fn tool_depth_for_test_mut(&mut self) -> &mut std::collections::HashMap<String, u8> {
         &mut self.tool_depth
     }
+}
+
+// ─── LoadState render helpers ───────────────────────────────────────────────
+
+/// Render a centered single-line status label for pre-ready LoadStates
+/// (`Retiring`, `Connecting`, `Loading`).
+fn render_load_label(frame: &mut Frame, area: Rect, label: &str) {
+    use ratatui::layout::Alignment;
+    use ratatui::widgets::{Block, Borders};
+    let para = Paragraph::new(label)
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::NONE));
+    // Centre vertically by splitting the area in thirds.
+    let [_, mid, _] = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Percentage(40),
+        ratatui::layout::Constraint::Min(1),
+        ratatui::layout::Constraint::Percentage(60),
+    ])
+    .areas(area);
+    frame.render_widget(para, mid);
+}
+
+/// Render a red error panel for `LoadState::Failed`.
+fn render_error_label(frame: &mut Frame, area: Rect, message: &str) {
+    use ratatui::layout::Alignment;
+    use ratatui::widgets::{Block, Borders};
+    let para = Paragraph::new(message)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Red))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Session error"),
+        );
+    let [_, mid, _] = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Percentage(40),
+        ratatui::layout::Constraint::Min(3),
+        ratatui::layout::Constraint::Percentage(60),
+    ])
+    .areas(area);
+    frame.render_widget(para, mid);
 }
 
 // ─── Formatting helpers (test-only; production path uses dispatch.rs) ───
