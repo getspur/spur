@@ -260,7 +260,7 @@ async fn retire_brain_session<S: RetirableMcpServer + ?Sized>(
     mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
     scheduler: &mut crate::scheduler::BrainScheduler,
     overflow: &crate::continuation_bridge::OverflowBuf,
-    new_active: Option<SessionId>,
+    new_active: Option<spur_acp::types::BrainSessionId>,
 ) {
     shutdown_mcp_server(funnel, session, mcp_server, mcp_guard).await;
     scheduler.note_session_swap(new_active, overflow);
@@ -1407,9 +1407,16 @@ impl Orchestrator {
                                 // future continuations target the correct session id.
                                 // No eviction emission here — the note_session_swap(None)
                                 // above already drained any stale continuations.
+                                //
+                                // MUST be `spur_session_id`, not `acp_session_id`: the
+                                // scheduler's `push_continuation` compares against
+                                // `BrainContinuation.brain_session`, which the MCP server
+                                // stamps from `McpCallbackServer.brain_session_id` (the
+                                // SPUR UUID). See
+                                // tests/continuation_brain_session_wiring.rs.
                                 if let Some(ref b) = brain {
                                     scheduler.note_session_swap(
-                                        Some(SessionId(b.acp_session_id.clone())),
+                                        Some(b.spur_session_id.clone().into()),
                                         &overflow_continuations,
                                     );
                                 }
@@ -1702,7 +1709,19 @@ impl Orchestrator {
                 match result {
                     Ok(b) => {
                         // Wire the new session into the scheduler.
-                        let new_sid = Some(SessionId(b.acp_session_id.clone()));
+                        //
+                        // The scheduler keys `push_continuation` on the SPUR
+                        // session id (`spur_session_id`), NOT the ACP protocol
+                        // session id (`acp_session_id`). These are distinct
+                        // UUIDs — `spur_session_id` is SPUR-generated; the ACP
+                        // agent returns its own session id from `new_session`.
+                        // The MCP server stamps continuations with
+                        // `spur_session_id` (see
+                        // `McpCallbackServer.brain_session_id`), so we must
+                        // seed the scheduler on the same id to avoid every
+                        // detached continuation being dropped as StaleSession.
+                        // Regression test: tests/continuation_brain_session_wiring.rs.
+                        let new_sid = Some(b.spur_session_id.clone().into());
                         scheduler.note_session_swap(new_sid, &overflow_continuations);
                         brain = Some(b);
                     }
@@ -6064,7 +6083,10 @@ mod phase5_orchestrator_finalization_tests {
 
     fn mk_scheduler(active_session: Option<SessionId>) -> (BrainScheduler, Arc<RecordingSink>) {
         let sink = Arc::new(RecordingSink::default());
-        let scheduler = BrainScheduler::new(active_session, sink.clone());
+        let scheduler = BrainScheduler::new(
+            active_session.map(spur_acp::types::BrainSessionId::from),
+            sink.clone(),
+        );
         (scheduler, sink)
     }
 
@@ -6181,7 +6203,7 @@ mod phase5_orchestrator_finalization_tests {
             None,
             &mut scheduler,
             &overflow,
-            Some(new_session.clone()),
+            Some(new_session.clone().into()),
         )
         .await;
 
@@ -6274,7 +6296,7 @@ mod phase5_orchestrator_finalization_tests {
             None,
             &mut scheduler,
             &overflow,
-            Some(new_session.clone()),
+            Some(new_session.clone().into()),
         )
         .await;
 

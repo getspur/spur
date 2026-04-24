@@ -84,7 +84,8 @@ async fn invc3_delegation_completed_precedes_prompt_dispatched_in_seq_order() {
     let (ingress_tx, mut ingress_rx) = mpsc::channel::<InteractiveInput>(64);
     let overflow = new_overflow_buf();
     let brain_session = SessionId::new();
-    let mut scheduler = BrainScheduler::new(Some(brain_session.clone()), Arc::new(funnel.clone()));
+    let mut scheduler =
+        BrainScheduler::new(Some(brain_session.clone().into()), Arc::new(funnel.clone()));
     let worker_session = SessionId::new();
     let cont = mk_cont("delegation-invc3-1", &brain_session);
 
