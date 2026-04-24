@@ -27,6 +27,7 @@ pub const INSTALL_HINTS: &[(&str, &str)] = &[
     ("codex", "npx @zed-industries/codex-acp"),
     ("gemini", "npm install -g @google/gemini-cli"),
     ("opencode", "npm install -g opencode"),
+    ("kimi", "see docs/spur/agent-onboarding-cookbook.md"),
 ];
 
 pub fn install_hint(name: &str) -> &'static str {
@@ -51,7 +52,7 @@ pub fn install_hint(name: &str) -> &'static str {
 ///
 /// `--force` resets the agent list to discovered-only (drops manually-added
 /// agents) while still preserving non-agent sections.
-pub async fn run(repo_root: PathBuf, force: bool) -> Result<()> {
+pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
     let config_path = repo_root.join(".spur").join("config.toml");
 
     // ── Phase 1: Environment discovery ─────────────────────────────────
@@ -150,24 +151,26 @@ pub async fn run(repo_root: PathBuf, force: bool) -> Result<()> {
         return Ok(());
     }
 
-    // ── Phase 10: Atomic persist ───────────────────────────────────────
+    // ── Phase 10: Permission-bypass safety prompt (TTY only) ───────────
+    if std::io::stdin().is_terminal() {
+        if let Err(e) = prompt_permission_bypass(&mut config) {
+            eprintln!("[spur] permission bypass prompt failed: {e}; continuing");
+        }
+    }
+
+    // ── Phase 11: Atomic persist ───────────────────────────────────────
     std::fs::create_dir_all(config_path.parent().unwrap())?;
     std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
 
-    // ── Phase 11: Skills install (non-fatal) ───────────────────────────
-    match spur_core::skills::installer::run(&repo_root) {
-        Ok(summary) => {
-            println!();
-            print!("{summary}");
-            print_gitattributes_advisory_if_needed(&repo_root);
-        }
-        Err(e) => {
+    // ── Phase 12: Skills install (only when explicitly requested) ──────
+    if skills {
+        if let Err(e) = run_skills_init(&repo_root) {
             eprintln!("[spur] warning: skills install failed: {e}");
             // Do not return Err — config is already written and usable.
         }
     }
 
-    // ── Phase 12: Summary ──────────────────────────────────────────────
+    // ── Phase 13: Summary ──────────────────────────────────────────────
     print_summary(&config);
 
     Ok(())
@@ -399,6 +402,58 @@ fn print_summary(config: &SpurConfig) {
     if config.bot.telegram.enabled {
         println!("  spur bot telegram                            # start Telegram bot");
     }
+}
+
+/// Run the SpurPower skills installer independently of config init.
+pub fn run_skills_init(repo_root: &std::path::Path) -> Result<()> {
+    match spur_core::skills::installer::run(repo_root) {
+        Ok(summary) => {
+            println!();
+            print!("{summary}");
+            print_gitattributes_advisory_if_needed(repo_root);
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("skills install failed: {e}")),
+    }
+}
+
+fn prompt_permission_bypass(config: &mut SpurConfig) -> Result<()> {
+    let bypass_agents: Vec<&str> = config
+        .agents
+        .entries
+        .iter()
+        .filter(|a| a.effective_permissions().skip)
+        .map(|a| a.name.as_str())
+        .collect();
+
+    if bypass_agents.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("WARNING: the following agents have permission bypass enabled:");
+    for name in &bypass_agents {
+        println!("  - {name}");
+    }
+    println!();
+    println!("Permission bypass allows agents to execute tools without prompting.");
+    println!("Keep bypass enabled? [y/N]");
+    eprint!("> ");
+    std::io::stderr().flush()?;
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    if line.trim().eq_ignore_ascii_case("y") {
+        return Ok(());
+    }
+
+    // User declined — disable bypass for all agents.
+    for agent in &mut config.agents.entries {
+        agent.permissions.skip = false;
+        agent.skip_permissions = false;
+    }
+    println!("Permission bypass disabled for all agents.");
+    Ok(())
 }
 
 fn print_gitattributes_advisory_if_needed(repo_root: &std::path::Path) {

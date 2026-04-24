@@ -34,14 +34,6 @@ fn init_tracing(
     }
 }
 
-/// User-facing install commands per seed agent. Surfaced by `spur init`
-/// when a seed agent's binary is not on $PATH. Kept here (not in the
-/// schema) because hints are onboarding copy — they don't belong in
-/// every user's round-tripped `.spur/config.toml`.
-///
-/// Contract: every agent in `spur_acp::config::load_seed_template()`
-/// must have an entry here. Enforced by `tests/init_ux.rs`.
-
 fn resolve_landing(
     new: bool,
     sessions: bool,
@@ -100,6 +92,14 @@ enum Commands {
         /// Overwrite existing .spur/config.toml.
         #[arg(long)]
         force: bool,
+        /// Also install SpurPower skills after config init.
+        #[arg(long)]
+        with_skills: bool,
+    },
+    /// Install SpurPower skills into adapter directories
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommands,
     },
     /// List and manage registered agents
     Agents {
@@ -205,6 +205,12 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum SkillsCommands {
+    /// Render bundled+override skills into per-adapter agent dirs
+    Init,
+}
+
+#[derive(Subcommand)]
 enum AgentsCommands {
     /// Register a custom agent
     Add { path: String },
@@ -259,7 +265,12 @@ async fn main() -> Result<()> {
     let _tracing_guard = init_tracing(tui_mode, &repo_root)?;
 
     match cli.command {
-        Commands::Init { force } => commands::init::run(repo_root, force).await,
+        Commands::Init { force, with_skills } => {
+            commands::init::run(repo_root, force, with_skills).await
+        }
+        Commands::Skills { command } => match command {
+            SkillsCommands::Init => commands::init::run_skills_init(&repo_root),
+        },
         Commands::Agents { command } => cmd_agents(repo_root, command).await,
         Commands::Run {
             task,
