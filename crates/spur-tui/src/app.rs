@@ -1744,9 +1744,9 @@ impl App {
                 self.dashboard.set_focused_node(None);
             }
             Action::JumpToReview => {
-                // Cycle through pending reviews in insertion order. Skip the
-                // currently-focused node so repeated `r` presses advance to
-                // the next review instead of re-landing on the same one.
+                // Cycle forward through pending reviews in insertion order.
+                // Skip the currently-focused node so repeated presses advance
+                // to the next review instead of re-landing on the same one.
                 let current = self.dashboard.focused_node().cloned();
                 let reviews = self.lineage.pending_reviews();
                 let next = reviews
@@ -1755,6 +1755,25 @@ impl App {
                     .and_then(|i| reviews.get(i + 1).cloned())
                     .or_else(|| reviews.into_iter().next());
                 if let Some(id) = next {
+                    self.dashboard
+                        .agents_tree_mut()
+                        .set_selected(Some(id.clone()));
+                    self.dashboard.set_focused_node(Some(id));
+                    self.dashboard
+                        .detail_pane_mut()
+                        .jump_to_tab(crate::components::detail_pane::DetailTab::Review);
+                }
+            }
+            Action::JumpToPreviousReview => {
+                // Cycle backward through pending reviews in insertion order.
+                let current = self.dashboard.focused_node().cloned();
+                let reviews = self.lineage.pending_reviews();
+                let prev = reviews
+                    .iter()
+                    .position(|id| Some(id) == current.as_ref())
+                    .and_then(|i| i.checked_sub(1).and_then(|j| reviews.get(j).cloned()))
+                    .or_else(|| reviews.last().cloned());
+                if let Some(id) = prev {
                     self.dashboard
                         .agents_tree_mut()
                         .set_selected(Some(id.clone()));

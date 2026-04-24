@@ -94,6 +94,8 @@ pub enum Action {
     UnfocusNode,
     /// Jump to the next executor with a pending review.
     JumpToReview,
+    /// Jump to the previous executor with a pending review.
+    JumpToPreviousReview,
     /// Toggle collapse on the selected subtree.
     ToggleCollapse,
     /// Submit a review decision for the given executor.

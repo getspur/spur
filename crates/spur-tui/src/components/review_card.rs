@@ -42,7 +42,7 @@ pub fn render_review(node: &ExecutorNode) -> Vec<Line<'static>> {
     }
     out.push(Line::from(""));
     out.push(Line::from(Span::styled(
-        "[a] approve  [d] deny  [m] modify+approve  [R] retry",
+        "[A] approve  [D] deny  [M] modify+approve  [R] retry",
         Style::default().fg(Color::Cyan),
     )));
     out
@@ -61,11 +61,11 @@ fn kind_label(k: &ReviewKind) -> &'static str {
 /// `ReviewDecision`. Returns `None` for keys that are not review actions.
 pub fn decision_for_key(key: char, prompt_answer: Option<String>) -> Option<ReviewDecision> {
     match key {
-        'a' => Some(ReviewDecision::Approve),
-        'd' => Some(ReviewDecision::Reject {
+        'A' => Some(ReviewDecision::Approve),
+        'D' => Some(ReviewDecision::Reject {
             reason: prompt_answer.unwrap_or_else(|| "(no reason given)".into()),
         }),
-        'm' => Some(ReviewDecision::Modify {
+        'M' => Some(ReviewDecision::Modify {
             note: prompt_answer.unwrap_or_else(|| "(no note)".into()),
         }),
         'R' => Some(ReviewDecision::Retry {

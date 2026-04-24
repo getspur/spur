@@ -210,7 +210,7 @@ impl DashboardView {
             Some(id) => {
                 let agent = lineage.node(id).map(|n| n.agent.as_str()).unwrap_or("?");
                 format!(
-                        "[Detail: {}] ←/→/1-5 tabs · j/k scroll · Ctrl+O toggle · r review · Esc unfocus",
+                        "[Detail: {}] h/l/←/→ tabs · Ctrl+1-5 jump · j/k scroll · o toggle · N/P review · Esc back",
                         agent
                     )
             }
@@ -842,7 +842,7 @@ impl DashboardView {
                         // [a/d/m/R] are explicit UI contracts, not text input.
                         let in_review = self.focused_node.is_some()
                             && self.detail_pane.current_tab == DetailTab::Review
-                            && matches!(c, 'a' | 'd' | 'm' | 'R');
+                            && matches!(c, 'A' | 'D' | 'M' | 'R');
                         if in_review {
                             KeyOwner::View
                         } else if matches!(c, 'i' | 'a' | 'A' | 'I' | 'o' | 'O') {
@@ -866,15 +866,19 @@ impl DashboardView {
     /// Whether `ch` is a known view-action key in Navigate mode.
     /// These characters navigate instead of entering Compose mode in Emacs.
     fn is_view_action_char(&self, ch: char) -> bool {
-        if self.focused_node.is_some()
-            && self.detail_pane.current_tab == DetailTab::Review
-            && matches!(ch, 'a' | 'd' | 'm' | 'R')
-        {
-            return true;
+        if self.focused_node.is_some() {
+            if matches!(ch, 'h' | 'l' | 'o') {
+                return true;
+            }
+            if self.detail_pane.current_tab == DetailTab::Review
+                && matches!(ch, 'A' | 'D' | 'M' | 'R')
+            {
+                return true;
+            }
         }
         matches!(
             ch,
-            'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's' | 'q' | 'z'
+            'j' | 'k' | 'g' | 'G' | 'r' | 'v' | '?' | 's' | 'q' | 'z' | 'N' | 'P'
         ) || (ch == 'c' && self.focused_panel == Panel::Agents)
     }
 
@@ -894,50 +898,73 @@ impl DashboardView {
                 self.detail_pane.cycle_tab(true);
                 None
             }
-            // ── Direct tab jumping (focused node) ─────────────────────────
-            KeyCode::Char('1')
+            // ── Vim-style tab cycling (focused node) ──────────────────────
+            KeyCode::Char('h')
                 if self.focused_node.is_some()
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.detail_pane.cycle_tab(false);
+                None
+            }
+            KeyCode::Char('l')
+                if self.focused_node.is_some()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.detail_pane.cycle_tab(true);
+                None
+            }
+            // ── Direct tab jumping (focused node, Ctrl modifier) ──────────
+            KeyCode::Char('1')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Stream);
                 None
             }
             KeyCode::Char('2')
-                if self.focused_node.is_some()
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Artifacts);
                 None
             }
             KeyCode::Char('3')
-                if self.focused_node.is_some()
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Attempts);
                 None
             }
             KeyCode::Char('4')
-                if self.focused_node.is_some()
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.focused_node.is_some() =>
             {
                 self.detail_pane.jump_to_tab(DetailTab::Task);
                 None
             }
             KeyCode::Char('5')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.focused_node.is_some() =>
+            {
+                self.detail_pane.jump_to_tab(DetailTab::Review);
+                None
+            }
+            // ── Toggle observe collapsed (Stream tab) ─────────────────────
+            KeyCode::Char('o')
                 if self.focused_node.is_some()
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                self.detail_pane.jump_to_tab(DetailTab::Review);
+                if let Some(ref id) = self.focused_node.clone() {
+                    if let Some(trace) = worker_streams.get_mut(&id.0) {
+                        trace.toggle_observe_collapsed();
+                    }
+                }
                 None
             }
             // ── View jump: Issue Browser ──────────────────────────────────
@@ -1048,7 +1075,14 @@ impl DashboardView {
                             }
                             Some(Action::ScrollUp)
                         }
-                        'r' => Some(Action::JumpToReview),
+                        'r'
+                            if !(self.focused_node.is_some()
+                                && self.detail_pane.current_tab == DetailTab::Review) =>
+                        {
+                            Some(Action::JumpToReview)
+                        }
+                        'N' => Some(Action::JumpToReview),
+                        'P' => Some(Action::JumpToPreviousReview),
                         'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
                         'g' if self.focused_panel == Panel::Agents
                             && self.focused_node.is_none() =>
@@ -1096,7 +1130,7 @@ impl DashboardView {
                         }
                         '?' => Some(Action::ShowHelp),
                         's' => Some(Action::RequestSessions),
-                        'i' | 'a' | 'A' | 'I' | 'o' | 'O' => None,
+                        'i' | 'a' | 'A' | 'I' | 'O' => None,
                         _ => return None,
                     };
                     if let Some(a) = action {
@@ -1155,7 +1189,14 @@ impl DashboardView {
                         }
                         Some(Action::ScrollUp)
                     }
-                    'r' => Some(Action::JumpToReview),
+                    'r'
+                        if !(self.focused_node.is_some()
+                            && self.detail_pane.current_tab == DetailTab::Review) =>
+                    {
+                        Some(Action::JumpToReview)
+                    }
+                    'N' => Some(Action::JumpToReview),
+                    'P' => Some(Action::JumpToPreviousReview),
                     'c' if self.focused_panel == Panel::Agents => Some(Action::ToggleCollapse),
                     'g' if self.focused_panel == Panel::Agents && self.focused_node.is_none() => {
                         if let Some(lineage) = lineage {
@@ -1312,14 +1353,6 @@ impl DashboardView {
         if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.input_bar.history_next();
             return None;
-        }
-        if matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(ref id) = self.focused_node {
-                if let Some(trace) = worker_streams.get_mut(&id.0) {
-                    trace.toggle_observe_collapsed();
-                    return None;
-                }
-            }
         }
         if matches!(key.code, KeyCode::Char('i')) && key.modifiers.contains(KeyModifiers::ALT) {
             return Some(Action::ToggleVimMode);
