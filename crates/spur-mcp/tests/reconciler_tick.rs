@@ -1043,6 +1043,7 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     let response = server
         .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
+    eprintln!("execute_epic_response={response}");
     assert!(
         response.get("error").is_none(),
         "execute_epic should succeed: {response}"
