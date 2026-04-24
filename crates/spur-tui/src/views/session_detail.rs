@@ -323,6 +323,7 @@ impl SessionDetailView {
     /// The full `View::handle_spur_event` trait method also calls
     /// `apply_milestone_event` internally; this is the test-facing entry
     /// point.
+    #[cfg(any(test, debug_assertions))]
     pub fn apply_spur_event(&mut self, event: &SpurEvent) {
         self.apply_milestone_event(event);
     }
