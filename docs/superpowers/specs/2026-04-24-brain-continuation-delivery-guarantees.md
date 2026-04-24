@@ -1,15 +1,21 @@
 # Brain Continuation — Delivery Guarantees & Handshake Redesign
 
-- **Date:** 2026-04-24 (v2 — amended post-review)
-- **Status:** Solution design — ready for implementation (pending PR review)
+- **Date:** 2026-04-24 (v3 — amended post-v2-review)
+- **Status:** Solution design — ready for implementation
 - **Supersedes / amends:** `docs/superpowers/specs/2026-04-19-brain-async-continuation-design.md` (invariants INV-C1…C7 remain; this spec adds INV-D1…D7 below them and changes the scheduler↔dispatcher handshake)
 - **Root-cause reference:** `docs/superpowers/reviews/2026-04-24-brain-continuation-rca.md`
-- **Authored from:** 3-POV RCA (primary + `worker:kimi` + `worker:codex`) + multi-round first-principles analysis + 2nd-round spec review by same two POVs
+- **Authored from:** 3-POV RCA (primary + `worker:kimi` + `worker:codex`) + multi-round first-principles analysis + 2 rounds of `worker:kimi` + `worker:codex` spec review (v1→v2 and v2→v3)
 
 ## Revision history
 
 - **v1 (initial draft)** — two-phase checkout/commit handshake, session-scoped continuations, typed drop events.
-- **v2 (this document)** — amended to fix 16 issues raised by the 2nd-round `worker:kimi` (APPROVE-WITH-CHANGES) and `worker:codex` (REWORK) spec review. Summary of the v2 deltas:
+- **v3 (this document)** — amended to fix 4 residual issues identified by the v2-review round (`worker:codex` REWORK): the unreachable `OversizedSingleItem` terminal state, INV-D7 being claimed rather than enforced, retirement protocol backing-field ambiguity, and a compile error in the dispatch sample. v3 deltas:
+  - **v3-a: `commit_partial` signature gains `dropped_terminal: Vec<(DelegationKey, DropReason)>`.** The renderer's `dropped_oversized` partition now has a real landing site on the scheduler side. Items in `dropped_terminal` are removed without requeue and fire `ContinuationDropped(reason)`. Closes v2 BUG B5 (phantom `OversizedSingleItem` state).
+  - **v3-b: Requeue channel made bounded** (`mpsc::channel(REQUEUE_CHANNEL_CAPACITY)`, default `DRAIN_CAP * 4 = 128`). New `DropReason::RequeueChannelFull` fires on `try_send` fail in `DrainedBatch::Drop`. Converts v2's unbounded-leak failure mode into bounded-loss. INV-D7 now structurally enforced.
+  - **v3-c: Retirement backing fields specified.** `McpCallbackServer` fields pinned: `retiring: AtomicBool`, `cancel_token: CancellationToken`, `task_tracker: TaskTracker`, `root_handle: Mutex<Option<JoinHandle<()>>>`. Each new method's implementation contract documented.
+  - **v3-d: Dispatch sample compile errors fixed.** `RenderOutcome` destructured as struct (not tuple); `dropped_terminal` construction shown explicitly; unused bindings removed.
+
+- **v2** — amended to fix 16 issues raised by the 1st-round `worker:kimi` (APPROVE-WITH-CHANGES) and `worker:codex` (REWORK) spec review. Summary of the v2 deltas:
   1. `TurnGuard` redesigned so sample dispatch code actually compiles (`Arc<AtomicBool>` backing, no `&mut scheduler` borrow held).
   2. `DrainedBatch::take(&mut self)` removed from public API; replaced with `pub(crate) fn into_items(self)` consumed only by terminal scheduler methods.
   3. Events split: `ContinuationDropped { reason: DropReason }` for terminal losses; `ContinuationDeferred { reason: DeferReason }` for retriable requeues.
@@ -48,7 +54,7 @@ Existing invariants INV-C1…C7 from the 2026-04-19 spec are preserved. This spe
 - **INV-D4 Scheduler-announced liveness.** `ScheduledAction` carries an `IdleUntil(Option<Instant>)` deadline. The orchestrator loop wakes no later than that deadline when set, even in the absence of ingress events.
 - **INV-D5 Bounded-per-attempt dedup.** Dedup key is `(delegation_id, attempt)`, not `delegation_id` alone. Retries produce visible continuations. Attempt numbering is **1-based** to match existing retry state in `orchestrator.rs:3286` — attempt 1 is the first run.
 - **INV-D6 Bounded fan-out.** Producer-side field sizes are clipped; autonomous turns enforce the same byte budget as merged turns; scheduler drains at most `DRAIN_CAP` continuations per turn. Every clip/spill emits an event. A continuation whose own serialised cost exceeds the budget is dropped with `OversizedSingleItem` the first time it fails to fit alone — it is never permitted to enter the requeue loop.
-- **INV-D7 Bounded requeue channel.** At most one `DrainedBatch` is outstanding per brain turn (enforced by `turn_in_flight`). Therefore at most one batch may leak per turn, bounding the `requeue_rx` channel depth by `DRAIN_CAP` items between `next()` calls. The scheduler exposes `requeue_depth()` as an operational metric.
+- **INV-D7 Bounded requeue channel.** The requeue channel is bounded at `REQUEUE_CHANNEL_CAPACITY = DRAIN_CAP * 4 = 128` messages (v3-b amendment). `DrainedBatch::Drop` uses `try_send`; on `Full`, items are terminal-dropped with `ContinuationDropped(RequeueChannelFull)` — lossy but observable and bounded. This is a structural property (enforced by the channel capacity), not a convention (which v2's "at most one outstanding batch per turn" was). The scheduler exposes `requeue_depth()` as an operational metric for backpressure monitoring.
 
 ---
 
@@ -206,6 +212,7 @@ pub enum DropReason {
     },
     MaxRequeueExceeded,        // INV-D7 safety net; requeue_count > MAX_REQUEUE_ATTEMPTS
     MismatchedCommitKeys,      // commit_partial called with keys not in batch
+    RequeueChannelFull,        // v3-b: bounded requeue channel rejected the leak requeue
     RetrySuperseded,           // reserved for INV-7 streaming — not wired v2
 }
 
@@ -300,8 +307,16 @@ pub struct BrainScheduler {
     /// Internal requeue channel. Receive end drained at top of `next()`.
     /// Sender is cloned into every `DrainedBatch` so leaked batches return
     /// their items here on Drop. Depth bounded by INV-D7.
-    requeue_rx: mpsc::UnboundedReceiver<RequeueCommand>,
-    requeue_tx: mpsc::UnboundedSender<RequeueCommand>,
+    ///
+    /// v3-b: **BOUNDED** (was unbounded in v2). Capacity
+    /// `REQUEUE_CHANNEL_CAPACITY = DRAIN_CAP * 4 = 128`. On `try_send`
+    /// failure in `DrainedBatch::Drop`, items are dropped with
+    /// `ContinuationDropped(RequeueChannelFull)` rather than stalling the
+    /// drop or silently leaking. This converts unbounded-leak failure
+    /// into bounded-loss and makes INV-D7 a structural property rather
+    /// than an enforcement-by-convention claim.
+    requeue_rx: mpsc::Receiver<RequeueCommand>,
+    requeue_tx: mpsc::Sender<RequeueCommand>,
 
     /// Typed event sink for all emissions (Dropped + Deferred + FieldTruncated).
     event_sink: Arc<dyn ContinuationEventSink>,
@@ -337,27 +352,43 @@ impl BrainScheduler {
 
     pub fn next(&mut self, now: std::time::Instant) -> ScheduledAction;
 
-    /// Called on successful prompt dispatch. Moves `delivered_keys` into
-    /// `delivered_ids`. Items in `batch` whose keys are NOT in
-    /// `delivered_keys` are treated as spilled and requeued via
-    /// `push_internal` (INV-D6 / INV-D7); a `ContinuationDeferred(BudgetSpill)`
-    /// event fires for each.
+    /// Called on successful prompt dispatch. Partitions `batch.items` into:
+    /// - items whose `(delegation_id, attempt)` key appears in `delivered_keys`
+    ///   → moved into `delivered_ids`; considered Delivered (no event fires
+    ///   here; the prompt dispatch itself is the ledger entry).
+    /// - items whose key appears in `dropped_terminal` → **dropped without
+    ///   requeue**. Emits `ContinuationDropped(reason)` per item using the
+    ///   `DropReason` supplied by the dispatcher. Typical use: oversized
+    ///   items identified by the renderer.
+    /// - items whose key is in neither list → treated as spilled; requeued
+    ///   via `push_internal` (INV-D6 / INV-D7) with
+    ///   `ContinuationDeferred(BudgetSpill)`.
     ///
-    /// Invariant: every key in `delivered_keys` MUST correspond to an item
-    /// in `batch`. Violations:
+    /// v3-a (this parameter): `dropped_terminal` is the landing site for
+    /// renderer-identified terminal losses (primarily `OversizedSingleItem`).
+    /// Without this, the `OversizedSingleItem` state would be unreachable
+    /// because the renderer only has an immutable borrow of `batch.items()`
+    /// and cannot remove items from the batch itself.
+    ///
+    /// Invariants:
+    /// - Every key in `delivered_keys` MUST correspond to an item in `batch`.
+    /// - Every key in `dropped_terminal` MUST correspond to an item in `batch`.
+    /// - `delivered_keys` and `dropped_terminal` MUST be disjoint.
+    /// Violations:
     /// - debug build: `debug_assert!` panics
     /// - release build: emits `ContinuationDropped(MismatchedCommitKeys)` for
     ///   the offending key; unknown-key entries are otherwise ignored
     ///
     /// Consumes the batch. DrainedBatch::Drop is therefore a no-op on the
-    /// leaked path because `consumed` is set to true inside this method.
+    /// leaked path because `into_items` was called inside this method.
     pub fn commit_partial(
         &mut self,
         batch: DrainedBatch,
         delivered_keys: Vec<DelegationKey>,
+        dropped_terminal: Vec<(DelegationKey, DropReason)>,
     );
 
-    /// Shorthand for `commit_partial(batch, all-keys)`. Consumes the batch.
+    /// Shorthand for `commit_partial(batch, all_keys, vec![])`. Consumes the batch.
     pub fn commit(&mut self, batch: DrainedBatch);
 
     /// Called on prompt-dispatch failure. All items in the batch are
@@ -434,7 +465,15 @@ This is the **critical v2 fix**. The original v1 sample code `let _guard = TurnG
 #[must_use = "DrainedBatch must be passed to commit / commit_partial / rollback; dropping unhandled requeues the items with a Deferred(LeakedBatch) event"]
 pub struct DrainedBatch {
     items: Vec<BrainContinuation>,
-    requeue_tx: mpsc::UnboundedSender<RequeueCommand>,
+    /// v3-b: bounded sender. On try_send failure (channel full), Drop
+    /// emits ContinuationDropped(RequeueChannelFull) via the event sink
+    /// accessible through a second handle (see event_sink_weak below).
+    requeue_tx: mpsc::Sender<RequeueCommand>,
+    /// v3-b: weak handle to the scheduler's event sink so the Drop impl
+    /// can emit `RequeueChannelFull` events without needing a live
+    /// scheduler reference. `Weak` to avoid keeping the sink alive past
+    /// orchestrator shutdown.
+    event_sink_weak: Weak<dyn ContinuationEventSink>,
     consumed: bool,
 }
 
@@ -464,12 +503,30 @@ impl DrainedBatch {
 
 impl Drop for DrainedBatch {
     fn drop(&mut self) {
-        if !self.consumed && !self.items.is_empty() {
-            // Send never panics and only errors if rx is dropped (scheduler
-            // shut down). In that case the items are lost; tracing records it.
-            let _ = self.requeue_tx.send(RequeueCommand::Leaked {
-                items: std::mem::take(&mut self.items),
-            });
+        if self.consumed || self.items.is_empty() {
+            return;
+        }
+        let items = std::mem::take(&mut self.items);
+        // v3-b: bounded channel. try_send fails if (a) channel full, or
+        // (b) rx dropped (scheduler shut down). Handle both.
+        match self.requeue_tx.try_send(RequeueCommand::Leaked { items }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(RequeueCommand::Leaked { items }))
+            | Err(mpsc::error::TrySendError::Closed(RequeueCommand::Leaked { items })) => {
+                // Emit a terminal drop event per item so the loss is observable.
+                if let Some(sink) = self.event_sink_weak.upgrade() {
+                    for c in items {
+                        sink.emit(SpurEventBody::ContinuationDropped {
+                            delegation_id: c.delegation_id.clone(),
+                            attempt: c.attempt,
+                            brain_session: c.brain_session.clone(),
+                            reason: DropReason::RequeueChannelFull,
+                        });
+                    }
+                }
+                // else: orchestrator has already shut down — nothing to observe with.
+            }
+            Err(_) => unreachable!("RequeueCommand::Leaked variant stable"),
         }
     }
 }
@@ -548,7 +605,7 @@ async fn maybe_sleep_until(deadline: Option<TokioInstant>) {
 
 `tokio::time::sleep_until(past_instant)` returns immediately — it does not "miss" a deadline in the past. `std::future::pending()` cooperates with `select!` (never resolves) so the `None` arm is passive.
 
-### Dispatch flow (merged example) — v2 compile-verified shape
+### Dispatch flow (merged example) — v3 compile-verified shape
 
 ```rust
 async fn dispatch_merged(
@@ -563,22 +620,27 @@ async fn dispatch_merged(
     // 1. Render: read-only borrow of batch.items().
     //    If render panics, `batch` unwinds → Drop sends Leaked requeue.
     let user_bl = user_blocks(&user);
-    let (blocks, delivered_keys, deferred_spill, dropped_oversized) =
-        render_merged_turn_with_spill_v2(&user_bl, batch.items(), BUDGET);
+    let RenderOutcome {
+        blocks,
+        delivered_keys,
+        deferred_spill: _, // computed by scheduler from "batch \ delivered \ dropped"
+        dropped_oversized,
+    } = render_merged_turn_with_spill_v2(&user_bl, batch.items(), BUDGET);
 
-    // 2. Emit oversized-single-item drops (terminal) BEFORE any await.
-    //    These never enter the requeue loop — INV-D6.
-    for (k, bytes) in &dropped_oversized {
-        self.events.emit(SpurEventBody::ContinuationDropped {
-            delegation_id: k.delegation_id.clone(),
-            attempt: k.attempt,
-            brain_session: self.session_id.clone(),
-            reason: DropReason::OversizedSingleItem {
-                continuation_bytes: *bytes,
+    // 2. Transform dropped_oversized from the renderer's (key, bytes) form
+    //    into the (key, DropReason) form commit_partial expects.
+    //    v3-a: these keys ride into commit_partial and get terminal-dropped
+    //    without requeue.
+    let dropped_terminal: Vec<(DelegationKey, DropReason)> = dropped_oversized
+        .into_iter()
+        .map(|(key, bytes)| (
+            key,
+            DropReason::OversizedSingleItem {
+                continuation_bytes: bytes,
                 budget_bytes: BUDGET,
             },
-        });
-    }
+        ))
+        .collect();
 
     // 3. Dispatch. Await point — batch is still held.
     //    Cancellation of the future here: drops `batch` unconsumed → Leaked.
@@ -586,18 +648,22 @@ async fn dispatch_merged(
     let result = self.connection.prompt(blocks).await;
 
     // 4. Terminal handoff — commit_partial consumes `batch` by value.
-    //    The oversized items were already removed by the renderer; spill items
-    //    are identified by "in batch but not in delivered_keys". commit_partial
-    //    requeues spill with Deferred(BudgetSpill).
+    //    Scheduler partitions batch.items into:
+    //      - delivered_keys → move to delivered_ids (silent)
+    //      - dropped_terminal → emit ContinuationDropped(reason), no requeue
+    //      - remainder → requeue via Deferred(BudgetSpill)
     //
-    //    Note: the _guard drops at end of scope, freeing `turn_in_flight`.
-    //    Scheduler can be borrowed &mut here because the guard holds only
-    //    the shared Arc<AtomicBool>, not the scheduler itself.
+    //    _guard drops at end of scope; turn_in_flight is cleared.
+    //    commit_partial can borrow &mut self.scheduler because the guard
+    //    holds only Arc<AtomicBool>, not the scheduler itself.
     match result {
-        Ok(_) => self.scheduler.commit_partial(batch, delivered_keys),
+        Ok(_) => self.scheduler.commit_partial(batch, delivered_keys, dropped_terminal),
         Err(e) => {
             tracing::error!(?e, "prompt dispatch failed");
-            // rollback requeues all items with Deferred(PromptDispatchFailure).
+            // rollback ignores dropped_terminal — on dispatch failure we don't
+            // know whether the brain saw anything, so we conservatively requeue
+            // everything with Deferred(PromptDispatchFailure). A subsequent turn
+            // will re-encounter the oversized items and terminal-drop them there.
             self.scheduler.rollback(batch);
         }
     }
@@ -606,9 +672,13 @@ async fn dispatch_merged(
 
 Key invariants enforced:
 - `commit_partial` / `rollback` always called on the normal paths.
-- On panic OR future-cancellation at the `.await`, `batch` drops unconsumed → `Leaked` requeue fires via the channel. `_guard` drops → `turn_in_flight` cleared. System continues on next `next()` tick.
-- Oversized terminal drops fire before the prompt call; they are never requeued. This closes the starvation path kimi identified.
-- `render_merged_turn_with_spill_v2` returns FOUR outputs: the blocks to dispatch, the keys that will be delivered, the items to defer (spill), and the items to drop (oversized). The scheduler learns about the first two via `commit_partial`; about spill via "batch items minus delivered_keys"; about oversized via dispatcher-emitted events.
+- On panic OR future-cancellation at the `.await`, `batch` drops unconsumed → `Leaked` requeue fires via the bounded channel. `_guard` drops → `turn_in_flight` cleared. System continues on next `next()` tick.
+- Oversized terminal drops are committed **inside the scheduler** via `commit_partial`'s `dropped_terminal` parameter — NOT by the dispatcher emitting events before the prompt call. This is the v3-a fix: the v2 draft had the dispatcher emitting events while the items were still inside `batch.items()`, so `commit_partial` later requeued them as spill. With v3-a, the scheduler authoritatively removes them.
+- `render_merged_turn_with_spill_v2` returns `RenderOutcome` (struct, not tuple): `blocks` to dispatch, `delivered_keys` the dispatcher expects to send, `deferred_spill` (informational only — the scheduler rederives this from set subtraction), and `dropped_oversized` (key + byte count for the dispatcher to convert to `DropReason`).
+
+### Rollback vs oversized: subtle semantic note
+
+On dispatch failure, v3 chooses to requeue **all** items (including those the renderer had classified oversized) because the dispatcher cannot know whether the prompt partially succeeded. The oversized items will be terminal-dropped on the next successful dispatch (or the next `MaxRequeueExceeded` trip). Alternative: `rollback` could also accept a `dropped_terminal` arg and drop oversized items even on failure. The current choice is conservative — prefer to lose budget to a re-encounter than silently drop items on an ambiguous dispatch state.
 
 ### MCP server shutdown on brain retirement — v2 full protocol
 
@@ -679,13 +749,80 @@ async fn retire_brain_session(&mut self, new_active: Option<SessionId>) {
 }
 ```
 
-Required additions to `spur-mcp/src/server.rs`:
-- `fn mark_retiring(&self)` — flags the server so `delegate_to_worker` etc. return `SessionRetiring` errors.
-- `fn cancel_in_flight_workers(&self)` — broadcasts cancel tokens to every active delegation.
-- `fn force_abort(&self)` — complement to the existing (unused today) `shutdown()`; bypasses TaskTracker wait and aborts the root.
-- Orchestrator holds `Option<Arc<McpCallbackServer>>`, not just `JoinHandle`.
+Required additions to `spur-mcp/src/server.rs` (v3-c: backing fields pinned):
 
-Fixes the third leak surface in finding D (server-not-shutdown) and closes the deadlock hazard that codex flagged.
+```rust
+pub struct McpCallbackServer {
+    // existing fields (task_tracker etc.) …
+
+    /// v3-c: set to true by `mark_retiring`. Every delegation-dispatch
+    /// entry point checks this and returns `Err(SessionRetiring)` when set.
+    retiring: AtomicBool,
+
+    /// v3-c: triggered by `cancel_in_flight_workers`. Every spawned worker
+    /// collector holds a child token; a `cancel()` here propagates.
+    cancel_token: CancellationToken,
+
+    /// v3-c: tracks every spawned task (workers, collectors, callback handlers).
+    /// Used by `shutdown()` (wait) and `force_abort()` (close without wait).
+    task_tracker: TaskTracker,
+
+    /// v3-c: handle to the ACP listener task. `force_abort` aborts this
+    /// directly so no new collectors are spawned after force-abort.
+    /// Mutex for interior mutability so `&self` methods can take/abort.
+    root_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl McpCallbackServer {
+    /// v3-c: flips retiring = true. Idempotent. Subsequent
+    /// `delegate_to_worker` / `delegate_parallel` calls from the brain
+    /// return an error rather than spawning new workers.
+    pub fn mark_retiring(&self) {
+        self.retiring.store(true, Ordering::SeqCst);
+    }
+
+    /// v3-c: signals the cancel token. Existing workers see this via
+    /// their child token and wind down gracefully, typically producing
+    /// a final continuation with `ContinuationSource::Cancelled`.
+    pub fn cancel_in_flight_workers(&self) {
+        self.cancel_token.cancel();
+    }
+
+    /// v3-c: existing method, clarified contract. Calls
+    /// `task_tracker.close()` (idempotent, marks no new spawns allowed)
+    /// then awaits `task_tracker.wait()` (resolves when all tracked
+    /// tasks have finished). May take arbitrarily long if a worker
+    /// ignores cancel — caller (retirement protocol) wraps in timeout.
+    pub async fn shutdown(&self) {
+        self.task_tracker.close();
+        self.task_tracker.wait().await;
+    }
+
+    /// v3-c: hard-stop path used when `shutdown()` times out. Closes
+    /// the task tracker (no new spawns), aborts the root handle
+    /// (stops the listener), and lets the tokio runtime clean up
+    /// tracked tasks via their own Drop impls on next yield.
+    ///
+    /// Idempotent: multiple calls are safe. Safe to call after
+    /// `shutdown()` was partially progressing — `task_tracker.close()`
+    /// is idempotent and `root_handle.take()` returns None on 2nd call.
+    pub fn force_abort(&self) {
+        self.task_tracker.close();
+        if let Some(handle) = self.root_handle.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+}
+```
+
+Orchestrator change:
+- Hold `Option<Arc<McpCallbackServer>>`, not just the `JoinHandle<()>`.
+- The `Arc` is because the retirement path needs `&self` access (for `mark_retiring`, etc.) while the server itself may still be running inside the spawned task. Clone is cheap; drop order handled by ownership.
+- `root_handle` lives inside `McpCallbackServer` (not the orchestrator) so `force_abort` can reach it through `&self`.
+
+Shutdown-timeout interaction with TaskTracker: when `tokio::time::timeout` elapses, the `server.shutdown()` future is dropped mid-`wait().await`. Dropping `TaskTracker::wait()` is safe — it only drops the waker; it does not corrupt tracker state. The tracker itself is reachable via `&self` because we only hold `&Arc<McpCallbackServer>` at the timeout call-site, so `force_abort()` can still operate on it after the timeout. **No broken-tracker state.**
+
+Fixes the third leak surface in finding D (server-not-shutdown), closes the deadlock hazard codex flagged in round 1, and closes the v2-round backing-field-ambiguity concern.
 
 ---
 
@@ -807,12 +944,13 @@ stateDiagram-v2
     OverflowBuffered --> [*]: swap drains overflow<br/>→ Dropped(SessionSwap)
 
     Enqueued --> Drained: next() packs into DrainedBatch
-    Drained --> Delivered: prompt Ok + commit_partial<br/>→ delivered_ids++
-    Drained --> [*]: renderer: cost exceeds budget alone<br/>→ Dropped(OversizedSingleItem)
+    Drained --> Delivered: prompt Ok + commit_partial<br/>key in delivered_keys<br/>→ delivered_ids++
+    Drained --> [*]: prompt Ok + commit_partial<br/>key in dropped_terminal<br/>→ Dropped(OversizedSingleItem)
 
+    Drained --> Enqueued: prompt Ok + commit_partial<br/>key in neither list<br/>→ Deferred(BudgetSpill)
     Drained --> Enqueued: prompt Err + rollback<br/>→ Deferred(PromptDispatchFailure)
-    Drained --> Enqueued: renderer: fits budget but spilled<br/>→ Deferred(BudgetSpill)
-    Drained --> Enqueued: batch leaked (panic / await cancel)<br/>→ Deferred(LeakedBatch)
+    Drained --> Enqueued: batch leaked<br/>channel has space<br/>→ Deferred(LeakedBatch)
+    Drained --> [*]: batch leaked<br/>channel full<br/>→ Dropped(RequeueChannelFull)
 
     Enqueued --> [*]: session swap<br/>→ Dropped(SessionSwap)
     Enqueued --> [*]: requeue_count > MAX_REQUEUE_ATTEMPTS<br/>→ Dropped(MaxRequeueExceeded)
@@ -871,7 +1009,10 @@ proptest! {
 - **test_f_source_serialised_as_snake_case** — render with `ContinuationSource::BlockTimeout`; assert JSON body contains `"source":{"kind":"block_timeout"}`.
 - **test_g_producer_clips_oversized_summary** — worker returns 20 KB summary; construct continuation; assert clipped to `PRODUCER_MAX_FIELD_BYTES` + `ContinuationFieldTruncated` event fired.
 - **test_g_autonomous_turn_spills_above_budget** — enqueue N continuations all fitting individually but exceeding budget together; assert only first K delivered; rest produce `Deferred(BudgetSpill)`.
-- **test_g_oversized_single_item_dropped_terminally** *(v2)* — push a continuation whose own cost > `BUDGET`; assert `Dropped(OversizedSingleItem)` event fires on first drain attempt; verify item is NOT requeued; verify `requeue_count` never exceeds 1.
+- **test_g_oversized_single_item_dropped_terminally** *(v2, v3-revised)* — push a continuation whose own cost > `BUDGET`; drain into `DrainedBatch`; call `commit_partial(batch, vec![], vec![(key, OversizedSingleItem{..})])`; assert exactly one `Dropped(OversizedSingleItem)` event fires; assert `pending_continuations` is empty (item NOT requeued); assert subsequent `push_continuation` of the same `(id, attempt)` is dropped with `AlreadyDelivered` because the key is now in `delivered_ids`… wait, it should NOT be in `delivered_ids` because it was dropped terminally, not delivered. **Assert: subsequent push of same key goes through to pending_continuations** (terminal-dropped keys are NOT in `delivered_ids`; they're just gone).
+- **test_v3a_commit_partial_three_way_partition** *(v3)* — construct batch with 3 items {A, B, C}; call `commit_partial(batch, [A], [(C, OversizedSingleItem{..})])`; assert: A moves to `delivered_ids`; C fires `Dropped(OversizedSingleItem)`; B gets `Deferred(BudgetSpill)` and is in `pending_continuations`; no events for A.
+- **test_v3a_commit_partial_disjoint_lists_violation** *(v3)* — pass the same key in both `delivered_keys` and `dropped_terminal`; assert `debug_assert!` panic in debug build; `Dropped(MismatchedCommitKeys)` in release.
+- **test_v3b_requeue_channel_full_drops_terminally** *(v3)* — construct scheduler with `REQUEUE_CHANNEL_CAPACITY = 2`; force 3 leaked batches (don't drain `requeue_rx` between them); assert the 3rd batch's Drop emits `Dropped(RequeueChannelFull)` for each of its items; assert `requeue_depth()` is saturated.
 - **test_h_retry_attempt_not_deduped** — commit continuation with `(id=X, attempt=1)`; push `(id=X, attempt=2)`; assert enqueued, not dropped. Note attempt numbering is 1-based per v2 amendment #8.
 - **test_amendment_11_commit_partial_unknown_key** *(v2)* — call `commit_partial(batch, [key_not_in_batch])`; in debug build, assert panic via `debug_assert!`; in release, assert `Dropped(MismatchedCommitKeys)` event for the offending key.
 - **test_j_drop_reason_events_fired** — trigger each `DropReason` variant explicitly; assert corresponding event seen at the funnel with correct `session` + `delegation_id` + `attempt` fields.
@@ -938,13 +1079,19 @@ v2 spec-review amendments:
 - [ ] #1 borrow-checker — `test_turn_guard_scheduler_callable_while_armed` (compile-check) + dispatch sample builds
 - [ ] #2 no public take — `test_drained_batch_no_public_take` (compile-fail test)
 - [ ] #3/#5 Dropped vs Deferred split — state-diagram invariants enforced by property-based tests
-- [ ] #5 oversized terminal — `test_g_oversized_single_item_dropped_terminally`
+- [ ] #5 oversized terminal — `test_g_oversized_single_item_dropped_terminally` (revised per v3-a)
 - [ ] #6/#7 retirement protocol — `test_d_mcp_server_shutdown_awaited` + `test_d_shutdown_timeout_forces_abort`
 - [ ] #8 attempt 1-based — `test_h_retry_attempt_not_deduped` asserts `attempt: 1` for first run
 - [ ] #9 delivered_ids cleared — `test_d_delivered_ids_cleared_on_swap`
 - [ ] #10 created_at split — `test_e_artifact_ref_serialised` also asserts `created_at_wall` on wire, `created_at_mono` skipped
 - [ ] #11 commit_partial invariant — `test_amendment_11_commit_partial_unknown_key`
 - [ ] #14 requeue depth bounded — `test_requeue_depth_bounded`
+
+v3 spec-review amendments:
+- [ ] v3-a commit_partial three-way partition — `test_v3a_commit_partial_three_way_partition` + `test_v3a_commit_partial_disjoint_lists_violation` + revised `test_g_oversized_single_item_dropped_terminally`
+- [ ] v3-b bounded requeue channel — `test_v3b_requeue_channel_full_drops_terminally`
+- [ ] v3-c retirement backing fields — `test_d_mcp_server_shutdown_awaited` (covers shutdown), `test_d_shutdown_timeout_forces_abort` (covers force_abort); new `test_v3c_retiring_rejects_new_delegations` asserts `delegate_to_worker` returns `SessionRetiring` error after `mark_retiring`
+- [ ] v3-d dispatch sample compiles — handled by `test_turn_guard_scheduler_callable_while_armed` (already existed) extended to exercise the v3-d RenderOutcome destructure shape
 
 Plus all leak-resistance and property-based round-trip tests pass.
 
