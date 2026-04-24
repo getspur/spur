@@ -56,3 +56,29 @@ LEFT JOIN pricing p
     ON lower(e.model) = lower(p.model)
     AND e.timestamp >= p.effective_from
     AND (p.effective_to IS NULL OR e.timestamp < p.effective_to);
+
+-- --------------------------------------------
+-- 4. PERSISTENT CACHE (Phase 2.5)
+-- --------------------------------------------
+-- When `refresh_cache()` materializes `all_events` rows into the
+-- `events_cache` table, subsequent reports read from the cache
+-- instead of re-scanning JSONL. `scan_manifest` tracks the last
+-- refresh-time so we can detect staleness cheaply.
+CREATE TABLE IF NOT EXISTS events_cache (
+    timestamp             TIMESTAMP,
+    session_id            VARCHAR,
+    agent                 VARCHAR,
+    model                 VARCHAR,
+    project               VARCHAR,
+    input_tokens          BIGINT,
+    output_tokens         BIGINT,
+    cache_read_tokens     BIGINT,
+    cache_creation_tokens BIGINT,
+    cost_usd              DOUBLE
+);
+
+CREATE TABLE IF NOT EXISTS scan_manifest (
+    agent     VARCHAR PRIMARY KEY,
+    loaded_at TIMESTAMP NOT NULL,
+    row_count BIGINT NOT NULL DEFAULT 0
+);
