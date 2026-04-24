@@ -219,7 +219,16 @@ async fn shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
     let Some(server) = mcp_server.take() else {
         if let Some(mcp_guard) = mcp_guard {
             if let Some(guard) = mcp_guard.take() {
-                let _ = guard.await;
+                if tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, guard)
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        session = %session,
+                        timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                        "MCP guard await exceeded timeout on early-return; aborting via drop"
+                    );
+                }
             }
         }
         return;
@@ -248,7 +257,16 @@ async fn shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
 
     if let Some(mcp_guard) = mcp_guard {
         if let Some(guard) = mcp_guard.take() {
-            let _ = guard.await;
+            if tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, guard)
+                .await
+                .is_err()
+            {
+                warn!(
+                    session = %session,
+                    timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                    "MCP guard await exceeded timeout post-shutdown; aborting via drop"
+                );
+            }
         }
     }
 }
