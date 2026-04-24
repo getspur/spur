@@ -453,7 +453,7 @@ mod tests {
         );
         let outcome = render_merged_turn_with_spill_v2(
             &user_blocks,
-            &[continuation.clone()],
+            std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
         );
 
@@ -474,7 +474,7 @@ mod tests {
         let cost = continuation_cost(&continuation);
 
         let outcome =
-            render_merged_turn_with_spill_v2(&user_blocks, &[continuation.clone()], cost - 1);
+            render_merged_turn_with_spill_v2(&user_blocks, std::slice::from_ref(&continuation), cost - 1);
 
         assert_eq!(outcome.blocks, user_blocks);
         assert!(outcome.delivered_keys.is_empty());
@@ -572,7 +572,7 @@ mod tests {
             Some("done".into()),
         );
         let outcome = render_autonomous_turn_with_spill_v2(
-            &[continuation.clone()],
+            std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
         );
 
@@ -634,7 +634,7 @@ mod tests {
             Some("done".into()),
         );
         let outcome = render_autonomous_turn_with_spill_v2(
-            &[continuation.clone()],
+            std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
         );
         let json = first_resource_json(&outcome.blocks);
@@ -651,7 +651,7 @@ mod tests {
             Some("done".into()),
         );
         let outcome = render_autonomous_turn_with_spill_v2(
-            &[continuation.clone()],
+            std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
         );
         let json = first_resource_json(&outcome.blocks);
@@ -668,7 +668,7 @@ mod tests {
             Some("done".into()),
         );
         let outcome = render_autonomous_turn_with_spill_v2(
-            &[continuation.clone()],
+            std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
         );
         let json = first_resource_json(&outcome.blocks);
@@ -685,7 +685,7 @@ mod tests {
             Some("done".into()),
         );
         let outcome = render_autonomous_turn_with_spill_v2(
-            &[continuation.clone()],
+            std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
         );
         let json = first_resource_json(&outcome.blocks);
@@ -717,7 +717,7 @@ mod tests {
         });
 
         let outcome = render_autonomous_turn_with_spill_v2(
-            &[continuation.clone()],
+            std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
         );
         let json = first_resource_json(&outcome.blocks);
