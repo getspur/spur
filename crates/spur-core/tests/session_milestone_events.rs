@@ -1,17 +1,17 @@
 //! Integration test — Tranche 2 Task 2: resume-pipeline milestone events.
 //!
-//! Verifies that `SessionRetireStart` and `BrainConnecting` are emitted on
-//! the `ResumeSession` path at the correct phase boundaries.
+//! Verifies that `SessionRetireStart`/`SessionRetireComplete` pair correctly and
+//! that `BrainConnecting` carries the default brain name (not an empty string).
 //!
 //! ## Coverage scope
 //!
-//! | Milestone          | Tested? | Notes                                      |
-//! |--------------------|---------|--------------------------------------------|
-//! | SessionRetireStart | YES     | Fires before connect_brain (no brain held) |
-//! | SessionRetireComplete | PARTIAL | Fires only when there is an active brain to retire; not tested here because the harness never establishes a prior brain session |
-//! | BrainConnecting    | YES     | Fires before connect_brain is attempted    |
-//! | SessionLoading     | NO      | Requires connect_brain to succeed (needs live ACP subprocess) |
-//! | SessionLoaded      | NO      | Requires load_brain_session to succeed (needs live ACP subprocess) |
+//! | Milestone             | Tested? | Notes                                                              |
+//! |-----------------------|---------|--------------------------------------------------------------------|
+//! | SessionRetireStart    | YES     | Cold resume: must NOT fire (no prior brain → no pair to complete)  |
+//! | SessionRetireComplete | PARTIAL | Fires only when there is an active brain to retire; not tested here |
+//! | BrainConnecting       | YES     | Fires before connect_brain; carries default brain name, not ""     |
+//! | SessionLoading        | NO      | Requires connect_brain to succeed (needs live ACP subprocess)      |
+//! | SessionLoaded         | NO      | Requires load_brain_session to succeed (needs live ACP subprocess) |
 //!
 //! ## Gap documentation (DONE_WITH_CONCERNS)
 //!
@@ -82,15 +82,17 @@ fn build_orchestrator_with_failing_connect() -> (
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// `SessionRetireStart.to` must equal the session id passed in `ResumeSession`.
+/// On cold resume (no prior brain), `SessionRetireStart` must NOT be emitted.
 ///
-/// Because the orchestrator starts with no active brain, `from` will be `None`
-/// and `to` will be the target session.  The event must fire BEFORE
-/// `connect_brain` is attempted (and fails).
+/// Because there is no active brain to retire, emitting Start without Complete
+/// would leave subscribers hanging.  The fix ensures BOTH events fire or NEITHER.
+///
+/// After sending `ResumeSession`, `connect_brain` fails immediately (empty
+/// registry) and `BrainError` is emitted.  We assert `SessionRetireStart` never
+/// appeared between `ResumeSession` and `BrainError`.
 #[tokio::test]
-async fn resume_emits_session_retire_start_with_faithful_target() {
+async fn cold_resume_emits_no_retire_events() {
     let target_str = "milestone-target";
-    let target = SessionId(target_str.to_string());
 
     let (input_tx, mut events_rx) = build_orchestrator_with_failing_connect();
 
@@ -112,40 +114,38 @@ async fn resume_emits_session_retire_start_with_faithful_target() {
             Err(_) => continue,
         };
 
-        if let SpurEventBody::SessionRetireStart { to, from } = &ev.body {
-            assert_eq!(
-                *to, target,
-                "SessionRetireStart.to must match the resume target"
-            );
-            assert!(
-                from.is_none(),
-                "SessionRetireStart.from must be None when no prior brain is active; got {:?}",
-                from
-            );
+        if matches!(ev.body, SpurEventBody::SessionRetireStart { .. }) {
             saw_retire_start = true;
-            break;
         }
 
-        // connect_brain fails → BrainError is emitted.  If we reach this
-        // without having seen SessionRetireStart, the assertion below will
-        // catch it.
+        // connect_brain fails → BrainError is emitted.  Stop collecting here.
         if matches!(ev.body, SpurEventBody::BrainError { .. }) {
             break;
         }
     }
 
     assert!(
-        saw_retire_start,
-        "SessionRetireStart was never emitted on the resume path"
+        !saw_retire_start,
+        "SessionRetireStart must NOT be emitted on cold resume (no prior brain)"
     );
 }
 
 /// `BrainConnecting` must fire before `connect_brain` is attempted, carrying
-/// the resume target session id.
+/// the resume target session id AND a non-empty default brain name.
+///
+/// When no `brain_override` is set, `brain_name` must be the config default
+/// (e.g. `"claude-code"`), NOT an empty string.
 #[tokio::test]
 async fn resume_emits_brain_connecting_before_connect_fails() {
     let target_str = "milestone-brain-connecting";
     let target = SessionId(target_str.to_string());
+
+    // The default SpurConfig uses "claude-code" as the default brain name.
+    let expected_brain_name = SpurConfig::default().brain.default.clone();
+    assert!(
+        !expected_brain_name.is_empty(),
+        "Test invariant: SpurConfig::default().brain.default must not be empty"
+    );
 
     let (input_tx, mut events_rx) = build_orchestrator_with_failing_connect();
 
@@ -167,10 +167,14 @@ async fn resume_emits_brain_connecting_before_connect_fails() {
             Err(_) => continue,
         };
 
-        if let SpurEventBody::BrainConnecting { session, .. } = &ev.body {
+        if let SpurEventBody::BrainConnecting { session, brain_name } = &ev.body {
             assert_eq!(
                 *session, target,
                 "BrainConnecting.session must match the resume target"
+            );
+            assert_eq!(
+                *brain_name, expected_brain_name,
+                "BrainConnecting.brain_name must be the config default, not an empty string"
             );
             saw_brain_connecting = true;
             break;
