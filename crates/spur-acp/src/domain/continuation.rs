@@ -67,25 +67,45 @@ pub struct ArtifactRef {
 /// Deliberately NOT `DelegationResult` to decouple scheduler evolution
 /// from result-struct evolution and to avoid moving large diffs through
 /// the orchestrator ingress channel.
+///
+/// Schema v3 (Phase 3 of plan-5) adds `estimated_cost_micros`, `artifact_id`,
+/// and `fetch_hint`. All three are additive `Option<>` with `#[serde(default,
+/// skip_serializing_if)]` — wire-compatible with v2 producers/consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationPayload {
     pub status: DelegationStatus,
     pub summary: Option<String>,
     pub diff_summary: Option<DiffSummary>,
     pub worker_branch: Option<String>,
-    /// If the worker produced a large side-channel artifact, this points
-    /// to retrievable storage rather than inlining the bytes into ACP.
+    /// EXISTING (Phase 1 enriched) — reference to oversized stdout artifact (legacy narrow scope).
+    /// Coexists with `artifact_id` during transition; deprecated after stabilization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_ref: Option<ArtifactRef>,
+    /// NEW (Phase 3 / MF3) — cost in micro-USD (1e-6 USD).
+    /// `u64` chosen over `f64` so `ContinuationPayload` keeps deriving `Eq`
+    /// (f64 does not impl Eq). See `estimated_cost_usd()` for display-time
+    /// conversion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_micros: Option<u64>,
+    /// NEW (Phase 3) — reference to the full delegation outcome in OutcomeStore.
+    /// `Some(_)` ⇒ brain may call `fetch_outcome_artifact` for fuller context.
+    /// Brains check `artifact_id` FIRST, fall back to `artifact_ref` if absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<crate::domain::outcome::OutcomeKey>,
+    /// NEW (Phase 3) — explicit human-readable hint when `artifact_id` is `Some`.
+    /// Capped at 256 B by the materializer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_hint: Option<String>,
 }
 
 impl ContinuationPayload {
+    /// Display-time conversion: micros → USD. Single canonical source so
+    /// every consumer (TUI, dashboards, brain prompts) renders the same
+    /// value. Returns `None` when `estimated_cost_micros` is `None`.
+    ///
+    /// Note: lossless up to `2^53` micros (~$9 billion); larger values
+    /// truncate to the nearest representable `f64`. Practical API costs
+    /// are many orders of magnitude below that ceiling.
     pub fn estimated_cost_usd(&self) -> Option<f64> {
         self.estimated_cost_micros.map(|m| m as f64 / 1_000_000.0)
     }
@@ -240,6 +260,38 @@ mod tests {
         };
         let usd = payload.estimated_cost_usd().expect("Some");
         assert!((usd - 1.234567).abs() < 1e-9);
+    }
+
+    #[test]
+    fn estimated_cost_usd_handles_none_and_zero_and_large_values() {
+        let none_payload = ContinuationPayload {
+            status: DelegationStatus::Success,
+            summary: None,
+            diff_summary: None,
+            worker_branch: None,
+            artifact_ref: None,
+            estimated_cost_micros: None,
+            artifact_id: None,
+            fetch_hint: None,
+        };
+        assert!(none_payload.estimated_cost_usd().is_none());
+
+        let zero_payload = ContinuationPayload {
+            estimated_cost_micros: Some(0),
+            ..none_payload.clone()
+        };
+        assert_eq!(zero_payload.estimated_cost_usd(), Some(0.0));
+
+        // Past 2^53: precision is lost but the conversion still produces a
+        // finite USD value (the docstring notes this is out of practical range).
+        let big = (1u64 << 53) + 1;
+        let big_payload = ContinuationPayload {
+            estimated_cost_micros: Some(big),
+            ..none_payload
+        };
+        let usd = big_payload.estimated_cost_usd().expect("Some");
+        assert!(usd.is_finite());
+        assert!(usd > 0.0);
     }
 
     #[test]
