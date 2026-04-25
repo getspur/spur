@@ -124,7 +124,7 @@ mod tests {
         let entry = ledger.get(&env.message_id).await.unwrap();
         assert_eq!(entry.state, LedgerState::Delivered);
 
-        let event = events.try_recv().expect("reconciled event");
+        let event = events.recv().await.expect("reconciled event");
         assert!(matches!(
             event,
             SpurEventBody::WorkerPeerMailboxReconciled {
@@ -159,7 +159,7 @@ mod tests {
         let entry = ledger.get(&env.message_id).await.unwrap();
         assert_eq!(entry.state, LedgerState::Queued);
 
-        let event = events.try_recv().expect("reconciled event");
+        let event = events.recv().await.expect("reconciled event");
         assert!(matches!(
             event,
             SpurEventBody::WorkerPeerMailboxReconciled {
