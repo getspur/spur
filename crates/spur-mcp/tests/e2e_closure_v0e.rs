@@ -17,6 +17,12 @@ use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
+fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
+    Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    ))
+}
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -553,6 +559,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
             task_tracker: TaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
+            materializer: test_materializer(),
         }),
         Some(plan_id.into()),
     );
@@ -589,6 +596,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
             task_tracker: TaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
+            materializer: test_materializer(),
         }),
         Some(plan_id.into()),
     );

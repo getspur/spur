@@ -17,6 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
+fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
+    Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    ))
+}
+
 #[tokio::test]
 async fn run_plan_stays_alive_while_task_awaiting_review() {
     let state = PlanState {
@@ -51,7 +57,15 @@ async fn run_plan_stays_alive_while_task_awaiting_review() {
     // while the task is AwaitingReview.
     let plan_for_runner = Arc::clone(&plan);
     let runner = tokio::spawn(async move {
-        run_plan(plan_for_runner, delegation_tx, None, None, None).await;
+        run_plan(
+            plan_for_runner,
+            delegation_tx,
+            None,
+            None,
+            None,
+            test_materializer(),
+        )
+        .await;
     });
 
     // Park well past any reasonable "immediate exit" path. 500ms is
