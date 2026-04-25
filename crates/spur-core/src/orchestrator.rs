@@ -6005,13 +6005,10 @@ mod peer_mailbox_drain_tests {
         handle
     }
 
-    async fn drain_events(events: &mut UnboundedReceiver<SpurEventBody>) -> Vec<SpurEventBody> {
+    fn drain_events(events: &mut UnboundedReceiver<SpurEventBody>) -> Vec<SpurEventBody> {
         let mut out = Vec::new();
-        loop {
-            match tokio::time::timeout(Duration::from_millis(1), events.recv()).await {
-                Ok(Some(event)) => out.push(event),
-                Ok(None) | Err(_) => break,
-            }
+        while let Ok(event) = events.try_recv() {
+            out.push(event);
         }
         out
     }
@@ -6062,7 +6059,7 @@ mod peer_mailbox_drain_tests {
         );
         let entry = fixture.bundle.ledger.get(&message_id).await.unwrap();
         assert_eq!(entry.state, LedgerState::Ignored);
-        let events = drain_events(&mut fixture.events).await;
+        let events = drain_events(&mut fixture.events);
         assert_eq!(ignored_timeout_events(&events, message_id, &target), 1);
     }
 
@@ -6110,7 +6107,7 @@ mod peer_mailbox_drain_tests {
 
         let entry = fixture.bundle.ledger.get(&message_id).await.unwrap();
         assert_eq!(entry.state, LedgerState::Ignored);
-        let events = drain_events(&mut fixture.events).await;
+        let events = drain_events(&mut fixture.events);
         assert_eq!(ignored_timeout_events(&events, message_id, &target), 1);
     }
 
@@ -6158,7 +6155,7 @@ mod peer_mailbox_drain_tests {
         assert!(elapsed >= quiet_window, "elapsed: {elapsed:?}");
         let entry = fixture.bundle.ledger.get(&message_id).await.unwrap();
         assert_eq!(entry.state, LedgerState::Ignored);
-        let events = drain_events(&mut fixture.events).await;
+        let events = drain_events(&mut fixture.events);
         assert_eq!(ignored_timeout_events(&events, message_id, &target), 1);
     }
 
@@ -6184,20 +6181,31 @@ mod peer_mailbox_drain_tests {
             stale_ack_tx.send(()).is_err(),
             "late ack should be dropped after drain receiver exits"
         );
-        assert!(
-            fixture
-                .bundle
-                .router
-                .record_terminal(&message_id, TerminalOutcome::Consumed)
-                .await
-                .is_err(),
-            "terminal lockout must reject Ignored -> Consumed even if a stale ack bypassed the channel"
-        );
+        let err = fixture
+            .bundle
+            .router
+            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .await
+            .unwrap_err();
+        let expected = crate::peer_mailbox::ledger::LedgerError::InvalidTransition {
+            from: LedgerState::Ignored,
+            to: LedgerState::Consumed,
+        }
+        .to_string();
+        match err {
+            crate::peer_mailbox::router::RouterError::Ledger(message) => {
+                assert!(crate::peer_mailbox::ledger::is_terminal(
+                    LedgerState::Ignored
+                ));
+                assert_eq!(message, expected);
+            }
+            other => panic!("expected InvalidTransition with terminal Ignored from, got {other:?}"),
+        }
 
         let entry = fixture.bundle.ledger.get(&message_id).await.unwrap();
         assert_eq!(entry.state, LedgerState::Ignored);
 
-        let events = drain_events(&mut fixture.events).await;
+        let events = drain_events(&mut fixture.events);
         assert_eq!(ignored_timeout_events(&events, message_id, &target), 1);
         assert!(!events.iter().any(|event| {
             matches!(
@@ -6242,7 +6250,7 @@ mod peer_mailbox_drain_tests {
         assert_eq!(entry_a.state, LedgerState::Ignored);
         assert_eq!(entry_b.state, LedgerState::Delivered);
 
-        let events = drain_events(&mut fixture.events).await;
+        let events = drain_events(&mut fixture.events);
         assert_eq!(ignored_timeout_events(&events, message_a, &target_a), 1);
         assert_eq!(ignored_timeout_events(&events, message_b, &target_b), 0);
     }
