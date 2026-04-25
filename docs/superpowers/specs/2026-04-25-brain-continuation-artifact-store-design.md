@@ -111,7 +111,7 @@ Background sweeper
 - `arb_diff_summary` — 0–1024 files × paths up to 256 B; counts up to `u32::MAX`.
 - `arb_summary` — strings 0–10 KB including null bytes and high-bit code points.
 - `arb_worker_branch` — strings 0–10 KB.
-- `arb_artifact_ref` — `uri` and `git_object_ref` 0–10 KB (covers N1's defensive-clip branch).
+- `arb_artifact_ref` — `uri` and `git_object_ref` 0–10 KB **with adversarial UTF-8 character distribution: null bytes, control characters (0x00–0x1F), backslashes, double-quotes, high-bit code points (≥0x80), surrogates** (round 11 / SF2). Length-only generation exercises clipping but leaves JSON-escape-expansion regressions under-specified; explicit hostile chars exercise serde escape logic too.
 - 1024 cases per CI run; nightly job runs `PROPTEST_CASES=100_000` for high-confidence regression detection on the critical envelope bound.
 
 The merger's `OversizedSingleItem` branch becomes unreachable for `OutcomeMaterializer`-produced continuations. Other producers (none expected post-Plan-5) remain subject to the merger fallback.
@@ -181,6 +181,8 @@ pub struct ArtifactRef {
 Update `map_worker_artifact_ref` to populate both new fields. Existing consumers see `Option::None` for both — backward-compatible.
 
 **Round 9 round-trip test (mandatory CI gate):** `crates/spur-acp/tests/artifact_ref_wire_compat.rs` deserializes a stored pre-Phase-1 envelope (golden JSON file at `crates/spur-acp/tests/data/artifact_ref_v0.json` produced from current code), re-serializes, and asserts byte-for-byte equality on the `kind` projection. Catches regressions where `flatten` is accidentally removed during refactoring.
+
+**Round 11 (NIT) — golden fixture coverage:** the fixture must include BOTH a unit variant (e.g., `ArtifactKind::Patch` serializing to `"kind": "patch"`) AND the data-carrying variant `ArtifactKind::Other(String)` (serializing to `{"kind": "other", "name": "<value>"}`). The unit variant locks the top-level discriminator; `Other` locks the `name` projection. Without both, a refactor that keeps unit variants flat but un-flattens data-carrying variants would slip through.
 
 ### 5.2 Add `fetch_outcome_artifact` MCP tool (minimal)
 
@@ -344,6 +346,11 @@ pub struct OutcomeMetadata {
     pub content_type: ContentType,           // Diff | Stdout | Stderr | Json
     pub original_byte_size: u64,
     pub stored_byte_size: u64,                // post-truncation if applicable
+    /// Round 11 (SF1): SHA-256 hex of stored content. Single source of truth
+    /// for ContentMismatch detection — both FsOutcomeStore and
+    /// GitBlobOutcomeStore read this on `put` to compare against new content
+    /// hash, avoiding full re-hash of stored bytes on every duplicate put.
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -387,18 +394,65 @@ pub enum StoreError {
 - `get` reads via `tokio::fs::read`.
 - `delete_namespace` recursively deletes `<root>/<brain_session_id>/`.
 - `sweep_older_than` walks namespaces, reads `created_at` from sidecar `OutcomeMetadata` (see below), deletes older ones. **Round 9 (P2-S3): minimum supported TTL = 1 day; sub-day TTLs not supported on all filesystems.**
-- **Round 9 (N2) — same-key-different-content semantics:** before atomic-rename, `put` compares SHA-256 of new content against existing sidecar metadata (if present). If `existing.sha256 != new.sha256`, returns `StoreError::ContentMismatch { key, existing_sha, new_sha }` without overwriting. Idempotent re-puts (matching SHA) succeed and return the existing `OutcomeRef`.
+- **Round 9 (N2) + Round 11 (SF1) — same-key-different-content semantics:** before atomic-rename, `put` reads `<root>/<session>/<delegation>/<attempt>.meta` (sidecar `OutcomeMetadata` JSON). If present, compares `existing.sha256` (round 11 — read directly from metadata, NOT recomputed by re-hashing the file) against new content's SHA-256. If unequal, returns `StoreError::ContentMismatch { key, existing_sha, new_sha }` without overwriting. Matching SHA → idempotent re-put succeeds and returns the existing `OutcomeRef`. The metadata sidecar is the same shape used by `GitBlobOutcomeStore` (single `OutcomeMetadata` source of truth).
 - Default root: `$SPUR_DATA_DIR/outcomes/` (uses `directories` crate fallback per `spur-context` precedent).
 
 **`GitBlobOutcomeStore`** (in `spur-worktree`, NOT in `spur-blob-store`):
 - spur-worktree gains a `spur-blob-store` workspace dependency.
 - `worktrees.persist_artifact` (currently at `crates/spur-worktree/src/manager.rs:295`) is wrapped to also implement `OutcomeStore::put`.
 - Existing `WorkerArtifact { object_ref, blob_sha, size_bytes, kind }` shape preserved on the wire.
-- Internal layout: continues using `refs/spur/artifacts/<session-id>` git refs.
-- `delete_namespace` invokes `git update-ref -d refs/spur/artifacts/<session-id>`.
-- **Round 9 (GC-M1) — sidecar metadata for sweep correctness:** alongside the artifact blob, `put` writes `OutcomeMetadata` (incl. `created_at`) as a separate small git blob keyed at `refs/spur/artifacts/<session-id>/<delegation>-<attempt>.meta`. `sweep_older_than` reads `created_at` from the sidecar, NOT filesystem mtime — filesystem mtime of `.git/refs/...` is unreliable for packed refs (the entire `packed-refs` file shares one mtime). Sidecar approach is reliable across loose/packed ref states.
-- `delete_namespace` removes both content and `.meta` refs in a single git transaction.
-- `ContentMismatch` semantics: same as `FsOutcomeStore` — read existing `.meta` blob, compare SHA, return `StoreError::ContentMismatch` if mismatch.
+
+**Round 11 (MF1 + MF2) — NEW ref namespace; legacy ref becomes read-only-during-transition.**
+
+The legacy artifact ref at `refs/spur/artifacts/<session-id>` is shared per session — every delegation in a session would overwrite the same ref, losing earlier blobs. The OutcomeStore trait requires per-`(session, delegation, attempt)` granularity: each triple must store and retrieve its own blob. Round 9's sidecar layout (`refs/spur/artifacts/<session-id>/<delegation>-<attempt>.meta`) also collides with git's directory/file rule because the legacy ref makes `<session-id>` a leaf, blocking children.
+
+Round 11 resolves both by introducing a **new ref namespace** for Plan-5 outcomes, separate from the legacy artifact namespace:
+
+```
+NEW (Plan-5 outcomes — per-(session, delegation, attempt) granularity):
+  refs/spur/outcomes/<session-id>/<delegation-id>-<attempt>.blob    # content
+  refs/spur/outcomes/<session-id>/<delegation-id>-<attempt>.meta    # OutcomeMetadata sidecar
+
+LEGACY (pre-Plan-5; per-session granularity, read-only during transition):
+  refs/spur/artifacts/<session-id>                                  # last-write-wins (latent bug)
+```
+
+- `OutcomeStore::put(key)` writes `refs/spur/outcomes/<session>/<delegation>-<attempt>.blob` (content) and `.meta` (sidecar `OutcomeMetadata` JSON blob). Both refs are leaves under the namespace; no D/F conflict.
+- `OutcomeStore::get(key)` reads via `git cat-file -p $(git rev-parse refs/spur/outcomes/<session>/<delegation>-<attempt>.blob)`.
+- `OutcomeStore::delete_namespace(session)` deletes all refs matching `refs/spur/outcomes/<session-id>/*` in a single git transaction. Legacy `refs/spur/artifacts/<session-id>` is also removed at the same time (cleanup of pre-Plan-5 debt).
+- `OutcomeStore::sweep_older_than(ttl)` reads `created_at` from each `.meta` sidecar; deletes namespaces whose newest `created_at` is older than `ttl`.
+
+**Round 11 (SF3) — UUID validation in GitBlobOutcomeStore::put**: same as `FsOutcomeStore` — assert `uuid::Uuid::parse_str` for `brain_session_id` and `delegation_id`; reject with `StoreError::Backend("non-uuid identifier")` otherwise. `DelegationId::From<String>` exists for test ergonomics; the store layer must guard against non-UUID inputs reaching `git update-ref` (which has its own ref-name validation but failure mode is opaque).
+
+**Round 11 (SF1) — `ContentMismatch` semantics:** before writing, `put` reads the existing `.meta` sidecar (if any), compares its `sha256` field to the new content's hash. If `existing.sha256 != new_sha256`, returns `StoreError::ContentMismatch { key, existing_sha, new_sha }` without overwriting. This avoids re-hashing the entire content blob just to detect duplicates — `OutcomeMetadata.sha256` is the single source of truth (see §6.3).
+
+**Phase 1 read path coexistence:**
+
+Phase 1's `fetch_outcome_artifact` reads from the LEGACY `refs/spur/artifacts/<session-id>` path (current code). Phase 2's introduction of the new namespace does not affect Phase 1 reads; the legacy ref continues to work for artifacts written before Plan-5. Phase 3's `OutcomeMaterializer` writes ONLY to the new namespace. The transition window is one release cycle — by Phase 4 (post-Plan-5), the legacy ref is purged from production data.
+
+**Backcompat adapter** at §6.5 is updated to return the **real** new-namespace ref:
+
+```rust
+impl OutcomeRef {
+    pub fn as_worker_artifact(&self, kind: WorkerArtifactKind) -> Option<WorkerArtifact> {
+        match self.backend {
+            BackendTag::GitBlob => Some(WorkerArtifact {
+                // Round 11 fix: real new-namespace ref, not legacy hardcoded path.
+                object_ref: format!(
+                    "refs/spur/outcomes/{}/{}-{}.blob",
+                    self.key.brain_session_id,
+                    self.key.delegation_id,
+                    self.key.attempt,
+                ),
+                blob_sha: self.sha256.clone(),
+                size_bytes: self.byte_size as usize,
+                kind,
+            }),
+            _ => None,
+        }
+    }
+}
+```
 
 **`MemoryOutcomeStore`** (test impl, in `spur-blob-store::memory_store`):
 - `Arc<RwLock<HashMap<OutcomeKey, (Vec<u8>, OutcomeMetadata)>>>`.
@@ -434,10 +488,20 @@ impl OutcomeRef {
     /// legacy WorkerArtifact shape. Returns None for non-git backends.
     /// Phase 2 callers use this to preserve DelegationResult.artifact behavior
     /// during transition; Phase 3 cleanup may remove or deprecate.
+    ///
+    /// Round 11 (MF2): returns the REAL per-(session, delegation, attempt)
+    /// ref under refs/spur/outcomes/, not the legacy shared-per-session ref.
+    /// The legacy refs/spur/artifacts/<session> path is read-only during
+    /// Phase 1 transition; new writes go to the new namespace.
     pub fn as_worker_artifact(&self, kind: WorkerArtifactKind) -> Option<WorkerArtifact> {
         match self.backend {
             BackendTag::GitBlob => Some(WorkerArtifact {
-                object_ref: format!("refs/spur/artifacts/{}", self.key.brain_session_id),
+                object_ref: format!(
+                    "refs/spur/outcomes/{}/{}-{}.blob",
+                    self.key.brain_session_id,
+                    self.key.delegation_id,
+                    self.key.attempt,
+                ),
                 blob_sha: self.sha256.clone(),
                 size_bytes: self.byte_size as usize,
                 kind,
@@ -862,11 +926,14 @@ Lists or removes namespaces matching criteria. Useful for ops emergencies (disk 
 
 The trait method signature is unchanged; the per-backend implementations honor the same contract through different mechanisms.
 
-**Pre-Plan-5 debt:** the current git-blob path accumulates refs without cleanup. Once `GitBlobOutcomeStore` ships in Phase 2, the unified GC sweeper handles pre-existing artifacts too — but those don't have sidecar `OutcomeMetadata`. Migration step:
+**Pre-Plan-5 debt + dual-namespace sweep (round 11 / MF1+MF2):**
 
-- On first sweep after Phase 2 deploys, any artifact ref *without* a sidecar `.meta` blob is treated as `created_at = epoch` (i.e., immediately eligible for sweep). Operators get one warning trace per pruned legacy ref. After one sweep cycle, all surviving artifacts have sidecar metadata.
+- The legacy `refs/spur/artifacts/<session-id>` namespace coexists with the new `refs/spur/outcomes/<session-id>/...` namespace during Phase 1's transition window. `GitBlobOutcomeStore::sweep_older_than` walks **both** namespaces:
+  1. **New namespace** (`refs/spur/outcomes/<session-id>/<delegation>-<attempt>.{blob,meta}`): read `created_at` from each `.meta` sidecar; delete ref pairs whose newest `created_at` is older than `ttl`.
+  2. **Legacy namespace** (`refs/spur/artifacts/<session-id>`): no sidecar metadata. Treated as `created_at = epoch` (immediately eligible). Operators get one warning trace per pruned legacy ref. After one sweep cycle in Phase 2+, all surviving outcomes are in the new namespace.
+- `delete_namespace(session)` removes both `refs/spur/outcomes/<session>/*` AND `refs/spur/artifacts/<session>` in a single git transaction — pre-Plan-5 debt for that session is cleaned alongside the new outcomes.
 
-**Net win:** pre-Plan-5 debt is purged by the same mechanism on first sweep; subsequent runs use the reliable sidecar metadata path.
+**Net win:** pre-Plan-5 debt is purged automatically; subsequent runs use the reliable per-`(session, delegation, attempt)` namespace with sidecar metadata.
 
 ## 9. Failure modes
 
