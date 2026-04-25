@@ -53,7 +53,7 @@ pub struct LedgerEntry {
     pub injected_into_prompts: HashSet<String>,
 }
 
-pub fn is_terminal(state: LedgerState) -> bool {
+pub(crate) fn is_terminal(state: LedgerState) -> bool {
     matches!(
         state,
         LedgerState::Rejected
@@ -556,7 +556,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_message_rejects_post_prompt_delivery_transition_contract() {
+    async fn transition_returns_invalid_transition_with_terminal_from_when_message_already_consumed(
+    ) {
         let ledger = InMemoryLedger::new();
         let env = envelope("hi");
         ledger.accept(env.clone()).await.unwrap();
@@ -570,7 +571,14 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, LedgerError::InvalidTransition { .. }));
+        match err {
+            LedgerError::InvalidTransition { from, to } => {
+                assert!(is_terminal(from));
+                assert_eq!(from, LedgerState::Consumed);
+                assert_eq!(to, LedgerState::DeliveredInflight);
+            }
+            other => panic!("expected InvalidTransition with terminal from, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -4889,17 +4889,6 @@ async fn run_one_worker_attempt(
             spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
 
         for inj in pc.injection_records {
-            if let Some(entry) = bundle.ledger.get(&inj.message_id).await {
-                if is_terminal(entry.state) {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?entry.state,
-                        "post-prompt transition skipped: already terminal"
-                    );
-                    continue;
-                }
-            }
-
             match bundle
                 .ledger
                 .transition(&inj.message_id, LedgerState::DeliveredInflight)
@@ -4912,6 +4901,16 @@ async fn run_one_worker_attempt(
                         state = ?state,
                         "peer mailbox: delivered-inflight transition no-op"
                     );
+                }
+                Err(crate::peer_mailbox::ledger::LedgerError::InvalidTransition {
+                    from, ..
+                }) if is_terminal(from) => {
+                    tracing::debug!(
+                        message_id = ?inj.message_id,
+                        state = ?from,
+                        "post-prompt DeliveredInflight transition skipped: message already terminal"
+                    );
+                    continue;
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -4954,6 +4953,16 @@ async fn run_one_worker_attempt(
                         state = ?state,
                         "peer mailbox: delivered transition no-op"
                     );
+                }
+                Err(crate::peer_mailbox::ledger::LedgerError::InvalidTransition {
+                    from, ..
+                }) if is_terminal(from) => {
+                    tracing::debug!(
+                        message_id = ?inj.message_id,
+                        state = ?from,
+                        "post-prompt Delivered transition skipped: message already terminal"
+                    );
+                    continue;
                 }
                 Err(err) => {
                     tracing::warn!(
