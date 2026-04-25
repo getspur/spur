@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::lineage::ExecutorLineage;
 use spur_acp::domain::events::{SpurEvent, SpurEventBody};
 
+#[allow(clippy::large_enum_variant)]
 enum FunnelCommand {
     Event(SpurEventBody),
     LineageSnapshot(tokio::sync::oneshot::Sender<Option<ExecutorLineage>>),

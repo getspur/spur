@@ -166,7 +166,7 @@ impl PeerMailboxLedger for InMemoryLedger {
         let mut g = self.inner.lock().await;
         let entry = g
             .get_mut(message_id)
-            .ok_or_else(|| LedgerError::NotFound(*message_id))?;
+            .ok_or(LedgerError::NotFound(*message_id))?;
         // Idempotency: same-state transitions are observable no-ops.
         if entry.state == next {
             return Ok(TransitionOutcome::Unchanged(next));
@@ -190,7 +190,7 @@ impl PeerMailboxLedger for InMemoryLedger {
         let mut g = self.inner.lock().await;
         let entry = g
             .get_mut(message_id)
-            .ok_or_else(|| LedgerError::NotFound(*message_id))?;
+            .ok_or(LedgerError::NotFound(*message_id))?;
         if entry.injected_into_prompts.insert(target_prompt_id.into()) {
             Ok(InjectionOutcome::Injected)
         } else {

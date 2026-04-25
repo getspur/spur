@@ -18,9 +18,11 @@ use crate::{
     SweepReport,
 };
 
+type MemoryStoreMap = HashMap<OutcomeKey, (Vec<u8>, OutcomeMetadata)>;
+
 #[derive(Debug, Default, Clone)]
 pub struct MemoryOutcomeStore {
-    inner: Arc<RwLock<HashMap<OutcomeKey, (Vec<u8>, OutcomeMetadata)>>>,
+    inner: Arc<RwLock<MemoryStoreMap>>,
 }
 
 impl MemoryOutcomeStore {

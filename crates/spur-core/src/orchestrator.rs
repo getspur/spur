@@ -353,6 +353,7 @@ fn format_error_chain(error: &anyhow::Error) -> String {
 /// A user input message from the TUI.
 #[derive(Debug)]
 #[non_exhaustive]
+#[allow(clippy::large_enum_variant)]
 pub enum InteractiveInput {
     /// Initialize and warm the brain transport without creating an ACP
     /// session yet. Used by dashboard startup to reduce first-prompt latency.
@@ -3676,6 +3677,12 @@ impl Orchestrator {
 
         loop {
             attempt_tracker.store(attempt_n, Ordering::SeqCst);
+            let (ack_tx, ack_rx) = if peer_mailbox.is_some() {
+                let (ack_tx, ack_rx) = tokio::sync::mpsc::unbounded_channel();
+                (Some(ack_tx), Some(ack_rx))
+            } else {
+                (None, None)
+            };
             let outcome = match run_one_worker_attempt(
                 next_worker_session.clone(),
                 &WorkerAttemptCtx {
@@ -3688,6 +3695,7 @@ impl Orchestrator {
                     delegation_plan: delegation_plan.clone(),
                     issue_id: issue_id.clone(),
                     peer_mailbox: peer_mailbox.as_ref(),
+                    ack_tx: ack_tx.clone(),
                 },
                 &mut worktrees,
                 &funnel,
@@ -3824,14 +3832,10 @@ impl Orchestrator {
                 );
             }
 
-            if let Some(bundle) = peer_mailbox.as_ref() {
+            drop(ack_tx);
+            if let (Some(bundle), Some(ack_rx)) = (peer_mailbox.as_ref(), ack_rx) {
                 let quiet_window =
                     std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
-                let (_ack_tx, ack_rx) = tokio::sync::mpsc::unbounded_channel();
-                // TODO(peer-mailbox): Task 18's e2e path or a follow-up
-                // patch must wire ack_tx into the worker notification
-                // consumer when `_spur/peer_message_consumed` or
-                // `_spur/peer_message_ignored` arrives for this delegation.
                 drain_peer_acks_with_timeout(
                     bundle,
                     &spur_acp::domain::delegation::DelegationId(request_id.clone()),
@@ -4633,6 +4637,7 @@ struct WorkerAttemptCtx<'a> {
     delegation_plan: Option<spur_acp::domain::DelegationPlan>,
     issue_id: Option<String>,
     peer_mailbox: Option<&'a crate::peer_mailbox::PeerMailboxBundle>,
+    ack_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
 }
 
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
@@ -4705,14 +4710,27 @@ async fn run_one_worker_attempt(
         let funnel_for_ext = funnel.clone();
         let executor_id_for_ext = worker_session.0.clone();
         let brain_session_for_ext = ctx.brain_session_id.as_session_id().clone();
+        let peer_mailbox_for_ext = ctx.peer_mailbox.cloned();
+        let ack_tx_for_ext = ctx.ack_tx.clone();
         tokio::spawn(async move {
             while let Some(payload) = ext_rx.recv().await {
+                let terminal_method = payload.method.clone();
+                let terminal_params = payload.params.clone();
                 crate::spur_ext_interp::interpret(
                     payload,
                     brain_session_for_ext.clone(),
                     executor_id_for_ext.clone(),
                     &funnel_for_ext,
                 );
+                if let (Some(bundle), Some(ack_tx)) = (&peer_mailbox_for_ext, &ack_tx_for_ext) {
+                    crate::spur_ext_interp::interpret_peer_message_terminal(
+                        &terminal_method,
+                        terminal_params,
+                        bundle,
+                        ack_tx,
+                    )
+                    .await;
+                }
             }
         });
     }
@@ -5132,6 +5150,7 @@ async fn run_one_worker_attempt(
 /// notifications scoped to `delegation_id`. Each ack resets the window.
 /// After the window elapses, delivered non-terminal peer messages are forced
 /// to `Ignored` with reason `drain_timeout`.
+#[allow(clippy::while_let_loop)]
 async fn drain_peer_acks_with_timeout(
     bundle: &crate::peer_mailbox::PeerMailboxBundle,
     delegation_id: &spur_acp::domain::delegation::DelegationId,
