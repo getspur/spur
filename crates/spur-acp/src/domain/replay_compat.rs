@@ -17,6 +17,16 @@ impl ReplayBody {
             ReplayBody::Unknown(_) => None,
         }
     }
+
+    /// Returns the raw JSON value for unknown variants. Useful for replay
+    /// tooling that wants to log or pass through unrecognized payloads
+    /// without manual `match` boilerplate.
+    pub fn as_unknown(&self) -> Option<&serde_json::Value> {
+        match self {
+            ReplayBody::Known(_) => None,
+            ReplayBody::Unknown(v) => Some(v),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -35,5 +45,17 @@ mod tests {
         let json = r#"{"FutureVariantThatDoesNotExist":{"x":1}}"#;
         let body: ReplayBody = serde_json::from_str(json).unwrap();
         assert!(body.as_known().is_none());
+    }
+
+    #[test]
+    fn unknown_variant_round_trips_preserving_payload() {
+        let original_json = r#"{"FutureVariantV2":{"new_field":42,"nested":{"x":"y"}}}"#;
+        let body: ReplayBody = serde_json::from_str(original_json).unwrap();
+        let value = body.as_unknown().expect("should be unknown");
+        // Re-serialize and confirm the inner JSON survives untouched.
+        let re_emitted = serde_json::to_string(value).unwrap();
+        let original_value: serde_json::Value = serde_json::from_str(original_json).unwrap();
+        let re_emitted_value: serde_json::Value = serde_json::from_str(&re_emitted).unwrap();
+        assert_eq!(re_emitted_value, original_value);
     }
 }
