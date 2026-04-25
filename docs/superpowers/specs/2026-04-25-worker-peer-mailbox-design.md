@@ -129,8 +129,11 @@ Stage 1 should introduce small components rather than growing
   inspect labels ad hoc inside `run_one_worker_attempt`.
 - `PeerPromptContextBuilder` in `spur-core`, responsible only for turning
   accepted mailbox entries into bounded orchestrator-authored prompt context.
-  Enforces the per-`(message_id, target_delegation_id)` injection idempotence
-  defined under "Delivery Guarantees" below.
+  Enforces the per-`(message_id, target_prompt_id)` injection idempotence
+  defined under "Delivery Guarantees" below. `target_prompt_id` is an
+  orchestrator-generated identifier for each specific prompt build, not the
+  delegation id; this key survives Stage 2 where one delegation contains many
+  prompts/turns.
 - Lineage adapter changes under `crates/spur-core/src/lineage`, projecting
   peer messages as edges between executor nodes (`ExecutorNode` / `Attempt`
   in `lineage/types.rs`).
@@ -164,8 +167,10 @@ a retried worker attempt can cause double side effects (file edits, PR
 comments, tool calls). SPUR therefore enforces injection idempotence at the
 prompt-builder layer rather than relying on receiver-side deduplication. The
 delivery guarantee is at-least-once at the transport layer and at-most-once
-per `(message_id, target_delegation_id)` pair at the injection layer; see
-"Delivery Guarantees" below.
+per `(message_id, target_prompt_id)` pair at the injection layer, where
+`target_prompt_id` identifies a single concrete prompt build (Stage 1: one
+prompt per attempt; Stage 2: one prompt per turn within a `WorkerRuntime`).
+See "Delivery Guarantees" below.
 
 ## Approved Direction
 
@@ -258,28 +263,99 @@ but the ledger does not record it. v1 handles this conservatively:
 - The orchestrator emits `WorkerPeerMessageAuditFailed` for each affected
   message (existing variant; consistent with the audit-failed rule in
   "Durable State").
-- The next attempt for the same target task will re-inject these messages
-  unless the per-`(message_id, target_delegation_id)` injection record was
-  itself written successfully. The injection record write is therefore the
-  authoritative idempotence boundary, not the `Delivered` ledger transition.
+- The next prompt build for the same target task will re-inject these
+  messages unless the per-`(message_id, target_prompt_id)` injection record
+  was itself written successfully. The injection record write is therefore
+  the authoritative idempotence boundary, not the `Delivered` ledger
+  transition.
 - This makes the injection-record write the smallest required atomicity
   unit; the ledger and beads writes can fail-and-retry without causing
   double-injection.
+- A new `target_prompt_id` is generated at every prompt build, including
+  retries within the same delegation. Stage 1 produces one `target_prompt_id`
+  per `run_one_worker_attempt` invocation; Stage 2 produces one per
+  `WorkerRuntime` turn. This keeps the idempotence key stable across the
+  Stage 1 → Stage 2 transition.
 
 The post-prompt acknowledgement drain (see "Review Behavior") attaches at
 the existing notification-drain point in `run_one_worker_attempt` rather
 than introducing a new control-flow branch.
 
+### Startup Reconciliation
+
+A process crash can leave the ledger and beads in inconsistent states:
+
+- **Ledger transition written, beads write never reached.** The audit-failed
+  event was never emitted because the process died.
+- **Injection record written, `Delivered_inflight` never resolved.** The
+  prompt was dispatched but the `Delivered` transition was lost mid-write.
+- **Guard still resident in memory.** Stranded entries the in-process
+  reconciler never drained.
+
+On orchestrator startup, before any prompt dispatch, the system runs a
+**Startup Reconciliation** pass:
+
+1. Scan the ledger for entries in non-terminal states (`Accepted`, `Queued`,
+   `Delivered_inflight`).
+2. For each entry, consult beads for the corresponding audit reference:
+   - If the audit reference is missing for a transition that should have
+     written one, emit `WorkerPeerMessageAuditFailed` (idempotent by
+     `message_id` plus transition kind).
+   - If `Delivered_inflight` is older than the configured drain quiet
+     window, force-resolve to `Delivered` if the injection record was
+     written, else fall back to `Queued`.
+3. Wrap every loaded non-terminal entry in a fresh `PeerMessageGuard`
+   *before* any `run_one_worker_attempt` is allowed to start. This guarantees
+   that a crash during reconciliation cannot leave entries unprotected.
+4. Drain any entries left in the previous run's stranded-message mpsc by
+   reading from the durable backing store, if any. v1 in-memory ledger has
+   no durable mpsc spillover, so this step is a no-op until persistence
+   backing lands.
+
+The reconciliation pass is bounded in time and emits a single
+`WorkerPeerMailboxReconciled` summary event with counts per resolution
+kind, so operators can see the recovery shape on every restart.
+
 Stranded-message safety. The orchestrator wraps every accepted-but-not-yet-
 terminal peer message in a `PeerMessageGuard` RAII handle, mirroring the
-existing `DelegationGuard` pattern (`crates/spur-core/src/orchestrator.rs`)
-that guarantees `DelegationCompleted(Failed)` on Drop for stranded
-executors. If a `PeerMessageGuard` is dropped without an explicit terminal
-transition (panic, early return, task abort), its `Drop` impl synchronously
-persists `Undeliverable` with reason `source_task_died` (or
-`target_task_died`, depending on which side held the guard) and emits the
-corresponding `WorkerPeerMessageUndeliverable` event. The audit-failed rule
-covers ledger-write failures; `PeerMessageGuard` covers task-death failures.
+existing `DelegationGuard` pattern (`crates/spur-core/src/orchestrator.rs`).
+Async-Drop is intentionally avoided — performing async ledger writes in
+`Drop` is unsafe (the runtime may be shutting down, leading to silent
+failures or task panics).
+
+The guard exposes two paths:
+
+1. **`async fn finalize(self, outcome: TerminalOutcome)`** — the normal
+   path. Called explicitly from every code path that resolves the message,
+   including `Consumed`, `Ignored`, `Expired`, `Dropped`, `Undeliverable`.
+   Performs the full async ledger transition, beads write, and event
+   emission. Consumes the guard so no `Drop` runs.
+2. **Sync-only `Drop` impl** — fires only when the guard is dropped
+   *without* `finalize` having been called (panic, early return, task
+   abort). It performs:
+   - A non-blocking enqueue of an `Undeliverable` transition onto a
+     dedicated unbounded mpsc drained by a long-lived reconciler task
+     (separate from the EventFunnel, so it survives runtime shutdown
+     differently).
+   - A `tracing::error!` log noting the missed `finalize`.
+   - No async work, no blocking writes, no `block_on`.
+
+  The reconciler task drains the mpsc and applies the transitions when the
+  runtime is healthy; if the runtime has fully shut down, the entries are
+  recovered on next startup by the startup reconciliation pass (see
+  "Startup Reconciliation" below).
+
+Guard scope. The guard is constructed by the router immediately after the
+ledger `Accepted` write succeeds (not by the orchestrator). This closes the
+window where a router-side panic between ledger-persist and event emission
+could leave a durable message with no guard. The guard is then transferred
+to the orchestrator when injection begins, and to the consumer-acker when
+delivery completes. Each transfer is a move, not a copy; at most one guard
+exists per message at any time.
+
+The audit-failed rule covers ledger-write failures during normal operation;
+`PeerMessageGuard` covers task-death and panic failures; the startup
+reconciler (below) covers process-death failures.
 
 ## Stage 2: Stateful WorkerRuntime
 
@@ -453,7 +529,7 @@ In-flight supersession (after acceptance):
 ## Delivery Guarantees
 
 v1 chooses **at-least-once delivery at the transport layer** and
-**at-most-once injection per `(message_id, target_delegation_id)` pair**.
+**at-most-once injection per `(message_id, target_prompt_id)` pair**.
 Exactly-once is intentionally not targeted: in distributed systems, duplicates
 are fixable; data loss is not.
 
@@ -463,16 +539,29 @@ Two layers of idempotence:
    Replays of the same ACP notification or restart-time recovery may re-apply
    a transition; the ledger returns the existing state and must not duplicate
    beads audit references or peer lifecycle events.
-2. **Injection idempotence by `(message_id, target_delegation_id)`.** The
-   `PeerPromptContextBuilder` records each successful delivery against the
-   target's `delegation_id`. Within the same delegation, a message is injected
-   into at most one prompt. A new attempt of the same task (new
-   `delegation_id`) is a fresh injection boundary; carry-forward rules in
-   "Validation" decide whether the message follows.
+2. **Injection idempotence by `(message_id, target_prompt_id)`.** The
+   `PeerPromptContextBuilder` records each successful delivery against a
+   specific `target_prompt_id` — an orchestrator-generated identifier scoped
+   to one concrete prompt build. A given `(message_id, target_prompt_id)`
+   pair is injected at most once. Stage 1 generates one `target_prompt_id`
+   per `run_one_worker_attempt` invocation; Stage 2 generates one per
+   `WorkerRuntime` turn. A new prompt build (Stage 1 retry, Stage 2 next
+   turn) is a fresh injection boundary; carry-forward rules in "Validation"
+   decide whether the message follows.
+
+The injection record is the authoritative idempotence boundary — *not* the
+`Delivered` ledger transition. The ledger uses an explicit
+`Delivered_inflight` state to capture the window between "injection record
+written, prompt dispatched" and "Delivered transition committed". On
+recovery, an entry stuck in `Delivered_inflight` for longer than the
+configured drain quiet window is forced to `Delivered` if its injection
+record was written, or back to `Queued` if not. This eliminates the
+ambiguity between "Delivered write failed after prompt sent" and "not yet
+injected".
 
 This separation is necessary because the receiver is an LLM, not an
-idempotent service: re-injecting a `handoff` or `constraint` message across
-prompt builds within a single delegation can cause double side effects.
+idempotent service: re-injecting a `handoff` or `constraint` message into
+the same prompt build can cause double side effects within a single turn.
 
 Deduplication window: v1 keeps the per-`message_id` accepted-transition record
 in the in-memory ledger for the lifetime of the process. A persistent
@@ -489,6 +578,8 @@ Ledger states:
 - `Accepted`
 - `Rejected`
 - `Queued`
+- `Delivered_inflight` — injection record written and prompt dispatched, but
+  `Delivered` transition not yet committed; resolved by recovery sweep
 - `Delivered`
 - `Consumed`
 - `Ignored`
@@ -550,6 +641,9 @@ the same story:
 - `WorkerPeerMessageDropped`
 - `WorkerPeerMessageUndeliverable`
 - `WorkerPeerMessageAuditFailed`
+- `WorkerPeerMailboxReconciled` — emitted once per startup reconciliation
+  pass, carrying counts per resolution kind (audit-failed emitted, inflight
+  forced to delivered, inflight reverted to queued, guards re-wrapped)
 
 Event ordering:
 
@@ -590,28 +684,35 @@ ignored. Messages from unreviewed source work are advisory unless the brain
 promotes them.
 
 Acknowledgements arrive through the extension notification consumer, which
-flows through `EventFunnel`. The funnel is a single-task serial loop
-(`crates/spur-core/src/event_funnel.rs`), so observed sequence numbers form
-a total order. v1 uses this property for the post-prompt drain barrier:
+flows through `EventFunnel` (`crates/spur-core/src/event_funnel.rs`).
+v1 uses a **forced-terminal-timeout drain** as the authoritative barrier
+before review proceeds:
 
-- The orchestrator records the funnel's current high-water-mark `seq` after
-  the prompt completes and after every observed `_spur/peer_message_consumed`
-  / `_spur/peer_message_ignored` for the active delegation.
-- The drain completes only when the funnel has advanced past the most recent
-  recorded high-water-mark with no further peer-ack events for a configured
-  quiet window (separate from the existing file-touch dedup grace).
-- `ExecutorReviewRequested` is emitted only after the drain barrier resolves.
+- After the worker prompt completes, the orchestrator opens a fixed quiet
+  window (configurable; default 2 seconds) for peer-ack notifications
+  scoped to the active delegation.
+- Observing a `_spur/peer_message_consumed` / `_spur/peer_message_ignored`
+  for the active delegation resets the quiet window once.
+- When the quiet window elapses without further peer-ack events, the drain
+  is complete. Any inbound peer messages still in non-terminal state are
+  forced to `Ignored`, `Expired`, `Dropped`, or `Undeliverable` with a
+  durable reason before review can proceed.
+- `ExecutorReviewRequested` is emitted only after the drain completes.
 
-If delivered inbound messages remain unacknowledged after the drain quiet
-window, the router records them as `Ignored`, `Expired`, `Dropped`, or
-`Undeliverable` with a durable reason before review can proceed.
+The funnel's monotonic seq is used opportunistically as a fast-path: if the
+orchestrator has already observed acks for every delivered message before
+the quiet window starts, the drain resolves immediately. The seq watermark
+is **not** a precondition for drain completion — relying on global seq
+advancement deadlocks when the active delegation is the only emitter (no
+other event sources push the funnel forward), so the timeout is the
+authoritative barrier and the seq watermark is only an optimization.
 
 Late acknowledgements that arrive after a message has reached a terminal
 state are **idempotent no-ops**: the router observes the existing terminal
-state and does not transition. This follows the ledger idempotency rule and
-avoids introducing a new `LateArrival` event variant. Late acks may be
-recorded as a debug-level log entry but must not flip terminal state or
-emit a duplicate lifecycle event.
+state and does not transition. This handles raw bytes still in flight in
+the ACP stdio buffer or kernel pipe at drain-timeout, which the seq
+watermark cannot capture. Late acks may be recorded as a debug-level log
+entry but must not flip terminal state or emit a duplicate lifecycle event.
 
 The peer influence summary should be available to `ExecutorReviewRequested`.
 Implementation may either extend `ReviewPayload` with peer summary fields or
@@ -675,12 +776,28 @@ V1 should ship behind a feature flag with conservative limits:
 
 The aggregate prompt-bloat bound must be expressed as a fraction of the
 target agent's context window, not as an absolute byte cap, because target
-agents range from ~32k (small Codex/Kimi profiles) to ~200k+ (Claude). v1
-default: total injected peer context per prompt must not exceed **5% of the
-target agent's known context window**, with a floor of `max_peer_message_size`
-so a single message is always permitted. The router rejects acceptance with
-reason `target_capacity_exhausted` when the projected total would exceed the
-bound; the rejection is recorded durably, not silently.
+agents range from ~32k (small Codex/Kimi profiles) to ~200k+ (Claude). A
+flat percentage is unsafe: 5% of 32k is 1,600 chars, which collapses to
+~200 chars per message at `max_pending_mailbox_depth = 8` — too tight for
+practical handoffs.
+
+v1 uses a **tiered bound**:
+
+| Target context window | Aggregate peer-context budget |
+|---|---|
+| < 64k | 10% of context window |
+| 64k–128k | 7% of context window |
+| ≥ 128k | 5% of context window |
+
+In addition, `max_peer_message_size` must satisfy
+`max_peer_message_size ≤ aggregate_budget / max_pending_mailbox_depth`,
+so even at full mailbox depth a single message body fits within the
+per-message slice. If the configured `max_peer_message_size` exceeds this
+derived ceiling, the router uses the smaller of the two.
+
+The router rejects acceptance with reason `target_capacity_exhausted` when
+the projected total would exceed the aggregate bound; the rejection is
+recorded durably, not silently.
 
 No peer message is silently discarded. Drops, expirations, and truncations are
 durable outcomes.
@@ -736,11 +853,20 @@ This preserves the existing event-pipeline backpressure profile.
   disabled or when a stateful runtime cannot be trusted.
 - Stage 2 cannot make live ACP session memory the source of truth.
 - Each peer message is injected at most once per `(message_id,
-  target_delegation_id)` pair, even under retry or replay.
-- Total injected peer context per target prompt does not exceed the
-  configured fraction of the target agent's context window.
-- `ExecutorReviewRequested` is never emitted before the post-prompt
-  acknowledgement drain barrier resolves; late acks after a terminal state
-  are recorded as no-ops without flipping state or emitting duplicate events.
-- All new `WorkerPeerMessage*` event variants round-trip serialize and tolerate
-  unknown-variant logs in both forward and backward replay tests.
+  target_prompt_id)` pair, even under retry or replay; this key remains
+  stable across the Stage 1 → Stage 2 transition.
+- Total injected peer context per target prompt does not exceed the tiered
+  aggregate budget defined under "Safety Limits" (10% under 64k context,
+  7% at 64k–128k, 5% at ≥128k), and `max_peer_message_size` never exceeds
+  `aggregate_budget / max_pending_mailbox_depth`.
+- `ExecutorReviewRequested` is never emitted before the forced-terminal-
+  timeout drain completes; late acks after a terminal state are recorded as
+  no-ops without flipping state or emitting duplicate events.
+- All new `WorkerPeerMessage*` event variants round-trip serialize and
+  tolerate unknown-variant logs in both forward and backward replay tests.
+- `PeerMessageGuard::Drop` performs no async work and no blocking writes;
+  every successful resolution path calls `finalize().await` before drop.
+- Startup reconciliation runs before any `run_one_worker_attempt` and emits
+  exactly one `WorkerPeerMailboxReconciled` event with per-kind counts.
+- No `Delivered_inflight` entry persists across two consecutive startup
+  reconciliations.
