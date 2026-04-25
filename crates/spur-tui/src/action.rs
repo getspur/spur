@@ -71,6 +71,9 @@ pub enum Action {
     NewSessionRequested,
     /// Re-issue `ListSessions` to refresh the picker's agent-side state.
     RefreshSessions,
+    /// Copy a session id to the system clipboard via OSC 52.
+    /// Emitted by the picker's `y` keybind.
+    CopySessionId(String),
     /// Cycle the active Claude session between `default` and `plan` mode.
     /// Dispatched by `Alt-m` in `SessionDetailView`.
     TogglePlanMode,
