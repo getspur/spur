@@ -5,6 +5,7 @@ use super::events::SpurEventBody;
 /// Replay-compatible body that captures unknown variants without failing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum ReplayBody {
     Known(SpurEventBody),
     Unknown(serde_json::Value),
