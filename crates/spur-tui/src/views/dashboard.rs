@@ -581,6 +581,7 @@ impl DashboardView {
                 alert_summary: self.alert_summary,
                 license_badge,
                 flag_summary,
+                view_hint_override: None,
             },
         );
     }
@@ -680,6 +681,7 @@ impl DashboardView {
                 alert_summary: self.alert_summary,
                 license_badge,
                 flag_summary,
+                view_hint_override: None,
             },
         );
     }
@@ -816,6 +818,7 @@ impl DashboardView {
                 alert_summary: self.alert_summary,
                 license_badge,
                 flag_summary,
+                view_hint_override: None,
             },
         );
     }
