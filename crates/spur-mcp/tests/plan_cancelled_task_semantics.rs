@@ -5,6 +5,12 @@ use spur_mcp::McpEventSink;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
+fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
+    Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    ))
+}
+
 /// A test sink that captures emitted event bodies synchronously.
 struct CaptureSink {
     events: std::sync::Mutex<Vec<spur_acp::SpurEvent>>,
@@ -166,7 +172,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
     let plan_clone = plan.clone();
 
     let handle = tokio::spawn(async move {
-        run_plan(plan_clone, dtx, None, None, None).await;
+        run_plan(plan_clone, dtx, None, None, None, test_materializer()).await;
     });
 
     // t1 should be dispatched immediately since it has no deps.
@@ -279,7 +285,15 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
     let (dtx, _drx) = mpsc::channel(8);
 
     // run_plan will immediately exit since both tasks are terminal
-    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None, None).await;
+    run_plan(
+        Arc::new(Mutex::new(state)),
+        dtx,
+        Some(sink_ref),
+        None,
+        None,
+        test_materializer(),
+    )
+    .await;
 
     let events = sink.events.lock().unwrap();
 

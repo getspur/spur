@@ -37,6 +37,12 @@ use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
+fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
+    Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    ))
+}
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -622,6 +628,7 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: Some(sink_ref),
+            materializer: test_materializer(),
         }),
         Some("P1".into()),
     );
@@ -694,6 +701,7 @@ async fn tick_once_persists_dispatch_before_queue_send() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
+            materializer: test_materializer(),
         }),
         Some("plan-1".into()),
     );
@@ -762,6 +770,7 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
+            materializer: test_materializer(),
         }),
         Some("plan-1".into()),
     );
@@ -847,6 +856,7 @@ async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
+            materializer: test_materializer(),
         }),
         None,
     );
@@ -1658,6 +1668,7 @@ async fn hybrid_fast_forward_matches_polling_projection() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId::new()),
             event_sink: None,
+            materializer: test_materializer(),
         }),
         Some("plan-1".into()),
     );

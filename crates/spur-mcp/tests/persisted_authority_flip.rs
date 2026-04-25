@@ -21,6 +21,12 @@ use tempfile::TempDir;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
+fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
+    Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    ))
+}
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -214,6 +220,7 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
+            materializer: test_materializer(),
         }),
         Some("plan-2".into()),
     );
@@ -428,6 +435,7 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
+            materializer: test_materializer(),
         }),
         Some("plan-5".into()),
     );

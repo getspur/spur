@@ -150,12 +150,6 @@ fn default_attempt() -> u32 {
     1
 }
 
-/// The attempt number for a task's first dispatch. Re-dispatches triggered
-/// by `request_changes` bump to `entry.attempt + 1` in
-/// `apply_decision_and_extract`; both initial dispatchers (`run_plan` and
-/// `dispatch_newly_ready`) emit this value for their audit sentinels.
-const FIRST_DISPATCH_ATTEMPT: u32 = 1;
-
 /// Runtime state of a submitted plan.
 #[derive(Debug)]
 pub struct PlanState {
@@ -1316,20 +1310,65 @@ pub(crate) async fn persist_completion_result_and_notify(
     plan_id: &str,
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
-    worker_branch: Option<&str>,
-    result_summary: Option<&str>,
-    artifact_uri: Option<&str>,
     fast_forward: &Option<Arc<tokio::sync::Notify>>,
+    result: &DelegationResult,
+    brain_session_id: &BrainSessionId,
+    attempt: u32,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
 ) -> anyhow::Result<()> {
+    use crate::plan::audit_sentinel::CompletionState;
+
+    if matches!(completion_state, CompletionState::Superseded) {
+        persist_completion_result(
+            pm,
+            issue_id,
+            plan_id,
+            delegation_id,
+            completion_state,
+            result.worker_branch.as_deref(),
+            result.summary.as_deref(),
+            None,
+        )
+        .await?;
+        crate::server::notify_fast_forward(fast_forward);
+        return Ok(());
+    }
+
+    let source = match completion_state {
+        CompletionState::AwaitingReview | CompletionState::Failed => {
+            spur_acp::domain::ContinuationSource::PlanCompleted
+        }
+        CompletionState::Cancelled => spur_acp::domain::ContinuationSource::Cancelled,
+        CompletionState::Superseded => unreachable!("handled above"),
+    };
+    let cont = materializer
+        .materialize(
+            result.clone(),
+            spur_acp::DelegationId::from(delegation_id),
+            attempt,
+            brain_session_id.clone(),
+            source,
+            None,
+        )
+        .await;
+    let artifact_uri = cont.payload.artifact_id.as_ref().map(|key| {
+        format!(
+            "spur://outcome/{}/{}/{}",
+            key.brain_session_id.as_session_id().0,
+            key.delegation_id.as_str(),
+            key.attempt
+        )
+    });
+
     persist_completion_result(
         pm,
         issue_id,
         plan_id,
         delegation_id,
         completion_state,
-        worker_branch,
-        result_summary,
-        artifact_uri,
+        result.worker_branch.as_deref(),
+        cont.payload.summary.as_deref(),
+        artifact_uri.as_deref(),
     )
     .await?;
     crate::server::notify_fast_forward(fast_forward);
@@ -1364,6 +1403,7 @@ pub async fn run_plan(
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     pm: Option<Arc<dyn PmLike>>,
     fast_forward: Option<Arc<tokio::sync::Notify>>,
+    materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,
 ) {
     if plan.lock().await.epic_id.is_some() {
         tracing::warn!(
@@ -1381,7 +1421,7 @@ pub async fn run_plan(
 
     loop {
         // ── Single-lock pass: compute ready, mark Dispatched, collect specs ──
-        let ready: Vec<(PlanTask, String)> = {
+        let ready: Vec<(PlanTask, String, u32)> = {
             let mut p = plan.lock().await;
             let completed: HashSet<String> = p
                 .tasks
@@ -1400,17 +1440,18 @@ pub async fn run_plan(
                         .all(|d| completed.contains(d.as_str()))
                 {
                     let delegation_id = uuid::Uuid::new_v4().to_string();
+                    let attempt = entry.attempt;
                     entry.status = PlanTaskStatus::Dispatched {
                         delegation_id: delegation_id.clone(),
                     };
                     entry.last_delegation_id = Some(delegation_id.clone());
-                    batch.push((entry.spec.clone(), delegation_id));
+                    batch.push((entry.spec.clone(), delegation_id, attempt));
                 }
             }
             batch
         }; // Lock released.
 
-        for (task_spec, delegation_id) in ready {
+        for (task_spec, delegation_id, task_attempt) in ready {
             let (tx, rx) = oneshot::channel::<DelegationResult>();
 
             let request = DelegationRequest {
@@ -1422,7 +1463,7 @@ pub async fn run_plan(
                 brain_session_id: brain_sid.clone(),
                 delegation_plan: None,
                 issue_id: task_spec.issue_id.clone(),
-                attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+                attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(task_attempt)),
             };
 
             if let Err(e) = delegation_tx.send(request).await {
@@ -1458,7 +1499,7 @@ pub async fn run_plan(
                 &plan_id,
                 &delegation_id,
                 &task_spec.agent,
-                FIRST_DISPATCH_ATTEMPT,
+                task_attempt,
             )
             .await;
 
@@ -1467,6 +1508,8 @@ pub async fn run_plan(
             let pid = plan_id.clone();
             let pm_ref = pm.clone();
             let fast_forward_ref = fast_forward.clone();
+            let materializer_ref = Arc::clone(&materializer);
+            let brain_sid_ref = brain_sid.clone();
             let issue_id_for_completion = task_spec.issue_id.clone();
             let delegation_id_for_completion = delegation_id.clone();
 
@@ -1475,8 +1518,6 @@ pub async fn run_plan(
                     Ok(result) => {
                         // Collect completion data before acquiring lock.
                         let completion_state = completion_state_from_status(&result.status);
-                        let result_worker_branch = result.worker_branch.clone();
-                        let result_summary = result.summary.clone();
                         if let (Some(pm), Some(issue_id)) =
                             (pm_ref.as_deref(), issue_id_for_completion.as_deref())
                         {
@@ -1486,10 +1527,11 @@ pub async fn run_plan(
                                 &pid,
                                 &delegation_id_for_completion,
                                 completion_state,
-                                result_worker_branch.as_deref(),
-                                result_summary.as_deref(),
-                                None,
                                 &fast_forward_ref,
+                                &result,
+                                &brain_sid_ref,
+                                task_attempt,
+                                &materializer_ref,
                             )
                             .await
                             {
@@ -2911,6 +2953,7 @@ pub mod test_support {
 mod tests {
     use super::*;
     use spur_acp::SessionId;
+    use std::sync::Arc;
 
     fn task(id: &str, deps: &[&str]) -> PlanTask {
         PlanTask {
@@ -2921,6 +2964,12 @@ mod tests {
             issue_id: None,
             context_files: vec![],
         }
+    }
+
+    fn test_materializer() -> Arc<crate::outcome_materializer::OutcomeMaterializer> {
+        Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        ))
     }
 
     #[test]
@@ -3109,7 +3158,9 @@ mod tests {
     #[tokio::test]
     async fn run_plan_with_epic_id_does_not_dispatch() {
         let (plan, tx, mut rx) = build_run_plan_fixture(Some("bd-epic".into()));
-        tokio::spawn(async move { run_plan(plan, tx, None, None, None).await });
+        tokio::spawn(
+            async move { run_plan(plan, tx, None, None, None, test_materializer()).await },
+        );
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
         assert!(
             matches!(recv, Ok(None) | Err(_)),
@@ -3120,7 +3171,9 @@ mod tests {
     #[tokio::test]
     async fn run_plan_without_epic_id_still_dispatches() {
         let (plan, tx, mut rx) = build_run_plan_fixture(None);
-        tokio::spawn(async move { run_plan(plan, tx, None, None, None).await });
+        tokio::spawn(
+            async move { run_plan(plan, tx, None, None, None, test_materializer()).await },
+        );
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
         assert!(
             matches!(recv, Ok(Some(_))),
@@ -3801,6 +3854,18 @@ mod tests {
             let notify = Arc::clone(&notify);
             async move { notify.notified().await }
         });
+        let result = spur_acp::DelegationResult {
+            status: spur_acp::DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        };
+        let brain_session_id =
+            spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into()));
+        let materializer = test_materializer();
 
         super::persist_completion_result_and_notify(
             &NoopPm,
@@ -3808,10 +3873,11 @@ mod tests {
             "plan-1",
             "del-A",
             crate::plan::audit_sentinel::CompletionState::AwaitingReview,
-            None,
-            None,
-            None,
             &Some(Arc::clone(&notify)),
+            &result,
+            &brain_session_id,
+            1,
+            &materializer,
         )
         .await
         .expect("persist completion");
@@ -3820,6 +3886,121 @@ mod tests {
             .await
             .expect("completion writeback must trigger a fast-forward")
             .expect("waiter task must not panic");
+    }
+
+    struct RecordingAdvanced {
+        comments: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl spur_pm::BeadsAdvanced for RecordingAdvanced {
+        async fn list_ready(
+            &self,
+            _filter: spur_pm::ReadyFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            Ok(vec![])
+        }
+
+        async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+            Ok(vec![])
+        }
+
+        async fn add_comment(&self, _issue_id: &str, body: &str) -> anyhow::Result<String> {
+            let mut comments = self.comments.lock().expect("comments lock");
+            comments.push(body.to_string());
+            Ok(format!("c{}", comments.len()))
+        }
+
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+            Ok(vec![])
+        }
+    }
+
+    struct RecordingPm {
+        advanced: RecordingAdvanced,
+    }
+
+    #[async_trait::async_trait]
+    impl PmLike for RecordingPm {
+        async fn update_issue(
+            &self,
+            _id: &str,
+            _update: spur_pm::IssueUpdate,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn closed_status(&self) -> &str {
+            "closed"
+        }
+
+        fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+            Some(&self.advanced)
+        }
+    }
+
+    #[tokio::test]
+    async fn persist_completion_result_and_notify_materializes_artifact_uri_in_audit() {
+        let pm = RecordingPm {
+            advanced: RecordingAdvanced {
+                comments: std::sync::Mutex::new(vec![]),
+            },
+        };
+        let result = spur_acp::DelegationResult {
+            status: spur_acp::DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("worker done".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker-test".into()),
+            artifact: None,
+        };
+        let materializer = test_materializer();
+        let brain_session_id =
+            spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into()));
+
+        super::persist_completion_result_and_notify(
+            &pm,
+            "bd-1",
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            &None,
+            &result,
+            &brain_session_id,
+            2,
+            &materializer,
+        )
+        .await
+        .expect("persist completion");
+
+        let comments = pm.advanced.comments.lock().expect("comments lock");
+        let completion = comments
+            .iter()
+            .filter_map(|body| crate::plan::audit_sentinel::parse_comment(body))
+            .find_map(|sentinel| match sentinel {
+                Ok(crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                    artifact_uri,
+                    result_summary,
+                    ..
+                }) => Some((artifact_uri, result_summary)),
+                _ => None,
+            })
+            .expect("completion audit");
+
+        assert_eq!(
+            completion.0.as_deref(),
+            Some("spur://outcome/brain-test/del-A/2")
+        );
+        assert_eq!(completion.1.as_deref(), Some("worker done"));
     }
 
     #[tokio::test]
@@ -3890,7 +4071,17 @@ mod tests {
         let runner = tokio::spawn({
             let plan = Arc::clone(&plan);
             let pm = Arc::clone(&pm);
-            async move { run_plan(plan, delegation_tx, None, Some(pm), None).await }
+            async move {
+                run_plan(
+                    plan,
+                    delegation_tx,
+                    None,
+                    Some(pm),
+                    None,
+                    test_materializer(),
+                )
+                .await
+            }
         });
 
         let request = delegation_rx.recv().await.expect("initial dispatch");
@@ -3979,7 +4170,17 @@ mod tests {
         let (delegation_tx, mut delegation_rx) = mpsc::channel(1);
         let runner = tokio::spawn({
             let plan = Arc::clone(&plan);
-            async move { run_plan(plan, delegation_tx, None, Some(Arc::new(FailingPm)), None).await }
+            async move {
+                run_plan(
+                    plan,
+                    delegation_tx,
+                    None,
+                    Some(Arc::new(FailingPm)),
+                    None,
+                    test_materializer(),
+                )
+                .await
+            }
         });
 
         let request = delegation_rx.recv().await.expect("initial dispatch");

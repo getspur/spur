@@ -9,6 +9,12 @@ use spur_mcp::{build_entries_with_task_map, plan_epic_issue_creates, tools_list}
 // `pub mod plan;` is declared in lib.rs, so spur_mcp::plan::PlanTask is accessible.
 use spur_mcp::plan::PlanTask;
 
+fn test_materializer() -> std::sync::Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
+    std::sync::Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
+        std::sync::Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    ))
+}
+
 fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
     let mut v = vec![
         PlanTask {
@@ -204,7 +210,15 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
 
     let (dtx, _drx) = mpsc::channel(8);
 
-    run_plan(Arc::new(Mutex::new(state)), dtx, Some(sink_ref), None, None).await;
+    run_plan(
+        Arc::new(Mutex::new(state)),
+        dtx,
+        Some(sink_ref),
+        None,
+        None,
+        test_materializer(),
+    )
+    .await;
 
     let events = sink.events.lock().unwrap();
     let saw_completed = events.iter().any(|e| {
@@ -374,7 +388,15 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
     let (dtx, _drx) = mpsc::channel(8);
     let plan_arc = Arc::new(Mutex::new(state));
 
-    run_plan(Arc::clone(&plan_arc), dtx, Some(sink_ref), None, None).await;
+    run_plan(
+        Arc::clone(&plan_arc),
+        dtx,
+        Some(sink_ref),
+        None,
+        None,
+        test_materializer(),
+    )
+    .await;
 
     let st = plan_arc.lock().await;
     assert!(
