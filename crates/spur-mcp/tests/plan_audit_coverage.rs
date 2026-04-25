@@ -30,7 +30,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
+use spur_mcp::plan::audit_sentinel::{
+    self, AuditSentinelKind, CompletionAuditFields, CompletionState,
+};
 use spur_mcp::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -201,9 +203,11 @@ async fn plan_audit_coverage_all_four_sentinels() {
         &delegation_id,
         CompletionState::AwaitingReview,
         false,
-        Some("feat/worker-branch-1"),
-        Some("3 files changed"),
-        None,
+        &CompletionAuditFields {
+            worker_branch: Some("feat/worker-branch-1".into()),
+            result_summary: Some("3 files changed".into()),
+            artifact_uri: None,
+        },
     )
     .await;
 
@@ -445,9 +449,11 @@ async fn completion_success_writes_ready_for_review_and_completion_audit() {
         "plan-1",
         "del-A",
         CompletionState::AwaitingReview,
-        Some("feat/task"),
-        Some("worker finished cleanly"),
-        None,
+        CompletionAuditFields {
+            worker_branch: Some("feat/task".into()),
+            result_summary: Some("worker finished cleanly".into()),
+            artifact_uri: None,
+        },
     )
     .await
     .expect("persist completion");
@@ -512,9 +518,11 @@ async fn completion_failed_closes_issue_and_emits_completion_audit() {
         "plan-1",
         "del-fail",
         CompletionState::Failed,
-        None,
-        Some("worker failed"),
-        None,
+        CompletionAuditFields {
+            worker_branch: None,
+            result_summary: Some("worker failed".into()),
+            artifact_uri: None,
+        },
     )
     .await
     .expect("persist completion");
@@ -586,9 +594,11 @@ async fn completion_cancelled_closes_issue_and_emits_completion_audit() {
         "plan-1",
         "del-cancel",
         CompletionState::Cancelled,
-        None,
-        Some("worker cancelled"),
-        None,
+        CompletionAuditFields {
+            worker_branch: None,
+            result_summary: Some("worker cancelled".into()),
+            artifact_uri: None,
+        },
     )
     .await
     .expect("persist completion");

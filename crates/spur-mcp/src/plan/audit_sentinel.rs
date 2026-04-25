@@ -28,6 +28,16 @@ pub enum EpicCompletionOutcome {
     TerminalWithFailures,
 }
 
+/// Optional fields propagated from a completed delegation into the beads audit
+/// comment. Bundled to keep completion plumbing signatures manageable and to
+/// localize future field additions to one struct.
+#[derive(Debug, Default, Clone)]
+pub struct CompletionAuditFields {
+    pub worker_branch: Option<String>,
+    pub result_summary: Option<String>,
+    pub artifact_uri: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpDescription {
     pub kind: String,
