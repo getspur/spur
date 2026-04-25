@@ -346,6 +346,7 @@ async fn review_callback_becomes_stale_after_topic_rebind() {
                     error: None,
                     delegation_plan: None,
                     chosen_matches_dispatched: None,
+                    peer_influence: None,
                 },
             },
         ))
@@ -431,6 +432,7 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
                     error: None,
                     delegation_plan: None,
                     chosen_matches_dispatched: None,
+                    peer_influence: None,
                 },
             },
         ))
@@ -1196,6 +1198,7 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
                     error: None,
                     delegation_plan: None,
                     chosen_matches_dispatched: None,
+                    peer_influence: None,
                 },
             },
         ))

@@ -88,6 +88,7 @@ fn dashboard_reads_attempt_n_from_lineage_on_submit() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
     assert_eq!(

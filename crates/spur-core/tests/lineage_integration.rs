@@ -52,6 +52,7 @@ fn full_flow_brain_to_review_to_resolved() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
 
@@ -252,6 +253,7 @@ fn replay_produces_byte_identical_state() {
                     error: None,
                     delegation_plan: None,
                     chosen_matches_dispatched: None,
+                    peer_influence: None,
                 },
             },
         ),

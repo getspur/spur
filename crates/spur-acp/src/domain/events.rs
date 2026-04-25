@@ -43,6 +43,17 @@ pub struct ReviewPayload {
     /// dispatch; exposed for reviewer visibility.
     #[serde(default)]
     pub chosen_matches_dispatched: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_influence: Option<PeerInfluenceSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PeerInfluenceSummary {
+    pub inbound_consumed: u32,
+    pub inbound_ignored: u32,
+    pub outbound_emitted: u32,
+    pub undelivered: u32,
+    pub from_unreviewed_source: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -935,6 +946,7 @@ mod review_payload_tests {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         };
         assert!(p.delegation_plan.is_none());
         assert!(p.chosen_matches_dispatched.is_none());
@@ -954,11 +966,53 @@ mod review_payload_tests {
             error: None,
             delegation_plan: Some(plan),
             chosen_matches_dispatched: Some(true),
+            peer_influence: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: ReviewPayload = serde_json::from_str(&json).unwrap();
         assert!(back.delegation_plan.is_some());
         assert_eq!(back.chosen_matches_dispatched, Some(true));
+    }
+
+    #[test]
+    fn peer_influence_round_trips_through_serde() {
+        let p = ReviewPayload {
+            summary: "done".into(),
+            diff_summary: None,
+            pr_url: None,
+            error: None,
+            delegation_plan: None,
+            chosen_matches_dispatched: None,
+            peer_influence: Some(PeerInfluenceSummary {
+                inbound_consumed: 2,
+                inbound_ignored: 1,
+                outbound_emitted: 3,
+                undelivered: 4,
+                from_unreviewed_source: true,
+            }),
+        };
+
+        let json = serde_json::to_string(&p).unwrap();
+        let back: ReviewPayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            back.peer_influence,
+            Some(PeerInfluenceSummary {
+                inbound_consumed: 2,
+                inbound_ignored: 1,
+                outbound_emitted: 3,
+                undelivered: 4,
+                from_unreviewed_source: true,
+            })
+        );
+    }
+
+    #[test]
+    fn review_payload_default_has_no_peer_influence() {
+        let json = r#"{"summary":"done","diff_summary":null,"pr_url":null,"error":null}"#;
+        let p: ReviewPayload = serde_json::from_str(json).unwrap();
+
+        assert!(p.peer_influence.is_none());
     }
 }
 
