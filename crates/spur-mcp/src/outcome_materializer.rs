@@ -330,7 +330,7 @@ impl OutcomeMaterializer {
         _source: ContinuationSource,
         _event_sink: Option<&Arc<dyn McpEventSink>>,
     ) -> BrainContinuation {
-        unimplemented!("Task 6")
+        unimplemented!("Task 6 wires the truncation-ladder fallback")
     }
 }
 
@@ -361,13 +361,15 @@ pub(crate) fn build_fetch_hint(summary_clipped: bool, diff_files_clipped: bool) 
 fn sha256_hex(content: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
+    const CHARS: &[u8; 16] = b"0123456789abcdef";
+
     let mut hasher = Sha256::new();
     hasher.update(content);
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
     for byte in digest {
-        use std::fmt::Write;
-        write!(&mut hex, "{byte:02x}").expect("hex write infallible");
+        hex.push(CHARS[(byte >> 4) as usize] as char);
+        hex.push(CHARS[(byte & 0x0f) as usize] as char);
     }
     hex
 }
@@ -406,10 +408,13 @@ fn build_artifact_ref(
 pub fn estimate_envelope_cost(payload: &ContinuationPayload) -> usize {
     use spur_acp::domain::merge_budget::ENVELOPE_WRAPPER_HEADROOM_BYTES;
 
-    let payload_bytes = serde_json::to_vec(payload)
-        .map(|bytes| bytes.len())
-        .unwrap_or(0);
-    payload_bytes + ENVELOPE_WRAPPER_HEADROOM_BYTES
+    // Force the INV-D8 gate to fail (and thus engage the truncation-ladder
+    // fallback) if the payload can't be serialized — silently returning 0
+    // would let an unserializable payload sail past the budget check.
+    let Ok(bytes) = serde_json::to_vec(payload) else {
+        return usize::MAX;
+    };
+    bytes.len() + ENVELOPE_WRAPPER_HEADROOM_BYTES
 }
 
 #[cfg(test)]
@@ -544,6 +549,90 @@ mod tests {
         assert!(
             raw.contains(&oversized_error),
             "stored blob must contain full unclipped error"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_clips_diff_files_and_steers_fetch_hint() {
+        use spur_acp::domain::events::DiffSummary;
+        use std::path::PathBuf;
+
+        let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let mat = OutcomeMaterializer::new(store);
+        let many_files: Vec<PathBuf> = (0..64)
+            .map(|i| PathBuf::from(format!("crates/foo/file_{i}.rs")))
+            .collect();
+        let diff = DiffSummary {
+            files_changed: 64,
+            insertions: 0,
+            deletions: 0,
+            files: many_files,
+        };
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: Some(diff),
+            summary: Some("done".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        };
+        let cont = mat
+            .materialize(
+                result,
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+
+        let clipped = cont
+            .payload
+            .diff_summary
+            .as_ref()
+            .expect("diff_summary preserved");
+        assert!(
+            clipped.files.len() <= DEFAULT_DIFF_FILES_CAP_COUNT,
+            "diff_summary.files must be capped at diff_files_cap_count"
+        );
+        let hint = cont.payload.fetch_hint.expect("fetch_hint populated");
+        assert!(
+            hint.contains("diff_only") || hint.contains("full"),
+            "fetch_hint must steer the brain when diff was clipped (got: {hint})"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_records_max_attempt_per_delegation() {
+        let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let mat = OutcomeMaterializer::new(store);
+        let _ = mat
+            .materialize(
+                small_result(),
+                delegation_id(),
+                3,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        let _ = mat
+            .materialize(
+                small_result(),
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        let latest = mat.latest_attempt(&delegation_id()).await;
+        assert_eq!(
+            latest,
+            Some(3),
+            "latest_attempt must hold max(seen), not last-seen"
         );
     }
 }
