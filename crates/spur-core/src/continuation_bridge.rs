@@ -717,6 +717,8 @@ mod tests {
             uri: "spur://artifact/abc".into(),
             byte_size: 123_456,
             sha256: Some("a".repeat(64)),
+            git_object_ref: None,
+            git_blob_sha: None,
         });
 
         let outcome = render_autonomous_turn_with_spill_v2(
