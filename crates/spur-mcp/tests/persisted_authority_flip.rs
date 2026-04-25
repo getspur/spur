@@ -21,6 +21,8 @@ use tempfile::TempDir;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
+mod common;
+
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -659,6 +661,7 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
         );
         return;
     }
+    skip_if_no_loopback!("t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -685,20 +688,10 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
     server.set_repo_root(dir.path().to_path_buf());
 
     let server = Arc::new(server);
-    let started = Arc::clone(&server).start().await;
-    let (_url, handle) = match started {
-        Ok(started) => started,
-        Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("Failed to bind TCP listener") {
-                eprintln!(
-                    "skipping t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch: {message}"
-                );
-                return;
-            }
-            panic!("start server: {message}");
-        }
-    };
+    let (_url, handle) = Arc::clone(&server)
+        .start()
+        .await
+        .expect("start server (loopback bind already probed at fn entry)");
     server.fast_forward_reconciler();
     let request = tokio::time::timeout(Duration::from_secs(1), channel.request_rx.recv())
         .await
@@ -718,6 +711,7 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
         );
         return;
     }
+    skip_if_no_loopback!("t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -752,20 +746,10 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
     server.set_repo_root(dir.path().to_path_buf());
 
     let server = Arc::new(server);
-    let started = Arc::clone(&server).start().await;
-    let (_url, handle) = match started {
-        Ok(started) => started,
-        Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("Failed to bind TCP listener") {
-                eprintln!(
-                    "skipping t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch: {message}"
-                );
-                return;
-            }
-            panic!("start server: {message}");
-        }
-    };
+    let (_url, handle) = Arc::clone(&server)
+        .start()
+        .await
+        .expect("start server (loopback bind already probed at fn entry)");
 
     let issue_after_start = pm
         .get_issue(&task_id)
