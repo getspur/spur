@@ -4,8 +4,12 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone)]
 pub struct PlanScopeSnapshot {
     pub plan_version: u64,
-    /// Set of `(source_task_id, target_task_id)` pairs allowed by the DAG +
-    /// brain-approved peer edges.
+    /// Set of `(source_task_id, target_task_id)` pairs allowed by the plan
+    /// DAG. v1 only populates direct dependency edges from
+    /// `PlanTask::depends_on`; brain-approved explicit peer edges that
+    /// extend beyond DAG dependencies are a deferred v1 limitation
+    /// (see spec "V1 Defaults" — sibling tasks without a direct dependency
+    /// are not enough by themselves).
     pub peer_edges: HashSet<(String, String)>,
     /// Maps `delegation_id` to the task it executes.
     pub delegation_to_task: HashMap<DelegationId, String>,
@@ -29,11 +33,7 @@ pub enum EdgeCheck {
 }
 
 impl PlanScopeSnapshot {
-    pub fn check_peer_edge(
-        &self,
-        source: &DelegationId,
-        target: &DelegationId,
-    ) -> EdgeCheck {
+    pub fn check_peer_edge(&self, source: &DelegationId, target: &DelegationId) -> EdgeCheck {
         let src_task = match self.delegation_to_task.get(source) {
             Some(t) => t,
             None => return EdgeCheck::SourceMissing,
@@ -51,7 +51,10 @@ impl PlanScopeSnapshot {
         if self.terminal_tasks.contains(src_task) {
             return EdgeCheck::SourceTerminal;
         }
-        if !self.peer_edges.contains(&(src_task.clone(), tgt_task.clone())) {
+        if !self
+            .peer_edges
+            .contains(&(src_task.clone(), tgt_task.clone()))
+        {
             return EdgeCheck::NotInDag;
         }
         EdgeCheck::Allowed
