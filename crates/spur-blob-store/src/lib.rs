@@ -16,6 +16,8 @@ pub use spur_acp::domain::outcome::{BackendTag, OutcomeKey, OutcomeRef};
 pub mod fs_store;
 pub mod measured;
 pub mod memory_store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers;
 pub mod trait_def;
 pub mod types;
 
