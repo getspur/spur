@@ -1071,6 +1071,17 @@ impl Orchestrator {
                 .and_then(|v| v.as_count())
                 .map(|n| n as usize)
                 .unwrap_or(self.config.worktree.max_concurrent);
+            if let Some(bundle) = self.peer_mailbox.clone() {
+                let drain_quiet_window =
+                    std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
+                let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
+                    bundle.ledger.clone(),
+                    self.funnel.clone(),
+                    brain_session_id.to_string(),
+                    drain_quiet_window,
+                )
+                .await;
+            }
             let delegation_handle = tokio::spawn(Self::handle_delegations(
                 delegation_channel,
                 self.repo_root.clone(),
@@ -2445,6 +2456,17 @@ impl Orchestrator {
             .and_then(|v| v.as_count())
             .map(|n| n as usize)
             .unwrap_or(self.config.worktree.max_concurrent);
+        if let Some(bundle) = self.peer_mailbox.clone() {
+            let drain_quiet_window =
+                std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
+            let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
+                bundle.ledger.clone(),
+                self.funnel.clone(),
+                brain_session_id.to_string(),
+                drain_quiet_window,
+            )
+            .await;
+        }
         let delegation_handle = tokio::spawn(Self::handle_delegations(
             delegation_channel,
             self.repo_root.clone(),
@@ -2695,6 +2717,17 @@ impl Orchestrator {
             .and_then(|v| v.as_count())
             .map(|n| n as usize)
             .unwrap_or(self.config.worktree.max_concurrent);
+        if let Some(bundle) = self.peer_mailbox.clone() {
+            let drain_quiet_window =
+                std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
+            let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
+                bundle.ledger.clone(),
+                self.funnel.clone(),
+                brain_session_id.to_string(),
+                drain_quiet_window,
+            )
+            .await;
+        }
         let delegation_handle = tokio::spawn(Self::handle_delegations(
             delegation_channel,
             self.repo_root.clone(),
