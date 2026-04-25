@@ -315,7 +315,10 @@ fn parse_duration_days(s: &str) -> Result<Duration, String> {
     if days == 0 {
         return Err("TTL floor is 1 day".into());
     }
-    Ok(Duration::from_secs(days * 86_400))
+    let secs = days
+        .checked_mul(86_400)
+        .ok_or_else(|| format!("days * 86_400 overflows u64: {days}"))?;
+    Ok(Duration::from_secs(secs))
 }
 
 #[derive(Subcommand)]
@@ -949,11 +952,14 @@ async fn run_gc_outcomes(
         }
 
         let removed = store.delete_namespace(&session_id).await?;
+        // total_bytes is intentionally omitted: delete_namespace returns a
+        // count, not byte size, and emitting a literal 0 would skew metric
+        // averages. Spec §10.1 lists total_bytes as a field; surfacing it
+        // requires a trait-level change deferred to a follow-up.
         tracing::info!(
             target: "spur.metrics.outcome_namespace_deleted",
             brain_session_id = %session_id,
             artifact_count = removed,
-            total_bytes = 0u64,
             source = "cli.gc_outcomes",
         );
         println!("Deleted {removed} blobs in namespace {session_id}");
@@ -961,11 +967,20 @@ async fn run_gc_outcomes(
     }
 
     let ttl = older_than.unwrap_or_else(|| {
-        let days: u64 = std::env::var("SPUR_OUTCOME_TTL_DAYS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(7);
-        Duration::from_secs(days * 86_400)
+        let days: u64 = match std::env::var("SPUR_OUTCOME_TTL_DAYS") {
+            Ok(raw) => match raw.parse::<u64>() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    tracing::warn!(
+                        env = %raw,
+                        "SPUR_OUTCOME_TTL_DAYS is set but not a positive integer; using default 7"
+                    );
+                    7
+                }
+            },
+            Err(_) => 7,
+        };
+        Duration::from_secs(days.saturating_mul(86_400))
     });
 
     if dry_run {
@@ -1024,6 +1039,65 @@ mod tests {
         assert!(parse_duration_days("notanumber").is_err());
         assert!(parse_duration_days("0").is_err());
         assert!(parse_duration_days("0d").is_err());
+    }
+
+    #[test]
+    fn parse_duration_days_rejects_overflow() {
+        // u64::MAX / 86_400 ~ 2.13e14; 1e18 overflows when * 86_400.
+        let huge = "1000000000000000000";
+        let err = parse_duration_days(huge).expect_err("overflow must error");
+        assert!(err.contains("overflow"), "expected overflow message: {err}");
+    }
+
+    #[test]
+    fn gc_outcomes_parses_namespace() {
+        let args = Cli::try_parse_from([
+            "spur",
+            "gc",
+            "outcomes",
+            "--namespace",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .expect("parse namespace");
+        if let Commands::Gc {
+            cmd:
+                GcCmd::Outcomes {
+                    namespace,
+                    older_than,
+                    dry_run,
+                },
+        } = args.command
+        {
+            assert_eq!(
+                namespace.as_deref(),
+                Some("550e8400-e29b-41d4-a716-446655440000")
+            );
+            assert!(older_than.is_none());
+            assert!(!dry_run);
+        } else {
+            panic!("wrong subcommand");
+        }
+    }
+
+    #[test]
+    fn gc_outcomes_parses_dry_run_only() {
+        let args =
+            Cli::try_parse_from(["spur", "gc", "outcomes", "--dry-run"]).expect("parse dry-run");
+        if let Commands::Gc {
+            cmd:
+                GcCmd::Outcomes {
+                    namespace,
+                    older_than,
+                    dry_run,
+                },
+        } = args.command
+        {
+            assert!(dry_run);
+            assert!(older_than.is_none());
+            assert!(namespace.is_none());
+        } else {
+            panic!("wrong subcommand");
+        }
     }
 }
 
