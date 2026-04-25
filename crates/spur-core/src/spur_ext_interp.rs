@@ -4,11 +4,38 @@
 //! ext_notification channel, parses the method (e.g.
 //! `_spur/progress_milestone`) and params JSON, and emits the
 //! corresponding `SpurEventBody` variant through the event funnel.
+//!
+//! Worker-supplied `_spur/peer_message_ignored` reasons are capped at this
+//! boundary. `REASON_ALLOWLIST` is the low-cardinality contract dashboards may
+//! group directly; every other reason collapses to a fixed worker bucket so
+//! funnel metrics stay strictly bounded. Worker-side logs and OTel keep any raw
+//! diagnostic detail that operators need.
 
 use spur_acp::connection::ExtNotificationPayload;
 use spur_acp::domain::events::{FileTouchKind, SpurEventBody};
 
 use crate::event_funnel::FunnelHandle;
+
+pub(crate) const REASON_ALLOWLIST: &[&str] = &[
+    "worker_ignored",
+    "drain_timeout",
+    "out_of_scope",
+    "duplicate",
+    "stale_plan_version",
+];
+
+pub(crate) const REASON_OVERSIZED_BYTES: usize = 128;
+
+pub(crate) fn cap_reason(raw: &str) -> String {
+    if REASON_ALLOWLIST.contains(&raw) {
+        return raw.to_string();
+    }
+    if raw.len() > REASON_OVERSIZED_BYTES {
+        "worker:other_oversized".to_string()
+    } else {
+        "worker:other".to_string()
+    }
+}
 
 /// Caller supplies `brain_session_id` and `executor_id` from the worker's
 /// delegation context — both are in-scope inside `run_one_worker_attempt`
@@ -109,17 +136,32 @@ pub async fn interpret_peer_message_terminal(
     params: serde_json::Value,
     bundle: &crate::peer_mailbox::PeerMailboxBundle,
     ack_tx: &tokio::sync::mpsc::UnboundedSender<()>,
+    funnel: &FunnelHandle,
+    brain_session_id: &str,
+    source_executor_id: &str,
 ) {
     use spur_acp::domain::peer_message::{PeerMessageId, TerminalOutcome};
 
     let message_id: PeerMessageId = match serde_json::from_value(params["message_id"].clone()) {
         Ok(id) => id,
         Err(err) => {
-            tracing::warn!(
+            let reason = if params.get("message_id").is_none() {
+                "missing_message_id".to_string()
+            } else {
+                format!("malformed_message_id: {err}")
+            };
+            tracing::debug!(
                 method = %method,
                 error = %err,
                 "_spur/*: malformed peer terminal 'message_id' param"
             );
+            funnel.emit(SpurEventBody::WorkerPeerMessageMalformed {
+                brain_session_id: brain_session_id.to_string(),
+                source_executor_id: source_executor_id.to_string(),
+                method: method.to_string(),
+                reason,
+            });
+            let _ = ack_tx.send(());
             return;
         }
     };
@@ -127,10 +169,7 @@ pub async fn interpret_peer_message_terminal(
     let outcome = match method {
         "_spur/peer_message_consumed" => TerminalOutcome::Consumed,
         "_spur/peer_message_ignored" => TerminalOutcome::Ignored {
-            reason: params["reason"]
-                .as_str()
-                .unwrap_or("worker_ignored")
-                .to_string(),
+            reason: cap_reason(params["reason"].as_str().unwrap_or("worker_ignored")),
         },
         _ => return,
     };
@@ -753,7 +792,7 @@ mod tests {
         let (reconciler_tx, _reconciler_rx) = unbounded_channel();
         let router = Arc::new(PeerMailboxRouter::new(
             ledger.clone(),
-            funnel,
+            funnel.clone(),
             reconciler_tx,
             Limits::default(),
             "bs".into(),
@@ -823,6 +862,9 @@ mod tests {
             json!({"message_id": message_id}),
             &bundle,
             &ack_tx,
+            &funnel,
+            "bs",
+            "exec-1",
         )
         .await;
 
@@ -862,7 +904,7 @@ mod tests {
         let (reconciler_tx, _reconciler_rx) = unbounded_channel();
         let router = Arc::new(PeerMailboxRouter::new(
             ledger.clone(),
-            funnel,
+            funnel.clone(),
             reconciler_tx,
             Limits::default(),
             "bs".into(),
@@ -932,6 +974,9 @@ mod tests {
             json!({"message_id": message_id, "reason": "not_needed"}),
             &bundle,
             &ack_tx,
+            &funnel,
+            "bs",
+            "exec-1",
         )
         .await;
 
@@ -947,9 +992,147 @@ mod tests {
                 matches!(
                     event,
                     SpurEventBody::WorkerPeerMessageIgnored { message_id: id, reason, .. }
-                        if id == message_id && reason == "not_needed"
+                        if id == message_id && reason == "worker:other"
                 )
             });
         assert!(ignored, "expected WorkerPeerMessageIgnored event");
+    }
+
+    #[tokio::test]
+    async fn terminal_helper_emits_malformed_event_on_bad_message_id() {
+        use crate::peer_mailbox::ledger::{InMemoryLedger, PeerMailboxLedger};
+        use crate::peer_mailbox::limits::Limits;
+        use crate::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
+        use crate::peer_mailbox::router::PeerMailboxRouter;
+        use crate::peer_mailbox::PeerMailboxBundle;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+        let (reconciler_tx, _reconciler_rx) = unbounded_channel();
+        let router = Arc::new(PeerMailboxRouter::new(
+            ledger.clone(),
+            funnel.clone(),
+            reconciler_tx,
+            Limits::default(),
+            "bs".into(),
+        ));
+        let bundle = PeerMailboxBundle {
+            router,
+            builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
+            ledger,
+        };
+
+        let (ack_tx, mut ack_rx) = unbounded_channel();
+        interpret_peer_message_terminal(
+            "_spur/peer_message_consumed",
+            json!({"message_id": "not-a-uuid"}),
+            &bundle,
+            &ack_tx,
+            &funnel,
+            "bs",
+            "exec-1",
+        )
+        .await;
+
+        let events = drain_test_events(&mut events).await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SpurEventBody::WorkerPeerMessageMalformed {
+                brain_session_id,
+                source_executor_id,
+                method,
+                reason,
+            } => {
+                assert_eq!(brain_session_id, "bs");
+                assert_eq!(source_executor_id, "exec-1");
+                assert_eq!(method, "_spur/peer_message_consumed");
+                assert!(reason.starts_with("malformed_message_id"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        ack_rx.try_recv().unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_helper_emits_malformed_event_on_missing_message_id() {
+        use crate::peer_mailbox::ledger::{InMemoryLedger, PeerMailboxLedger};
+        use crate::peer_mailbox::limits::Limits;
+        use crate::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
+        use crate::peer_mailbox::router::PeerMailboxRouter;
+        use crate::peer_mailbox::PeerMailboxBundle;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+        let (reconciler_tx, _reconciler_rx) = unbounded_channel();
+        let router = Arc::new(PeerMailboxRouter::new(
+            ledger.clone(),
+            funnel.clone(),
+            reconciler_tx,
+            Limits::default(),
+            "bs".into(),
+        ));
+        let bundle = PeerMailboxBundle {
+            router,
+            builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
+            ledger,
+        };
+
+        let (ack_tx, mut ack_rx) = unbounded_channel();
+        interpret_peer_message_terminal(
+            "_spur/peer_message_consumed",
+            json!({}),
+            &bundle,
+            &ack_tx,
+            &funnel,
+            "bs",
+            "exec-1",
+        )
+        .await;
+
+        let events = drain_test_events(&mut events).await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SpurEventBody::WorkerPeerMessageMalformed { reason, .. } => {
+                assert!(reason.starts_with("missing_message_id"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        ack_rx.try_recv().unwrap();
+    }
+
+    #[test]
+    fn cap_reason_passes_allowlist_through() {
+        for reason in REASON_ALLOWLIST {
+            assert_eq!(cap_reason(reason), *reason);
+        }
+    }
+
+    #[test]
+    fn cap_reason_collapses_unknown_short_string_to_other() {
+        assert_eq!(cap_reason("plan_diverged"), "worker:other");
+    }
+
+    #[test]
+    fn cap_reason_collapses_oversized_string_to_other_oversized() {
+        assert_eq!(cap_reason(&"x".repeat(200)), "worker:other_oversized");
+    }
+
+    #[test]
+    fn cap_reason_bounds_cardinality_strictly() {
+        let mut buckets = std::collections::HashSet::new();
+        for reason in REASON_ALLOWLIST {
+            buckets.insert(cap_reason(reason));
+        }
+        for i in 0..1000 {
+            let raw = if i % 2 == 0 {
+                format!("random_reason_{i}")
+            } else {
+                format!("random_reason_{i}_{}", "x".repeat(160))
+            };
+            buckets.insert(cap_reason(&raw));
+        }
+        assert!(buckets.len() <= REASON_ALLOWLIST.len() + 2);
     }
 }

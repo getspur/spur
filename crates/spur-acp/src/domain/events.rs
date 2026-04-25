@@ -399,6 +399,17 @@ pub enum SpurEventBody {
         target_delegation_id: crate::domain::delegation::DelegationId,
         reason: String,
     },
+    /// Worker sent a terminal peer-message notification whose payload could
+    /// not be parsed at the `_spur/*` boundary.
+    ///
+    /// Downstream consumers should treat this as observability for a rejected
+    /// worker ack, not as a terminal state transition for the peer message.
+    WorkerPeerMessageMalformed {
+        brain_session_id: String,
+        source_executor_id: String,
+        method: String,
+        reason: String,
+    },
     WorkerPeerMessageExpired {
         brain_session_id: String,
         message_id: crate::domain::peer_message::PeerMessageId,
@@ -1086,6 +1097,32 @@ mod worker_peer_event_tests {
             back,
             SpurEventBody::WorkerPeerMessageAccepted { .. }
         ));
+    }
+
+    #[test]
+    fn worker_peer_message_malformed_roundtrips() {
+        let body = SpurEventBody::WorkerPeerMessageMalformed {
+            brain_session_id: "bs-1".into(),
+            source_executor_id: "exec-1".into(),
+            method: "_spur/peer_message_consumed".into(),
+            reason: "malformed_message_id: invalid UUID".into(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        if let SpurEventBody::WorkerPeerMessageMalformed {
+            brain_session_id,
+            source_executor_id,
+            method,
+            reason,
+        } = back
+        {
+            assert_eq!(brain_session_id, "bs-1");
+            assert_eq!(source_executor_id, "exec-1");
+            assert_eq!(method, "_spur/peer_message_consumed");
+            assert_eq!(reason, "malformed_message_id: invalid UUID");
+        } else {
+            panic!("wrong variant");
+        }
     }
 
     #[test]
