@@ -1,4 +1,4 @@
-//! INV-alpha merge-budget constants shared between the materializer (spur-mcp)
+//! INV-α merge-budget constants shared between the materializer (spur-mcp)
 //! and the merger (spur-core). Held in spur-acp so spur-mcp can reference
 //! them without introducing a spur-mcp -> spur-core cycle.
 //!
@@ -7,7 +7,7 @@
 //! on `agent-client-protocol` types (`ContentBlock`, `EmbeddedResource`).
 //! The materializer uses a conservative upper-bound cost estimate (see
 //! `spur_mcp::outcome_materializer::estimate_envelope_cost`) and the
-//! merger's `pack_continuations` is the authoritative INV-alpha gate.
+//! merger's `pack_continuations` is the authoritative INV-α gate.
 
 pub const MERGE_BUDGET_DEFAULT_BYTES: usize = 8192;
 
