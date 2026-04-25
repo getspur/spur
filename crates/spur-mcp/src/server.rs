@@ -2719,14 +2719,31 @@ impl McpCallbackServer {
             }
         };
 
-        let text = match run_git_capture(
-            &repo_root,
-            None,
-            &["cat-file", "-p", artifact.blob_sha.as_str()],
-        )
-        .await
+        // NOTE: do NOT use `run_git_capture` here — it trims stdout, which
+        // would corrupt blob payloads that have significant trailing
+        // whitespace or a final newline. We need the exact bytes of the
+        // git blob, lossy-converted to UTF-8 only because the MCP wire
+        // expects a `text` content field.
+        let text = match tokio::process::Command::new("git")
+            .args(["cat-file", "-p", artifact.blob_sha.as_str()])
+            .current_dir(&repo_root)
+            .output()
+            .await
         {
-            Ok(output) => output,
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).into_owned()
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "git cat-file failed for blob {} (exit {}): {stderr}",
+                        artifact.blob_sha,
+                        output.status.code().unwrap_or(-1)
+                    ),
+                );
+            }
             Err(error) => {
                 return JsonRpcResponse::internal_error(
                     id,
