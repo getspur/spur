@@ -5,6 +5,7 @@
 > **REVISION HISTORY:**
 > - **R1 (kimi+gemini+codex sequential)** — applied: rewrote Task 1 clip helpers to match real `DelegationStatus`/`TimeoutFallback`/`String` (not Option) field types; added `DelegationStatus::Timeout` variant; replaced merge_budget relocation in Task 5 with a conservative envelope-cost estimate so the spur-core rendered-resource arithmetic stays in spur-core; extended `ContinuationResourceBody<'a>` in continuation_bridge.rs with the new v3 fields (Task 2) so the wire actually carries them; added MCP-layer `Section` projection in Task 10 (Phase 2 stores ignore the `_section` arg today); replaced broken `r.attempt` lookup with a `latest_attempt_by_delegation: HashMap` in Task 10; fixed Task 11 CLI to use real `spur-worktree` API + added missing direct deps; replaced Panic `FailureMode` variant in Task 3 with explicit panic-resilience documentation (mock can't `panic!` and stay testable).
 > - **R2 (kimi+gemini+codex sequential)** — applied: Task 8 `persist_completion_result_and_notify` now early-returns on `CompletionState::Superseded` (don't spam the brain with stale attempt data) AND covers all four variants in the source-mapping match (R1's match was non-exhaustive); Task 10 `project_section` accepts `&OutcomeKey` and injects `attempt`/`brain_session`/`estimated_cost_micros` (converting USD→micros) per spec §7.5 line 818; Task 6 panic test rewritten using an inline async closure (R1 dropped `FailureMode::Panic` so the test referencing it was uncompilable); Task 4 adds `[features] test-support = []` to `crates/spur-mcp/Cargo.toml` (R1 added gated builder methods but missed the feature definition); Task 5 drops the unused `sha2::{Digest, Sha256}` import inside `materialize` (clippy `-D warnings` would fail) and converts `result.estimated_cost_usd` → `estimated_cost_micros` at materialize time (R1 left it `None` always, so v3 cost would never populate).
+> - **R3 (kimi+gemini+codex sequential — FINAL)** — applied: moved `latest_attempt_by_delegation` from `McpCallbackServer` onto `OutcomeMaterializer` itself as `Arc<Mutex<HashMap<DelegationId, u32>>>` (gemini's override of kimi: the reconciler holds `&OutcomeMaterializer`, not `&McpCallbackServer`, so the map MUST live where both call sites can update it); the materializer's `materialize()` body now updates the map atomically alongside the persist (single source of truth); added `Arc<dyn OutcomeStore>` field to `McpCallbackServer` (Task 7) so Task 10's fetch handler has an actual `self.outcome_store` to read from (codex caught: R2's plan referenced the field but Task 7 never added it); added `background_tasks: Vec<JoinHandle<()>>` field to the orchestrator struct (Task 11) so the GC sweep tokio::spawn handle can be tracked for graceful shutdown (codex caught: R1 used `self.background_tasks.push(...)` but the field didn't exist); Task 11's `--namespace` CLI path now emits `spur.metrics.outcome_namespace_deleted` (spec §10.1 line 1003) with `artifact_count`/`brain_session_id`; Task 10's `Section::Full` switched from `String::from_utf8_lossy` to strict `String::from_utf8` so corrupted blobs surface as a typed error instead of garbled UTF-8; Task 8's code block updated to call `persist_completion_result` with the new `artifact_uri` arg directly (R2's "drop until Task 9" note conflicted with the verbatim code — implementer must land Task 9's signature change FIRST when executing).
 
 **Goal:** Introduce the `OutcomeMaterializer` (in `spur-mcp`), bump `BrainContinuation` to schema v3 with `artifact_id`/`fetch_hint`/`estimated_cost_micros` fields, extend `fetch_outcome_artifact` with `section` pagination + `attempt`, and integrate background TTL sweep + a `spur gc outcomes` CLI escape hatch.
 
@@ -982,6 +983,17 @@ pub const DEFAULT_ARTIFACT_REF_STRING_CAP_BYTES: usize = 256;
 #[derive(Clone)]
 pub struct OutcomeMaterializer {
     store: Arc<dyn OutcomeStore>,
+    /// Tracks the highest attempt seen per delegation so the fetch tool
+    /// can default `attempt` to "latest known". Lives on the materializer
+    /// (not the server) so both the direct callback path
+    /// (server.rs::build_detached_continuation) and the reconciler path
+    /// (plan/mod.rs::persist_completion_result_and_notify) — the latter
+    /// only has `&OutcomeMaterializer` access — can update the map.
+    /// Memory bound: ~40 B per delegation. A long-running brain session
+    /// with thousands of completions sits in tens of KB; not pruned.
+    latest_attempt_by_delegation: Arc<tokio::sync::Mutex<
+        std::collections::HashMap<DelegationId, u32>
+    >>,
     summary_cap_bytes: usize,
     worker_branch_cap_bytes: usize,
     fetch_hint_cap_bytes: usize,
@@ -1004,6 +1016,9 @@ impl OutcomeMaterializer {
     pub fn new(store: Arc<dyn OutcomeStore>) -> Self {
         Self {
             store,
+            latest_attempt_by_delegation: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             summary_cap_bytes: DEFAULT_SUMMARY_CAP_BYTES,
             worker_branch_cap_bytes: DEFAULT_WORKER_BRANCH_CAP_BYTES,
             fetch_hint_cap_bytes: DEFAULT_FETCH_HINT_CAP_BYTES,
@@ -1011,6 +1026,14 @@ impl OutcomeMaterializer {
             status_string_cap_bytes: DEFAULT_STATUS_STRING_CAP_BYTES,
             artifact_ref_string_cap_bytes: DEFAULT_ARTIFACT_REF_STRING_CAP_BYTES,
         }
+    }
+
+    /// Look up the highest attempt the materializer has materialized for
+    /// `delegation_id`. Used by `fetch_outcome_artifact` (Task 10) when
+    /// the caller doesn't pin a specific attempt.
+    pub async fn latest_attempt(&self, delegation_id: &DelegationId) -> Option<u32> {
+        let map = self.latest_attempt_by_delegation.lock().await;
+        map.get(delegation_id).copied()
     }
 
     /// Builder methods for tests that need to exercise truncation paths
@@ -1432,6 +1455,16 @@ Replace `materialize`'s body in `crates/spur-mcp/src/outcome_materializer.rs`:
                     event_sink,
                 )
                 .await;
+        }
+
+        // Record the highest attempt for this delegation so the fetch
+        // tool defaults attempt = latest. Lock is held for a single
+        // sync HashMap insert; no .await while held.
+        {
+            let mut map = self.latest_attempt_by_delegation.lock().await;
+            map.entry(delegation_id.clone())
+                .and_modify(|cur| *cur = (*cur).max(attempt))
+                .or_insert(attempt);
         }
 
         tracing::info!(
@@ -2125,17 +2158,24 @@ pub(crate) async fn build_detached_continuation(
 
 Delete the now-unused `map_worker_artifact_ref` helper at lines 237-255 — it's subsumed by the materializer. (Confirm there are no other callers via `grep -rn "map_worker_artifact_ref" crates/`.)
 
-- [ ] **Step 4: Update `McpCallbackServer` to own the materializer**
+- [ ] **Step 4: Update `McpCallbackServer` to own the materializer + outcome store**
 
 Run: `grep -n "pub struct McpCallbackServer\|impl McpCallbackServer" crates/spur-mcp/src/server.rs | head -5`
 
-Find the struct definition. Add a field:
+Find the struct definition. Add two fields — the materializer (used by
+`build_detached_continuation`) AND the outcome store (used by Task 10's
+`handle_fetch_outcome_artifact` for `OutcomeStore::get`):
 
 ```rust
     pub(crate) materializer: crate::outcome_materializer::OutcomeMaterializer,
+    pub(crate) outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
 ```
 
-Find the constructor (`fn new(`) and add a parameter:
+Find the constructor (`fn new(`) and add a parameter. The constructor
+clones the `Arc` once for the materializer and stashes another clone
+on the server so the fetch handler can read directly without going
+through the materializer (which would make `materialize` and `get`
+share a struct unnecessarily):
 
 ```rust
     pub fn new(
@@ -2145,7 +2185,10 @@ Find the constructor (`fn new(`) and add a parameter:
         // ...
         Self {
             // ... existing fields ...
-            materializer: crate::outcome_materializer::OutcomeMaterializer::new(outcome_store),
+            materializer: crate::outcome_materializer::OutcomeMaterializer::new(
+                outcome_store.clone(),
+            ),
+            outcome_store,
         }
     }
 ```
@@ -2329,9 +2372,16 @@ pub(crate) async fn persist_completion_result_and_notify(
 }
 ```
 
-Note: this requires `persist_completion_result` to gain an `artifact_uri: Option<&str>` parameter. That's a Task 9 dependency; for now stub the call as the existing 7-arg form and wire `artifact_uri` in Task 9.
-
-For Task 8 alone, drop the `artifact_uri.as_deref()` arg until Task 9 lands. The local variable `artifact_uri` stays as future-state plumbing (use `let _ = artifact_uri;` to silence the unused-variable warning).
+**EXECUTION ORDER NOTE:** the code block above calls
+`persist_completion_result(...)` with the new `artifact_uri.as_deref()`
+arg. That signature change lands in Task 9. **A fresh implementer must
+land Task 9 BEFORE Task 8 to compile.** The plan's task numbering
+groups Task 8 (reconciler wiring) before Task 9 (audit-comment field)
+because the conceptual chain is materializer → reconciler →
+audit_uri-out-the-side; but the concrete edit order is reversed.
+Recommendation: implement Task 9 first, then Task 8. The
+`subagent-driven-development` skill should reorder these in its task
+queue.
 
 - [ ] **Step 3: Update the production callsite at `reconciler.rs:421`**
 
@@ -2619,30 +2669,19 @@ Add to `mod fetch_outcome_artifact_tests`:
 
 (The full bodies follow the existing `fetch_outcome_artifact_returns_persisted_blob_text` pattern. Inline them when filling Step 4.)
 
-- [ ] **Step 3a: Add a `latest_attempt_by_delegation` field to `McpCallbackServer`**
+- [ ] **Step 3a: Latest-attempt tracking lives on `OutcomeMaterializer`**
 
-`DelegationResult` does NOT have an `attempt` field (verified at `crates/spur-acp/src/domain/delegation.rs:146`). The materializer in Task 5 receives `attempt: u32` as an explicit parameter. Plumb that into a separate per-server map so the fetch tool can answer "latest known attempt" when the caller doesn't pin one.
+`DelegationResult` does NOT have an `attempt` field (verified at
+`crates/spur-acp/src/domain/delegation.rs:146`). The materializer in
+Task 5 receives `attempt: u32` as an explicit parameter and updates
+the `latest_attempt_by_delegation: Arc<Mutex<HashMap<DelegationId,
+u32>>>` field on `OutcomeMaterializer` (see Tasks 4 + 5).
 
-In Task 7 (`McpCallbackServer` constructor), add the field:
-
-```rust
-pub(crate) latest_attempt_by_delegation: Arc<tokio::sync::Mutex<
-    std::collections::HashMap<DelegationId, u32>
->>,
-```
-
-Initialize it as empty in `new()`. In Task 5 (`OutcomeMaterializer::materialize`) and the success-callbacks at server.rs callsites, after a successful materialize, update the map:
-
-```rust
-{
-    let mut map = self.latest_attempt_by_delegation.lock().await;
-    map.entry(delegation_id.clone())
-        .and_modify(|cur| *cur = (*cur).max(attempt))
-        .or_insert(attempt);
-}
-```
-
-(Place this update in the McpCallbackServer wrapper that invokes `materializer.materialize` — keep the materializer struct itself store-agnostic.)
+This handler reads via `self.materializer.latest_attempt(...)` rather
+than touching the map directly. The map is owned by the materializer
+because the reconciler call site (Task 8) holds only
+`&OutcomeMaterializer` and could not reach a map that lived on
+`McpCallbackServer`.
 
 - [ ] **Step 3b: Update handler to use the new tracker + MCP-layer section projection**
 
@@ -2677,10 +2716,7 @@ Edit `crates/spur-mcp/src/server.rs:2668`:
 
         let attempt = match args.get("attempt").and_then(|v| v.as_u64()) {
             Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
-            None => {
-                let map = self.latest_attempt_by_delegation.lock().await;
-                map.get(&delegation_id).copied().unwrap_or(1)
-            }
+            None => self.materializer.latest_attempt(&delegation_id).await.unwrap_or(1),
             Some(_) => {
                 return JsonRpcResponse::invalid_params(id, "Invalid 'attempt': must be u32 ≥ 1");
             }
@@ -2762,6 +2798,8 @@ projections, and converts `estimated_cost_usd` (the field that lives on
 ```rust
 #[derive(Debug, thiserror::Error)]
 enum ProjectionError {
+    #[error("stored blob is not valid UTF-8: {0}")]
+    InvalidUtf8(#[source] std::string::FromUtf8Error),
     #[error("stored blob is not a valid DelegationResult: {0}")]
     InvalidResult(#[source] serde_json::Error),
     #[error("projection serialization failed: {0}")]
@@ -2779,8 +2817,11 @@ fn project_section(
     if matches!(section, Section::Full) {
         // Full: return stored bytes verbatim. The stored blob is the
         // serialized DelegationResult JSON; spec §7.5 says
-        // `full — entire DelegationResult`. No round-trip required.
-        return Ok(String::from_utf8_lossy(full_bytes).into_owned());
+        // `full — entire DelegationResult`. Strict UTF-8 validation
+        // (NOT lossy) so a corrupted blob produces a typed error
+        // instead of a malformed JSON string downstream consumers
+        // would have to debug.
+        return String::from_utf8(full_bytes.to_vec()).map_err(ProjectionError::InvalidUtf8);
     }
 
     let result: DelegationResult = serde_json::from_slice(full_bytes)
@@ -2882,11 +2923,25 @@ Phase 3 of plan-5; spec §7.5."
 
 **What:** On orchestrator startup, spawn a background tokio task that runs `OutcomeStore::sweep_older_than(ttl_days)`. Default TTL = 7 days; override via `SPUR_OUTCOME_TTL_DAYS` env. CLI: `spur gc outcomes [--dry-run] [--older-than=Nd]`.
 
-- [ ] **Step 1: Add startup sweep to orchestrator**
+- [ ] **Step 1: Add `background_tasks` field + startup sweep to orchestrator**
 
 Run: `grep -n "fn new\|fn build\|self.outcome_store" crates/spur-core/src/orchestrator.rs | head -10`
 
-Find the orchestrator constructor (where `outcome_store` was added in Task 7). Append after construction:
+Find the orchestrator struct definition. Add a field for tracking
+background tasks (the GC sweep handle stashes here so the orchestrator
+can `.abort()` on shutdown):
+
+```rust
+    /// Background tokio tasks the orchestrator owns. Currently only the
+    /// Phase 3 GC sweep on startup. Tracked so `.abort()` runs on
+    /// orchestrator shutdown — orphan `git` subprocesses are killed
+    /// because Phase 2's GitBlobOutcomeStore uses `kill_on_drop(true)`.
+    background_tasks: Vec<tokio::task::JoinHandle<()>>,
+```
+
+Initialize it as `Vec::new()` in the constructor.
+
+Find the constructor (where `outcome_store` was added in Task 7). Append after construction:
 
 ```rust
         // Phase 3 (§8.2): background TTL sweep on startup. Tracked
@@ -3016,6 +3071,18 @@ async fn run_gc_outcomes(
             return Ok(());
         }
         let removed = store.delete_namespace(&session_id).await?;
+        // Spec §10.1 line 1003: emit on session terminate / TTL sweep.
+        tracing::info!(
+            target: "spur.metrics.outcome_namespace_deleted",
+            brain_session_id = %session_id,
+            artifact_count = removed,
+            // total_bytes is not surfaced by delete_namespace's
+            // current return shape; spec lists it as a field but the
+            // trait only returns the count. Surface 0 for now and
+            // document the gap.
+            total_bytes = 0u64,
+            source = "cli.gc_outcomes",
+        );
         println!("Deleted {removed} blobs in namespace {session_id}");
         return Ok(());
     }
