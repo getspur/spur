@@ -377,6 +377,24 @@ impl SessionPickerView {
         sessions.iter().any(|s| s.cwd != *first)
     }
 
+    #[allow(dead_code)]
+    fn brains_are_heterogeneous(sessions: &[SessionInfo], metadata: &SessionMetadata) -> bool {
+        if sessions.len() <= 1 {
+            return false;
+        }
+        let first = metadata
+            .sessions
+            .get(sessions[0].session_id.0.as_ref())
+            .and_then(|e| e.brain_name.as_deref());
+        sessions.iter().any(|s| {
+            let b = metadata
+                .sessions
+                .get(s.session_id.0.as_ref())
+                .and_then(|e| e.brain_name.as_deref());
+            b != first
+        })
+    }
+
     fn cwd_basename(cwd: &std::path::Path) -> &str {
         cwd.file_name()
             .and_then(|n| n.to_str())
