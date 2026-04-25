@@ -28,6 +28,7 @@ fn render_status(width: u16) -> String {
             alert_summary: None,
             license_badge: None,
             flag_summary: None,
+            view_hint_override: None,
         };
         StatusBar::render(f, area, props);
     })

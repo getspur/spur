@@ -2114,6 +2114,7 @@ impl SessionDetailView {
                 alert_summary: None,
                 license_badge,
                 flag_summary,
+                view_hint_override: None,
             },
         );
 
