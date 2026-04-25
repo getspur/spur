@@ -6260,17 +6260,15 @@ mod peer_mailbox_drain_tests {
             .record_terminal(&message_id, TerminalOutcome::Consumed)
             .await
             .unwrap_err();
-        let expected = crate::peer_mailbox::ledger::LedgerError::InvalidTransition {
-            from: LedgerState::Ignored,
-            to: LedgerState::Consumed,
-        }
-        .to_string();
         match err {
-            crate::peer_mailbox::router::RouterError::Ledger(message) => {
+            crate::peer_mailbox::router::RouterError::Ledger(
+                crate::peer_mailbox::ledger::LedgerError::InvalidTransition { from, to },
+            ) => {
                 assert!(crate::peer_mailbox::ledger::is_terminal(
                     LedgerState::Ignored
                 ));
-                assert_eq!(message, expected);
+                assert_eq!(from, LedgerState::Ignored);
+                assert_eq!(to, LedgerState::Consumed);
             }
             other => panic!("expected InvalidTransition with terminal Ignored from, got {other:?}"),
         }

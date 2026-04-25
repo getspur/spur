@@ -1,6 +1,8 @@
 use crate::event_funnel::FunnelHandle;
 use crate::peer_mailbox::guard::{PeerMessageGuard, StrandedMessage};
-use crate::peer_mailbox::ledger::{AcceptOutcome, PeerMailboxLedger, TransitionOutcome};
+use crate::peer_mailbox::ledger::{
+    AcceptOutcome, LedgerError, PeerMailboxLedger, TransitionOutcome,
+};
 use crate::peer_mailbox::limits::Limits;
 use spur_acp::domain::events::SpurEventBody;
 use spur_acp::domain::peer_message::{
@@ -12,10 +14,17 @@ use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RouterError {
+    /// Request-level rejection before ledger mutation, with a stable
+    /// machine-readable reason emitted to the peer-message funnel.
     #[error("rejected: {reason}")]
     Rejected { reason: String },
-    #[error("ledger error: {0}")]
-    Ledger(String),
+    /// Typed failures returned by the peer-mailbox ledger implementation.
+    #[error("ledger: {0}")]
+    Ledger(#[from] LedgerError),
+    /// Router-only invariant failures that are not ledger state-machine
+    /// errors and should not be retried as ledger/storage failures.
+    #[error("invariant violation: {0}")]
+    InvariantViolation(String),
 }
 
 /// Result of `accept_or_reject`. Distinguishes a fresh acceptance (caller
@@ -88,11 +97,7 @@ impl PeerMailboxRouter {
         }
 
         let envelope = request.clone();
-        let accept_outcome = self
-            .ledger
-            .accept(envelope.clone())
-            .await
-            .map_err(|err| RouterError::Ledger(err.to_string()))?;
+        let accept_outcome = self.ledger.accept(envelope.clone()).await?;
 
         match accept_outcome {
             AcceptOutcome::Created => {
@@ -147,18 +152,13 @@ impl PeerMailboxRouter {
             TerminalOutcome::Dropped { .. } => LedgerState::Dropped,
             TerminalOutcome::Undeliverable { .. } => LedgerState::Undeliverable,
             _ => {
-                return Err(RouterError::Ledger(
-                    "unsupported terminal outcome".to_string(),
+                return Err(RouterError::InvariantViolation(
+                    "unsupported terminal outcome".into(),
                 ))
             }
         };
 
-        match self
-            .ledger
-            .transition(message_id, next)
-            .await
-            .map_err(|err| RouterError::Ledger(err.to_string()))?
-        {
+        match self.ledger.transition(message_id, next).await? {
             TransitionOutcome::Changed { .. } => {}
             TransitionOutcome::Unchanged(state) => {
                 tracing::debug!(
@@ -177,7 +177,7 @@ impl PeerMailboxRouter {
         // invariant has broken; surface it rather than silently dropping
         // the lifecycle event.
         let entry = self.ledger.get(message_id).await.ok_or_else(|| {
-            RouterError::Ledger(format!(
+            RouterError::InvariantViolation(format!(
                 "transition succeeded but entry missing for {:?}",
                 message_id
             ))
@@ -216,8 +216,8 @@ impl PeerMailboxRouter {
                     }
                 }
                 _ => {
-                    return Err(RouterError::Ledger(
-                        "unsupported terminal outcome".to_string(),
+                    return Err(RouterError::InvariantViolation(
+                        "unsupported terminal outcome".into(),
                     ))
                 }
             };
@@ -299,17 +299,10 @@ mod tests {
     /// can race ahead of the relay. We poll with a small per-recv timeout
     /// to give the relay a chance to forward, and stop once nothing
     /// arrives within that window.
-    async fn drain_events(
-        events: &mut UnboundedReceiver<SpurEventBody>,
-    ) -> Vec<SpurEventBody> {
+    async fn drain_events(events: &mut UnboundedReceiver<SpurEventBody>) -> Vec<SpurEventBody> {
         let mut out = Vec::new();
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(20),
-                events.recv(),
-            )
-            .await
-            {
+            match tokio::time::timeout(std::time::Duration::from_millis(20), events.recv()).await {
                 Ok(Some(event)) => out.push(event),
                 Ok(None) | Err(_) => break,
             }
@@ -381,8 +374,7 @@ mod tests {
         let snap = snapshot_allowing("src", "tgt");
         let env = envelope("src", "tgt");
 
-        let first =
-            unwrap_created(router.accept_or_reject(env.clone(), &snap).await.unwrap());
+        let first = unwrap_created(router.accept_or_reject(env.clone(), &snap).await.unwrap());
         // Don't finalize first yet — simulate the original handler still
         // working when the replay arrives.
         let replay = router.accept_or_reject(env.clone(), &snap).await.unwrap();
@@ -506,5 +498,90 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RouterError::Ledger(_)));
+    }
+
+    #[tokio::test]
+    async fn router_error_preserves_ledger_invalid_transition_typed() {
+        let (router, ledger, _events) = fixture().await;
+        let snap = snapshot_allowing("src", "tgt");
+        let env = envelope("src", "tgt");
+        let message_id = env.message_id;
+
+        let _guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
+        ledger
+            .transition(&message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::Delivered)
+            .await
+            .unwrap();
+        router
+            .record_terminal(
+                &message_id,
+                TerminalOutcome::Ignored {
+                    reason: "ignored".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = router
+            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .await
+            .unwrap_err();
+
+        match err {
+            RouterError::Ledger(crate::peer_mailbox::ledger::LedgerError::InvalidTransition {
+                from,
+                to,
+            }) => {
+                assert_eq!(from, LedgerState::Ignored);
+                assert_eq!(to, LedgerState::Consumed);
+            }
+            other => panic!("expected typed InvalidTransition, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn router_error_preserves_ledger_already_terminal_typed() {
+        let (router, ledger, _events) = fixture().await;
+        let snap = snapshot_allowing("src", "tgt");
+        let env = envelope("src", "tgt");
+        let message_id = env.message_id;
+
+        let _guard = unwrap_created(router.accept_or_reject(env.clone(), &snap).await.unwrap());
+        ledger
+            .transition(&message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::Delivered)
+            .await
+            .unwrap();
+        router
+            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .await
+            .unwrap();
+
+        let err = router.accept_or_reject(env, &snap).await.unwrap_err();
+
+        match err {
+            RouterError::Ledger(crate::peer_mailbox::ledger::LedgerError::AlreadyTerminal {
+                state,
+                ..
+            }) => {
+                assert_eq!(state, LedgerState::Consumed);
+            }
+            other => panic!("expected typed AlreadyTerminal, got {other:?}"),
+        }
     }
 }
