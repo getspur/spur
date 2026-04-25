@@ -619,6 +619,7 @@ pub struct Orchestrator {
     continuation_overflow: Option<crate::continuation_bridge::OverflowBuf>,
     /// Feature gate for dynamic quota/feature enforcement.
     feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
+    pub(crate) peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -794,6 +795,7 @@ impl Orchestrator {
             continuation_tx: None,
             continuation_overflow: None,
             feature_gate,
+            peer_mailbox: None,
         })
     }
 
@@ -1078,6 +1080,7 @@ impl Orchestrator {
                 self.review_sink.clone(),
                 self.pm_service.clone(),
                 self.cancellation_control.clone(),
+                self.peer_mailbox.clone(),
             ));
 
             // Stream brain output. For native (ACP-transport) agents prompt()
@@ -2451,6 +2454,7 @@ impl Orchestrator {
             self.review_sink.clone(),
             self.pm_service.clone(),
             self.cancellation_control.clone(),
+            self.peer_mailbox.clone(),
         ));
 
         // Spawn the vendor-extension notification pump (if the transport
@@ -2700,6 +2704,7 @@ impl Orchestrator {
             self.review_sink.clone(),
             self.pm_service.clone(),
             self.cancellation_control.clone(),
+            self.peer_mailbox.clone(),
         ));
 
         // Pump vendor-extension notifications onto the event stream.
@@ -3279,6 +3284,7 @@ impl Orchestrator {
         review_sink: ReviewSink,
         pm_service: Option<Arc<PmService>>,
         cancellation_control: CancellationControl,
+        peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
         // Debounce: skip post-delegation refresh if another completed <3s ago.
@@ -3321,6 +3327,7 @@ impl Orchestrator {
             let review_sink = review_sink.clone();
             let pm_service = pm_service.clone();
             let last_refresh_at = Arc::clone(&last_refresh_at);
+            let peer_mailbox = peer_mailbox.clone();
 
             // INV-6: register a cancellation token BEFORE spawning so
             // cancel() arriving between dispatch and spawn still works.
@@ -3430,6 +3437,7 @@ impl Orchestrator {
                         funnel.clone(),
                         review_sink.clone(),
                         attempt_tracker,
+                        peer_mailbox,
                     ) => r,
                 };
                 // Always clean up the token entry (avoids stale entries
@@ -3546,6 +3554,7 @@ impl Orchestrator {
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
         attempt_tracker: Arc<std::sync::atomic::AtomicU32>,
+        peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
     ) -> (DelegationResult, Option<ExecutorId>) {
         // Shadow `original_task` with the Relevant Files-prepended form
         // so retry loops at orchestrator.rs:3013 reuse the formatted
@@ -3633,6 +3642,7 @@ impl Orchestrator {
                     agent_config: &agent_config,
                     delegation_plan: delegation_plan.clone(),
                     issue_id: issue_id.clone(),
+                    peer_mailbox: peer_mailbox.as_ref(),
                 },
                 &mut worktrees,
                 &funnel,
@@ -4529,6 +4539,7 @@ struct WorkerAttemptCtx<'a> {
     agent_config: &'a spur_acp::config::AgentConfig,
     delegation_plan: Option<spur_acp::domain::DelegationPlan>,
     issue_id: Option<String>,
+    peer_mailbox: Option<&'a crate::peer_mailbox::PeerMailboxBundle>,
 }
 
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
@@ -4656,10 +4667,63 @@ async fn run_one_worker_attempt(
         worktree_info.path.display(),
         ctx.task
     );
-    let prompt_request = PromptRequest::new(
-        session_response.session_id.clone(),
-        vec![ContentBlock::Text(TextContent::new(prompt_text))],
-    );
+    // Pre-prompt peer-mailbox injection hook.
+    let peer_context = match ctx.peer_mailbox {
+        Some(bundle) => {
+            // TODO(peer-mailbox): plumb context_window_chars from agent config.
+            let context_window = 200_000;
+            let target_delegation =
+                spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
+            let limits = bundle.router.limits();
+            let built = bundle
+                .builder
+                .build_for_target(
+                    &target_delegation,
+                    context_window,
+                    limits.max_pending_mailbox_depth,
+                    limits.max_peer_message_size,
+                )
+                .await;
+            for inj in &built.injection_records {
+                match bundle
+                    .ledger
+                    .record_injection(&inj.message_id, &built.target_prompt_id)
+                    .await
+                {
+                    Ok(crate::peer_mailbox::ledger::InjectionOutcome::Injected) => {}
+                    Ok(crate::peer_mailbox::ledger::InjectionOutcome::AlreadyInjected) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            "peer mailbox: replay injection no-op"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            message_id = ?inj.message_id,
+                            ?err,
+                            "peer mailbox: record_injection failed"
+                        );
+                    }
+                }
+            }
+            Some(built)
+        }
+        None => None,
+    };
+
+    let mut prompt_blocks = vec![ContentBlock::Text(TextContent::new(prompt_text))];
+    if let Some(pc) = &peer_context {
+        if !pc.orchestrator_authored_text.is_empty() {
+            prompt_blocks.insert(
+                0,
+                ContentBlock::Text(TextContent::new(format!(
+                    "## Peer messages (orchestrator-authored)\n{}",
+                    pc.orchestrator_authored_text
+                ))),
+            );
+        }
+    }
+    let prompt_request = PromptRequest::new(session_response.session_id.clone(), prompt_blocks);
 
     let mut output_text = String::new();
     let mut worker_success = true;
@@ -4672,7 +4736,7 @@ async fn run_one_worker_attempt(
     // For native (ACP-transport) workers prompt() returns an empty stream;
     // notifications arrive via the connection-scoped broadcast instead.
     // drive_prompt_notifications handles both paths transparently.
-    if let Err(e) = crate::notification_drain::drive_prompt_notifications(
+    let prompt_result = crate::notification_drain::drive_prompt_notifications(
         &mut *connection,
         prompt_request,
         |notification| {
@@ -4702,10 +4766,70 @@ async fn run_one_worker_attempt(
             }
         },
     )
-    .await
-    {
+    .await;
+    if let Err(e) = prompt_result {
         worker_success = false;
         output_text = format!("Failed to prompt worker: {e}");
+    } else if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
+        use spur_acp::domain::peer_message::LedgerState;
+
+        for inj in pc.injection_records {
+            match bundle
+                .ledger
+                .transition(&inj.message_id, LedgerState::DeliveredInflight)
+                .await
+            {
+                Ok(crate::peer_mailbox::ledger::TransitionOutcome::Changed { .. }) => {}
+                Ok(crate::peer_mailbox::ledger::TransitionOutcome::Unchanged(state)) => {
+                    tracing::debug!(
+                        message_id = ?inj.message_id,
+                        state = ?state,
+                        "peer mailbox: delivered-inflight transition no-op"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        message_id = ?inj.message_id,
+                        ?err,
+                        "peer mailbox: delivered-inflight transition failed"
+                    );
+                }
+            }
+
+            match bundle
+                .ledger
+                .transition(&inj.message_id, LedgerState::Delivered)
+                .await
+            {
+                Ok(crate::peer_mailbox::ledger::TransitionOutcome::Changed { .. }) => {
+                    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDelivered {
+                        brain_session_id: ctx.brain_session_id.to_string(),
+                        message_id: inj.message_id,
+                        target_delegation_id: spur_acp::domain::delegation::DelegationId(
+                            ctx.request_id.to_string(),
+                        ),
+                        target_prompt_id: pc.target_prompt_id.clone(),
+                        injected_chars: inj.injected_bytes,
+                    });
+                    // TODO(peer-mailbox): Task 14 startup reconciliation is
+                    // the durable peer-mailbox audit path.
+                }
+                Ok(crate::peer_mailbox::ledger::TransitionOutcome::Unchanged(state)) => {
+                    tracing::debug!(
+                        message_id = ?inj.message_id,
+                        state = ?state,
+                        "peer mailbox: delivered transition no-op"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        message_id = ?inj.message_id,
+                        ?err,
+                        "peer mailbox: delivered transition failed"
+                    );
+                }
+            }
+        }
     }
 
     let _ = connection.shutdown().await;
