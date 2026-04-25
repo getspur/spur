@@ -104,6 +104,48 @@ pub fn interpret(
     }
 }
 
+pub(crate) async fn interpret_peer_message_terminal(
+    method: &str,
+    params: serde_json::Value,
+    bundle: &crate::peer_mailbox::PeerMailboxBundle,
+    ack_tx: &tokio::sync::mpsc::UnboundedSender<()>,
+) {
+    use spur_acp::domain::peer_message::{PeerMessageId, TerminalOutcome};
+
+    let message_id: PeerMessageId = match serde_json::from_value(params["message_id"].clone()) {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(
+                method = %method,
+                error = %err,
+                "_spur/*: malformed peer terminal 'message_id' param"
+            );
+            return;
+        }
+    };
+
+    let outcome = match method {
+        "_spur/peer_message_consumed" => TerminalOutcome::Consumed,
+        "_spur/peer_message_ignored" => TerminalOutcome::Ignored {
+            reason: params["reason"]
+                .as_str()
+                .unwrap_or("worker_ignored")
+                .to_string(),
+        },
+        _ => return,
+    };
+
+    if let Err(err) = bundle.router.record_terminal(&message_id, outcome).await {
+        tracing::warn!(
+            method = %method,
+            message_id = ?message_id,
+            error = %err,
+            "peer mailbox: failed to record worker terminal ack"
+        );
+    }
+    let _ = ack_tx.send(());
+}
+
 /// Schema string the helper accepts. Anything else is rejected at the boundary.
 pub const PEER_MESSAGE_SCHEMA_V1: &str = "spur-peer-message/v1";
 
@@ -228,6 +270,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
     use tokio::sync::broadcast;
+    use tokio::sync::mpsc::UnboundedReceiver;
 
     fn harness() -> (
         FunnelHandle,
@@ -241,6 +284,18 @@ mod tests {
 
     fn test_brain() -> spur_acp::types::SessionId {
         spur_acp::types::SessionId("brain-1".to_string())
+    }
+
+    async fn drain_test_events(
+        events: &mut UnboundedReceiver<SpurEventBody>,
+    ) -> Vec<SpurEventBody> {
+        let mut out = Vec::new();
+        while let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(10), events.recv()).await
+        {
+            out.push(event);
+        }
+        out
     }
 
     #[tokio::test]
@@ -512,10 +567,8 @@ mod tests {
         router: &std::sync::Arc<crate::peer_mailbox::router::PeerMailboxRouter>,
         snapshot: &std::sync::Arc<spur_mcp::plan::scope_snapshot::PlanScopeSnapshot>,
         payload: serde_json::Value,
-    ) -> Result<
-        crate::peer_mailbox::router::Acceptance,
-        crate::peer_mailbox::router::RouterError,
-    > {
+    ) -> Result<crate::peer_mailbox::router::Acceptance, crate::peer_mailbox::router::RouterError>
+    {
         use spur_acp::domain::delegation::DelegationId;
         interpret_peer_message(
             router,
@@ -679,5 +732,224 @@ mod tests {
                 "expected {missing_field}, got {err:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn consumed_helper_records_terminal_and_signals_ack() {
+        use crate::peer_mailbox::ledger::{InMemoryLedger, PeerMailboxLedger};
+        use crate::peer_mailbox::limits::Limits;
+        use crate::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
+        use crate::peer_mailbox::router::{Acceptance, PeerMailboxRouter};
+        use crate::peer_mailbox::PeerMailboxBundle;
+        use spur_acp::domain::delegation::DelegationId;
+        use spur_acp::domain::events::SpurEventBody;
+        use spur_acp::domain::peer_message::LedgerState;
+        use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
+        use std::collections::{HashMap, HashSet};
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+        let (reconciler_tx, _reconciler_rx) = unbounded_channel();
+        let router = Arc::new(PeerMailboxRouter::new(
+            ledger.clone(),
+            funnel,
+            reconciler_tx,
+            Limits::default(),
+            "bs".into(),
+        ));
+        let bundle = PeerMailboxBundle {
+            router: router.clone(),
+            builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
+            ledger: ledger.clone(),
+        };
+
+        let mut delegation_to_task = HashMap::new();
+        delegation_to_task.insert(DelegationId("src".into()), "ta".into());
+        delegation_to_task.insert(DelegationId("tgt".into()), "tb".into());
+        let mut peer_edges = HashSet::new();
+        peer_edges.insert(("ta".into(), "tb".into()));
+        let snapshot = Arc::new(PlanScopeSnapshot {
+            plan_version: 1,
+            peer_edges,
+            delegation_to_task,
+            delegation_to_issue: HashMap::new(),
+            superseded_tasks: HashSet::new(),
+            terminal_tasks: HashSet::new(),
+        });
+
+        let payload = json!({
+            "schema": "spur-peer-message/v1",
+            "message_id": "00000000-0000-0000-0000-000000000501",
+            "target_delegation_id": "tgt",
+            "target_issue_id": "i2",
+            "target_plan_task_id": "tb",
+            "kind": "question",
+            "body": "test",
+            "sequence": 1
+        });
+        let guard = match interpret_peer_message(
+            &router,
+            &snapshot,
+            DelegationId("src".into()),
+            "ex".into(),
+            "i1".into(),
+            "ta".into(),
+            payload,
+        )
+        .await
+        .unwrap()
+        {
+            Acceptance::Created(guard) => guard,
+            Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+        };
+        let message_id = *guard.message_id();
+        ledger
+            .transition(&message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::Delivered)
+            .await
+            .unwrap();
+
+        let (ack_tx, mut ack_rx) = unbounded_channel();
+        interpret_peer_message_terminal(
+            "_spur/peer_message_consumed",
+            json!({"message_id": message_id}),
+            &bundle,
+            &ack_tx,
+        )
+        .await;
+
+        assert_eq!(
+            ledger.get(&message_id).await.unwrap().state,
+            LedgerState::Consumed
+        );
+        ack_rx.try_recv().unwrap();
+        let consumed = drain_test_events(&mut events)
+            .await
+            .into_iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    SpurEventBody::WorkerPeerMessageConsumed { message_id: id, .. } if id == message_id
+                )
+            });
+        assert!(consumed, "expected WorkerPeerMessageConsumed event");
+    }
+
+    #[tokio::test]
+    async fn ignored_helper_records_terminal_reason_and_signals_ack() {
+        use crate::peer_mailbox::ledger::{InMemoryLedger, PeerMailboxLedger};
+        use crate::peer_mailbox::limits::Limits;
+        use crate::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
+        use crate::peer_mailbox::router::{Acceptance, PeerMailboxRouter};
+        use crate::peer_mailbox::PeerMailboxBundle;
+        use spur_acp::domain::delegation::DelegationId;
+        use spur_acp::domain::events::SpurEventBody;
+        use spur_acp::domain::peer_message::LedgerState;
+        use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
+        use std::collections::{HashMap, HashSet};
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+        let (reconciler_tx, _reconciler_rx) = unbounded_channel();
+        let router = Arc::new(PeerMailboxRouter::new(
+            ledger.clone(),
+            funnel,
+            reconciler_tx,
+            Limits::default(),
+            "bs".into(),
+        ));
+        let bundle = PeerMailboxBundle {
+            router: router.clone(),
+            builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
+            ledger: ledger.clone(),
+        };
+
+        let mut delegation_to_task = HashMap::new();
+        delegation_to_task.insert(DelegationId("src".into()), "ta".into());
+        delegation_to_task.insert(DelegationId("tgt".into()), "tb".into());
+        let mut peer_edges = HashSet::new();
+        peer_edges.insert(("ta".into(), "tb".into()));
+        let snapshot = Arc::new(PlanScopeSnapshot {
+            plan_version: 1,
+            peer_edges,
+            delegation_to_task,
+            delegation_to_issue: HashMap::new(),
+            superseded_tasks: HashSet::new(),
+            terminal_tasks: HashSet::new(),
+        });
+
+        let payload = json!({
+            "schema": "spur-peer-message/v1",
+            "message_id": "00000000-0000-0000-0000-000000000502",
+            "target_delegation_id": "tgt",
+            "target_issue_id": "i2",
+            "target_plan_task_id": "tb",
+            "kind": "question",
+            "body": "test",
+            "sequence": 1
+        });
+        let guard = match interpret_peer_message(
+            &router,
+            &snapshot,
+            DelegationId("src".into()),
+            "ex".into(),
+            "i1".into(),
+            "ta".into(),
+            payload,
+        )
+        .await
+        .unwrap()
+        {
+            Acceptance::Created(guard) => guard,
+            Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+        };
+        let message_id = *guard.message_id();
+        ledger
+            .transition(&message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::Delivered)
+            .await
+            .unwrap();
+
+        let (ack_tx, mut ack_rx) = unbounded_channel();
+        interpret_peer_message_terminal(
+            "_spur/peer_message_ignored",
+            json!({"message_id": message_id, "reason": "not_needed"}),
+            &bundle,
+            &ack_tx,
+        )
+        .await;
+
+        assert_eq!(
+            ledger.get(&message_id).await.unwrap().state,
+            LedgerState::Ignored
+        );
+        ack_rx.try_recv().unwrap();
+        let ignored = drain_test_events(&mut events)
+            .await
+            .into_iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    SpurEventBody::WorkerPeerMessageIgnored { message_id: id, reason, .. }
+                        if id == message_id && reason == "not_needed"
+                )
+            });
+        assert!(ignored, "expected WorkerPeerMessageIgnored event");
     }
 }
