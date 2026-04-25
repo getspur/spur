@@ -23,7 +23,7 @@ pub mod types;
 // pub use fs_store::FsOutcomeStore;
 // pub use measured::MeasuredOutcomeStore;
 // pub use memory_store::MemoryOutcomeStore;
-// pub use trait_def::OutcomeStore;
-// pub use types::{
-//     ContentType, OutcomeContent, OutcomeMetadata, Section, StoreError, SweepReport,
-// };
+pub use trait_def::OutcomeStore;
+pub use types::{
+    ContentType, OutcomeContent, OutcomeMetadata, Section, StoreError, SweepReport,
+};
