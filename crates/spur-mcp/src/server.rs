@@ -254,6 +254,17 @@ fn map_worker_artifact_ref(
     })
 }
 
+/// **INVARIANT (persist-before-publish):** the upstream caller MUST persist
+/// any side-channel artifact (`worktrees.persist_artifact(...).await`) BEFORE
+/// invoking this function. This ensures that `result.artifact.blob_sha`, which
+/// gets propagated into the `BrainContinuation` and thus exposed to the brain,
+/// resolves successfully under `git cat-file -p <blob_sha>` at the time the
+/// brain calls `fetch_outcome_artifact`. Without this ordering, the brain
+/// could observe a `delegation_id` whose backing blob has not yet been
+/// written, racing the persist with the fetch.
+///
+/// Spec §5.2 / §7.2 (post-round-9 P1-M2). Phase 3 will preserve this
+/// ordering inside `OutcomeMaterializer::materialize`.
 fn build_detached_continuation(
     delegation_id: &DelegationId,
     result: &DelegationResult,
