@@ -12,11 +12,13 @@ pub mod mutation_executor;
 pub mod projector;
 pub mod proposers;
 pub mod reconciler;
+pub mod scope_snapshot;
 pub mod signal_watcher;
 pub mod signals;
 pub mod snapshot;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -175,6 +177,128 @@ pub struct PlanState {
     /// follow-up (v1 auto-closes only `PlanTaskEntry.spec.issue_id`, the
     /// brain-supplied pre-existing ref).
     pub epic_id: Option<String>,
+}
+
+impl PlanState {
+    /// Build an immutable snapshot for the peer mailbox router. The caller
+    /// briefly holds the `PlanState` lock to construct this; afterwards the
+    /// snapshot is read without contention.
+    pub fn snapshot_for_peer(&self) -> crate::plan::scope_snapshot::PlanScopeSnapshot {
+        crate::plan::scope_snapshot::PlanScopeSnapshot {
+            plan_version: self.version(),
+            peer_edges: self.compute_peer_edges(),
+            delegation_to_task: self.delegation_to_task_map(),
+            delegation_to_issue: self.delegation_to_issue_map(),
+            superseded_tasks: self.superseded_task_ids(),
+            terminal_tasks: self.terminal_task_ids(),
+        }
+    }
+
+    fn version(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.plan_id.hash(&mut hasher);
+        for entry in &self.tasks {
+            entry.spec.task_id.hash(&mut hasher);
+            entry.spec.depends_on.hash(&mut hasher);
+            entry.spec.issue_id.hash(&mut hasher);
+            entry.last_delegation_id.hash(&mut hasher);
+            match &entry.status {
+                PlanTaskStatus::Pending => 0u8.hash(&mut hasher),
+                PlanTaskStatus::Ready => 1u8.hash(&mut hasher),
+                PlanTaskStatus::Dispatched { delegation_id } => {
+                    2u8.hash(&mut hasher);
+                    delegation_id.hash(&mut hasher);
+                }
+                PlanTaskStatus::AwaitingReview { .. } => 3u8.hash(&mut hasher),
+                PlanTaskStatus::Approved { .. } => 4u8.hash(&mut hasher),
+                PlanTaskStatus::Rejected { .. } => 5u8.hash(&mut hasher),
+                PlanTaskStatus::Failed { .. } => 6u8.hash(&mut hasher),
+                PlanTaskStatus::Cancelled { .. } => 7u8.hash(&mut hasher),
+                PlanTaskStatus::Superseded { mutation_id, by } => {
+                    8u8.hash(&mut hasher);
+                    mutation_id.hash(&mut hasher);
+                    by.hash(&mut hasher);
+                }
+            }
+        }
+        hasher.finish()
+    }
+
+    fn compute_peer_edges(&self) -> HashSet<(String, String)> {
+        let task_ids: HashSet<&str> = self.tasks.iter().map(|t| t.spec.task_id.as_str()).collect();
+        let mut edges = HashSet::new();
+        for entry in &self.tasks {
+            for dependency in &entry.spec.depends_on {
+                if task_ids.contains(dependency.as_str()) {
+                    edges.insert((dependency.clone(), entry.spec.task_id.clone()));
+                }
+            }
+        }
+        edges
+    }
+
+    fn delegation_to_task_map(
+        &self,
+    ) -> HashMap<spur_acp::domain::delegation::DelegationId, String> {
+        let mut map = HashMap::new();
+        for entry in &self.tasks {
+            if let Some(delegation_id) = latest_delegation_id(entry) {
+                map.insert(
+                    spur_acp::domain::delegation::DelegationId(delegation_id.to_string()),
+                    entry.spec.task_id.clone(),
+                );
+            }
+        }
+        map
+    }
+
+    fn delegation_to_issue_map(
+        &self,
+    ) -> HashMap<spur_acp::domain::delegation::DelegationId, String> {
+        let mut map = HashMap::new();
+        for entry in &self.tasks {
+            if let (Some(delegation_id), Some(issue_id)) =
+                (latest_delegation_id(entry), entry.spec.issue_id.as_ref())
+            {
+                map.insert(
+                    spur_acp::domain::delegation::DelegationId(delegation_id.to_string()),
+                    issue_id.clone(),
+                );
+            }
+        }
+        map
+    }
+
+    fn superseded_task_ids(&self) -> HashSet<String> {
+        self.tasks
+            .iter()
+            .filter(|entry| matches!(entry.status, PlanTaskStatus::Superseded { .. }))
+            .map(|entry| entry.spec.task_id.clone())
+            .collect()
+    }
+
+    fn terminal_task_ids(&self) -> HashSet<String> {
+        self.tasks
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.status,
+                    PlanTaskStatus::Approved { .. }
+                        | PlanTaskStatus::Rejected { .. }
+                        | PlanTaskStatus::Failed { .. }
+                        | PlanTaskStatus::Cancelled { .. }
+                )
+            })
+            .map(|entry| entry.spec.task_id.clone())
+            .collect()
+    }
+}
+
+fn latest_delegation_id(entry: &PlanTaskEntry) -> Option<&str> {
+    match &entry.status {
+        PlanTaskStatus::Dispatched { delegation_id } => Some(delegation_id.as_str()),
+        _ => entry.last_delegation_id.as_deref(),
+    }
 }
 
 /// Maximum number of iterations per plan task. After this many attempts,
