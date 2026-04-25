@@ -5,7 +5,6 @@ use super::events::SpurEventBody;
 /// Replay-compatible body that captures unknown variants without failing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-#[allow(clippy::large_enum_variant)]
 pub enum ReplayBody {
     Known(SpurEventBody),
     Unknown(serde_json::Value),
@@ -36,7 +35,8 @@ mod tests {
 
     #[test]
     fn known_variant_deserializes_as_known() {
-        let json = r#"{"WorkerHeartbeat":{"brain_session_id":"bs","executor_id":"ex","worker_ts":null}}"#;
+        let json =
+            r#"{"WorkerHeartbeat":{"brain_session_id":"bs","executor_id":"ex","worker_ts":null}}"#;
         let body: ReplayBody = serde_json::from_str(json).unwrap();
         assert!(body.as_known().is_some());
     }
