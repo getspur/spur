@@ -390,20 +390,55 @@ impl OutcomeMaterializer {
 
         let mut envelope_bytes = estimate_envelope_cost(&cont.payload);
         let budget = spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES;
+
+        // Ladder steps emit ContinuationFieldTruncated events as fields are
+        // dropped so observability matches the actual on-wire state — silently
+        // dropping fields would make the brain see "missing" data with no
+        // operator signal that the materializer chose to drop them.
+        let emit_drop = |sink: Option<&Arc<dyn McpEventSink>>,
+                         field: &'static str,
+                         original: usize| {
+            if let Some(sink) = sink {
+                sink.emit(SpurEventBody::ContinuationFieldTruncated {
+                    delegation_id: delegation_id.clone(),
+                    field: field.into(),
+                    original_bytes: original,
+                    kept_bytes: 0,
+                });
+            }
+        };
+
         if envelope_bytes > budget {
+            let original = cont.payload.summary.as_ref().map(|s| s.len()).unwrap_or(0);
             cont.payload.summary = None;
+            emit_drop(event_sink, "summary", original);
             envelope_bytes = estimate_envelope_cost(&cont.payload);
         }
         if envelope_bytes > budget {
+            let original = cont
+                .payload
+                .diff_summary
+                .as_ref()
+                .map(|d| d.files.len())
+                .unwrap_or(0);
             cont.payload.diff_summary = None;
+            emit_drop(event_sink, "diff_summary", original);
             envelope_bytes = estimate_envelope_cost(&cont.payload);
         }
         if envelope_bytes > budget {
+            let original = cont
+                .payload
+                .artifact_ref
+                .as_ref()
+                .map(|a| a.uri.len())
+                .unwrap_or(0);
             cont.payload.artifact_ref = None;
+            emit_drop(event_sink, "artifact_ref", original);
             envelope_bytes = estimate_envelope_cost(&cont.payload);
         }
         if envelope_bytes > budget {
             cont.payload.status = clip_status_strings(&cont.payload.status, 128);
+            emit_drop(event_sink, "status", self.status_string_cap_bytes);
             envelope_bytes = estimate_envelope_cost(&cont.payload);
         }
 
@@ -415,11 +450,16 @@ impl OutcomeMaterializer {
                 budget_bytes = budget,
                 "fallback ladder exhausted; emitting minimal continuation"
             );
-            cont.payload.status = spur_acp::domain::delegation::DelegationStatus::Success;
+            // Preserve the (clipped) status — overwriting with Success would
+            // lie to the brain about a failed delegation. The clipped 128 B
+            // status from the previous ladder step already fits the budget;
+            // dropping the inline summary/diff/branch/artifact_ref recovers
+            // additional headroom without misrepresenting outcome.
             cont.payload.summary = Some("(continuation oversized; fields dropped)".into());
             cont.payload.diff_summary = None;
             cont.payload.worker_branch = None;
             cont.payload.artifact_ref = None;
+            emit_drop(event_sink, "worker_branch", 0);
         }
 
         tracing::warn!(
@@ -886,6 +926,42 @@ mod tests {
         assert!(
             cont.payload.artifact_id.is_none(),
             "panic in store.put must fall back, not unwind"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_preserves_failed_status_at_last_resort() {
+        // Last-resort branch must NOT overwrite status with Success when the
+        // delegation actually failed. Test by forcing a Failed input through a
+        // store that always returns TooLarge so the fallback path runs.
+        use spur_blob_store::test_helpers::{FailureMode, MockFailingOutcomeStore};
+        let store = MockFailingOutcomeStore::new(FailureMode::TooLarge);
+        let mat = OutcomeMaterializer::new(store);
+        let failed = DelegationResult {
+            status: DelegationStatus::Failed {
+                error: "compilation error".into(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        };
+        let cont = mat
+            .materialize(
+                failed,
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        assert!(
+            matches!(cont.payload.status, DelegationStatus::Failed { .. }),
+            "fallback must preserve Failed status; got {:?}",
+            cont.payload.status
         );
     }
 }
