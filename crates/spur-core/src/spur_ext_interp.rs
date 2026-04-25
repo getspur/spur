@@ -104,6 +104,16 @@ pub fn interpret(
     }
 }
 
+/// Schema string the helper accepts. Anything else is rejected at the boundary.
+pub const PEER_MESSAGE_SCHEMA_V1: &str = "spur-peer-message/v1";
+
+/// Hard upper bound on body bytes copied out of the raw JSON value. Defends
+/// the parse step against a malicious worker who would otherwise force a
+/// multi-megabyte `String` allocation before the router's body-size check
+/// fires. Picked to be one order of magnitude above `Limits::default()` so
+/// legitimate boundary cases still reach the router for a typed reject.
+const BODY_HARD_CEILING_BYTES: usize = 64 * 1024;
+
 pub async fn interpret_peer_message(
     router: &std::sync::Arc<crate::peer_mailbox::router::PeerMailboxRouter>,
     snapshot: &std::sync::Arc<spur_mcp::plan::scope_snapshot::PlanScopeSnapshot>,
@@ -117,29 +127,83 @@ pub async fn interpret_peer_message(
     use spur_acp::domain::delegation::DelegationId;
     use spur_acp::domain::peer_message::{MessageKind, PeerMessageEnvelope, PeerMessageId};
 
+    // Reject unknown schemas at the boundary so the v1 router never sees
+    // a v2-shaped payload masquerading as v1. Absent `schema` is rejected
+    // for the same reason — protocol versioning is not optional.
+    let schema = payload["schema"]
+        .as_str()
+        .ok_or_else(|| RouterError::Rejected {
+            reason: "missing_schema".into(),
+        })?;
+    if schema != PEER_MESSAGE_SCHEMA_V1 {
+        return Err(RouterError::Rejected {
+            reason: format!("unsupported_schema: {schema}"),
+        });
+    }
+
     let message_id: PeerMessageId =
         serde_json::from_value(payload["message_id"].clone()).map_err(|e| {
             RouterError::Rejected {
                 reason: format!("malformed_message_id: {e}"),
             }
         })?;
+
     let target_delegation_id: String = payload["target_delegation_id"]
         .as_str()
         .ok_or_else(|| RouterError::Rejected {
             reason: "missing_target_delegation_id".into(),
         })?
         .into();
-    let target_issue_id: String = payload["target_issue_id"].as_str().unwrap_or("").into();
-    let target_plan_task_id: String = payload["target_plan_task_id"].as_str().unwrap_or("").into();
+    let target_issue_id: String = payload["target_issue_id"]
+        .as_str()
+        .ok_or_else(|| RouterError::Rejected {
+            reason: "missing_target_issue_id".into(),
+        })?
+        .into();
+    let target_plan_task_id: String = payload["target_plan_task_id"]
+        .as_str()
+        .ok_or_else(|| RouterError::Rejected {
+            reason: "missing_target_plan_task_id".into(),
+        })?
+        .into();
+
     let kind: MessageKind =
         serde_json::from_value(payload["kind"].clone()).map_err(|e| RouterError::Rejected {
             reason: format!("malformed_kind: {e}"),
         })?;
-    let body: String = payload["body"].as_str().unwrap_or("").into();
-    let sequence: u64 = payload["sequence"].as_u64().unwrap_or(0);
+    // `MessageKind` carries `#[serde(other)] Unknown` for forward-compat;
+    // accepting it would let workers ship payloads of unspecified intent.
+    // Reject explicitly so semantics stay machine-checked.
+    if matches!(kind, MessageKind::Unknown) {
+        return Err(RouterError::Rejected {
+            reason: "unsupported_message_kind".into(),
+        });
+    }
+
+    // Body: validate length on the borrowed `&str` before allocating an
+    // owned `String`. The router enforces the configured per-message cap;
+    // this is a hard parse-layer ceiling that protects against allocation
+    // DoS regardless of router config.
+    let body_str = payload["body"]
+        .as_str()
+        .ok_or_else(|| RouterError::Rejected {
+            reason: "missing_body".into(),
+        })?;
+    if body_str.len() > BODY_HARD_CEILING_BYTES {
+        return Err(RouterError::Rejected {
+            reason: "body_size_exceeded".into(),
+        });
+    }
+    let body: String = body_str.into();
+
+    let sequence: u64 = payload["sequence"]
+        .as_u64()
+        .ok_or_else(|| RouterError::Rejected {
+            reason: "missing_sequence".into(),
+        })?;
 
     let envelope = PeerMessageEnvelope {
-        schema: "spur-peer-message/v1".into(),
+        schema: PEER_MESSAGE_SCHEMA_V1.into(),
         message_id,
         source_delegation_id,
         target_delegation_id: DelegationId(target_delegation_id),
@@ -361,6 +425,259 @@ mod tests {
                 assert_eq!(sequence, 1);
             }
             other => panic!("unexpected router event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_message_consumed_method_emits_passthrough() {
+        let (h, mut rx) = harness();
+        interpret(
+            ExtNotificationPayload {
+                method: "_spur/peer_message_consumed".into(),
+                params: json!({"message_id": "00000000-0000-0000-0000-000000000302"}),
+            },
+            test_brain(),
+            "exec-1".into(),
+            &h,
+        );
+        let event = rx.recv().await.unwrap();
+        match event.body {
+            SpurEventBody::AgentExtNotification { method, .. } => {
+                assert_eq!(method, "_spur/peer_message_consumed");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_message_ignored_method_emits_passthrough() {
+        let (h, mut rx) = harness();
+        interpret(
+            ExtNotificationPayload {
+                method: "_spur/peer_message_ignored".into(),
+                params: json!({"message_id": "00000000-0000-0000-0000-000000000303"}),
+            },
+            test_brain(),
+            "exec-1".into(),
+            &h,
+        );
+        let event = rx.recv().await.unwrap();
+        match event.body {
+            SpurEventBody::AgentExtNotification { method, .. } => {
+                assert_eq!(method, "_spur/peer_message_ignored");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    async fn helper_fixture() -> (
+        std::sync::Arc<crate::peer_mailbox::router::PeerMailboxRouter>,
+        std::sync::Arc<spur_mcp::plan::scope_snapshot::PlanScopeSnapshot>,
+    ) {
+        use crate::peer_mailbox::ledger::InMemoryLedger;
+        use crate::peer_mailbox::limits::Limits;
+        use crate::peer_mailbox::router::PeerMailboxRouter;
+        use spur_acp::domain::delegation::DelegationId;
+        use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
+        use std::collections::{HashMap, HashSet};
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let ledger = std::sync::Arc::new(InMemoryLedger::new());
+        let (funnel, _events) = crate::event_funnel::test_channel();
+        let (tx, _rx) = unbounded_channel();
+        let router = std::sync::Arc::new(PeerMailboxRouter::new(
+            ledger,
+            funnel,
+            tx,
+            Limits::default(),
+            "bs".into(),
+        ));
+        let mut delegation_to_task = HashMap::new();
+        delegation_to_task.insert(DelegationId("src".into()), "ta".into());
+        delegation_to_task.insert(DelegationId("tgt".into()), "tb".into());
+        let mut peer_edges = HashSet::new();
+        peer_edges.insert(("ta".into(), "tb".into()));
+        let snapshot = std::sync::Arc::new(PlanScopeSnapshot {
+            plan_version: 1,
+            peer_edges,
+            delegation_to_task,
+            delegation_to_issue: HashMap::new(),
+            superseded_tasks: HashSet::new(),
+            terminal_tasks: HashSet::new(),
+        });
+        (router, snapshot)
+    }
+
+    async fn helper_call(
+        router: &std::sync::Arc<crate::peer_mailbox::router::PeerMailboxRouter>,
+        snapshot: &std::sync::Arc<spur_mcp::plan::scope_snapshot::PlanScopeSnapshot>,
+        payload: serde_json::Value,
+    ) -> Result<
+        crate::peer_mailbox::router::Acceptance,
+        crate::peer_mailbox::router::RouterError,
+    > {
+        use spur_acp::domain::delegation::DelegationId;
+        interpret_peer_message(
+            router,
+            snapshot,
+            DelegationId("src".into()),
+            "ex".into(),
+            "i1".into(),
+            "ta".into(),
+            payload,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_missing_schema() {
+        let (router, snapshot) = helper_fixture().await;
+        let err = helper_call(
+            &router,
+            &snapshot,
+            json!({
+                "message_id": "00000000-0000-0000-0000-000000000401",
+                "target_delegation_id": "tgt",
+                "target_issue_id": "i2",
+                "target_plan_task_id": "tb",
+                "kind": "question",
+                "body": "hi",
+                "sequence": 1
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::peer_mailbox::router::RouterError::Rejected { reason } if reason == "missing_schema"
+        ));
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_unknown_schema_version() {
+        let (router, snapshot) = helper_fixture().await;
+        let err = helper_call(
+            &router,
+            &snapshot,
+            json!({
+                "schema": "spur-peer-message/v2",
+                "message_id": "00000000-0000-0000-0000-000000000402",
+                "target_delegation_id": "tgt",
+                "target_issue_id": "i2",
+                "target_plan_task_id": "tb",
+                "kind": "question",
+                "body": "hi",
+                "sequence": 1
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::peer_mailbox::router::RouterError::Rejected { reason } if reason.starts_with("unsupported_schema")
+        ));
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_unknown_message_kind() {
+        let (router, snapshot) = helper_fixture().await;
+        let err = helper_call(
+            &router,
+            &snapshot,
+            json!({
+                "schema": "spur-peer-message/v1",
+                "message_id": "00000000-0000-0000-0000-000000000403",
+                "target_delegation_id": "tgt",
+                "target_issue_id": "i2",
+                "target_plan_task_id": "tb",
+                "kind": "future_kind_v9",
+                "body": "hi",
+                "sequence": 1
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::peer_mailbox::router::RouterError::Rejected { reason } if reason == "unsupported_message_kind"
+        ));
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_oversized_body_before_allocation() {
+        let (router, snapshot) = helper_fixture().await;
+        // 200 KiB > 64 KiB hard ceiling. Reject must surface at parse layer.
+        let err = helper_call(
+            &router,
+            &snapshot,
+            json!({
+                "schema": "spur-peer-message/v1",
+                "message_id": "00000000-0000-0000-0000-000000000404",
+                "target_delegation_id": "tgt",
+                "target_issue_id": "i2",
+                "target_plan_task_id": "tb",
+                "kind": "question",
+                "body": "x".repeat(200 * 1024),
+                "sequence": 1
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::peer_mailbox::router::RouterError::Rejected { reason } if reason == "body_size_exceeded"
+        ));
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_missing_required_fields() {
+        let (router, snapshot) = helper_fixture().await;
+        for (missing_field, payload) in [
+            (
+                "missing_target_issue_id",
+                json!({
+                    "schema": "spur-peer-message/v1",
+                    "message_id": "00000000-0000-0000-0000-000000000405",
+                    "target_delegation_id": "tgt",
+                    "target_plan_task_id": "tb",
+                    "kind": "question",
+                    "body": "hi",
+                    "sequence": 1
+                }),
+            ),
+            (
+                "missing_target_plan_task_id",
+                json!({
+                    "schema": "spur-peer-message/v1",
+                    "message_id": "00000000-0000-0000-0000-000000000406",
+                    "target_delegation_id": "tgt",
+                    "target_issue_id": "i2",
+                    "kind": "question",
+                    "body": "hi",
+                    "sequence": 1
+                }),
+            ),
+            (
+                "missing_sequence",
+                json!({
+                    "schema": "spur-peer-message/v1",
+                    "message_id": "00000000-0000-0000-0000-000000000407",
+                    "target_delegation_id": "tgt",
+                    "target_issue_id": "i2",
+                    "target_plan_task_id": "tb",
+                    "kind": "question",
+                    "body": "hi"
+                }),
+            ),
+        ] {
+            let err = helper_call(&router, &snapshot, payload).await.unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    crate::peer_mailbox::router::RouterError::Rejected { reason } if reason == missing_field
+                ),
+                "expected {missing_field}, got {err:?}"
+            );
         }
     }
 }
