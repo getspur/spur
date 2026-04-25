@@ -1,3 +1,4 @@
+use serde_json::json;
 use spur_acp::domain::delegation::DelegationId;
 use spur_acp::domain::peer_message::{
     LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
@@ -11,7 +12,7 @@ use spur_core::peer_mailbox::limits::{
 use spur_core::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
 use spur_core::peer_mailbox::router::Acceptance;
 use spur_core::peer_mailbox::{
-    InMemoryLedger, Limits, PeerMailboxLedger, PeerMailboxRouter, RouterError,
+    InMemoryLedger, Limits, PeerMailboxBundle, PeerMailboxLedger, PeerMailboxRouter, RouterError,
 };
 use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
 use std::collections::{HashMap, HashSet};
@@ -68,6 +69,31 @@ fn router_with_broadcast(
     (router, bcast_rx)
 }
 
+fn bundle_with_broadcast() -> (PeerMailboxBundle, broadcast::Receiver<spur_acp::SpurEvent>) {
+    let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
+    let (bcast_tx, bcast_rx) = broadcast::channel(4096);
+    let seq = Arc::new(AtomicU64::new(0));
+    let funnel = spur_core::event_funnel::spawn_funnel(bcast_tx.clone(), seq);
+    let (recon_tx, _recon_rx) = unbounded_channel();
+    let router = Arc::new(PeerMailboxRouter::new(
+        ledger.clone(),
+        funnel,
+        recon_tx,
+        Limits::default(),
+        "bs".into(),
+    ));
+    let builder = Arc::new(PeerPromptContextBuilder::new(ledger.clone()));
+
+    (
+        PeerMailboxBundle {
+            router,
+            builder,
+            ledger,
+        },
+        bcast_rx,
+    )
+}
+
 async fn drain_broadcast_events(
     bcast_rx: &mut broadcast::Receiver<spur_acp::SpurEvent>,
 ) -> Vec<SpurEventBody> {
@@ -80,6 +106,44 @@ async fn drain_broadcast_events(
         }
     }
     out
+}
+
+#[tokio::test]
+async fn worker_ack_during_accepted_state_consumes_message() {
+    let (bundle, mut bcast_rx) = bundle_with_broadcast();
+    let snap = snapshot();
+    let env = envelope("Worker B: consume this during prompt");
+    let mid = env.message_id;
+    let _guard = match bundle.router.accept_or_reject(env, &snap).await.unwrap() {
+        Acceptance::Created(guard) => guard,
+        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+    };
+    assert_eq!(
+        bundle.ledger.get(&mid).await.unwrap().state,
+        LedgerState::Accepted
+    );
+
+    let (ack_tx, mut ack_rx) = unbounded_channel();
+    spur_core::spur_ext_interp::interpret_peer_message_terminal(
+        "_spur/peer_message_consumed",
+        json!({ "message_id": mid }),
+        &bundle,
+        &ack_tx,
+    )
+    .await;
+
+    assert_eq!(
+        bundle.ledger.get(&mid).await.unwrap().state,
+        LedgerState::Consumed
+    );
+    let events = drain_broadcast_events(&mut bcast_rx).await;
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            SpurEventBody::WorkerPeerMessageConsumed { message_id, .. } if *message_id == mid
+        )
+    }));
+    assert!(ack_rx.try_recv().is_ok());
 }
 
 #[tokio::test]

@@ -104,7 +104,7 @@ pub fn interpret(
     }
 }
 
-pub(crate) async fn interpret_peer_message_terminal(
+pub async fn interpret_peer_message_terminal(
     method: &str,
     params: serde_json::Value,
     bundle: &crate::peer_mailbox::PeerMailboxBundle,
