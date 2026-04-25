@@ -4,13 +4,14 @@ mod onboarding;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tracing_subscriber::prelude::*;
 
 use commands::auth::AuthCommands;
 use commands::flags::FlagsCommands;
 use spur_acp::config::SpurConfig;
-use spur_acp::SessionId;
+use spur_acp::{BrainSessionId, SessionId};
 use spur_core::{Orchestrator, RunOpts};
 use spur_license::SpurLicense;
 
@@ -204,6 +205,11 @@ enum Commands {
         #[command(subcommand)]
         command: FlagsCommands,
     },
+    /// Garbage-collect outcome blobs
+    Gc {
+        #[command(subcommand)]
+        cmd: GcCmd,
+    },
     /// Bot frontend commands
     Bot {
         #[command(subcommand)]
@@ -278,6 +284,38 @@ enum WorkflowCommands {
 enum ConfigCommands {
     /// Validate that every [agents.entries] block has a coherent configuration.
     Check,
+}
+
+#[derive(Debug, Subcommand)]
+enum GcCmd {
+    /// Sweep outcome blobs older than the TTL
+    Outcomes {
+        /// Don't actually delete, just report
+        #[arg(long)]
+        dry_run: bool,
+        /// TTL override in days; accepts Nd, Ndays, or bare N
+        #[arg(long, value_parser = parse_duration_days)]
+        older_than: Option<Duration>,
+        /// Optional brain session id namespace to delete
+        #[arg(long)]
+        namespace: Option<String>,
+    },
+}
+
+fn parse_duration_days(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    let n_str = s
+        .strip_suffix("days")
+        .or_else(|| s.strip_suffix('d'))
+        .unwrap_or(s);
+    let days: u64 = n_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("expected integer days, got {s:?}"))?;
+    if days == 0 {
+        return Err("TTL floor is 1 day".into());
+    }
+    Ok(Duration::from_secs(days * 86_400))
 }
 
 #[derive(Subcommand)]
@@ -515,6 +553,14 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Flags { command } => commands::flags::run(command).await,
+        Commands::Gc {
+            cmd:
+                GcCmd::Outcomes {
+                    dry_run,
+                    older_than,
+                    namespace,
+                },
+        } => run_gc_outcomes(dry_run, older_than, namespace).await,
         Commands::Bot {
             command: BotCommands::Telegram { brain },
         } => {
@@ -881,6 +927,104 @@ fn load_orchestrator(repo_root: PathBuf) -> Result<Orchestrator> {
     let config = load_config()?;
     let license = SpurLicense::from_env_or_disabled();
     Orchestrator::new(repo_root, config, Some(license.feature_gate()))
+}
+
+async fn run_gc_outcomes(
+    dry_run: bool,
+    older_than: Option<Duration>,
+    namespace: Option<String>,
+) -> Result<()> {
+    use spur_blob_store::OutcomeStore;
+    use spur_worktree::git_blob_store::GitBlobOutcomeStore;
+    use std::sync::Arc;
+
+    let repo_root = std::env::current_dir()?;
+    let store: Arc<dyn OutcomeStore> = Arc::new(GitBlobOutcomeStore::new(repo_root));
+
+    if let Some(namespace) = namespace {
+        let session_id = BrainSessionId::new(SessionId(namespace));
+        if dry_run {
+            println!("Would delete namespace {session_id}");
+            return Ok(());
+        }
+
+        let removed = store.delete_namespace(&session_id).await?;
+        tracing::info!(
+            target: "spur.metrics.outcome_namespace_deleted",
+            brain_session_id = %session_id,
+            artifact_count = removed,
+            total_bytes = 0u64,
+            source = "cli.gc_outcomes",
+        );
+        println!("Deleted {removed} blobs in namespace {session_id}");
+        return Ok(());
+    }
+
+    let ttl = older_than.unwrap_or_else(|| {
+        let days: u64 = std::env::var("SPUR_OUTCOME_TTL_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7);
+        Duration::from_secs(days * 86_400)
+    });
+
+    if dry_run {
+        println!("Dry-run: would sweep namespaces older than {:?}", ttl);
+        return Ok(());
+    }
+
+    let report = store.sweep_older_than(ttl).await?;
+    println!(
+        "Swept {} namespaces / {} blobs / {} bytes (effective_ttl={:?})",
+        report.namespaces_swept, report.blobs_swept, report.bytes_freed, report.effective_ttl
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gc_outcomes_parses_older_than() {
+        let args = Cli::try_parse_from(["spur", "gc", "outcomes", "--older-than=14d"]).unwrap();
+        if let Commands::Gc {
+            cmd:
+                GcCmd::Outcomes {
+                    older_than,
+                    dry_run,
+                    ..
+                },
+        } = args.command
+        {
+            assert_eq!(
+                older_than,
+                Some(std::time::Duration::from_secs(14 * 86_400))
+            );
+            assert!(!dry_run);
+        } else {
+            panic!("wrong subcommand");
+        }
+    }
+
+    #[test]
+    fn parse_duration_days_accepts_common_forms() {
+        assert!(parse_duration_days("30d").is_ok());
+        assert!(parse_duration_days("30").is_ok());
+        assert!(parse_duration_days("30days").is_ok());
+        assert_eq!(
+            parse_duration_days("30").unwrap(),
+            std::time::Duration::from_secs(30 * 86_400)
+        );
+    }
+
+    #[test]
+    fn parse_duration_days_rejects_invalid_input() {
+        assert!(parse_duration_days("30h").is_err());
+        assert!(parse_duration_days("notanumber").is_err());
+        assert!(parse_duration_days("0").is_err());
+        assert!(parse_duration_days("0d").is_err());
+    }
 }
 
 // ─── cost subcommand helpers ──────────────────────────────────────────

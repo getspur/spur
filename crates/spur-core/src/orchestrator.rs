@@ -612,6 +612,8 @@ pub struct Orchestrator {
     repo_root: PathBuf,
     pub pm_service: Option<Arc<PmService>>,
     outcome_store: Arc<dyn OutcomeStore>,
+    /// Background tokio tasks owned by the orchestrator.
+    background_tasks: Vec<JoinHandle<()>>,
     /// INV-6: per-delegation cancellation token registry.
     cancellation_control: CancellationControl,
     /// Sender half of the `run_interactive` ingress channel.  Set by
@@ -713,6 +715,14 @@ fn binary_on_path(binary: &str) -> bool {
     })
 }
 
+impl Drop for Orchestrator {
+    fn drop(&mut self) {
+        for handle in self.background_tasks.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
 // ─── Free function: log-cap enforcer ──────────────────────────────────────────
 
 fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
@@ -793,7 +803,7 @@ impl Orchestrator {
         crate::event_sink::spawn_sink(event_tx.subscribe(), max_bytes);
         let review_sink = ReviewSink::new();
 
-        Ok(Self {
+        let mut orchestrator = Self {
             registry,
             config,
             worktrees,
@@ -805,12 +815,38 @@ impl Orchestrator {
             repo_root,
             pm_service: None,
             outcome_store,
+            background_tasks: Vec::new(),
             cancellation_control: CancellationControl::new(),
             continuation_tx: None,
             continuation_overflow: None,
             feature_gate,
             peer_mailbox: None,
-        })
+        };
+
+        let ttl_days: u64 = std::env::var("SPUR_OUTCOME_TTL_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7);
+        let sweep_store = orchestrator.outcome_store.clone();
+        let sweep_handle = tokio::spawn(async move {
+            let ttl = Duration::from_secs(ttl_days * 86_400);
+            match sweep_store.sweep_older_than(ttl).await {
+                Ok(report) => tracing::info!(
+                    target: "spur.metrics.outcome_swept",
+                    namespaces_swept = report.namespaces_swept,
+                    blobs_swept = report.blobs_swept,
+                    bytes_freed = report.bytes_freed,
+                    ttl_days,
+                ),
+                Err(e) => tracing::warn!(
+                    target: "spur.metrics.outcome_swept_failed",
+                    error = %e,
+                ),
+            }
+        });
+        orchestrator.background_tasks.push(sweep_handle);
+
+        Ok(orchestrator)
     }
 
     /// Attach a PM service. Must be called before `run_adhoc` or `run_interactive`.
