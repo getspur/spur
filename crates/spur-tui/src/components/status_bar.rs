@@ -92,24 +92,32 @@ pub struct StatusBarProps<'a> {
     pub license_badge: Option<&'a LicenseBadge>,
     /// Compact flag snapshot: (active_count, total_count). None if unavailable.
     pub flag_summary: Option<(usize, usize)>,
+    /// When `Some`, overrides the hardcoded per-view hint string.
+    /// Used by `SessionPickerView` to keep the StatusBar hint in sync
+    /// with `footer_hint(...)` for the current picker mode.
+    pub view_hint_override: Option<&'a str>,
 }
 
 impl StatusBar {
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
-        let hints = match props.view {
-            ViewId::Dashboard => {
-                " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
+        let hints = if let Some(s) = props.view_hint_override {
+            s
+        } else {
+            match props.view {
+                ViewId::Dashboard => {
+                    " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
+                }
+                ViewId::IssueBrowser => {
+                    " [j/k]navigate [Enter]detail [o/w/b/d]status [W]work [Esc]back [?]help"
+                }
+                ViewId::SessionDetail(_) => {
+                    hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
+                }
+                ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
+                ViewId::PlanInspector(_) => " [Esc]back [Alt-p]close",
+                #[cfg(feature = "markdown")]
+                ViewId::MermaidOverlay(_) => " [Esc]close",
             }
-            ViewId::IssueBrowser => {
-                " [j/k]navigate [Enter]detail [o/w/b/d]status [W]work [Esc]back [?]help"
-            }
-            ViewId::SessionDetail(_) => {
-                hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
-            }
-            ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
-            ViewId::PlanInspector(_) => " [Esc]back [Alt-p]close",
-            #[cfg(feature = "markdown")]
-            ViewId::MermaidOverlay(_) => " [Esc]close",
         };
 
         let mode_text = props

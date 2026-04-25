@@ -30,6 +30,7 @@ fn status_bar_renders_flag_summary() {
                     alert_summary: None,
                     license_badge: Some(&LicenseBadge::new("community", LicenseBadgeTone::Neutral)),
                     flag_summary: Some((3, 4)),
+                    view_hint_override: None,
                 },
             );
         })
@@ -74,6 +75,7 @@ fn status_bar_omits_flag_summary_when_none() {
                     alert_summary: None,
                     license_badge: None,
                     flag_summary: None,
+                    view_hint_override: None,
                 },
             );
         })
@@ -119,6 +121,7 @@ fn status_bar_shows_back_when_streaming_but_composer_owns_esc() {
                     alert_summary: None,
                     license_badge: None,
                     flag_summary: None,
+                    view_hint_override: None,
                 },
             );
         })

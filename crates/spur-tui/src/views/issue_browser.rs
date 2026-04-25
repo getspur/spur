@@ -289,6 +289,7 @@ impl IssueBrowserView {
                 alert_summary: None,
                 license_badge: None,
                 flag_summary: None,
+                view_hint_override: None,
             },
         );
     }

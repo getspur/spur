@@ -499,6 +499,7 @@ impl SessionPickerView {
                 alert_summary: None,
                 license_badge,
                 flag_summary,
+                view_hint_override: Some(footer_hint(&self.state, false, false)),
             },
         );
         render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));
@@ -790,6 +791,7 @@ impl SessionPickerView {
                     alert_summary: None,
                     license_badge,
                     flag_summary,
+                    view_hint_override: Some(footer_hint(&self.state, false, false)),
                 },
             );
         }
@@ -858,6 +860,7 @@ impl SessionPickerView {
                 alert_summary: None,
                 license_badge,
                 flag_summary,
+                view_hint_override: Some(footer_hint(&self.state, false, false)),
             },
         );
         render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));
