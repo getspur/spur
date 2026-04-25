@@ -472,6 +472,23 @@ mod tests {
     }
 
     #[test]
+    fn completion_variant_omits_artifact_uri_when_none() {
+        let s = AuditSentinelKind::Completion {
+            delegation_id: "abc".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: None,
+            result_summary: None,
+            artifact_uri: None,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            !json.contains("artifact_uri"),
+            "skip_serializing_if should omit artifact_uri when None; got: {json}"
+        );
+    }
+
+    #[test]
     fn completion_state_and_dispatch_orphan_cleared_round_trip() {
         let completion = AuditSentinelKind::Completion {
             delegation_id: "del-A".into(),
