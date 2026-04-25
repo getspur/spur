@@ -86,7 +86,10 @@ fn new_payloads_with_optional_fields_omit_them_when_none() {
     };
 
     let serialized = serde_json::to_value(&fresh).unwrap();
-    assert!(serialized.get("git_object_ref").is_none(), "None field must be omitted");
+    assert!(
+        serialized.get("git_object_ref").is_none(),
+        "None field must be omitted"
+    );
     assert!(serialized.get("git_blob_sha").is_none());
     assert!(serialized.get("sha256").is_none());
 
@@ -100,5 +103,8 @@ fn new_payloads_with_optional_fields_omit_them_when_none() {
         serialized2.get("git_object_ref"),
         Some(&json!("refs/spur/artifacts/sess-1"))
     );
-    assert_eq!(serialized2.get("git_blob_sha"), Some(&json!("a".repeat(40))));
+    assert_eq!(
+        serialized2.get("git_blob_sha"),
+        Some(&json!("a".repeat(40)))
+    );
 }

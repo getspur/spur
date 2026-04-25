@@ -68,3 +68,58 @@ yields ~1091 B for all-null emergency caps, exceeding MIN = 1024.
 
 **NIT:**
 1. `fetch_hint: Option<String>` in §7.1 lacks `#[serde(default, skip_serializing_if = "Option::is_none")]`, unlike the surrounding additive optional fields.
+
+## Round 10 — codex
+
+Verdict: REJECT-WITH-MUST-FIX
+
+MUST-FIX:
+
+1. GC-M1 sidecar ref layout is individually valid but cannot coexist with the existing content ref. The spec says GitBlobOutcomeStore continues using content refs at `refs/spur/artifacts/<session-id>` while writing metadata at `refs/spur/artifacts/<session-id>/<delegation>-<attempt>.meta` (`spec:397-399`; current code writes the content ref at `crates/spur-worktree/src/artifact.rs:51`). `git check-ref-format refs/spur/artifacts/550e8400-e29b-41d4-a716-446655440000/9b2c84e0-1111-4222-8333-aaaaaaaaaaaa-1.meta` returns valid, but `git update-ref` rejects creating both refs in either order: the session ref is a leaf, so Git cannot also create children below it. This is a round-9 regression introduced by the GC-M1 sidecar amendment. Fix by changing the GitBlobOutcomeStore ref layout so both content and metadata are leaves under a namespace, e.g. `refs/spur/artifacts/<session-id>/<delegation>-<attempt>.content` and `.meta`, or put metadata under a separate non-conflicting prefix such as `refs/spur/artifact-metadata/<session-id>/<delegation>-<attempt>`; document legacy `refs/spur/artifacts/<session-id>` migration/deletion separately.
+
+SHOULD-FIX:
+
+1. N1 generator coverage should explicitly say `arb_artifact_ref` generates arbitrary/adversarial UTF-8 strings, including null/control/backslash/high-bit characters, not just long plausible URIs. The spec currently says only `uri` and `git_object_ref` are 0-10 KB (`spec:114`), while `arb_summary` explicitly names hostile characters (`spec:112`). Length-only generation exercises clipping but leaves JSON-escape and URI-assumption regressions under-specified.
+
+2. Apply UUID/ref-component validation to GitBlobOutcomeStore keys too, not only FsOutcomeStore. Production `DelegationId::new()` is UUID-backed, but `DelegationId` still has `From<String>`/`From<&str>` and tests already use non-UUID ids. Git ref construction should reject malformed key components before `git update-ref` rather than relying on production discipline.
+
+NIT:
+
+1. The P1-M1 golden-file test is sufficient to catch accidental removal of `#[serde(flatten)]`: flat golden JSON like `{"kind":"patch","uri":...}` will fail to deserialize or reserialize byte-identically if the field becomes nested. Include both a unit variant (`patch`) and `Other(String)` in the golden fixture so the top-level `name` projection is also locked.
+
+Verification notes:
+
+- P1-M1 holds. The spec code block preserves `#[serde(flatten)]` on `ArtifactRef.kind`, matching current `crates/spur-acp/src/domain/continuation.rs:46`.
+- P1-M2 holds for the race under review. Current Phase 1 code awaits `worktrees.persist_artifact(...).await` before the result can carry `artifact`, then `server.rs:1714-1721` builds the continuation and only afterwards invokes the completion callback. The Phase 3 spec likewise orders `store.put(...).await` before building/returning the continuation (`spec:611-640`). I do not see an async enqueue path before `store.put` completes.
+- GC-M1 does not hold due the ref leaf/prefix collision above, even though the concrete UUID metadata ref name itself is syntactically valid.
+- N1 mostly holds at the type-property level: §7.2 clips both `uri` and `git_object_ref` to 256 B before building the lean continuation (`spec:617`). Tighten the proptest character distribution as above.
+- N2/N3 hold. `ContentMismatch` is a `StoreError` returned from `put`; §7.2 treats any store failure at step 3 as `outcome_persist_failed` plus truncation-ladder fallback (`spec:642-645`), and §7.7 includes `FailureMode::ContentMismatch` in the fallback CI matrix.
+
+## Round 10 — gemini
+**Date:** 2026-04-25
+**Reviewer:** gemini (Adversarial Verification)
+**Verdict:** REJECT-WITH-MUST-FIX
+
+### 1. L9 Grounding Pass Legitimacy (Spot-Check)
+The round-9 L9 grounding pass is legitimate. The author authentically folded the findings into the spec text. Spot-checks confirmed:
+- **P1-M1:** `#[serde(flatten)]` was added to the spec's `ArtifactRef` definition along with a mandatory CI round-trip test.
+- **GC-M1:** Explicit backend separation for `sweep_older_than` (sidecar metadata for Git, filesystem mtime for FS) was documented in §6.4 and §8.4.
+- **P2-S2:** UUID validation via `uuid::Uuid::parse_str(...)` was explicitly added to `FsOutcomeStore::put` in §6.4 to prevent path traversal.
+
+### 2. INV-D8 "enforced-by-clip" & Round-9 N3 Fix
+The "enforced-by-clip" model combined with the round-9 N3 fix is structurally defensible and constitutes genuine hardening.
+If a future contributor adds a field but forgets to clip it, the release-build `if envelope_bytes > MERGE_BUDGET_DEFAULT_BYTES` triggers the Plan-4 truncation ladder fallback. This fallback actively shrinks the payload using emergency caps (e.g., status strings to 128 bytes, diffs to 512 bytes, dropping `artifact_ref` completely). It is not a no-progress loop; it guarantees the continuation will fit and the brain will make progress, albeit with loud telemetry.
+
+### MUST-FIX
+**1. Git Ref Directory/File (D/F) Conflict (Spec §6.4 & §8.4)**
+The round-9 GC-M1 fix introduces a Git physical impossibility. The spec mandates keeping the legacy blob ref at `refs/spur/artifacts/<session-id>` (which creates a file in `.git/refs/`) while simultaneously writing a metadata sidecar to `refs/spur/artifacts/<session-id>/<delegation>-<attempt>.meta` (which requires `<session-id>` to be a directory). Git strictly forbids this and will fail with `cannot lock ref... exists`.
+*Fix:* The new `GitBlobOutcomeStore` must use a completely separate ref namespace (e.g., `refs/spur/outcomes/<session-id>/<delegation>-<attempt>.blob` and `.meta`). The GC sweeper in §8.4 must be updated to explicitly sweep both the new namespace and the legacy `refs/spur/artifacts/` namespace to clear pre-Plan-5 debt.
+
+**2. Missing Blob Ref in `GitBlobOutcomeStore` Design (Spec §6.4)**
+The spec states "Internal layout: continues using `refs/spur/artifacts/<session-id>` git refs." But `OutcomeStore::get` takes an `OutcomeKey { session, delegation, attempt }`. If all delegations in a session overwrite the exact same `refs/spur/artifacts/<session-id>` ref (which only points to the latest blob), the store has no way to locate the blobs for earlier delegations! The `OutcomeMetadata` does not store the blob SHA to fall back on either.
+*Fix:* The layout MUST store a unique ref for every blob (e.g., `refs/spur/outcomes/<session-id>/<delegation>-<attempt>.blob`). The backcompat adapter in §6.5 should return this real ref, not a hardcoded fake one.
+
+### SHOULD-FIX
+**1. `OutcomeMetadata` missing `sha256` for `ContentMismatch` check (Spec §6.3 & §6.4)**
+The round-9 N2 fix says `put` will "read existing .meta blob, compare SHA, return StoreError::ContentMismatch". However, `OutcomeMetadata` does not contain a `sha256` field. For `FsOutcomeStore`, this forces re-hashing the entire file on disk on every duplicate put. For `GitBlobOutcomeStore` (once the D/F conflict is fixed), it could use `git rev-parse`, but that is asymmetric and complex.
+*Fix:* Add `sha256: String` to `OutcomeMetadata`. It makes idempotent/mismatch detection fast and backend-agnostic.

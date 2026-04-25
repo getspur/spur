@@ -4781,7 +4781,10 @@ mod continuation_producer_tests {
         );
         assert_eq!(artifact_ref.uri, "spur://artifact/del-cont-1");
         assert_eq!(artifact_ref.byte_size, 1_234);
-        assert_eq!(artifact_ref.sha256.as_deref(), Some("0".repeat(40).as_str()));
+        assert_eq!(
+            artifact_ref.sha256.as_deref(),
+            Some("0".repeat(40).as_str())
+        );
         assert_eq!(
             artifact_ref.git_object_ref.as_deref(),
             Some("refs/spur/artifacts/abc123")
@@ -4896,14 +4899,10 @@ mod fetch_outcome_artifact_tests {
 
         let body = "line one\nline two\n".repeat(100);
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
-        let artifact = spur_worktree::artifact::persist(
-            td.path(),
-            session_id,
-            &body,
-            ArtifactKind::Output,
-        )
-        .await
-        .expect("persist artifact");
+        let artifact =
+            spur_worktree::artifact::persist(td.path(), session_id, &body, ArtifactKind::Output)
+                .await
+                .expect("persist artifact");
 
         let server = build_test_server(td.path(), session_id).await;
 
@@ -4929,10 +4928,7 @@ mod fetch_outcome_artifact_tests {
             )
             .await;
 
-        let payload = response
-            .result
-            .as_ref()
-            .expect("expected success response");
+        let payload = response.result.as_ref().expect("expected success response");
         let text = payload["content"][0]["text"]
             .as_str()
             .expect("text content");
@@ -4990,7 +4986,9 @@ mod fetch_outcome_artifact_tests {
             .expect("expected InvalidParams error");
         assert_eq!(error.code, -32602, "InvalidParams JSON-RPC code");
         assert!(
-            error.message.contains("Phase 1 only supports section='full'"),
+            error
+                .message
+                .contains("Phase 1 only supports section='full'"),
             "Phase 1 must reject unknown sections cleanly: {error:?}"
         );
     }
@@ -5005,10 +5003,7 @@ mod fetch_outcome_artifact_tests {
         let response = server
             .handle_tool_call(
                 Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({ "delegation_id": "" }),
-                ),
+                dispatch_args("fetch_outcome_artifact", json!({ "delegation_id": "" })),
             )
             .await;
 
@@ -5031,14 +5026,10 @@ mod fetch_outcome_artifact_tests {
         let session_a_id = "550e8400-e29b-41d4-a716-446655440000";
         let session_b_id = "550e8400-e29b-41d4-a716-aaaaaaaaaaaa";
 
-        let artifact_a = spur_worktree::artifact::persist(
-            td.path(),
-            session_a_id,
-            &body,
-            ArtifactKind::Output,
-        )
-        .await
-        .expect("persist artifact for session A");
+        let artifact_a =
+            spur_worktree::artifact::persist(td.path(), session_a_id, &body, ArtifactKind::Output)
+                .await
+                .expect("persist artifact for session A");
 
         let server_a = build_test_server(td.path(), session_a_id).await;
         let server_b = build_test_server(td.path(), session_b_id).await;

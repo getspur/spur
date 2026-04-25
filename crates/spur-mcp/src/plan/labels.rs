@@ -299,6 +299,8 @@ mod tests {
             label.len()
         );
         // Grammar: [A-Za-z0-9_:-]+
-        assert!(label.chars().all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-'));
+        assert!(label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-'));
     }
 }
