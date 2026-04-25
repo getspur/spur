@@ -53,7 +53,8 @@ pub struct LedgerEntry {
     pub injected_into_prompts: HashSet<String>,
 }
 
-pub(crate) fn is_terminal(state: LedgerState) -> bool {
+#[doc(hidden)]
+pub fn is_terminal(state: LedgerState) -> bool {
     matches!(
         state,
         LedgerState::Rejected
@@ -65,7 +66,8 @@ pub(crate) fn is_terminal(state: LedgerState) -> bool {
     )
 }
 
-fn is_valid_transition(from: LedgerState, to: LedgerState) -> bool {
+#[doc(hidden)]
+pub fn is_valid_transition(from: LedgerState, to: LedgerState) -> bool {
     if from == to {
         return true;
     }
