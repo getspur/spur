@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use serde_json::json;
 use spur_acp::{BrainSessionId, SessionId};
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
+use spur_mcp::plan::audit_sentinel::{
+    self, AuditSentinelKind, CompletionAuditFields, CompletionState,
+};
 use spur_mcp::plan::labels;
 use spur_mcp::plan::proposers::{ScopeDriftSplitProposer, TrivialScorer};
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
@@ -269,9 +271,11 @@ async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
         "plan-3",
         "del-A",
         CompletionState::AwaitingReview,
-        Some("feat/task"),
-        Some("worker finished"),
-        None,
+        CompletionAuditFields {
+            worker_branch: Some("feat/task".into()),
+            result_summary: Some("worker finished".into()),
+            artifact_uri: None,
+        },
     )
     .await
     .expect("persist completion");
@@ -595,9 +599,11 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
         "plan-8",
         "del-stale",
         CompletionState::Superseded,
-        Some("feat/stale"),
-        Some("late completion"),
-        None,
+        CompletionAuditFields {
+            worker_branch: Some("feat/stale".into()),
+            result_summary: Some("late completion".into()),
+            artifact_uri: None,
+        },
     )
     .await
     .expect("persist superseded completion");

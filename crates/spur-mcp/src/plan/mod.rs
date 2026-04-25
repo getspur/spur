@@ -987,7 +987,6 @@ pub(crate) async fn emit_task_spec_audit(
 }
 
 /// Emit a `[[spur-audit v1]] Completion` sentinel comment on the task issue.
-#[allow(clippy::too_many_arguments)]
 pub async fn emit_completion_audit(
     pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
@@ -995,9 +994,7 @@ pub async fn emit_completion_audit(
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
     superseded: bool,
-    worker_branch: Option<&str>,
-    result_summary: Option<&str>,
-    artifact_uri: Option<&str>,
+    fields: &crate::plan::audit_sentinel::CompletionAuditFields,
 ) {
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
@@ -1007,9 +1004,9 @@ pub async fn emit_completion_audit(
         delegation_id: delegation_id.to_string(),
         completion_state,
         superseded,
-        worker_branch: worker_branch.map(String::from),
-        result_summary: result_summary.map(String::from),
-        artifact_uri: artifact_uri.map(str::to_string),
+        worker_branch: fields.worker_branch.clone(),
+        result_summary: fields.result_summary.clone(),
+        artifact_uri: fields.artifact_uri.clone(),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
@@ -1265,16 +1262,13 @@ pub fn completion_is_superseded(
     })
 }
 
-#[allow(clippy::too_many_arguments)] // Phase 4: extract CompletionAuditFields struct.
 pub async fn persist_completion_result(
     pm: &dyn PmLike,
     issue_id: &str,
     plan_id: &str,
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
-    worker_branch: Option<&str>,
-    result_summary: Option<&str>,
-    artifact_uri: Option<&str>,
+    fields: crate::plan::audit_sentinel::CompletionAuditFields,
 ) -> anyhow::Result<()> {
     let update = match completion_state {
         crate::plan::audit_sentinel::CompletionState::AwaitingReview => completion_success_update(),
@@ -1295,9 +1289,7 @@ pub async fn persist_completion_result(
         delegation_id,
         completion_state,
         completion_state == crate::plan::audit_sentinel::CompletionState::Superseded,
-        worker_branch,
-        result_summary,
-        artifact_uri,
+        &fields,
     )
     .await;
 
@@ -1326,9 +1318,11 @@ pub(crate) async fn persist_completion_result_and_notify(
             plan_id,
             delegation_id,
             completion_state,
-            result.worker_branch.as_deref(),
-            result.summary.as_deref(),
-            None,
+            crate::plan::audit_sentinel::CompletionAuditFields {
+                worker_branch: result.worker_branch.clone(),
+                result_summary: result.summary.clone(),
+                artifact_uri: None,
+            },
         )
         .await?;
         crate::server::notify_fast_forward(fast_forward);
@@ -1367,9 +1361,11 @@ pub(crate) async fn persist_completion_result_and_notify(
         plan_id,
         delegation_id,
         completion_state,
-        result.worker_branch.as_deref(),
-        cont.payload.summary.as_deref(),
-        artifact_uri.as_deref(),
+        crate::plan::audit_sentinel::CompletionAuditFields {
+            worker_branch: result.worker_branch.clone(),
+            result_summary: cont.payload.summary.clone(),
+            artifact_uri,
+        },
     )
     .await?;
     crate::server::notify_fast_forward(fast_forward);
