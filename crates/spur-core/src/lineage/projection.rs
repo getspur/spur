@@ -364,6 +364,7 @@ impl ExecutorLineage {
             }
 
             SpurEventBody::WorkerPeerMessageRejected { .. }
+            | SpurEventBody::WorkerPeerMessageMalformed { .. }
             | SpurEventBody::WorkerPeerMessageExpired { .. }
             | SpurEventBody::WorkerPeerMessageDropped { .. }
             | SpurEventBody::WorkerPeerMessageUndeliverable { .. }

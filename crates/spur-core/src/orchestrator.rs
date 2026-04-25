@@ -4750,6 +4750,9 @@ async fn run_one_worker_attempt(
                         terminal_params,
                         bundle,
                         ack_tx,
+                        &funnel_for_ext,
+                        brain_session_for_ext.0.as_str(),
+                        executor_id_for_ext.as_str(),
                     )
                     .await;
                 }
