@@ -145,6 +145,14 @@ pub fn signal_processed_label(signal_id: &uuid::Uuid) -> String {
     format!("spur:signal-processed:{}", signal_id.simple())
 }
 
+/// Beads audit-reference label for a peer mailbox message.
+///
+/// Format: `spur:peer:{compact_uuid}` (42 chars). Fits the 50-char
+/// `br create --label` cap, unlike `signal_processed_label`.
+pub fn peer_message_label(message_id: &uuid::Uuid) -> String {
+    format!("spur:peer:{}", message_id.simple())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +286,19 @@ mod tests {
             assert!(is_br_legal(child_label));
         }
         assert!(is_br_legal(&p));
+    }
+
+    #[test]
+    fn peer_message_label_is_under_50_chars_and_uses_compact_uuid() {
+        let id = uuid::Uuid::parse_str("0123456789abcdef0123456789abcdef").unwrap();
+        let label = peer_message_label(&id);
+        assert_eq!(label, "spur:peer:0123456789abcdef0123456789abcdef");
+        assert!(
+            label.len() <= 50,
+            "label exceeds 50-char br create cap: {} chars",
+            label.len()
+        );
+        // Grammar: [A-Za-z0-9_:-]+
+        assert!(label.chars().all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-'));
     }
 }
