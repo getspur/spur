@@ -149,7 +149,7 @@ impl<'a> LiveTrackerPool<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "duckdb"))]
 mod tests {
     use super::*;
     use crate::engine::AnalyticsEngine;
