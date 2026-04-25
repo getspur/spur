@@ -350,6 +350,71 @@ pub enum SpurEventBody {
         /// The TUI uses this to render transport-aware cancel feedback.
         cancel_mode: CancelMode,
     },
+    WorkerPeerMessageAccepted {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        source_delegation_id: crate::domain::delegation::DelegationId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+        kind: crate::domain::peer_message::MessageKind,
+        sequence: u64,
+    },
+    WorkerPeerMessageRejected {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        source_delegation_id: crate::domain::delegation::DelegationId,
+        reason: String,
+    },
+    WorkerPeerMessageQueued {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+    },
+    WorkerPeerMessageDelivered {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+        target_prompt_id: String,
+        injected_chars: u32,
+    },
+    WorkerPeerMessageConsumed {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+    },
+    WorkerPeerMessageIgnored {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+        reason: String,
+    },
+    WorkerPeerMessageExpired {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+    },
+    WorkerPeerMessageDropped {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        reason: String,
+    },
+    WorkerPeerMessageUndeliverable {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+        reason: String,
+    },
+    WorkerPeerMessageAuditFailed {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        transition_kind: String,
+        error: String,
+    },
+    WorkerPeerMailboxReconciled {
+        audit_failed_emitted: u32,
+        inflight_forced_to_delivered: u32,
+        inflight_reverted_to_queued: u32,
+        guards_re_wrapped: u32,
+    },
     WorkerSpawned {
         agent: String,
         session: SessionId,
@@ -937,6 +1002,63 @@ mod delegation_requested_tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod worker_peer_event_tests {
+    use super::*;
+
+    #[test]
+    fn worker_peer_message_accepted_roundtrips() {
+        use crate::domain::peer_message::{MessageKind, PeerMessageId};
+        use uuid::Uuid;
+
+        let body = SpurEventBody::WorkerPeerMessageAccepted {
+            brain_session_id: "bs-1".into(),
+            message_id: PeerMessageId(Uuid::new_v4()),
+            source_delegation_id: crate::domain::delegation::DelegationId("src".into()),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            kind: MessageKind::Question,
+            sequence: 1,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, SpurEventBody::WorkerPeerMessageAccepted { .. }));
+    }
+
+    #[test]
+    fn worker_peer_message_delivered_carries_injected_chars() {
+        use crate::domain::peer_message::PeerMessageId;
+        use uuid::Uuid;
+
+        let body = SpurEventBody::WorkerPeerMessageDelivered {
+            brain_session_id: "bs-1".into(),
+            message_id: PeerMessageId(Uuid::new_v4()),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            target_prompt_id: "prompt-uuid".into(),
+            injected_chars: 1234,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        if let SpurEventBody::WorkerPeerMessageDelivered { injected_chars, .. } = back {
+            assert_eq!(injected_chars, 1234);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn worker_peer_mailbox_reconciled_carries_counts() {
+        let body = SpurEventBody::WorkerPeerMailboxReconciled {
+            audit_failed_emitted: 2,
+            inflight_forced_to_delivered: 1,
+            inflight_reverted_to_queued: 0,
+            guards_re_wrapped: 3,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, SpurEventBody::WorkerPeerMailboxReconciled { .. }));
     }
 }
 
