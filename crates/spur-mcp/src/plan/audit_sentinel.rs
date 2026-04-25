@@ -76,6 +76,11 @@ pub enum AuditSentinelKind {
         worker_branch: Option<String>,
         #[serde(default)]
         result_summary: Option<String>,
+        /// NEW (Phase 3) - `Some(_)` when OutcomeMaterializer succeeded;
+        /// carries the OutcomeKey-derived URI. Operators viewing the beads
+        /// issue can extract this and resolve via `fetch_outcome_artifact`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_uri: Option<String>,
     },
     EpicCompletion {
         outcome: EpicCompletionOutcome,
@@ -241,6 +246,7 @@ mod tests {
                 superseded: false,
                 worker_branch: Some("feat/x".into()),
                 result_summary: None,
+                artifact_uri: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-A".into(),
@@ -341,6 +347,7 @@ mod tests {
                 superseded: false,
                 worker_branch: None,
                 result_summary: None,
+                artifact_uri: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "x".into(),
@@ -433,6 +440,38 @@ mod tests {
     }
 
     #[test]
+    fn completion_variant_parses_v2_comments_without_artifact_uri() {
+        // Audit comments emitted before Phase 3 don't have artifact_uri.
+        // Parser must default to None instead of erroring.
+        let v2_json = r#"{"kind":"completion","delegation_id":"abc","completion_state":"awaiting_review","superseded":false,"worker_branch":"spur/worker-x","result_summary":"done"}"#;
+        let parsed: AuditSentinelKind = serde_json::from_str(v2_json).expect("parse");
+        if let AuditSentinelKind::Completion { artifact_uri, .. } = parsed {
+            assert!(artifact_uri.is_none());
+        } else {
+            panic!("variant changed");
+        }
+    }
+
+    #[test]
+    fn completion_variant_round_trips_artifact_uri() {
+        let s = AuditSentinelKind::Completion {
+            delegation_id: "abc".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some("spur/worker-x".into()),
+            result_summary: Some("done".into()),
+            artifact_uri: Some("spur://outcome/aaa/bbb/1".into()),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AuditSentinelKind = serde_json::from_str(&json).unwrap();
+        if let AuditSentinelKind::Completion { artifact_uri, .. } = back {
+            assert_eq!(artifact_uri.as_deref(), Some("spur://outcome/aaa/bbb/1"));
+        } else {
+            panic!("variant changed");
+        }
+    }
+
+    #[test]
     fn completion_state_and_dispatch_orphan_cleared_round_trip() {
         let completion = AuditSentinelKind::Completion {
             delegation_id: "del-A".into(),
@@ -440,6 +479,7 @@ mod tests {
             superseded: true,
             worker_branch: Some("feat/stale".into()),
             result_summary: Some("late completion ignored".into()),
+            artifact_uri: None,
         };
         let orphan = AuditSentinelKind::DispatchOrphanCleared {
             delegation_id: "del-A".into(),
