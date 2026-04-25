@@ -1082,7 +1082,10 @@ mod worker_peer_event_tests {
         };
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, SpurEventBody::WorkerPeerMessageAccepted { .. }));
+        assert!(matches!(
+            back,
+            SpurEventBody::WorkerPeerMessageAccepted { .. }
+        ));
     }
 
     #[test]
@@ -1117,7 +1120,10 @@ mod worker_peer_event_tests {
         };
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, SpurEventBody::WorkerPeerMailboxReconciled { .. }));
+        assert!(matches!(
+            back,
+            SpurEventBody::WorkerPeerMailboxReconciled { .. }
+        ));
     }
 
     #[test]
@@ -1135,7 +1141,8 @@ mod worker_peer_event_tests {
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
         if let SpurEventBody::WorkerPeerMessageRejected {
-            target_delegation_id, ..
+            target_delegation_id,
+            ..
         } = back
         {
             assert_eq!(target_delegation_id.0, "tgt");
@@ -1158,7 +1165,8 @@ mod worker_peer_event_tests {
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
         if let SpurEventBody::WorkerPeerMessageDropped {
-            target_delegation_id, ..
+            target_delegation_id,
+            ..
         } = back
         {
             assert_eq!(target_delegation_id.0, "tgt");
@@ -1182,7 +1190,8 @@ mod worker_peer_event_tests {
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
         if let SpurEventBody::WorkerPeerMessageAuditFailed {
-            target_delegation_id, ..
+            target_delegation_id,
+            ..
         } = back
         {
             assert_eq!(target_delegation_id.0, "tgt");
