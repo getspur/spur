@@ -12,7 +12,7 @@ use ratatui::{
 use spur_acp::{SessionInfo, SpurEvent};
 
 use crate::action::{Action, ViewId};
-use crate::components::status_bar::{StatusBar, StatusBarProps};
+use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::session_metadata::SessionMetadata;
 
 use super::View;
@@ -37,6 +37,30 @@ fn footer_hint(
         } => "type to filter \u{00b7} Enter commit \u{00b7} Esc exit search",
         PickerState::Populated { .. } => {
             "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} d archive \u{00b7} y yank-id \u{00b7} P preview \u{00b7} Esc back"
+        }
+    }
+}
+
+fn footer_hint_compact(
+    state: &PickerState,
+    rename_active: bool,
+    confirm_active: bool,
+) -> &'static str {
+    if confirm_active {
+        return "y/Enter confirm \u{00b7} n/Esc cancel";
+    }
+    if rename_active {
+        return "type new title \u{00b7} Enter save \u{00b7} Esc cancel";
+    }
+    match state {
+        PickerState::Loading => "Esc back",
+        PickerState::Error { .. } => "r retry \u{00b7} Esc back",
+        PickerState::Populated {
+            search_focused: true,
+            ..
+        } => "\u{2191}\u{2193} pick \u{00b7} Esc",
+        PickerState::Populated { .. } => {
+            "j/k nav \u{00b7} \u{21b5} resume \u{00b7} / search \u{00b7} y yank \u{00b7} Esc"
         }
     }
 }
@@ -499,7 +523,11 @@ impl SessionPickerView {
                 alert_summary: None,
                 license_badge,
                 flag_summary,
-                view_hint_override: Some(footer_hint(&self.state, false, false)),
+                view_hint_override: Some(HintOverride {
+                    full: footer_hint(&self.state, false, false),
+                    compact: Some(footer_hint_compact(&self.state, false, false)),
+                    hide_on_overflow: true,
+                }),
             },
         );
         render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));
@@ -791,7 +819,19 @@ impl SessionPickerView {
                     alert_summary: None,
                     license_badge,
                     flag_summary,
-                    view_hint_override: Some(footer_hint(&self.state, false, false)),
+                    view_hint_override: Some(HintOverride {
+                        full: footer_hint(
+                            &self.state,
+                            self.rename_state.is_some(),
+                            self.confirm_switch.is_some(),
+                        ),
+                        compact: Some(footer_hint_compact(
+                            &self.state,
+                            self.rename_state.is_some(),
+                            self.confirm_switch.is_some(),
+                        )),
+                        hide_on_overflow: true,
+                    }),
                 },
             );
         }
@@ -860,7 +900,11 @@ impl SessionPickerView {
                 alert_summary: None,
                 license_badge,
                 flag_summary,
-                view_hint_override: Some(footer_hint(&self.state, false, false)),
+                view_hint_override: Some(HintOverride {
+                    full: footer_hint(&self.state, false, false),
+                    compact: Some(footer_hint_compact(&self.state, false, false)),
+                    hide_on_overflow: true,
+                }),
             },
         );
         render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));

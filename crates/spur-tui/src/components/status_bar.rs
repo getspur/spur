@@ -66,6 +66,31 @@ pub(crate) fn hint_for_session_detail(
     }
 }
 
+/// Optional override for a view's StatusBar hint. Supports three policies:
+/// - `full` is the canonical hint string.
+/// - `compact` is an optional shorter alternative used when `full` doesn't fit.
+/// - `hide_on_overflow` opt-in by views that have a separate footer carrying
+///   the same hint (e.g., SessionPicker), so the StatusBar can render empty
+///   when even `compact` doesn't fit, instead of truncating mid-word.
+#[derive(Clone, Copy)]
+pub struct HintOverride<'a> {
+    pub full: &'a str,
+    pub compact: Option<&'a str>,
+    pub hide_on_overflow: bool,
+}
+
+impl<'a> HintOverride<'a> {
+    /// Convenience constructor for views that have only a single hint
+    /// and never want the StatusBar to hide on overflow.
+    pub fn from_full(full: &'a str) -> Self {
+        Self {
+            full,
+            compact: None,
+            hide_on_overflow: false,
+        }
+    }
+}
+
 /// Everything the status bar needs to render one frame.
 #[derive(Clone, Copy)]
 pub struct StatusBarProps<'a> {
@@ -95,31 +120,11 @@ pub struct StatusBarProps<'a> {
     /// When `Some`, overrides the hardcoded per-view hint string.
     /// Used by `SessionPickerView` to keep the StatusBar hint in sync
     /// with `footer_hint(...)` for the current picker mode.
-    pub view_hint_override: Option<&'a str>,
+    pub view_hint_override: Option<HintOverride<'a>>,
 }
 
 impl StatusBar {
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
-        let hints = if let Some(s) = props.view_hint_override {
-            s
-        } else {
-            match props.view {
-                ViewId::Dashboard => {
-                    " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
-                }
-                ViewId::IssueBrowser => {
-                    " [j/k]navigate [Enter]detail [o/w/b/d]status [W]work [Esc]back [?]help"
-                }
-                ViewId::SessionDetail(_) => {
-                    hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
-                }
-                ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
-                ViewId::PlanInspector(_) => " [Esc]back [Alt-p]close",
-                #[cfg(feature = "markdown")]
-                ViewId::MermaidOverlay(_) => " [Esc]close",
-            }
-        };
-
         let mode_text = props
             .current_mode
             .filter(|m| !m.is_empty())
@@ -166,6 +171,44 @@ impl StatusBar {
         } else {
             (full_line, full_width)
         };
+
+        let hint_area_width = area
+            .width
+            .saturating_sub(right_width.max(1))
+            .saturating_sub(2);
+        let resolved_hint: &str = if let Some(o) = props.view_hint_override.as_ref() {
+            let full_w = Span::raw(o.full).width() as u16;
+            let compact_w = o.compact.map(|c| Span::raw(c).width() as u16);
+
+            if full_w <= hint_area_width {
+                o.full
+            } else if matches!(compact_w, Some(w) if w <= hint_area_width) {
+                o.compact.unwrap()
+            } else if o.hide_on_overflow {
+                ""
+            } else if let Some(c) = o.compact {
+                c
+            } else {
+                o.full
+            }
+        } else {
+            match props.view {
+                ViewId::Dashboard => {
+                    " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
+                }
+                ViewId::IssueBrowser => {
+                    " [j/k]navigate [Enter]detail [o/w/b/d]status [W]work [Esc]back [?]help"
+                }
+                ViewId::SessionDetail(_) => {
+                    hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
+                }
+                ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
+                ViewId::PlanInspector(_) => " [Esc]back [Alt-p]close",
+                #[cfg(feature = "markdown")]
+                ViewId::MermaidOverlay(_) => " [Esc]close",
+            }
+        };
+        let hints = resolved_hint;
 
         let hints_line = Line::from(Span::styled(
             hints,
