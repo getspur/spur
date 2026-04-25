@@ -13,6 +13,7 @@ pub mod lineage;
 pub(crate) mod notification_drain;
 pub mod notification_pump;
 pub mod orchestrator;
+pub mod peer_mailbox;
 pub mod plan_projection;
 pub mod retry_loop;
 pub mod review_sink;
