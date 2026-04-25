@@ -72,6 +72,111 @@ fn cursor_default_falls_back_when_last_active_not_in_visible_list() {
 }
 
 #[test]
+fn cursor_preserved_by_session_id_after_set_sessions_reorders_list() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
+    picker.set_sessions(
+        "t".into(),
+        vec![
+            session("a1", "alpha"),
+            session("a2", "beta"),
+            session("a3", "gamma"),
+        ],
+    );
+
+    // Move cursor to a3 (cursor 3 = third session row).
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert_eq!(picker.cursor(), 3);
+
+    // Simulate refresh that reorders the list (a3 first now).
+    picker.set_sessions(
+        "t".into(),
+        vec![
+            session("a3", "gamma"),
+            session("a1", "alpha"),
+            session("a2", "beta"),
+        ],
+    );
+
+    // Cursor should follow a3, which is now at row 1.
+    assert_eq!(picker.cursor(), 1);
+    assert_eq!(
+        picker
+            .visible_session_at(0)
+            .map(|s| s.session_id.0.as_ref()),
+        Some("a3")
+    );
+}
+
+#[test]
+fn cursor_preserves_new_session_row_across_refresh() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata({
+        let mut m = spur_tui::session_metadata::SessionMetadata::default();
+        m.last_active_session_id = Some("a1".to_string());
+        m
+    });
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    // last_active=a1 → cursor lands on row 1 by P1.
+    assert_eq!(picker.cursor(), 1);
+
+    // User explicitly moves to [+ New].
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
+    assert_eq!(picker.cursor(), 0);
+
+    // Refresh.
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+
+    // P2 special case: cursor==0 stays at 0 (don't yank the user away from [+ New]).
+    assert_eq!(picker.cursor(), 0);
+}
+
+#[test]
+fn cursor_falls_through_to_p1_when_highlighted_session_disappears() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata({
+        let mut m = spur_tui::session_metadata::SessionMetadata::default();
+        m.last_active_session_id = Some("a1".to_string());
+        m
+    });
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+    );
+    // Move to a2.
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert_eq!(picker.cursor(), 2);
+
+    // Refresh with a2 missing — P2 finds nothing; falls through to P1, which lands on a1.
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    assert_eq!(picker.cursor(), 1);
+    assert_eq!(
+        picker
+            .visible_session_at(0)
+            .map(|s| s.session_id.0.as_ref()),
+        Some("a1")
+    );
+}
+
+#[test]
 fn n_key_on_picker_emits_new_session_requested() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("test-agent".into(), vec![]);
