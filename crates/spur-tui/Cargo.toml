@@ -19,6 +19,7 @@ tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 anyhow = { workspace = true }
+base64 = "0.22"
 chrono = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
