@@ -61,7 +61,7 @@ The goal is for these tests to **skip gracefully** in restricted sandboxes (epri
 
 3. Wrap the test in a sub-module `mod perf_regressions { ... }` so the perf classification surfaces in `cargo test` output as `mutation_pagination::perf_regressions::mutation_scans_paginate_past_10k_issues`.
 
-4. Inside the sub-module, use **explicit named imports** rather than a glob (`use super::*` would silently miss the file-scope private helpers — Rust's glob import only re-exports `pub` items; named imports work for parent-private items because child modules can already see their parents):
+4. Inside the sub-module, use **explicit named imports** rather than a glob. Both `use super::*;` and explicit named imports compile — child modules can see *all* parent items (including private ones), and a glob import brings in everything visible from the use site, so `use super::*;` correctly pulls in the file-scope private helpers and `FILLER_COUNT`. Empirically verified at design time. Named imports are chosen here as a style preference, not a correctness one: the explicit list documents the test's dependency surface, and a future helper added at file scope will not be silently absorbed into the test module — adding it requires a deliberate edit to the import list. For a single test with a fixed set of 9 helpers this trade-off is cheap; for files with many helpers and tests, glob is simpler.
 
    ```rust
    mod perf_regressions {
@@ -301,9 +301,10 @@ The implementation plan will follow this order; each step is independently commi
 - **TCP-bind sandbox skip strategy:** option **B3** chosen — shared `tests/common/mod.rs` helper, not inline-per-test or env-var-gated.
 - **Async cache primitive:** `tokio::sync::OnceCell` over `std::sync::OnceLock` (caught in review iteration; needed because the probe is async).
 - **Macro shape:** two arms (unary + binary expr) over `Default::default()` trick (caught in review iteration; needed because `rmcp_streamable_http.rs` returns `Result<...>` and one of the other tests doesn't).
-- **Triple-review amendments (gemini, kimi, codex on `d9ba89c`):**
+- **Quad-review amendments (gemini ×2, kimi, codex on `d9ba89c`):**
   - Added `tempfile::TempDir` import inside the `mod perf_regressions` block (gemini caught: file-scope `use tempfile::TempDir;` does not propagate into the wrap module via `super::TempDir` in the named-import list).
   - Replaced the loopback-test wiring table with the verified 4-file list: `rmcp_streamable_http`, `server_start_pidfile`, `persisted_authority_flip`, `reconciler_tick` (codex + kimi independently verified via `rg '\.start\(\)'`). Removed three files that don't call `.start()` (`e2e_closure_v0e`, `pidfile_single_brain`, `parallel_response_shape`, `block_timeout_continuation`) and added two that do (`persisted_authority_flip`, `reconciler_tick`).
   - Added explicit exclusion for `beads_backed_start_requires_repo_root_before_listener_boot` (kimi caught: deliberately exercises pre-bind `repo_root` invariant at `server.rs:1898–1914`, must not receive the macro).
   - Expanded scope to migrate four existing ad-hoc post-bind skip patterns (`persisted_authority_flip.rs:691-700, 758-767`; `reconciler_tick.rs:1309, 1426`) to the pre-bind macro for consistency. Adds verification step 8 (`grep` for the old error string returns zero matches post-implementation).
   - Mandated that the implementation plan regenerate the wiring list via `rg '\.start\(\)'` rather than copy from the spec table (codex's recommendation).
+  - Corrected the rationale for choosing named imports over `use super::*;` (gemini's second-pass review). The original claim — that glob imports cannot see parent-private items — was technically wrong; child modules see all parent items and glob imports respect that, so both forms compile. Empirically verified with a 5-line `rustc --test` repro at design time. Named imports remain the chosen style for explicitness, not correctness.
