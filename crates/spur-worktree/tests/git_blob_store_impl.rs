@@ -242,3 +242,60 @@ async fn git_blob_store_sweep_prunes_legacy_artifact_refs() {
         .unwrap();
     assert!(!post.status.success(), "legacy ref pruned post-sweep");
 }
+
+
+#[tokio::test]
+async fn git_blob_store_returns_git_blob_sha_in_outcome_ref() {
+    // Regression guard: WorkerArtifact.blob_sha (Phase 1 fetch_outcome_artifact
+    // resolves via `git cat-file -p blob_sha`) MUST receive the 40-char git
+    // SHA-1, not the 64-char content SHA-256. T9 review surfaced this hole.
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let k = key(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "deadbeef-1111-2222-3333-444455556666",
+        1,
+    );
+    let body = b"sha-mapping check".to_vec();
+    let r = store.put(&k, &body, &metadata(&body)).await.unwrap();
+
+    let git_sha = r.git_blob_sha.expect("git_blob_sha must be populated");
+    assert_eq!(git_sha.len(), 40, "git SHA-1 is 40 hex chars");
+    assert!(
+        git_sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "git SHA-1 must be hex"
+    );
+    // sha256 must be the 64-char content digest.
+    assert_eq!(r.sha256.len(), 64, "content SHA-256 is 64 hex chars");
+    assert_ne!(git_sha, r.sha256, "git SHA-1 and content SHA-256 must differ");
+
+    // Verify git can resolve the SHA via cat-file.
+    let cat = Command::new("git")
+        .args(["cat-file", "-p", &git_sha])
+        .current_dir(td.path())
+        .output()
+        .unwrap();
+    assert!(cat.status.success(), "git cat-file -p git_blob_sha must succeed");
+    assert_eq!(cat.stdout, body, "git cat-file content must match input");
+}
+
+#[tokio::test]
+async fn git_blob_store_idempotent_put_preserves_git_blob_sha() {
+    // Second put for same key + same content recovers the existing
+    // git SHA-1 via rev-parse.
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let k = key(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "deadbeef-1111-2222-3333-444455556666",
+        1,
+    );
+    let body = b"idem".to_vec();
+    let m = metadata(&body);
+    let a = store.put(&k, &body, &m).await.unwrap();
+    let b = store.put(&k, &body, &m).await.unwrap();
+    assert_eq!(a.git_blob_sha, b.git_blob_sha, "idempotent put recovers git SHA");
+    assert!(a.git_blob_sha.is_some());
+}
