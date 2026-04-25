@@ -108,6 +108,7 @@ impl PersistedFixture {
             Some(Arc::clone(&pm)),
             Some(sink_ref),
             continuation_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         );
         server.set_repo_root(dir.path().to_path_buf());
 
@@ -261,6 +262,7 @@ async fn recover_persisted_plans_emits_plan_snapshot_updated() {
         Some(Arc::clone(&fixture.pm)),
         Some(sink_ref),
         continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     );
     server.set_repo_root(fixture._dir.path().to_path_buf());
     server
@@ -330,6 +332,7 @@ async fn recover_persisted_plans_uses_legacy_session_fallback_when_missing() {
         Some(Arc::clone(&pm)),
         Some(sink_ref),
         continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     );
     server.set_repo_root(dir.path().to_path_buf());
     server
