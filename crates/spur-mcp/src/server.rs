@@ -107,6 +107,58 @@ impl JsonRpcResponse {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ProjectionError {
+    #[error("stored blob is not valid UTF-8: {0}")]
+    InvalidUtf8(#[source] std::string::FromUtf8Error),
+    #[error("stored blob is not a valid DelegationResult: {0}")]
+    InvalidResult(#[source] serde_json::Error),
+    #[error("projection serialization failed: {0}")]
+    SerializeFailed(#[source] serde_json::Error),
+}
+
+fn project_section(
+    full_bytes: &[u8],
+    section: spur_blob_store::Section,
+    key: &spur_acp::domain::outcome::OutcomeKey,
+) -> std::result::Result<String, ProjectionError> {
+    use spur_acp::domain::DelegationResult;
+    use spur_blob_store::Section;
+
+    if matches!(section, Section::Full) {
+        return String::from_utf8(full_bytes.to_vec()).map_err(ProjectionError::InvalidUtf8);
+    }
+
+    let result: DelegationResult =
+        serde_json::from_slice(full_bytes).map_err(ProjectionError::InvalidResult)?;
+    let estimated_cost_micros =
+        crate::outcome_materializer::usd_to_micros_saturating(result.estimated_cost_usd);
+
+    let projected = match section {
+        Section::StatusOnly => json!({
+            "status": result.status,
+            "attempt": key.attempt,
+            "brain_session": &key.brain_session_id,
+            "estimated_cost_micros": estimated_cost_micros,
+        }),
+        Section::Summary => json!({
+            "status": result.status,
+            "attempt": key.attempt,
+            "brain_session": &key.brain_session_id,
+            "summary": result.summary,
+            "estimated_cost_micros": estimated_cost_micros,
+        }),
+        Section::DiffOnly => json!({
+            "status": result.status,
+            "diff": result.diff,
+            "diff_summary": result.diff_summary,
+        }),
+        Section::Full => unreachable!("handled above"),
+    };
+
+    serde_json::to_string(&projected).map_err(ProjectionError::SerializeFailed)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 enum DelegationDispatchError {
     #[error("SessionRetiring")]
@@ -283,7 +335,6 @@ pub struct McpCallbackServer {
     /// into the orchestrator ingress via `report_detached_completion`.
     continuation_ctx: Arc<DetachedContinuationCtx>,
     pub(crate) materializer: OutcomeMaterializer,
-    #[allow(dead_code)]
     pub(crate) outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
     /// Phase 1c: how long `handle_delegate_to_worker` / `handle_delegate_parallel`
     /// wait inline for a worker's oneshot to fire before handing the receiver
@@ -2601,20 +2652,9 @@ impl McpCallbackServer {
         JsonRpcResponse::error(id, -32602, format!("Unknown delegation: {delegation_id}"))
     }
 
-    /// Phase 1 of plan-5 brain-continuation artifact store.
-    /// Reads an existing oversized-stdout artifact via the git-blob path
-    /// previously stored by `worktrees.persist_artifact`. Authorization is
-    /// scoped to `self.brain_session_id` — the caller does NOT supply
-    /// `brain_session_id` as an argument.
-    ///
-    /// Phase 1 args:
-    ///   { "delegation_id": String, "section": Option<"full"> }  // default "full"
-    ///
-    /// Returns: { "content": [{ "type": "text", "text": <full text> }] }
-    ///
-    /// Future-compat: Phase 3 widens `section` to status_only|summary|diff_only|full
-    /// and adds an `attempt: Option<u32>` arg.
     async fn handle_fetch_outcome_artifact(&self, id: Value, args: Value) -> JsonRpcResponse {
+        use spur_blob_store::Section;
+
         let delegation_id: DelegationId = match args.get("delegation_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.into(),
             _ => {
@@ -2622,103 +2662,100 @@ impl McpCallbackServer {
             }
         };
 
-        // Phase 1: only "full" is supported. Anything else is a clean
-        // InvalidParams response, NOT a serde deserialization error.
-        match args.get("section").and_then(|v| v.as_str()) {
-            None | Some("full") => {}
-            Some(other) => {
+        let section_str = args
+            .get("section")
+            .and_then(|v| v.as_str())
+            .unwrap_or("full");
+        let section = match section_str {
+            "full" => Section::Full,
+            "status_only" => Section::StatusOnly,
+            "summary" => Section::Summary,
+            "diff_only" => Section::DiffOnly,
+            other => {
                 return JsonRpcResponse::invalid_params(
                     id,
                     format!(
-                        "Phase 1 only supports section='full' (got '{other}'). \
-                         Phase 3 will add: status_only, summary, diff_only."
+                        "Unknown section '{other}'. Must be one of: status_only, summary, diff_only, full."
                     ),
                 );
             }
-        }
-
-        // Look up the artifact from completed_delegations WITHOUT removing
-        // (the entry remains until TTL expires; multiple fetches allowed).
-        // Persist-before-publish ordering (orchestrator persists before the
-        // continuation is built) guarantees that any delegation_id known to
-        // the brain has already had its blob written. NotFound is reserved
-        // for hallucinated/wrong ids.
-        let entry = {
-            let map = self.completed_delegations.lock().await;
-            map.get(&delegation_id).map(|(r, _)| r.clone())
         };
-        let result = match entry {
-            Some(r) => r,
-            None => {
+
+        let attempt = match args.get("attempt").and_then(|v| v.as_u64()) {
+            Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
+            None => self
+                .materializer
+                .latest_attempt(&delegation_id)
+                .await
+                .unwrap_or(1),
+            Some(_) => {
+                return JsonRpcResponse::invalid_params(id, "Invalid 'attempt': must be u32 >= 1");
+            }
+        };
+
+        let key = spur_acp::domain::outcome::OutcomeKey {
+            brain_session_id: self.brain_session_id.clone(),
+            delegation_id: delegation_id.clone(),
+            attempt,
+        };
+
+        let start = std::time::Instant::now();
+        let content = match self.outcome_store.get(&key, Some(Section::Full)).await {
+            Ok(content) => content,
+            Err(spur_blob_store::StoreError::NotFound(_)) => {
+                tracing::warn!(
+                    target: "spur.metrics.outcome_fetch_not_found",
+                    ?key,
+                    section = section_str,
+                    "outcome not found; possible hallucinated id, post-GC read, or in-flight race"
+                );
                 return JsonRpcResponse::error(
                     id,
                     -32004,
-                    format!("Outcome artifact not found for delegation_id={delegation_id}"),
-                );
-            }
-        };
-
-        let artifact = match result.artifact.as_ref() {
-            Some(a) => a,
-            None => {
-                return JsonRpcResponse::error(
-                    id,
-                    -32004,
-                    format!("Delegation {delegation_id} has no side-channel artifact"),
-                );
-            }
-        };
-
-        let repo_root = match &self.repo_root {
-            Some(r) => r.clone(),
-            None => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    "fetch_outcome_artifact requires repo_root to be configured",
-                );
-            }
-        };
-
-        // NOTE: do NOT use `run_git_capture` here — it trims stdout, which
-        // would corrupt blob payloads that have significant trailing
-        // whitespace or a final newline. We need the exact bytes of the
-        // git blob, lossy-converted to UTF-8 only because the MCP wire
-        // expects a `text` content field.
-        let text = match tokio::process::Command::new("git")
-            .args(["cat-file", "-p", artifact.blob_sha.as_str()])
-            .current_dir(&repo_root)
-            .output()
-            .await
-        {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout).into_owned()
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                return JsonRpcResponse::internal_error(
-                    id,
                     format!(
-                        "git cat-file failed for blob {} (exit {}): {stderr}",
-                        artifact.blob_sha,
-                        output.status.code().unwrap_or(-1)
+                        "Outcome artifact not found for delegation_id={delegation_id} attempt={attempt}"
                     ),
                 );
+            }
+            Err(spur_blob_store::StoreError::Unauthorized { requested, actual }) => {
+                tracing::warn!(
+                    target: "spur.metrics.outcome_fetch_unauthorized",
+                    ?requested,
+                    ?actual,
+                    "cross-session fetch rejected"
+                );
+                return JsonRpcResponse::error(id, -32001, "cross-session outcome read forbidden");
             }
             Err(error) => {
                 return JsonRpcResponse::internal_error(
                     id,
-                    format!(
-                        "git cat-file failed for blob {}: {error}",
-                        artifact.blob_sha
-                    ),
+                    format!("OutcomeStore::get failed: {error}"),
                 );
             }
         };
 
+        let projected_text = match project_section(&content.bytes, section, &key) {
+            Ok(text) => text,
+            Err(error) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("Section projection failed: {error}"),
+                );
+            }
+        };
+
+        tracing::info!(
+            target: "spur.metrics.outcome_fetched",
+            ?key,
+            section = section_str,
+            byte_size = projected_text.len() as u64,
+            latency_ms = start.elapsed().as_millis() as u64,
+        );
+
         JsonRpcResponse::success(
             id,
             json!({
-                "content": [{ "type": "text", "text": text }]
+                "content": [{ "type": "text", "text": projected_text }]
             }),
         )
     }
@@ -4823,23 +4860,19 @@ mod continuation_producer_tests {
 mod fetch_outcome_artifact_tests {
     //! End-to-end tests for the `fetch_outcome_artifact` MCP tool.
     //!
-    //! Persists a real artifact via `spur_worktree::artifact::persist`,
-    //! injects a `DelegationResult` carrying that artifact into the
-    //! server's `completed_delegations` map, then calls the JSON-RPC
-    //! tool dispatcher and asserts the round-trip preserves the exact
-    //! blob bytes.
-    //!
-    //! Phase 1 of plan-5; spec §5.3.
+    //! Seeds the outcome store with serialized `DelegationResult` blobs,
+    //! then calls the JSON-RPC tool dispatcher and asserts the section
+    //! projection returned to the brain.
 
     use super::{DetachedContinuationCtx, McpCallbackServer};
     use serde_json::{json, Value};
-    use spur_acp::domain::artifact::ArtifactKind;
-    use spur_acp::domain::{DelegationResult, DelegationStatus};
+    use sha2::{Digest, Sha256};
+    use spur_acp::domain::{ContinuationSource, DelegationResult, DelegationStatus, OutcomeKey};
     use spur_acp::{BrainSessionId, DelegationId, SessionId};
+    use spur_blob_store::{ContentType, OutcomeMetadata, OutcomeStore};
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::time::Instant;
 
     async fn init_git_repo(path: &Path) {
         let init = tokio::process::Command::new("git")
@@ -4871,6 +4904,14 @@ mod fetch_outcome_artifact_tests {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
         let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        build_test_server_with_store(repo_root, brain_session, outcome_store).await
+    }
+
+    async fn build_test_server_with_store(
+        repo_root: &Path,
+        brain_session: BrainSessionId,
+        outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+    ) -> McpCallbackServer {
         let (mut server, _channel) = McpCallbackServer::new(
             &brain_session,
             None,
@@ -4882,17 +4923,68 @@ mod fetch_outcome_artifact_tests {
         server
     }
 
-    async fn inject_completed(
-        server: &McpCallbackServer,
+    fn sha256_hex(content: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write;
+            write!(&mut hex, "{byte:02x}").expect("hex write infallible");
+        }
+        hex
+    }
+
+    fn outcome_metadata(content: &[u8]) -> OutcomeMetadata {
+        OutcomeMetadata {
+            created_at: chrono::Utc::now(),
+            content_type: ContentType::Json,
+            original_byte_size: content.len() as u64,
+            stored_byte_size: content.len() as u64,
+            sha256: sha256_hex(content),
+        }
+    }
+
+    async fn put_outcome(
+        store: &Arc<dyn OutcomeStore>,
+        brain_session: &BrainSessionId,
         delegation_id: DelegationId,
-        result: DelegationResult,
+        attempt: u32,
+        result: &DelegationResult,
     ) {
-        let mut map = server.completed_delegations.lock().await;
-        map.insert(delegation_id, (result, Instant::now()));
+        let bytes = serde_json::to_vec(result).expect("serialize result");
+        let metadata = outcome_metadata(&bytes);
+        let key = OutcomeKey {
+            brain_session_id: brain_session.clone(),
+            delegation_id,
+            attempt,
+        };
+        store
+            .put(&key, &bytes, &metadata)
+            .await
+            .expect("put outcome");
+    }
+
+    fn success_result(summary: &str, diff: &str, cost: f64) -> DelegationResult {
+        DelegationResult {
+            status: DelegationStatus::Success,
+            summary: Some(summary.into()),
+            diff: Some(diff.into()),
+            diff_summary: None,
+            estimated_cost_usd: cost,
+            worker_branch: None,
+            artifact: None,
+        }
     }
 
     fn dispatch_args(name: &str, args: Value) -> Value {
         json!({ "name": name, "arguments": args })
+    }
+
+    fn response_text(response: &super::JsonRpcResponse) -> &str {
+        response.result.as_ref().expect("expected success response")["content"][0]["text"]
+            .as_str()
+            .expect("text content")
     }
 
     #[tokio::test]
@@ -4900,26 +4992,16 @@ mod fetch_outcome_artifact_tests {
         let td = TempDir::new().unwrap();
         init_git_repo(td.path()).await;
 
-        let body = "line one\nline two\n".repeat(100);
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
-        let artifact =
-            spur_worktree::artifact::persist(td.path(), session_id, &body, ArtifactKind::Output)
-                .await
-                .expect("persist artifact");
-
-        let server = build_test_server(td.path(), session_id).await;
+        let brain_session = BrainSessionId::new(SessionId(session_id.into()));
+        let store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let server =
+            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
 
         let delegation_id: DelegationId = "deadbeef-1111-2222-3333-444455556666".into();
-        let result = DelegationResult {
-            status: DelegationStatus::Success,
-            summary: Some("ok".into()),
-            diff: None,
-            diff_summary: None,
-            estimated_cost_usd: 0.0,
-            worker_branch: None,
-            artifact: Some(artifact),
-        };
-        inject_completed(&server, delegation_id.clone(), result).await;
+        let result = success_result("ok", "line one\nline two\n", 0.0);
+        put_outcome(&store, &brain_session, delegation_id.clone(), 1, &result).await;
 
         let response = server
             .handle_tool_call(
@@ -4931,11 +5013,194 @@ mod fetch_outcome_artifact_tests {
             )
             .await;
 
-        let payload = response.result.as_ref().expect("expected success response");
-        let text = payload["content"][0]["text"]
-            .as_str()
-            .expect("text content");
-        assert_eq!(text, body, "round-trip text must match the persisted body");
+        let text = response_text(&response);
+        let parsed: DelegationResult = serde_json::from_str(text).expect("full result json");
+        assert_eq!(parsed.summary.as_deref(), Some("ok"));
+        assert_eq!(parsed.diff.as_deref(), Some("line one\nline two\n"));
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_returns_status_only_section() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let brain_session = BrainSessionId::new(SessionId(session_id.into()));
+        let store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let server =
+            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+
+        let delegation_id: DelegationId = "deadbeef-status-only".into();
+        let result = success_result("summary must stay out", "diff must stay out", 1.25);
+        put_outcome(&store, &brain_session, delegation_id.clone(), 1, &result).await;
+
+        let response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({
+                        "delegation_id": delegation_id.as_str(),
+                        "section": "status_only"
+                    }),
+                ),
+            )
+            .await;
+
+        let projected: Value = serde_json::from_str(response_text(&response)).expect("json");
+        assert_eq!(projected["status"], "Success");
+        assert_eq!(projected["attempt"], 1);
+        assert_eq!(projected["brain_session"], session_id);
+        assert_eq!(projected["estimated_cost_micros"], 1_250_000);
+        assert!(projected.get("summary").is_none());
+        assert!(projected.get("diff").is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_returns_summary_section() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let brain_session = BrainSessionId::new(SessionId(session_id.into()));
+        let store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let server =
+            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+
+        let delegation_id: DelegationId = "deadbeef-summary".into();
+        let result = success_result("summary included", "diff must stay out", 0.5);
+        put_outcome(&store, &brain_session, delegation_id.clone(), 1, &result).await;
+
+        let response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({
+                        "delegation_id": delegation_id.as_str(),
+                        "section": "summary"
+                    }),
+                ),
+            )
+            .await;
+
+        let projected: Value = serde_json::from_str(response_text(&response)).expect("json");
+        assert_eq!(projected["status"], "Success");
+        assert_eq!(projected["attempt"], 1);
+        assert_eq!(projected["brain_session"], session_id);
+        assert_eq!(projected["summary"], "summary included");
+        assert_eq!(projected["estimated_cost_micros"], 500_000);
+        assert!(projected.get("diff").is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_returns_diff_only_section() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let brain_session = BrainSessionId::new(SessionId(session_id.into()));
+        let store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let server =
+            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+
+        let delegation_id: DelegationId = "deadbeef-diff-only".into();
+        let result = success_result("summary must stay out", "diff included", 0.25);
+        put_outcome(&store, &brain_session, delegation_id.clone(), 1, &result).await;
+
+        let response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({
+                        "delegation_id": delegation_id.as_str(),
+                        "section": "diff_only"
+                    }),
+                ),
+            )
+            .await;
+
+        let projected: Value = serde_json::from_str(response_text(&response)).expect("json");
+        assert_eq!(projected["status"], "Success");
+        assert_eq!(projected["diff"], "diff included");
+        assert!(projected.get("diff_summary").is_some());
+        assert!(projected.get("summary").is_none());
+        assert!(projected.get("attempt").is_none());
+        assert!(projected.get("estimated_cost_micros").is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_pins_specific_attempt() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let brain_session = BrainSessionId::new(SessionId(session_id.into()));
+        let store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let server =
+            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+
+        let delegation_id: DelegationId = "deadbeef-attempts".into();
+        server
+            .materializer
+            .materialize(
+                success_result("attempt one", "diff one", 0.0),
+                delegation_id.clone(),
+                1,
+                brain_session.clone(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        server
+            .materializer
+            .materialize(
+                success_result("attempt two", "diff two", 0.0),
+                delegation_id.clone(),
+                2,
+                brain_session.clone(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+
+        let latest_response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({
+                        "delegation_id": delegation_id.as_str(),
+                        "section": "summary"
+                    }),
+                ),
+            )
+            .await;
+        let latest: Value = serde_json::from_str(response_text(&latest_response)).expect("json");
+        assert_eq!(latest["attempt"], 2);
+        assert_eq!(latest["summary"], "attempt two");
+
+        let pinned_response = server
+            .handle_tool_call(
+                Value::Number(2.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({
+                        "delegation_id": delegation_id.as_str(),
+                        "attempt": 1,
+                        "section": "summary"
+                    }),
+                ),
+            )
+            .await;
+        let pinned: Value = serde_json::from_str(response_text(&pinned_response)).expect("json");
+        assert_eq!(pinned["attempt"], 1);
+        assert_eq!(pinned["summary"], "attempt one");
     }
 
     #[tokio::test]
@@ -4977,7 +5242,7 @@ mod fetch_outcome_artifact_tests {
                     "fetch_outcome_artifact",
                     json!({
                         "delegation_id": "any-id",
-                        "section": "diff_only"
+                        "section": "not_a_section"
                     }),
                 ),
             )
@@ -4991,8 +5256,8 @@ mod fetch_outcome_artifact_tests {
         assert!(
             error
                 .message
-                .contains("Phase 1 only supports section='full'"),
-            "Phase 1 must reject unknown sections cleanly: {error:?}"
+                .contains("Must be one of: status_only, summary, diff_only, full"),
+            "unknown sections must be rejected cleanly: {error:?}"
         );
     }
 
@@ -5016,38 +5281,27 @@ mod fetch_outcome_artifact_tests {
 
     #[tokio::test]
     async fn fetch_outcome_artifact_completed_delegations_are_per_session() {
-        // Two MCP servers in the same temp-repo, but each binds to its own
-        // brain_session_id and its own completed_delegations map. Server A
-        // persists+fetches successfully; Server B sees NotFound for the same
-        // delegation_id (its completed_delegations map is empty). The
-        // authorization boundary is per-server completed_delegations, scoped
-        // to brain_session_id at construction (spec §5.3 round-9).
+        // Two MCP servers share the same store, but each binds fetches to
+        // its own brain_session_id. Server B asks for the same delegation_id
+        // under its session and must not see Server A's outcome.
         let td = TempDir::new().unwrap();
         init_git_repo(td.path()).await;
 
-        let body = "secret stdout for session A".to_string();
         let session_a_id = "550e8400-e29b-41d4-a716-446655440000";
         let session_b_id = "550e8400-e29b-41d4-a716-aaaaaaaaaaaa";
+        let brain_session_a = BrainSessionId::new(SessionId(session_a_id.into()));
+        let brain_session_b = BrainSessionId::new(SessionId(session_b_id.into()));
+        let store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
 
-        let artifact_a =
-            spur_worktree::artifact::persist(td.path(), session_a_id, &body, ArtifactKind::Output)
-                .await
-                .expect("persist artifact for session A");
-
-        let server_a = build_test_server(td.path(), session_a_id).await;
-        let server_b = build_test_server(td.path(), session_b_id).await;
+        let server_a =
+            build_test_server_with_store(td.path(), brain_session_a.clone(), store.clone()).await;
+        let server_b =
+            build_test_server_with_store(td.path(), brain_session_b, store.clone()).await;
 
         let delegation_a: DelegationId = "delegation-belonging-to-a".into();
-        let result_a = DelegationResult {
-            status: DelegationStatus::Success,
-            summary: None,
-            diff: None,
-            diff_summary: None,
-            estimated_cost_usd: 0.0,
-            worker_branch: None,
-            artifact: Some(artifact_a),
-        };
-        inject_completed(&server_a, delegation_a.clone(), result_a).await;
+        let result_a = success_result("secret stdout for session A", "secret diff", 0.0);
+        put_outcome(&store, &brain_session_a, delegation_a.clone(), 1, &result_a).await;
 
         // Server A can fetch its own delegation.
         let resp_a = server_a
@@ -5059,13 +5313,15 @@ mod fetch_outcome_artifact_tests {
                 ),
             )
             .await;
-        let text = resp_a.result.as_ref().expect("server A success")["content"][0]["text"]
-            .as_str()
-            .expect("text");
-        assert_eq!(text, body);
+        let text = response_text(&resp_a);
+        let parsed: DelegationResult = serde_json::from_str(text).expect("full result");
+        assert_eq!(
+            parsed.summary.as_deref(),
+            Some("secret stdout for session A")
+        );
 
-        // Server B has no completed_delegations entry → NotFound, even
-        // though the underlying git blob is reachable from this same repo.
+        // Server B fetches under its own brain_session_id and gets NotFound,
+        // even though the shared store contains Server A's outcome.
         let resp_b = server_b
             .handle_tool_call(
                 Value::Number(1.into()),
