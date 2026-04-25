@@ -323,14 +323,114 @@ impl OutcomeMaterializer {
 
     async fn fallback_truncation_ladder(
         &self,
-        _result: DelegationResult,
-        _delegation_id: DelegationId,
-        _attempt: u32,
-        _brain_session: BrainSessionId,
-        _source: ContinuationSource,
-        _event_sink: Option<&Arc<dyn McpEventSink>>,
+        result: DelegationResult,
+        delegation_id: DelegationId,
+        attempt: u32,
+        brain_session: BrainSessionId,
+        source: ContinuationSource,
+        event_sink: Option<&Arc<dyn McpEventSink>>,
     ) -> BrainContinuation {
-        unimplemented!("Task 6 wires the truncation-ladder fallback")
+        use spur_acp::domain::clip::{
+            clip_artifact_ref_strings, clip_diff_files, clip_status_strings, clip_with_ellipsis,
+        };
+        use spur_acp::domain::events::SpurEventBody;
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        let clipped_status = clip_status_strings(&result.status, self.status_string_cap_bytes);
+        let original_summary_len = result.summary.as_ref().map(|s| s.len()).unwrap_or(0);
+        let (clipped_summary, summary_truncated) =
+            clip_with_ellipsis(result.summary.clone(), self.summary_cap_bytes);
+        let (clipped_branch, _) =
+            clip_with_ellipsis(result.worker_branch.clone(), self.worker_branch_cap_bytes);
+        let clipped_diff = result
+            .diff_summary
+            .as_ref()
+            .map(|diff| clip_diff_files(diff, self.diff_files_cap_count));
+        let clipped_artifact_ref = result
+            .artifact
+            .as_ref()
+            .map(|artifact| build_artifact_ref(&delegation_id, artifact))
+            .map(|artifact| {
+                clip_artifact_ref_strings(&artifact, self.artifact_ref_string_cap_bytes)
+            });
+
+        if summary_truncated {
+            if let Some(sink) = event_sink {
+                sink.emit(SpurEventBody::ContinuationFieldTruncated {
+                    delegation_id: delegation_id.clone(),
+                    field: "summary".into(),
+                    original_bytes: original_summary_len,
+                    kept_bytes: clipped_summary.as_ref().map(|s| s.len()).unwrap_or(0),
+                });
+            }
+        }
+
+        let payload = ContinuationPayload {
+            status: clipped_status,
+            summary: clipped_summary,
+            diff_summary: clipped_diff,
+            worker_branch: clipped_branch,
+            artifact_ref: clipped_artifact_ref,
+            estimated_cost_micros: None,
+            artifact_id: None,
+            fetch_hint: None,
+        };
+
+        let mut cont = BrainContinuation {
+            delegation_id: delegation_id.clone(),
+            attempt,
+            brain_session: brain_session.as_session_id().clone(),
+            source,
+            payload,
+            created_at_wall: chrono::Utc::now(),
+            created_at_mono: Instant::now(),
+        };
+
+        let mut envelope_bytes = estimate_envelope_cost(&cont.payload);
+        let budget = spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES;
+        if envelope_bytes > budget {
+            cont.payload.summary = None;
+            envelope_bytes = estimate_envelope_cost(&cont.payload);
+        }
+        if envelope_bytes > budget {
+            cont.payload.diff_summary = None;
+            envelope_bytes = estimate_envelope_cost(&cont.payload);
+        }
+        if envelope_bytes > budget {
+            cont.payload.artifact_ref = None;
+            envelope_bytes = estimate_envelope_cost(&cont.payload);
+        }
+        if envelope_bytes > budget {
+            cont.payload.status = clip_status_strings(&cont.payload.status, 128);
+            envelope_bytes = estimate_envelope_cost(&cont.payload);
+        }
+
+        if envelope_bytes > budget {
+            tracing::error!(
+                target: "spur.metrics.continuation_dropped_oversized",
+                delegation_id = %delegation_id,
+                envelope_bytes,
+                budget_bytes = budget,
+                "fallback ladder exhausted; emitting minimal continuation"
+            );
+            cont.payload.status = spur_acp::domain::delegation::DelegationStatus::Success;
+            cont.payload.summary = Some("(continuation oversized; fields dropped)".into());
+            cont.payload.diff_summary = None;
+            cont.payload.worker_branch = None;
+            cont.payload.artifact_ref = None;
+        }
+
+        tracing::warn!(
+            target: "spur.metrics.outcome_persist_failed",
+            delegation_id = %delegation_id,
+            attempt,
+            fallback_engaged = true,
+            envelope_bytes,
+            latency_ms = start.elapsed().as_millis() as u64,
+        );
+        cont
     }
 }
 
@@ -633,6 +733,159 @@ mod tests {
             latest,
             Some(3),
             "latest_attempt must hold max(seen), not last-seen"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_falls_back_on_io_error() {
+        use spur_blob_store::test_helpers::{FailureMode, MockFailingOutcomeStore};
+
+        let store = MockFailingOutcomeStore::new(FailureMode::Io);
+        let mat = OutcomeMaterializer::new(store);
+        let cont = mat
+            .materialize(
+                small_result(),
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        assert!(
+            cont.payload.artifact_id.is_none(),
+            "fallback path must clear artifact_id"
+        );
+        assert!(cont.payload.fetch_hint.is_none());
+        // Envelope (conservative estimate) must still fit. Use the same
+        // helper the materializer uses internally; importing
+        // `spur_core::continuation_bridge::continuation_cost_bytes` would
+        // create a cycle for spur-mcp tests.
+        let bytes = super::estimate_envelope_cost(&cont.payload);
+        assert!(bytes <= spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn materialize_falls_back_on_too_large_error() {
+        use spur_blob_store::test_helpers::{FailureMode, MockFailingOutcomeStore};
+
+        let store = MockFailingOutcomeStore::new(FailureMode::TooLarge);
+        let mat = OutcomeMaterializer::new(store);
+        let cont = mat
+            .materialize(
+                small_result(),
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        assert!(cont.payload.artifact_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn materialize_falls_back_on_content_mismatch() {
+        use spur_blob_store::test_helpers::{FailureMode, MockFailingOutcomeStore};
+
+        let store = MockFailingOutcomeStore::new(FailureMode::ContentMismatch);
+        let mat = OutcomeMaterializer::new(store);
+        let cont = mat
+            .materialize(
+                small_result(),
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        assert!(cont.payload.artifact_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn materialize_falls_back_on_backend_error() {
+        use spur_blob_store::test_helpers::{FailureMode, MockFailingOutcomeStore};
+
+        let store =
+            MockFailingOutcomeStore::new(FailureMode::Backend("git update-ref failed".into()));
+        let mat = OutcomeMaterializer::new(store);
+        let cont = mat
+            .materialize(
+                small_result(),
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        assert!(cont.payload.artifact_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn materialize_falls_back_when_inner_store_panics() {
+        // Spec §7.7 (Round 9 P3-S3) requires every FailureMode produce a
+        // valid BrainContinuation — including a panicking backend. The
+        // mock cannot panic-and-stay-testable inside an async fn (would
+        // poison the runtime), so this test wires a one-off
+        // `PanickingStore` inline and asserts the materializer collapses
+        // into the truncation-ladder fallback via
+        // `AssertUnwindSafe(store.put(...)).catch_unwind().await`.
+        use async_trait::async_trait;
+        use spur_acp::BrainSessionId;
+        use spur_blob_store::{
+            OutcomeContent, OutcomeKey as Key, OutcomeMetadata, OutcomeRef, OutcomeStore, Section,
+            StoreError, SweepReport,
+        };
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        struct PanickingStore;
+
+        #[async_trait]
+        impl OutcomeStore for PanickingStore {
+            async fn put(
+                &self,
+                _key: &Key,
+                _content: &[u8],
+                _metadata: &OutcomeMetadata,
+            ) -> Result<OutcomeRef, StoreError> {
+                panic!("simulated backend panic");
+            }
+
+            async fn get(
+                &self,
+                _key: &Key,
+                _section: Option<Section>,
+            ) -> Result<OutcomeContent, StoreError> {
+                Err(StoreError::Backend("unused".into()))
+            }
+
+            async fn delete_namespace(&self, _b: &BrainSessionId) -> Result<usize, StoreError> {
+                Ok(0)
+            }
+
+            async fn sweep_older_than(&self, _ttl: Duration) -> Result<SweepReport, StoreError> {
+                Ok(SweepReport::default())
+            }
+        }
+
+        let store: Arc<dyn OutcomeStore> = Arc::new(PanickingStore);
+        let mat = OutcomeMaterializer::new(store);
+        let cont = mat
+            .materialize(
+                small_result(),
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        assert!(
+            cont.payload.artifact_id.is_none(),
+            "panic in store.put must fall back, not unwind"
         );
     }
 }
