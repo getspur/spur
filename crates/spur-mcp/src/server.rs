@@ -4830,6 +4830,276 @@ mod continuation_producer_tests {
 }
 
 #[cfg(test)]
+mod fetch_outcome_artifact_tests {
+    //! End-to-end tests for the `fetch_outcome_artifact` MCP tool.
+    //!
+    //! Persists a real artifact via `spur_worktree::artifact::persist`,
+    //! injects a `DelegationResult` carrying that artifact into the
+    //! server's `completed_delegations` map, then calls the JSON-RPC
+    //! tool dispatcher and asserts the round-trip preserves the exact
+    //! blob bytes.
+    //!
+    //! Phase 1 of plan-5; spec §5.3.
+
+    use super::{DetachedContinuationCtx, McpCallbackServer};
+    use serde_json::{json, Value};
+    use spur_acp::domain::artifact::ArtifactKind;
+    use spur_acp::domain::{DelegationResult, DelegationStatus};
+    use spur_acp::{BrainSessionId, DelegationId, SessionId};
+    use std::path::Path;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::time::Instant;
+
+    async fn init_git_repo(path: &Path) {
+        let init = tokio::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(path)
+            .output()
+            .await
+            .expect("git init must run");
+        assert!(init.status.success(), "git init failed: {init:?}");
+
+        for kv in &[("user.email", "test@example.com"), ("user.name", "test")] {
+            let out = tokio::process::Command::new("git")
+                .args(["config", kv.0, kv.1])
+                .current_dir(path)
+                .output()
+                .await
+                .expect("git config must run");
+            assert!(out.status.success(), "git config {} failed", kv.0);
+        }
+    }
+
+    fn no_op_continuation_ctx() -> DetachedContinuationCtx {
+        DetachedContinuationCtx {
+            on_complete: Arc::new(|_cont, _worker_session| Box::pin(async {})),
+        }
+    }
+
+    async fn build_test_server(repo_root: &Path, session_id: &str) -> McpCallbackServer {
+        let brain_session = BrainSessionId::new(SessionId(session_id.into()));
+        let (mut server, _channel) =
+            McpCallbackServer::new(&brain_session, None, None, no_op_continuation_ctx());
+        server.set_repo_root(repo_root.to_path_buf());
+        server
+    }
+
+    async fn inject_completed(
+        server: &McpCallbackServer,
+        delegation_id: DelegationId,
+        result: DelegationResult,
+    ) {
+        let mut map = server.completed_delegations.lock().await;
+        map.insert(delegation_id, (result, Instant::now()));
+    }
+
+    fn dispatch_args(name: &str, args: Value) -> Value {
+        json!({ "name": name, "arguments": args })
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_returns_persisted_blob_text() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let body = "line one\nline two\n".repeat(100);
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let artifact = spur_worktree::artifact::persist(
+            td.path(),
+            session_id,
+            &body,
+            ArtifactKind::Output,
+        )
+        .await
+        .expect("persist artifact");
+
+        let server = build_test_server(td.path(), session_id).await;
+
+        let delegation_id: DelegationId = "deadbeef-1111-2222-3333-444455556666".into();
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            summary: Some("ok".into()),
+            diff: None,
+            diff_summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: Some(artifact),
+        };
+        inject_completed(&server, delegation_id.clone(), result).await;
+
+        let response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({ "delegation_id": delegation_id.as_str() }),
+                ),
+            )
+            .await;
+
+        let payload = response
+            .result
+            .as_ref()
+            .expect("expected success response");
+        let text = payload["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        assert_eq!(text, body, "round-trip text must match the persisted body");
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_returns_clean_error_for_unknown_delegation() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let server = build_test_server(td.path(), "any-session").await;
+
+        let response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({ "delegation_id": "nonexistent-delegation-id" }),
+                ),
+            )
+            .await;
+
+        let error = response.error.as_ref().expect("expected error response");
+        assert_eq!(error.code, -32004);
+        assert!(
+            error.message.contains("not found"),
+            "error message must mention not-found: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_rejects_unknown_section_cleanly() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let server = build_test_server(td.path(), "any-session").await;
+
+        let response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({
+                        "delegation_id": "any-id",
+                        "section": "diff_only"
+                    }),
+                ),
+            )
+            .await;
+
+        let error = response
+            .error
+            .as_ref()
+            .expect("expected InvalidParams error");
+        assert_eq!(error.code, -32602, "InvalidParams JSON-RPC code");
+        assert!(
+            error.message.contains("Phase 1 only supports section='full'"),
+            "Phase 1 must reject unknown sections cleanly: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_rejects_empty_delegation_id() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let server = build_test_server(td.path(), "any-session").await;
+
+        let response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({ "delegation_id": "" }),
+                ),
+            )
+            .await;
+
+        let error = response.error.as_ref().expect("expected error response");
+        assert_eq!(error.code, -32602, "InvalidParams JSON-RPC code");
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_completed_delegations_are_per_session() {
+        // Two MCP servers in the same temp-repo, but each binds to its own
+        // brain_session_id and its own completed_delegations map. Server A
+        // persists+fetches successfully; Server B sees NotFound for the same
+        // delegation_id (its completed_delegations map is empty). The
+        // authorization boundary is per-server completed_delegations, scoped
+        // to brain_session_id at construction (spec §5.3 round-9).
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let body = "secret stdout for session A".to_string();
+        let session_a_id = "550e8400-e29b-41d4-a716-446655440000";
+        let session_b_id = "550e8400-e29b-41d4-a716-aaaaaaaaaaaa";
+
+        let artifact_a = spur_worktree::artifact::persist(
+            td.path(),
+            session_a_id,
+            &body,
+            ArtifactKind::Output,
+        )
+        .await
+        .expect("persist artifact for session A");
+
+        let server_a = build_test_server(td.path(), session_a_id).await;
+        let server_b = build_test_server(td.path(), session_b_id).await;
+
+        let delegation_a: DelegationId = "delegation-belonging-to-a".into();
+        let result_a = DelegationResult {
+            status: DelegationStatus::Success,
+            summary: None,
+            diff: None,
+            diff_summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: Some(artifact_a),
+        };
+        inject_completed(&server_a, delegation_a.clone(), result_a).await;
+
+        // Server A can fetch its own delegation.
+        let resp_a = server_a
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({ "delegation_id": delegation_a.as_str() }),
+                ),
+            )
+            .await;
+        let text = resp_a.result.as_ref().expect("server A success")["content"][0]["text"]
+            .as_str()
+            .expect("text");
+        assert_eq!(text, body);
+
+        // Server B has no completed_delegations entry → NotFound, even
+        // though the underlying git blob is reachable from this same repo.
+        let resp_b = server_b
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({ "delegation_id": delegation_a.as_str() }),
+                ),
+            )
+            .await;
+        let err = resp_b.error.as_ref().expect("server B must error");
+        assert_eq!(err.code, -32004);
+        assert!(
+            err.message.contains("not found"),
+            "Server B must not expose Server A's delegations: {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod merge_plan_tests {
     use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base};
     use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind, CompletionState};
