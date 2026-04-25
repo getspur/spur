@@ -3787,6 +3787,24 @@ impl Orchestrator {
                 delegation_plan: delegation_plan.clone(),
                 chosen_matches_dispatched,
             };
+
+            if let Some(bundle) = peer_mailbox.as_ref() {
+                let quiet_window =
+                    std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
+                let (_ack_tx, ack_rx) = tokio::sync::mpsc::unbounded_channel();
+                // TODO(peer-mailbox): Task 18's e2e path or a follow-up
+                // patch must wire ack_tx into the worker notification
+                // consumer when `_spur/peer_message_consumed` or
+                // `_spur/peer_message_ignored` arrives for this delegation.
+                drain_peer_acks_with_timeout(
+                    bundle,
+                    &spur_acp::domain::delegation::DelegationId(request_id.clone()),
+                    quiet_window,
+                    ack_rx,
+                )
+                .await;
+            }
+
             // Emit via the handle — type-enforced: no handle → no emit.
             handle.emit_requested(&funnel, ReviewKind::Completion, review_payload);
 
@@ -5035,6 +5053,67 @@ async fn run_one_worker_attempt(
     })
 }
 
+/// Forced-terminal-timeout drain. Waits up to `quiet_window` for peer-ack
+/// notifications scoped to `delegation_id`. Each ack resets the window.
+/// After the window elapses, delivered non-terminal peer messages are forced
+/// to `Ignored` with reason `drain_timeout`.
+async fn drain_peer_acks_with_timeout(
+    bundle: &crate::peer_mailbox::PeerMailboxBundle,
+    delegation_id: &spur_acp::domain::delegation::DelegationId,
+    quiet_window: std::time::Duration,
+    mut ack_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+) {
+    use spur_acp::domain::peer_message::{LedgerState, TerminalOutcome};
+    use std::collections::HashSet;
+
+    loop {
+        match tokio::time::timeout(quiet_window, ack_rx.recv()).await {
+            Ok(Some(())) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    let mut candidates = bundle.ledger.pending_for_target(delegation_id).await;
+    candidates.extend(
+        bundle
+            .ledger
+            .non_terminal_entries()
+            .await
+            .into_iter()
+            .filter(|entry| &entry.envelope.target_delegation_id == delegation_id),
+    );
+
+    let mut seen = HashSet::new();
+    for entry in candidates {
+        let message_id = entry.envelope.message_id;
+        if !seen.insert(message_id) {
+            continue;
+        }
+        if !matches!(
+            entry.state,
+            LedgerState::Delivered | LedgerState::DeliveredInflight
+        ) {
+            continue;
+        }
+        if let Err(err) = bundle
+            .router
+            .record_terminal(
+                &message_id,
+                TerminalOutcome::Ignored {
+                    reason: "drain_timeout".into(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                message_id = ?message_id,
+                ?err,
+                "peer mailbox: forced-terminal-timeout drain failed"
+            );
+        }
+    }
+}
+
 /// Tail-weighted, UTF-8-safe truncation for worker summaries.
 ///
 /// Why tail-weighted: LLM worker output opens with task restatement
@@ -5664,6 +5743,87 @@ fn apply_decision_to_candidate(
                     (caller must wrap with retry loop)"
                 .into(),
         },
+    }
+}
+
+#[cfg(test)]
+mod peer_mailbox_drain_tests {
+    use super::drain_peer_acks_with_timeout;
+    use crate::peer_mailbox::{
+        prompt_builder::PeerPromptContextBuilder, InMemoryLedger, Limits, PeerMailboxBundle,
+        PeerMailboxLedger, PeerMailboxRouter,
+    };
+    use spur_acp::domain::delegation::DelegationId;
+    use spur_acp::domain::peer_message::{
+        LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn envelope(message_id: PeerMessageId, target: &DelegationId) -> PeerMessageEnvelope {
+        PeerMessageEnvelope {
+            schema: "spur-peer-message/v1".into(),
+            message_id,
+            source_delegation_id: DelegationId("src".into()),
+            target_delegation_id: target.clone(),
+            source_issue_id: "i1".into(),
+            target_issue_id: "i2".into(),
+            source_plan_task_id: "ta".into(),
+            target_plan_task_id: "tb".into(),
+            source_executor_id: "ex".into(),
+            plan_version: 1,
+            kind: MessageKind::Handoff,
+            body: "ready for review".into(),
+            sequence: 1,
+        }
+    }
+
+    fn bundle() -> PeerMailboxBundle {
+        let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
+        let (funnel, _events) = crate::event_funnel::test_channel();
+        let (reconciler_tx, _reconciler_rx) = unbounded_channel();
+        let router = Arc::new(PeerMailboxRouter::new(
+            ledger.clone(),
+            funnel,
+            reconciler_tx,
+            Limits::default(),
+            "bs".into(),
+        ));
+        PeerMailboxBundle {
+            router,
+            builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
+            ledger,
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_completes_after_quiet_window_with_no_acks() {
+        let bundle = bundle();
+        let target = DelegationId("tgt".into());
+        let message_id: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000701\"").unwrap();
+        bundle
+            .ledger
+            .accept(envelope(message_id, &target))
+            .await
+            .unwrap();
+        bundle
+            .ledger
+            .transition(&message_id, LedgerState::Delivered)
+            .await
+            .unwrap();
+
+        let (_ack_tx, ack_rx) = unbounded_channel();
+        let quiet_window = Duration::from_millis(50);
+        let start = Instant::now();
+        drain_peer_acks_with_timeout(&bundle, &target, quiet_window, ack_rx).await;
+        let elapsed = start.elapsed();
+
+        assert!(elapsed >= quiet_window, "elapsed: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(500), "elapsed: {elapsed:?}");
+        let entry = bundle.ledger.get(&message_id).await.unwrap();
+        assert_eq!(entry.state, LedgerState::Ignored);
     }
 }
 
