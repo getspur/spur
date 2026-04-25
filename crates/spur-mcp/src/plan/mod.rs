@@ -1265,6 +1265,7 @@ pub fn completion_is_superseded(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // Phase 4: extract CompletionAuditFields struct.
 pub async fn persist_completion_result(
     pm: &dyn PmLike,
     issue_id: &str,
