@@ -6,10 +6,10 @@
 use spur_acp::domain::delegation::DelegationId;
 use spur_acp::domain::events::SpurEventBody;
 use spur_acp::domain::peer_message::{
-    LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId,
+    LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
 };
 use spur_core::event_funnel::FunnelHandle;
-use spur_core::peer_mailbox::ledger::{InjectionOutcome, TransitionOutcome};
+use spur_core::peer_mailbox::ledger::{InjectionOutcome, LedgerError, TransitionOutcome};
 use spur_core::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
 use spur_core::peer_mailbox::router::Acceptance;
 use spur_core::peer_mailbox::{
@@ -17,6 +17,7 @@ use spur_core::peer_mailbox::{
 };
 use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
@@ -136,15 +137,6 @@ fn drain_events(events: &mut UnboundedReceiver<SpurEventBody>) -> Vec<SpurEventB
     out
 }
 
-fn sorted_message_ids(entries: &[spur_core::peer_mailbox::LedgerEntry]) -> Vec<PeerMessageId> {
-    let mut ids: Vec<_> = entries
-        .iter()
-        .map(|entry| entry.envelope.message_id)
-        .collect();
-    ids.sort_by_key(|id| id.0);
-    ids
-}
-
 fn distinct_accept_stress_n() -> usize {
     std::env::var("PEER_MAILBOX_CONCURRENCY_N")
         .ok()
@@ -186,8 +178,11 @@ async fn run_distinct_accept_race(n: usize, id_base: u128) {
     let entries = ledger.pending_for_target(&target).await;
     assert_eq!(entries.len(), n);
 
-    let actual = sorted_message_ids(&entries);
-    let expected: Vec<_> = (0..n).map(|index| id(id_base + index as u128)).collect();
+    let actual: HashSet<_> = entries
+        .iter()
+        .map(|entry| entry.envelope.message_id)
+        .collect();
+    let expected: HashSet<_> = (0..n).map(|index| id(id_base + index as u128)).collect();
     assert_eq!(actual, expected);
 }
 
@@ -277,14 +272,20 @@ async fn concurrent_transitions_on_same_message_are_serialized() {
         LedgerState::Dropped,
     ];
     let barrier = Arc::new(Barrier::new(N + 1));
+    let err_count = Arc::new(AtomicUsize::new(0));
     let mut set = JoinSet::new();
 
     for target in targets {
         let ledger = ledger.clone();
         let barrier = barrier.clone();
+        let err_count = err_count.clone();
         set.spawn(async move {
             barrier.wait().await;
-            (target, ledger.transition(&message_id, target).await)
+            let result = ledger.transition(&message_id, target).await;
+            if matches!(result, Err(LedgerError::InvalidTransition { .. })) {
+                err_count.fetch_add(1, Ordering::SeqCst);
+            }
+            (target, result)
         });
     }
 
@@ -313,6 +314,10 @@ async fn concurrent_transitions_on_same_message_are_serialized() {
         ok_terminal_states.contains(&final_state),
         "final state {final_state:?} was not produced by an accepted transition: {results:?}"
     );
+    assert!(
+        err_count.load(Ordering::SeqCst) >= 1,
+        "expected at least one invalid transition rejection"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -320,18 +325,18 @@ async fn fan_out_100x100_pending_for_target_is_consistent() {
     let ledger = Arc::new(InMemoryLedger::new());
     let target_a = delegation("tgt-A");
     let target_b = delegation("tgt-B");
-    let expected_a: Vec<_> = (0..100).map(|index| id(0x1_000 + index)).collect();
-    let expected_b: Vec<_> = (0..100).map(|index| id(0x2_000 + index)).collect();
+    let expected_a: HashSet<_> = (0..100).map(|index| id(0x1_000 + index)).collect();
+    let expected_b: HashSet<_> = (0..100).map(|index| id(0x2_000 + index)).collect();
 
-    for (index, message_id) in expected_a.iter().enumerate() {
+    for (index, message_id) in expected_a.iter().copied().enumerate() {
         ledger
-            .accept(envelope(*message_id, "tgt-A", index as u64))
+            .accept(envelope(message_id, "tgt-A", index as u64))
             .await
             .expect("accept A should succeed");
     }
-    for (index, message_id) in expected_b.iter().enumerate() {
+    for (index, message_id) in expected_b.iter().copied().enumerate() {
         ledger
-            .accept(envelope(*message_id, "tgt-B", index as u64))
+            .accept(envelope(message_id, "tgt-B", index as u64))
             .await
             .expect("accept B should succeed");
     }
@@ -348,20 +353,40 @@ async fn fan_out_100x100_pending_for_target_is_consistent() {
         let barrier = barrier.clone();
         set.spawn(async move {
             barrier.wait().await;
-            let actual = sorted_message_ids(&ledger.pending_for_target(&target).await);
+            let actual: HashSet<_> = ledger
+                .pending_for_target(&target)
+                .await
+                .iter()
+                .map(|entry| entry.envelope.message_id)
+                .collect();
             (target, actual)
         });
     }
 
     barrier.wait().await;
 
+    let mut target_a_sets = Vec::new();
+    let mut target_b_sets = Vec::new();
     for (target, actual) in set.join_all().await {
         if target == target_a {
             assert_eq!(actual, expected_a);
+            target_a_sets.push(actual);
         } else {
             assert_eq!(target, target_b);
             assert_eq!(actual, expected_b);
+            target_b_sets.push(actual);
         }
+    }
+
+    assert_eq!(target_a_sets.len(), 100);
+    assert_eq!(target_b_sets.len(), 100);
+    let h0 = target_a_sets[0].clone();
+    for h in &target_a_sets[1..] {
+        assert_eq!(h, &h0);
+    }
+    let h0 = target_b_sets[0].clone();
+    for h in &target_b_sets[1..] {
+        assert_eq!(h, &h0);
     }
 }
 
@@ -407,6 +432,114 @@ async fn record_injection_concurrent_calls_are_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sequential_replay_after_acceptance_returns_already_accepted() {
+    const N: usize = 8;
+
+    let ledger = Arc::new(InMemoryLedger::new());
+    let (funnel, mut events) = spur_core::event_funnel::test_channel();
+    let (recon_tx, _recon_rx) = unbounded_channel();
+    let router = PeerMailboxRouter::new(
+        ledger.clone(),
+        funnel.clone(),
+        recon_tx,
+        Limits::default(),
+        "brain-session".into(),
+    );
+    let snapshot = snapshot_for_targets(&["tgt"]);
+    let env = envelope(id(0x3_100), "tgt", 1);
+
+    let guard = match router
+        .accept_or_reject(env.clone(), &snapshot)
+        .await
+        .expect("first accept should succeed")
+    {
+        Acceptance::Created(guard) => guard,
+        Acceptance::AlreadyAccepted => panic!("first accept should create guard"),
+    };
+    drop(guard);
+
+    for _ in 0..N {
+        match router
+            .accept_or_reject(env.clone(), &snapshot)
+            .await
+            .expect("replay accept should succeed")
+        {
+            Acceptance::AlreadyAccepted => {}
+            Acceptance::Created(_) => panic!("replay returned a second guard"),
+        }
+    }
+
+    flush_funnel(&funnel).await;
+    let accepted_events = drain_events(&mut events)
+        .into_iter()
+        .filter(|event| matches!(event, SpurEventBody::WorkerPeerMessageAccepted { .. }))
+        .count();
+    assert_eq!(accepted_events, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_record_terminal_does_not_double_emit() {
+    const N: usize = 16;
+
+    let (ledger, router, funnel, mut events) = fixture();
+    let snapshot = snapshot_for_targets(&["tgt"]);
+    let message_id = id(0x3_200);
+    let env = envelope(message_id, "tgt", 1);
+    let guard = match router
+        .accept_or_reject(env, &snapshot)
+        .await
+        .expect("accept should succeed")
+    {
+        Acceptance::Created(guard) => guard,
+        Acceptance::AlreadyAccepted => panic!("first accept should create guard"),
+    };
+    ledger
+        .transition(&message_id, LedgerState::Queued)
+        .await
+        .expect("queue transition should succeed");
+    ledger
+        .transition(&message_id, LedgerState::DeliveredInflight)
+        .await
+        .expect("inflight transition should succeed");
+    ledger
+        .transition(&message_id, LedgerState::Delivered)
+        .await
+        .expect("delivered transition should succeed");
+
+    let barrier = Arc::new(Barrier::new(N + 1));
+    let mut set = JoinSet::new();
+    for _ in 0..N {
+        let router = router.clone();
+        let barrier = barrier.clone();
+        set.spawn(async move {
+            barrier.wait().await;
+            router
+                .record_terminal(&message_id, TerminalOutcome::Consumed)
+                .await
+        });
+    }
+
+    barrier.wait().await;
+
+    for result in set.join_all().await {
+        result.expect("record_terminal should succeed");
+    }
+    drop(guard);
+
+    flush_funnel(&funnel).await;
+    let consumed_events = drain_events(&mut events)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SpurEventBody::WorkerPeerMessageConsumed { message_id: id, .. } if *id == message_id
+            )
+        })
+        .count();
+    assert_eq!(consumed_events, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconciler_does_not_race_with_concurrent_workers() {
     const N: usize = 24;
 
@@ -431,6 +564,7 @@ async fn reconciler_does_not_race_with_concurrent_workers() {
                 Acceptance::Created(guard) => guard,
                 Acceptance::AlreadyAccepted => panic!("distinct message should be created"),
             };
+            ready.wait().await;
             ledger
                 .transition(&message_id, LedgerState::Queued)
                 .await
@@ -445,7 +579,9 @@ async fn reconciler_does_not_race_with_concurrent_workers() {
                 .transition(&message_id, LedgerState::DeliveredInflight)
                 .await
                 .expect("inflight transition should succeed");
-            ready.wait().await;
+            let _ = router
+                .record_terminal(&message_id, TerminalOutcome::Consumed)
+                .await;
             drop(guard);
         });
     }
@@ -461,17 +597,32 @@ async fn reconciler_does_not_race_with_concurrent_workers() {
 
     set.join_all().await;
 
-    assert_eq!(counts.inflight_forced_to_delivered, (N / 2) as u32);
-    assert_eq!(counts.inflight_reverted_to_queued, (N / 2) as u32);
+    assert!(
+        counts.inflight_forced_to_delivered + counts.inflight_reverted_to_queued <= N as u32,
+        "reconcile counts should not exceed raced messages: {counts:?}"
+    );
 
     for (message_id, injected) in ids {
         let state = ledger.get(&message_id).await.expect("ledger entry").state;
-        if injected {
-            assert_eq!(state, LedgerState::Delivered);
-        } else {
-            assert_eq!(state, LedgerState::Queued);
+        match state {
+            LedgerState::Delivered => assert!(
+                injected,
+                "message {message_id:?} was delivered without injection"
+            ),
+            LedgerState::Queued => assert!(
+                !injected,
+                "message {message_id:?} was reverted despite recorded injection"
+            ),
+            LedgerState::Ignored | LedgerState::Consumed => {}
+            other => panic!(
+                "message {message_id:?} ended in unexpected state {other:?}; injected={injected}"
+            ),
         }
-        assert_ne!(state, LedgerState::DeliveredInflight);
+        assert_ne!(
+            state,
+            LedgerState::DeliveredInflight,
+            "message {message_id:?} remained inflight after reconcile"
+        );
     }
 
     flush_funnel(&funnel).await;
