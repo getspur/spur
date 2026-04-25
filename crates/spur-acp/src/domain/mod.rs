@@ -4,6 +4,7 @@ pub mod delegation;
 pub mod events;
 pub mod outcome;
 pub mod peer_message;
+pub mod replay_compat;
 
 pub use artifact::{ArtifactKind, WorkerArtifact};
 pub use continuation::{
@@ -23,3 +24,4 @@ pub use outcome::{BackendTag, OutcomeKey, OutcomeRef};
 pub use peer_message::{
     LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
 };
+pub use replay_compat::ReplayBody;
