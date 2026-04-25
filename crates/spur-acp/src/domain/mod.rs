@@ -3,6 +3,7 @@ pub mod clip;
 pub mod continuation;
 pub mod delegation;
 pub mod events;
+pub mod merge_budget;
 pub mod outcome;
 pub mod peer_message;
 pub mod replay_compat;
