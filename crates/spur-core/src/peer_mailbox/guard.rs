@@ -1,11 +1,19 @@
 use crate::event_funnel::FunnelHandle;
-use crate::peer_mailbox::ledger::PeerMailboxLedger;
+use crate::peer_mailbox::ledger::{PeerMailboxLedger, TransitionOutcome};
 use spur_acp::domain::events::SpurEventBody;
 use spur_acp::domain::peer_message::{LedgerState, PeerMessageId, TerminalOutcome};
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// Sent to the reconciler when a `PeerMessageGuard` drops without finalize.
+///
+/// The reconciler always transitions stranded entries to `LedgerState::Undeliverable`
+/// regardless of which `TerminalOutcome` variant was supplied at `wrap` time:
+/// a guard that drops without finalize means the worker never observed the
+/// message, so any outcome other than "could not deliver" would be a lie.
+/// Only `TerminalOutcome::Undeliverable { reason }` is consulted, and only
+/// for its `reason` string. Other variants fall back to the synthetic reason
+/// `"guard_dropped_unfinalized"`.
 #[derive(Debug, Clone)]
 pub struct StrandedMessage {
     pub message_id: PeerMessageId,
@@ -68,10 +76,22 @@ impl Drop for PeerMessageGuard {
             message_id = ?self.message_id,
             "PeerMessageGuard dropped without finalize; enqueueing stranded recovery"
         );
-        let _ = self.reconciler_tx.send(StrandedMessage {
-            message_id: self.message_id,
-            default_outcome: self.default_outcome.clone(),
-        });
+        if self
+            .reconciler_tx
+            .send(StrandedMessage {
+                message_id: self.message_id,
+                default_outcome: self.default_outcome.clone(),
+            })
+            .is_err()
+        {
+            // Reconciler dead or runtime tearing down: in-memory recovery
+            // is unreachable, but the ledger entry persists, so the next
+            // startup reconciliation pass (Task 14) will catch it.
+            tracing::warn!(
+                message_id = ?self.message_id,
+                "stranded-message reconciler unavailable; recovery deferred to startup pass"
+            );
+        }
     }
 }
 
@@ -89,17 +109,38 @@ pub async fn run_reconciler_loop(
             _ => "guard_dropped_unfinalized".into(),
         };
 
-        if let Ok(_) = ledger
+        // Only emit the audit event on `Changed`. `Unchanged` means a
+        // prior reconciler pass (or the worker itself) already transitioned
+        // this entry to Undeliverable; emitting again would duplicate audit
+        // records. Errors are ignored: NotFound means the ledger never
+        // recorded an accept (nothing to recover); InvalidTransition means
+        // a different terminal state already won, which is fine.
+        match ledger
             .transition(&stranded.message_id, LedgerState::Undeliverable)
             .await
         {
-            if let Some(entry) = ledger.get(&stranded.message_id).await {
-                funnel.emit(SpurEventBody::WorkerPeerMessageUndeliverable {
-                    brain_session_id: brain_session_id.clone(),
-                    message_id: stranded.message_id,
-                    target_delegation_id: entry.envelope.target_delegation_id,
-                    reason,
-                });
+            Ok(TransitionOutcome::Changed { .. }) => {
+                if let Some(entry) = ledger.get(&stranded.message_id).await {
+                    funnel.emit(SpurEventBody::WorkerPeerMessageUndeliverable {
+                        brain_session_id: brain_session_id.clone(),
+                        message_id: stranded.message_id,
+                        target_delegation_id: entry.envelope.target_delegation_id,
+                        reason,
+                    });
+                }
+            }
+            Ok(TransitionOutcome::Unchanged(_)) => {
+                tracing::debug!(
+                    message_id = ?stranded.message_id,
+                    "stranded reconcile: already Undeliverable, skipping duplicate event"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(
+                    message_id = ?stranded.message_id,
+                    error = ?err,
+                    "stranded reconcile: transition rejected (likely terminal already)"
+                );
             }
         }
     }
@@ -127,6 +168,23 @@ mod tests {
 
         let stranded = rx.recv().await.expect("expected stranded message");
         assert_eq!(stranded.message_id, id);
+    }
+
+    #[tokio::test]
+    async fn drop_after_receiver_closed_does_not_panic() {
+        let (tx, rx) = unbounded_channel::<StrandedMessage>();
+        // Simulate the reconciler dying / runtime teardown: drop the receiver.
+        drop(rx);
+        let id: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000103\"").unwrap();
+        // Drop without finalize. Must not panic; the warn branch should fire.
+        let _ = PeerMessageGuard::wrap(
+            id,
+            tx,
+            TerminalOutcome::Undeliverable {
+                reason: "test".into(),
+            },
+        );
     }
 
     #[tokio::test]
