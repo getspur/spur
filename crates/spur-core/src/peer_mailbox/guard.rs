@@ -33,6 +33,7 @@ pub enum GuardOutcome {
 /// If dropped without finalize, the guard enqueues a `StrandedMessage` onto
 /// the reconciler mpsc (sync, non-blocking) and logs a `tracing::error!`.
 /// It never performs async work in `Drop`.
+#[derive(Debug)]
 pub struct PeerMessageGuard {
     message_id: PeerMessageId,
     reconciler_tx: UnboundedSender<StrandedMessage>,

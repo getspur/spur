@@ -18,6 +18,21 @@ pub enum RouterError {
     Ledger(String),
 }
 
+/// Result of `accept_or_reject`. Distinguishes a fresh acceptance (caller
+/// receives a guard and is responsible for finalize) from a replay
+/// (caller receives nothing — the original handler still owns the guard).
+///
+/// This separation is critical for spec invariant
+/// "at most one guard exists per message at any time": if we returned a
+/// fresh guard on replay, dropping it would enqueue a stranded message
+/// and the reconciler would forcibly mark the in-flight original as
+/// Undeliverable. The `AlreadyAccepted` variant prevents that.
+#[derive(Debug)]
+pub enum Acceptance {
+    Created(PeerMessageGuard),
+    AlreadyAccepted,
+}
+
 pub struct PeerMailboxRouter {
     ledger: Arc<dyn PeerMailboxLedger>,
     funnel: FunnelHandle,
@@ -47,7 +62,7 @@ impl PeerMailboxRouter {
         &self,
         request: PeerMessageEnvelope,
         snapshot: &PlanScopeSnapshot,
-    ) -> Result<PeerMessageGuard, RouterError> {
+    ) -> Result<Acceptance, RouterError> {
         // Body size cap is checked before any other validation or funnel emit.
         if request.body.len() > self.limits.max_peer_message_size {
             return Err(self.reject(request, "body_size_exceeded"));
@@ -85,22 +100,22 @@ impl PeerMailboxRouter {
                     kind: envelope.kind,
                     sequence: envelope.sequence,
                 });
+                Ok(Acceptance::Created(PeerMessageGuard::wrap(
+                    envelope.message_id,
+                    self.reconciler_tx.clone(),
+                    TerminalOutcome::Undeliverable {
+                        reason: "guard_dropped_unfinalized".into(),
+                    },
+                )))
             }
             AcceptOutcome::AlreadyAccepted => {
                 tracing::debug!(
                     message_id = ?envelope.message_id,
-                    "peer mailbox accept replay; skipping duplicate accepted event"
+                    "peer mailbox accept replay; original handler retains guard"
                 );
+                Ok(Acceptance::AlreadyAccepted)
             }
         }
-
-        Ok(PeerMessageGuard::wrap(
-            envelope.message_id,
-            self.reconciler_tx.clone(),
-            TerminalOutcome::Undeliverable {
-                reason: "guard_dropped_unfinalized".into(),
-            },
-        ))
     }
 
     fn reject(&self, request: PeerMessageEnvelope, reason: &str) -> RouterError {
@@ -151,7 +166,19 @@ impl PeerMailboxRouter {
             }
         }
 
-        if let Some(entry) = self.ledger.get(message_id).await {
+        // After a successful `Changed` transition, the entry must still exist
+        // in the ledger — InMemoryLedger never removes entries, and any
+        // future persistent backend that supports eviction must serialize
+        // eviction with transitions. A `None` here means an upstream
+        // invariant has broken; surface it rather than silently dropping
+        // the lifecycle event.
+        let entry = self.ledger.get(message_id).await.ok_or_else(|| {
+            RouterError::Ledger(format!(
+                "transition succeeded but entry missing for {:?}",
+                message_id
+            ))
+        })?;
+        {
             let target_delegation_id = entry.envelope.target_delegation_id;
             let body = match outcome {
                 TerminalOutcome::Consumed => SpurEventBody::WorkerPeerMessageConsumed {
@@ -256,13 +283,20 @@ mod tests {
         (router, ledger, event_rx)
     }
 
+    fn unwrap_created(acc: Acceptance) -> PeerMessageGuard {
+        match acc {
+            Acceptance::Created(g) => g,
+            Acceptance::AlreadyAccepted => panic!("expected Acceptance::Created"),
+        }
+    }
+
     #[tokio::test]
     async fn accept_succeeds_for_allowed_edge() {
         let (router, _ledger, _events) = fixture().await;
         let snap = snapshot_allowing("src", "tgt");
         let env = envelope("src", "tgt");
 
-        let guard = router.accept_or_reject(env, &snap).await.unwrap();
+        let guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
 
         guard
             .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
@@ -311,17 +345,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_replay_does_not_emit_duplicate_event() {
+    async fn accept_replay_returns_already_accepted_without_fresh_guard() {
+        // Spec invariant: at most one guard exists per message at any time.
+        // A replay must NOT spawn a second guard, otherwise dropping it
+        // would enqueue a stranded message and the reconciler would
+        // forcibly mark the in-flight original as Undeliverable.
         let (router, _ledger, mut events) = fixture().await;
         let snap = snapshot_allowing("src", "tgt");
         let env = envelope("src", "tgt");
 
-        let first = router.accept_or_reject(env.clone(), &snap).await.unwrap();
+        let first =
+            unwrap_created(router.accept_or_reject(env.clone(), &snap).await.unwrap());
+        // Don't finalize first yet — simulate the original handler still
+        // working when the replay arrives.
+        let replay = router.accept_or_reject(env.clone(), &snap).await.unwrap();
+        assert!(matches!(replay, Acceptance::AlreadyAccepted));
+
+        // Now finalize first; no orphaned stranded enqueue should fire.
         first
-            .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
-            .await;
-        let second = router.accept_or_reject(env, &snap).await.unwrap();
-        second
             .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
             .await;
 
@@ -332,5 +373,101 @@ mod tests {
             }
         }
         assert_eq!(accepted_count, 1);
+    }
+
+    #[tokio::test]
+    async fn body_size_check_runs_before_dag_check() {
+        // Both checks would reject this message; body size must win
+        // (per spec: backpressure-class checks happen first so a
+        // floodable input never reaches DAG validation).
+        let (router, _ledger, _events) = fixture().await;
+        let mut snap = snapshot_allowing("src", "tgt");
+        snap.peer_edges.clear(); // would also fail with not_in_dag
+        let mut env = envelope("src", "tgt");
+        env.body = "x".repeat(100_000);
+
+        let err = router.accept_or_reject(env, &snap).await.unwrap_err();
+        assert_eq!(
+            err,
+            RouterError::Rejected {
+                reason: "body_size_exceeded".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn record_terminal_emits_lifecycle_event_once() {
+        let (router, _ledger, mut events) = fixture().await;
+        let snap = snapshot_allowing("src", "tgt");
+        let env = envelope("src", "tgt");
+        let message_id = env.message_id;
+
+        let guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
+        // finalize() is informational only; record_terminal does the work.
+        guard
+            .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
+            .await;
+
+        router
+            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .await
+            .unwrap();
+        // Replay: must be a no-op (Unchanged path).
+        router
+            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .await
+            .unwrap();
+
+        let mut consumed_count = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, SpurEventBody::WorkerPeerMessageConsumed { .. }) {
+                consumed_count += 1;
+            }
+        }
+        assert_eq!(consumed_count, 1);
+    }
+
+    #[tokio::test]
+    async fn record_terminal_emits_undeliverable_with_reason() {
+        let (router, _ledger, mut events) = fixture().await;
+        let snap = snapshot_allowing("src", "tgt");
+        let env = envelope("src", "tgt");
+        let message_id = env.message_id;
+
+        let guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
+        guard
+            .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
+            .await;
+
+        router
+            .record_terminal(
+                &message_id,
+                TerminalOutcome::Undeliverable {
+                    reason: "test_path".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut found = false;
+        while let Ok(event) = events.try_recv() {
+            if let SpurEventBody::WorkerPeerMessageUndeliverable { reason, .. } = event {
+                assert_eq!(reason, "test_path");
+                found = true;
+            }
+        }
+        assert!(found, "expected one Undeliverable event with reason");
+    }
+
+    #[tokio::test]
+    async fn record_terminal_on_unknown_message_returns_ledger_error() {
+        let (router, _ledger, _events) = fixture().await;
+        let unknown: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000999\"").unwrap();
+        let err = router
+            .record_terminal(&unknown, TerminalOutcome::Consumed)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RouterError::Ledger(_)));
     }
 }
