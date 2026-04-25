@@ -20,7 +20,7 @@ pub mod trait_def;
 pub mod types;
 
 // Re-exports activated as types land in Tasks 3–6.
-// pub use fs_store::FsOutcomeStore;
+pub use fs_store::FsOutcomeStore;
 // pub use measured::MeasuredOutcomeStore;
 pub use memory_store::MemoryOutcomeStore;
 pub use trait_def::OutcomeStore;
