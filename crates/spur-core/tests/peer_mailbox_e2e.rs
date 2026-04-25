@@ -5,7 +5,7 @@ use spur_acp::domain::peer_message::{
 };
 use spur_acp::SpurEventBody;
 use spur_core::peer_mailbox::guard::GuardOutcome;
-use spur_core::peer_mailbox::ledger::{InjectionOutcome, TransitionOutcome};
+use spur_core::peer_mailbox::ledger::{InjectionOutcome, LedgerError, TransitionOutcome};
 use spur_core::peer_mailbox::limits::{
     aggregate_budget_for_context_window, effective_max_message_size,
 };
@@ -144,6 +144,80 @@ async fn worker_ack_during_accepted_state_consumes_message() {
         )
     }));
     assert!(ack_rx.try_recv().is_ok());
+}
+
+#[tokio::test]
+async fn post_prompt_skip_via_error_arm_does_not_emit_audit_failed() {
+    let (bundle, mut bcast_rx) = bundle_with_broadcast();
+    let snap = Arc::new(snapshot());
+    let mid = PeerMessageId(Uuid::new_v4());
+    let payload = json!({
+        "schema": "spur-peer-message/v1",
+        "message_id": mid,
+        "target_delegation_id": "tgt",
+        "target_issue_id": "i2",
+        "target_plan_task_id": "tb",
+        "kind": "handoff",
+        "body": "Worker B: consume this before post-prompt delivery audit",
+        "sequence": 1
+    });
+
+    let guard = match spur_core::spur_ext_interp::interpret_peer_message(
+        &bundle.router,
+        &snap,
+        DelegationId("src".into()),
+        "ex".into(),
+        "i1".into(),
+        "ta".into(),
+        payload,
+    )
+    .await
+    .unwrap()
+    {
+        Acceptance::Created(guard) => guard,
+        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+    };
+
+    let (ack_tx, mut ack_rx) = unbounded_channel();
+    spur_core::spur_ext_interp::interpret_peer_message_terminal(
+        "_spur/peer_message_consumed",
+        json!({ "message_id": mid }),
+        &bundle,
+        &ack_tx,
+    )
+    .await;
+    assert!(ack_rx.try_recv().is_ok());
+    assert_eq!(
+        bundle.ledger.get(&mid).await.unwrap().state,
+        LedgerState::Consumed
+    );
+
+    let consumed_events = drain_broadcast_events(&mut bcast_rx).await;
+    assert!(consumed_events
+        .iter()
+        .all(|event| !matches!(event, SpurEventBody::WorkerPeerMessageAuditFailed { .. })));
+
+    let err = bundle
+        .ledger
+        .transition(&mid, LedgerState::DeliveredInflight)
+        .await
+        .unwrap_err();
+    match err {
+        LedgerError::InvalidTransition { from, to } => {
+            assert_eq!(from, LedgerState::Consumed);
+            assert_eq!(to, LedgerState::DeliveredInflight);
+        }
+        other => panic!("expected terminal-source InvalidTransition, got {other:?}"),
+    }
+
+    let post_attempt_events = drain_broadcast_events(&mut bcast_rx).await;
+    assert!(post_attempt_events
+        .iter()
+        .all(|event| !matches!(event, SpurEventBody::WorkerPeerMessageAuditFailed { .. })));
+
+    guard
+        .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
+        .await;
 }
 
 #[tokio::test]
