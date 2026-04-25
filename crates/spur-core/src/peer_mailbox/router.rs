@@ -294,6 +294,29 @@ mod tests {
         }
     }
 
+    /// Drain all events from the funnel test channel. The funnel relay task
+    /// runs on its own tokio scheduler slot, so a synchronous `try_recv()`
+    /// can race ahead of the relay. We poll with a small per-recv timeout
+    /// to give the relay a chance to forward, and stop once nothing
+    /// arrives within that window.
+    async fn drain_events(
+        events: &mut UnboundedReceiver<SpurEventBody>,
+    ) -> Vec<SpurEventBody> {
+        let mut out = Vec::new();
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                events.recv(),
+            )
+            .await
+            {
+                Ok(Some(event)) => out.push(event),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        out
+    }
+
     #[tokio::test]
     async fn accept_succeeds_for_allowed_edge() {
         let (router, _ledger, _events) = fixture().await;
@@ -370,12 +393,11 @@ mod tests {
             .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
             .await;
 
-        let mut accepted_count = 0;
-        while let Ok(event) = events.try_recv() {
-            if matches!(event, SpurEventBody::WorkerPeerMessageAccepted { .. }) {
-                accepted_count += 1;
-            }
-        }
+        let drained = drain_events(&mut events).await;
+        let accepted_count = drained
+            .iter()
+            .filter(|e| matches!(e, SpurEventBody::WorkerPeerMessageAccepted { .. }))
+            .count();
         assert_eq!(accepted_count, 1);
     }
 
@@ -422,12 +444,11 @@ mod tests {
             .await
             .unwrap();
 
-        let mut consumed_count = 0;
-        while let Ok(event) = events.try_recv() {
-            if matches!(event, SpurEventBody::WorkerPeerMessageConsumed { .. }) {
-                consumed_count += 1;
-            }
-        }
+        let drained = drain_events(&mut events).await;
+        let consumed_count = drained
+            .iter()
+            .filter(|e| matches!(e, SpurEventBody::WorkerPeerMessageConsumed { .. }))
+            .count();
         assert_eq!(consumed_count, 1);
     }
 
@@ -453,13 +474,13 @@ mod tests {
             .await
             .unwrap();
 
-        let mut found = false;
-        while let Ok(event) = events.try_recv() {
-            if let SpurEventBody::WorkerPeerMessageUndeliverable { reason, .. } = event {
-                assert_eq!(reason, "test_path");
-                found = true;
-            }
-        }
+        let drained = drain_events(&mut events).await;
+        let found = drained.iter().any(|e| {
+            matches!(
+                e,
+                SpurEventBody::WorkerPeerMessageUndeliverable { reason, .. } if reason == "test_path"
+            )
+        });
         assert!(found, "expected one Undeliverable event with reason");
     }
 
