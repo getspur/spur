@@ -17,9 +17,10 @@ pub mod signal_watcher;
 pub mod signals;
 pub mod snapshot;
 
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -194,34 +195,73 @@ impl PlanState {
         }
     }
 
+    /// Stable, content-addressed plan version. Uses SHA-256 (truncated to
+    /// 8 bytes) rather than `DefaultHasher` so the value is reproducible
+    /// across Rust upgrades and across binary rebuilds — necessary because
+    /// `plan_version` is persisted in `PeerMessageEnvelope` and used by the
+    /// router's carry-forward logic to reject stale messages with
+    /// `plan_version_changed`. Includes every spec field that affects routing
+    /// or downstream task semantics so editing task text bumps the version.
     fn version(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.plan_id.hash(&mut hasher);
+        let mut hasher = Sha256::new();
+        hasher.update(b"spur-plan-version-v1\0");
+        hasher.update(self.plan_id.as_bytes());
+        hasher.update(b"\0");
         for entry in &self.tasks {
-            entry.spec.task_id.hash(&mut hasher);
-            entry.spec.depends_on.hash(&mut hasher);
-            entry.spec.issue_id.hash(&mut hasher);
-            entry.last_delegation_id.hash(&mut hasher);
+            hasher.update(entry.spec.task_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(entry.spec.agent.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(entry.spec.task.as_bytes());
+            hasher.update(b"\0");
+            for dep in &entry.spec.depends_on {
+                hasher.update(dep.as_bytes());
+                hasher.update(b"\0");
+            }
+            hasher.update(b"\x01");
+            for ctx in &entry.spec.context_files {
+                hasher.update(ctx.as_bytes());
+                hasher.update(b"\0");
+            }
+            hasher.update(b"\x01");
+            if let Some(issue) = &entry.spec.issue_id {
+                hasher.update(b"i");
+                hasher.update(issue.as_bytes());
+            }
+            hasher.update(b"\0");
+            if let Some(last) = &entry.last_delegation_id {
+                hasher.update(b"l");
+                hasher.update(last.as_bytes());
+            }
+            hasher.update(b"\0");
             match &entry.status {
-                PlanTaskStatus::Pending => 0u8.hash(&mut hasher),
-                PlanTaskStatus::Ready => 1u8.hash(&mut hasher),
+                PlanTaskStatus::Pending => hasher.update(b"\x00"),
+                PlanTaskStatus::Ready => hasher.update(b"\x01"),
                 PlanTaskStatus::Dispatched { delegation_id } => {
-                    2u8.hash(&mut hasher);
-                    delegation_id.hash(&mut hasher);
+                    hasher.update(b"\x02");
+                    hasher.update(delegation_id.as_bytes());
                 }
-                PlanTaskStatus::AwaitingReview { .. } => 3u8.hash(&mut hasher),
-                PlanTaskStatus::Approved { .. } => 4u8.hash(&mut hasher),
-                PlanTaskStatus::Rejected { .. } => 5u8.hash(&mut hasher),
-                PlanTaskStatus::Failed { .. } => 6u8.hash(&mut hasher),
-                PlanTaskStatus::Cancelled { .. } => 7u8.hash(&mut hasher),
+                PlanTaskStatus::AwaitingReview { .. } => hasher.update(b"\x03"),
+                PlanTaskStatus::Approved { .. } => hasher.update(b"\x04"),
+                PlanTaskStatus::Rejected { .. } => hasher.update(b"\x05"),
+                PlanTaskStatus::Failed { .. } => hasher.update(b"\x06"),
+                PlanTaskStatus::Cancelled { .. } => hasher.update(b"\x07"),
                 PlanTaskStatus::Superseded { mutation_id, by } => {
-                    8u8.hash(&mut hasher);
-                    mutation_id.hash(&mut hasher);
-                    by.hash(&mut hasher);
+                    hasher.update(b"\x08");
+                    hasher.update(mutation_id.as_bytes());
+                    hasher.update(b"\0");
+                    for child in by {
+                        hasher.update(child.as_bytes());
+                        hasher.update(b"\0");
+                    }
                 }
             }
+            hasher.update(b"\0");
         }
-        hasher.finish()
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        u64::from_be_bytes(bytes)
     }
 
     fn compute_peer_edges(&self) -> HashSet<(String, String)> {
@@ -294,10 +334,157 @@ impl PlanState {
     }
 }
 
+/// Returns the most recent delegation id for a task entry, falling back to
+/// `last_delegation_id` for non-dispatched statuses. Note: only the latest
+/// delegation is exposed; if a task has been retried, prior delegation ids
+/// are not returned. Stale-attempt peer messages will resolve to
+/// `EdgeCheck::SourceMissing` (not `SourceSuperseded`) at validation time;
+/// this is acceptable for v1 because retried tasks get fresh delegation ids
+/// and the source worker either emitted before retry (now stale) or after
+/// (current).
 fn latest_delegation_id(entry: &PlanTaskEntry) -> Option<&str> {
     match &entry.status {
         PlanTaskStatus::Dispatched { delegation_id } => Some(delegation_id.as_str()),
         _ => entry.last_delegation_id.as_deref(),
+    }
+}
+
+#[cfg(test)]
+mod scope_snapshot_integration_tests {
+    use super::*;
+    use spur_acp::domain::delegation::DelegationId;
+
+    fn task_spec(task_id: &str, agent: &str, deps: Vec<&str>) -> PlanTask {
+        PlanTask {
+            task_id: task_id.into(),
+            agent: agent.into(),
+            task: format!("Do {task_id}"),
+            depends_on: deps.into_iter().map(String::from).collect(),
+            issue_id: Some(format!("bd-{task_id}")),
+            context_files: vec![],
+        }
+    }
+
+    fn entry(spec: PlanTask, status: PlanTaskStatus, last_delegation: Option<&str>) -> PlanTaskEntry {
+        PlanTaskEntry {
+            spec,
+            status,
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: last_delegation.map(String::from),
+        }
+    }
+
+    #[test]
+    fn snapshot_for_peer_projects_dag_edges_and_dispatched_delegations() {
+        let state = PlanState {
+            plan_id: "plan-1".into(),
+            tasks: vec![
+                entry(
+                    task_spec("ta", "codex", vec![]),
+                    PlanTaskStatus::Dispatched {
+                        delegation_id: "deleg-a".into(),
+                    },
+                    Some("deleg-a"),
+                ),
+                entry(
+                    task_spec("tb", "kimi", vec!["ta"]),
+                    PlanTaskStatus::Dispatched {
+                        delegation_id: "deleg-b".into(),
+                    },
+                    Some("deleg-b"),
+                ),
+                entry(
+                    task_spec("tc", "gemini", vec![]),
+                    PlanTaskStatus::Approved { summary: None },
+                    Some("deleg-c"),
+                ),
+            ],
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("bs-1".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: None,
+        };
+
+        let snap = state.snapshot_for_peer();
+
+        // DAG edge: tb depends_on ta.
+        assert!(snap
+            .peer_edges
+            .contains(&("ta".to_string(), "tb".to_string())));
+        assert_eq!(snap.peer_edges.len(), 1);
+
+        // Delegations mapped for dispatched + approved tasks.
+        assert_eq!(
+            snap.delegation_to_task
+                .get(&DelegationId("deleg-a".into())),
+            Some(&"ta".to_string())
+        );
+        assert_eq!(
+            snap.delegation_to_task
+                .get(&DelegationId("deleg-b".into())),
+            Some(&"tb".to_string())
+        );
+        assert_eq!(
+            snap.delegation_to_task
+                .get(&DelegationId("deleg-c".into())),
+            Some(&"tc".to_string())
+        );
+
+        // tc is terminal (Approved).
+        assert!(snap.terminal_tasks.contains("tc"));
+        assert!(!snap.terminal_tasks.contains("ta"));
+        assert!(snap.superseded_tasks.is_empty());
+
+        // plan_version is non-zero for non-empty plan.
+        assert_ne!(snap.plan_version, 0);
+    }
+
+    #[test]
+    fn version_is_stable_under_repeated_calls() {
+        let state = PlanState {
+            plan_id: "plan-stable".into(),
+            tasks: vec![entry(
+                task_spec("only", "codex", vec![]),
+                PlanTaskStatus::Pending,
+                None,
+            )],
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("bs-1".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: None,
+        };
+        let v1 = state.version();
+        let v2 = state.version();
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn version_changes_when_task_text_changes() {
+        let mut state = PlanState {
+            plan_id: "plan-text".into(),
+            tasks: vec![entry(
+                task_spec("ta", "codex", vec![]),
+                PlanTaskStatus::Pending,
+                None,
+            )],
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("bs-1".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: None,
+        };
+        let v_before = state.version();
+        state.tasks[0].spec.task = "Edited task body".into();
+        let v_after = state.version();
+        assert_ne!(
+            v_before, v_after,
+            "editing task body must bump plan_version"
+        );
     }
 }
 
