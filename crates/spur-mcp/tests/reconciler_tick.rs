@@ -1034,6 +1034,7 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     );
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "codex".into(),
@@ -1121,6 +1122,7 @@ async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fr
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     );
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "codex".into(),
@@ -1221,6 +1223,7 @@ async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     );
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "bad/agent".into(),
@@ -1282,6 +1285,7 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     );
     server.set_repo_root(dir.path().to_path_buf());
     server.set_reconciler_enabled(true, None);
@@ -1394,6 +1398,7 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     );
     server.set_repo_root(dir.path().to_path_buf());
     server.set_reconciler_enabled(true, None);
@@ -1488,6 +1493,7 @@ async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
         Some(Arc::clone(&pm)),
         Some(sink_ref),
         test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     );
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "codex".into(),

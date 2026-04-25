@@ -156,8 +156,13 @@ async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
-    let (server, mut channel) =
-        McpCallbackServer::new(&session_id, Some(pm), None, continuation_ctx());
+    let (server, mut channel) = McpCallbackServer::new(
+        &session_id,
+        Some(pm),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
 
     let response = server
         .__test_call_submit_plan(json!({
@@ -661,8 +666,13 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
     .expect("build epic subgraph");
     let task_id = subgraph.task_map.get("t1").expect("task id").clone();
     let session_id = BrainSessionId::new(SessionId("brain".into()));
-    let (mut server, mut channel) =
-        McpCallbackServer::new(&session_id, Some(Arc::clone(&pm)), None, continuation_ctx());
+    let (mut server, mut channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server.set_reconciler_enabled(true, Some(Arc::new(Notify::new())));
     server.set_repo_root(dir.path().to_path_buf());
 
@@ -723,8 +733,13 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
     .await;
 
     let session_id = BrainSessionId::new(SessionId("brain".into()));
-    let (mut server, mut channel) =
-        McpCallbackServer::new(&session_id, Some(Arc::clone(&pm)), None, continuation_ctx());
+    let (mut server, mut channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server.set_reconciler_enabled(true, None);
     server.set_repo_root(dir.path().to_path_buf());
 

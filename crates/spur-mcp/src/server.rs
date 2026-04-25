@@ -24,11 +24,11 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info};
 
-use spur_acp::domain::clip::clip_with_ellipsis;
 use spur_acp::*;
 use spur_pm::{pidfile::PidFileGuard, IssueFilter, IssueUpdate, PmService, PrParams};
 use spur_worktree::WorktreeManager;
 
+use crate::outcome_materializer::OutcomeMaterializer;
 use crate::plan::proposers::{ScopeDriftSplitProposer, TrivialScorer};
 use crate::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use crate::plan::signal_watcher::SignalWatcher;
@@ -43,6 +43,7 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 /// The 60 s TTL is generous for any residual debug-injection use; the
 /// map is allowed to stay permanently empty in production.
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(test)]
 const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
@@ -205,83 +206,36 @@ pub struct DetachedCompletionHandle {
     pub attempt_tracker: Arc<AtomicU32>,
     pub brain_session: SessionId,
     pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+    pub materializer: OutcomeMaterializer,
 }
 
 fn new_attempt_tracker() -> Arc<AtomicU32> {
     Arc::new(AtomicU32::new(1))
 }
 
-fn map_worker_artifact_ref(
-    delegation_id: &DelegationId,
-    artifact: Option<&spur_acp::domain::artifact::WorkerArtifact>,
-) -> Option<spur_acp::domain::ArtifactRef> {
-    use spur_acp::domain::continuation::ArtifactKind as ContinuationArtifactKind;
-
-    artifact.map(|artifact| spur_acp::domain::ArtifactRef {
-        kind: ContinuationArtifactKind::Other("worker_artifact".into()),
-        uri: format!("spur://artifact/{}", delegation_id.as_str()),
-        byte_size: artifact.size_bytes as u64,
-        // Phase 1 fix: WorkerArtifact carries blob_sha (40-char hex) which
-        // serves as the SHA-1 git blob identifier. Populate sha256 with it
-        // for now; in Phase 3 OutcomeMetadata.sha256 will carry SHA-256
-        // separately. Until then, the field name is historical.
-        sha256: Some(artifact.blob_sha.clone()),
-        git_object_ref: Some(artifact.object_ref.clone()),
-        git_blob_sha: Some(artifact.blob_sha.clone()),
-    })
-}
-
-/// **INVARIANT (persist-before-publish):** the upstream caller MUST persist
-/// any side-channel artifact (`worktrees.persist_artifact(...).await`) BEFORE
-/// invoking this function. This ensures that `result.artifact.blob_sha`, which
-/// gets propagated into the `BrainContinuation` and thus exposed to the brain,
-/// resolves successfully under `git cat-file -p <blob_sha>` at the time the
-/// brain calls `fetch_outcome_artifact`. Without this ordering, the brain
-/// could observe a `delegation_id` whose backing blob has not yet been
-/// written, racing the persist with the fetch.
-///
-/// Spec §5.2 / §7.2 (post-round-9 P1-M2). Phase 3 will preserve this
-/// ordering inside `OutcomeMaterializer::materialize`.
-fn build_detached_continuation(
+/// Phase 3 (plan-5 §7.3): the materializer is the single producer of
+/// `BrainContinuation` for completed delegations. This function is now a
+/// thin wrapper that forwards to `OutcomeMaterializer::materialize`.
+pub(crate) async fn build_detached_continuation(
     delegation_id: &DelegationId,
     result: &DelegationResult,
     source: spur_acp::domain::ContinuationSource,
     attempt: u32,
     brain_session: SessionId,
     event_sink: Option<&Arc<dyn crate::events::McpEventSink>>,
+    materializer: &OutcomeMaterializer,
 ) -> spur_acp::domain::BrainContinuation {
-    let original_summary = result.summary.clone();
-    let (summary, summary_truncated) =
-        clip_with_ellipsis(result.summary.clone(), PRODUCER_MAX_FIELD_BYTES);
-    if summary_truncated {
-        if let Some(event_sink) = event_sink {
-            event_sink.emit(SpurEventBody::ContinuationFieldTruncated {
-                delegation_id: delegation_id.clone(),
-                field: "summary".into(),
-                original_bytes: original_summary.as_ref().map(|s| s.len()).unwrap_or(0),
-                kept_bytes: summary.as_ref().map(|s| s.len()).unwrap_or(0),
-            });
-        }
-    }
-
-    spur_acp::domain::BrainContinuation {
-        delegation_id: delegation_id.clone(),
-        attempt,
-        brain_session,
-        source,
-        payload: spur_acp::domain::ContinuationPayload {
-            status: result.status.clone(),
-            summary,
-            diff_summary: result.diff_summary.clone(),
-            worker_branch: result.worker_branch.clone(),
-            artifact_ref: map_worker_artifact_ref(delegation_id, result.artifact.as_ref()),
-            estimated_cost_micros: None,
-            artifact_id: None,
-            fetch_hint: None,
-        },
-        created_at_wall: chrono::Utc::now(),
-        created_at_mono: std::time::Instant::now(),
-    }
+    let brain_session_id = spur_acp::BrainSessionId::new(brain_session);
+    materializer
+        .materialize(
+            result.clone(),
+            delegation_id.clone(),
+            attempt,
+            brain_session_id,
+            source,
+            event_sink,
+        )
+        .await
 }
 
 // ─── McpCallbackServer ───────────────────────────────────────────────
@@ -328,6 +282,9 @@ pub struct McpCallbackServer {
     /// Bundle of handles for routing detached delegation completions back
     /// into the orchestrator ingress via `report_detached_completion`.
     continuation_ctx: Arc<DetachedContinuationCtx>,
+    pub(crate) materializer: OutcomeMaterializer,
+    #[allow(dead_code)]
+    pub(crate) outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
     /// Phase 1c: how long `handle_delegate_to_worker` / `handle_delegate_parallel`
     /// wait inline for a worker's oneshot to fire before handing the receiver
     /// to the detached collector. Default `0` — pure async-first.
@@ -1481,8 +1438,10 @@ impl McpCallbackServer {
         pm_service: Option<Arc<PmService>>,
         event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
         continuation_ctx: DetachedContinuationCtx,
+        outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
     ) -> (Self, DelegationChannel) {
         let (req_tx, req_rx) = mpsc::channel::<DelegationRequest>(32);
+        let materializer = OutcomeMaterializer::new(outcome_store.clone());
 
         let server = Self {
             delegation_tx: req_tx,
@@ -1497,6 +1456,8 @@ impl McpCallbackServer {
             plan_registry: Arc::new(tokio::sync::Mutex::new(crate::plan::PlanRegistry::default())),
             cancellation_control: None,
             continuation_ctx: Arc::new(continuation_ctx),
+            materializer,
+            outcome_store,
             inline_wait: std::time::Duration::from_millis(0),
             retiring: AtomicBool::new(false),
             cancel_token: CancellationToken::new(),
@@ -1705,6 +1666,7 @@ impl McpCallbackServer {
                     attempt_tracker,
                     brain_session,
                     event_sink,
+                    materializer,
                     ..
                 } = h;
                 let attempt = attempt_tracker.load(Ordering::SeqCst);
@@ -1715,7 +1677,9 @@ impl McpCallbackServer {
                     attempt,
                     brain_session,
                     event_sink.as_ref(),
-                );
+                    &materializer,
+                )
+                .await;
                 // Route the completion back to the orchestrator ingress via
                 // the injected callback (wired in spur-core to avoid a
                 // circular dependency). The delegation_id is used as a
@@ -2386,6 +2350,7 @@ impl McpCallbackServer {
                         attempt_tracker,
                         brain_session: self.brain_session_id.as_session_id().clone(),
                         event_sink: self.event_sink.clone(),
+                        materializer: self.materializer.clone(),
                     }),
                 );
                 let payload = json!({
@@ -2479,6 +2444,7 @@ impl McpCallbackServer {
             let cancel_token = self.cancel_token.child_token();
             let event_sink = self.event_sink.clone();
             let brain_session = self.brain_session_id.as_session_id().clone();
+            let materializer = self.materializer.clone();
             waits.spawn(async move {
                 let mut rx = rx;
                 // Cancel-during-handoff (Risk R2): see
@@ -2532,6 +2498,7 @@ impl McpCallbackServer {
                                 attempt_tracker,
                                 brain_session,
                                 event_sink,
+                                materializer,
                             }),
                         );
                         json!({
@@ -4436,8 +4403,13 @@ mod retirement_state_tests {
     #[tokio::test]
     async fn test_server_mark_retiring_rejects_new_delegations() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
-        let (server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, no_op_ctx());
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
 
         server.mark_retiring();
 
@@ -4455,8 +4427,13 @@ mod retirement_state_tests {
     #[tokio::test]
     async fn test_server_cancel_in_flight_signals_token() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
-        let (server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, no_op_ctx());
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
 
         assert!(
             !server.cancel_token.is_cancelled(),
@@ -4474,8 +4451,13 @@ mod retirement_state_tests {
     #[tokio::test]
     async fn test_server_force_abort_idempotent() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
-        let (server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, no_op_ctx());
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
         let dropped = Arc::new(AtomicBool::new(false));
         let started = Arc::new(Notify::new());
 
@@ -4513,8 +4495,13 @@ mod retirement_state_tests {
     #[tokio::test]
     async fn test_server_force_abort_after_shutdown_partial_progress() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
-        let (server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, no_op_ctx());
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
         let server = Arc::new(server);
 
         let release = Arc::new(Notify::new());
@@ -4598,6 +4585,9 @@ mod continuation_producer_tests {
         let completed = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let captured_for_ctx = Arc::clone(&captured);
+        let store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let materializer = super::OutcomeMaterializer::new(store);
 
         let detached = Some(super::DetachedCompletionHandle {
             ctx: Arc::new(super::DetachedContinuationCtx {
@@ -4612,6 +4602,7 @@ mod continuation_producer_tests {
             attempt_tracker: Arc::new(AtomicU32::new(attempt)),
             brain_session,
             event_sink,
+            materializer,
         });
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -4655,7 +4646,41 @@ mod continuation_producer_tests {
     }
 
     #[tokio::test]
-    async fn test_producer_clips_oversized_summary_with_event() {
+    async fn build_detached_continuation_populates_artifact_id_via_materializer() {
+        use spur_blob_store::MemoryOutcomeStore;
+
+        let store: Arc<dyn spur_blob_store::OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let mat = crate::outcome_materializer::OutcomeMaterializer::new(store);
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("done".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker-x".into()),
+            artifact: None,
+        };
+        let delegation_id = DelegationId::from("deadbeef-1111-2222-3333-444455556666");
+        let brain_session = SessionId("550e8400-e29b-41d4-a716-446655440000".into());
+
+        let cont = super::build_detached_continuation(
+            &delegation_id,
+            &result,
+            spur_acp::domain::ContinuationSource::BlockTimeout,
+            1,
+            brain_session,
+            None,
+            &mat,
+        )
+        .await;
+        assert!(
+            cont.payload.artifact_id.is_some(),
+            "Phase 3 wires artifact_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_producer_materializes_oversized_summary_with_fetch_hint() {
         let delegation_id: DelegationId = "del-oversized".into();
         let sink = Arc::new(RecordingSink::default());
         let sink_obj: Arc<dyn crate::events::McpEventSink> = sink.clone();
@@ -4683,27 +4708,23 @@ mod continuation_producer_tests {
             clipped.ends_with('…'),
             "clipped summary should carry the ellipsis marker"
         );
-
-        let events = sink.events.lock().unwrap();
-        assert_eq!(
-            events.len(),
-            1,
-            "exactly one truncation event should be emitted"
+        assert!(
+            continuation.payload.artifact_id.is_some(),
+            "full result should be fetchable from the outcome store"
         );
-        match &events[0] {
-            SpurEventBody::ContinuationFieldTruncated {
-                delegation_id: emitted_id,
-                field,
-                original_bytes,
-                kept_bytes,
-            } => {
-                assert_eq!(emitted_id, &delegation_id);
-                assert_eq!(field, "summary");
-                assert_eq!(*original_bytes, original_summary.len());
-                assert_eq!(*kept_bytes, clipped.len());
-            }
-            other => panic!("unexpected event emitted for clipped summary: {other:?}"),
-        }
+        assert!(
+            continuation
+                .payload
+                .fetch_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("Summary truncated")),
+            "fetch hint should tell the brain that the summary was clipped"
+        );
+
+        assert!(
+            sink.events.lock().unwrap().is_empty(),
+            "primary materializer path persists the full result instead of emitting a truncation event"
+        );
     }
 
     #[tokio::test]
@@ -4791,33 +4812,6 @@ mod continuation_producer_tests {
             Some("0".repeat(40).as_str())
         );
     }
-
-    #[test]
-    fn map_worker_artifact_ref_preserves_git_metadata() {
-        let delegation_id: DelegationId = "uuid-test".into();
-        let worker = WorkerArtifact {
-            object_ref: "refs/spur/artifacts/sess-abc".into(),
-            blob_sha: "a".repeat(40),
-            size_bytes: 12_345,
-            kind: WorkerArtifactKind::Output,
-        };
-
-        let mapped = super::map_worker_artifact_ref(&delegation_id, Some(&worker))
-            .expect("Some artifact yields Some ArtifactRef");
-
-        assert_eq!(
-            mapped.git_object_ref.as_deref(),
-            Some("refs/spur/artifacts/sess-abc"),
-            "git_object_ref must survive the mapping (Phase 1 bug fix)"
-        );
-        assert_eq!(
-            mapped.git_blob_sha.as_deref(),
-            Some("a".repeat(40).as_str()),
-            "git_blob_sha must survive the mapping"
-        );
-        assert_eq!(mapped.byte_size, 12_345);
-        assert!(mapped.uri.starts_with("spur://artifact/"));
-    }
 }
 
 #[cfg(test)]
@@ -4870,8 +4864,15 @@ mod fetch_outcome_artifact_tests {
 
     async fn build_test_server(repo_root: &Path, session_id: &str) -> McpCallbackServer {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
-        let (mut server, _channel) =
-            McpCallbackServer::new(&brain_session, None, None, no_op_continuation_ctx());
+        let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let (mut server, _channel) = McpCallbackServer::new(
+            &brain_session,
+            None,
+            None,
+            no_op_continuation_ctx(),
+            outcome_store,
+        );
         server.set_repo_root(repo_root.to_path_buf());
         server
     }
@@ -5260,6 +5261,7 @@ mod merge_plan_tests {
             Some(Arc::clone(&pm)),
             None,
             continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         );
         server.set_repo_root(dir.path().to_path_buf());
 
@@ -5450,6 +5452,7 @@ mod merge_plan_tests {
             Some(Arc::clone(&pm)),
             None,
             continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         );
         server.set_repo_root(dir.path().to_path_buf());
 
@@ -5828,8 +5831,13 @@ mod reconciler_fast_forward_tests {
         let continuation_ctx = super::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
-        let (mut server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        let (mut server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
         let notify = Arc::new(Notify::new());
         server.set_reconciler_enabled(true, Some(Arc::clone(&notify)));
 
@@ -5852,8 +5860,13 @@ mod reconciler_fast_forward_tests {
         let continuation_ctx = super::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
-        let (mut server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        let (mut server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
         server.set_reconciler_enabled(true, None);
         let notify = server
             .reconciler_fast_forward
@@ -5880,8 +5893,13 @@ mod reconciler_fast_forward_tests {
         let continuation_ctx = super::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
-        let (server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
         let plan = Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
             plan_id: "plan-1".into(),
             tasks: Vec::new(),
@@ -6013,8 +6031,13 @@ mod reconciler_fast_forward_tests {
         let continuation_ctx = super::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
-        let (server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
 
         let stale = Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
             plan_id: "plan-1".into(),
@@ -6104,6 +6127,7 @@ mod reconciler_fast_forward_tests {
             Some(Arc::clone(&pm)),
             None,
             continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         );
         assert!(server.active_plans.lock().await.is_empty());
 
@@ -6120,8 +6144,13 @@ mod reconciler_fast_forward_tests {
         let continuation_ctx = super::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
-        let (server, _channel) =
-            super::McpCallbackServer::new(&session_id, None, None, continuation_ctx);
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
         server.active_plans.lock().await.insert(
             "plan-1".into(),
             Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {

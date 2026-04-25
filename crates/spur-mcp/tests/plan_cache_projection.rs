@@ -108,8 +108,13 @@ async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
-    let (server, _channel) =
-        McpCallbackServer::new(&session_id, Some(pm), None, continuation_ctx());
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(pm),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
 
     let submit_response = server
         .__test_call_submit_plan(json!({
@@ -166,8 +171,13 @@ async fn get_plan_status_preserves_in_progress_persisted_children() {
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
-    let (server, _channel) =
-        McpCallbackServer::new(&session_id, Some(Arc::clone(&pm)), None, continuation_ctx());
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
 
     let submit_response = server
         .__test_call_submit_plan(json!({

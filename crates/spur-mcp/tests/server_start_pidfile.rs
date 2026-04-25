@@ -68,8 +68,13 @@ async fn beads_backed_start_requires_repo_root_before_listener_boot() {
     let pm = beads_pm(dir.path()).await;
     let brain_sid = BrainSessionId::new(SessionId::new());
 
-    let (server, _channel) =
-        McpCallbackServer::new(&brain_sid, Some(pm), None, test_continuation_ctx());
+    let (server, _channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(pm),
+        None,
+        test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     let err = Arc::new(server)
         .start()
         .await
@@ -96,8 +101,13 @@ async fn dropping_server_handle_releases_pidfile_for_next_start() {
     let pm = beads_pm(dir.path()).await;
     let brain_sid = BrainSessionId::new(SessionId::new());
 
-    let (mut server, _channel) =
-        McpCallbackServer::new(&brain_sid, Some(pm.clone()), None, test_continuation_ctx());
+    let (mut server, _channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(pm.clone()),
+        None,
+        test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server.set_repo_root(dir.path().to_path_buf());
     server.set_reconciler_enabled(true, None);
 
@@ -112,8 +122,13 @@ async fn dropping_server_handle_releases_pidfile_for_next_start() {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     loop {
-        let (mut next_server, _channel) =
-            McpCallbackServer::new(&brain_sid, Some(pm.clone()), None, test_continuation_ctx());
+        let (mut next_server, _channel) = McpCallbackServer::new(
+            &brain_sid,
+            Some(pm.clone()),
+            None,
+            test_continuation_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        );
         next_server.set_repo_root(dir.path().to_path_buf());
         next_server.set_reconciler_enabled(true, None);
 

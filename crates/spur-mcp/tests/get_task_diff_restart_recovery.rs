@@ -197,8 +197,13 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
     .expect("close task issue");
 
     let session_id = BrainSessionId::new(SessionId("brain".into()));
-    let (mut server1, _channel1) =
-        McpCallbackServer::new(&session_id, Some(Arc::clone(&pm)), None, continuation_ctx());
+    let (mut server1, _channel1) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server1.set_repo_root(dir.path().to_path_buf());
     let warm_status = server1
         .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
@@ -213,8 +218,13 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
     );
     drop(server1);
 
-    let (mut server2, _channel2) =
-        McpCallbackServer::new(&session_id, Some(Arc::clone(&pm)), None, continuation_ctx());
+    let (mut server2, _channel2) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server2.set_repo_root(dir.path().to_path_buf());
     assert_eq!(
         server2.__test_active_plan_count().await,
