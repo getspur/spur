@@ -1637,6 +1637,16 @@ impl App {
                 self.dirty = true;
             }
 
+            Action::CopySessionId(session_id) => {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+                use std::io::Write;
+                let payload = STANDARD.encode(session_id.as_bytes());
+                let mut out = std::io::stdout();
+                let _ = write!(out, "\x1b]52;c;{payload}\x1b\\");
+                let _ = out.flush();
+                tracing::debug!(target: "spur_tui::picker", session_id = %session_id, "OSC 52 copy emitted");
+            }
+
             Action::NewSessionRequested => {
                 // Shut down the current brain atomically so picker [+ New session]
                 // doesn't leave the old agent subprocess's session running.
