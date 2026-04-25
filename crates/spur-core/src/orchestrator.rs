@@ -5865,17 +5865,68 @@ fn apply_decision_to_candidate(
 #[cfg(test)]
 mod peer_mailbox_drain_tests {
     use super::drain_peer_acks_with_timeout;
+    use crate::peer_mailbox::router::Acceptance;
     use crate::peer_mailbox::{
         prompt_builder::PeerPromptContextBuilder, InMemoryLedger, Limits, PeerMailboxBundle,
         PeerMailboxLedger, PeerMailboxRouter,
     };
     use spur_acp::domain::delegation::DelegationId;
+    use spur_acp::domain::events::SpurEventBody;
     use spur_acp::domain::peer_message::{
-        LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId,
+        LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
     };
+    use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
-    use tokio::sync::mpsc::unbounded_channel;
+    use std::time::Duration;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+
+    struct DrainFixture {
+        bundle: PeerMailboxBundle,
+        snapshot: PlanScopeSnapshot,
+        events: UnboundedReceiver<SpurEventBody>,
+    }
+
+    fn fixture(targets: &[&str]) -> DrainFixture {
+        let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
+        let (funnel, events) = crate::event_funnel::test_channel();
+        let (reconciler_tx, _reconciler_rx) = unbounded_channel();
+        let router = Arc::new(PeerMailboxRouter::new(
+            ledger.clone(),
+            funnel,
+            reconciler_tx,
+            Limits::default(),
+            "bs".into(),
+        ));
+        let bundle = PeerMailboxBundle {
+            router,
+            builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
+            ledger,
+        };
+
+        let mut delegation_to_task = HashMap::new();
+        delegation_to_task.insert(DelegationId("src".into()), "task-src".into());
+
+        let mut peer_edges = HashSet::new();
+        for target in targets {
+            let task_id = format!("task-{target}");
+            delegation_to_task.insert(DelegationId((*target).into()), task_id.clone());
+            peer_edges.insert(("task-src".into(), task_id));
+        }
+
+        DrainFixture {
+            bundle,
+            snapshot: PlanScopeSnapshot {
+                plan_version: 1,
+                peer_edges,
+                delegation_to_task,
+                delegation_to_issue: HashMap::new(),
+                superseded_tasks: HashSet::new(),
+                terminal_tasks: HashSet::new(),
+            },
+            events,
+        }
+    }
 
     fn envelope(message_id: PeerMessageId, target: &DelegationId) -> PeerMessageEnvelope {
         PeerMessageEnvelope {
@@ -5895,61 +5946,305 @@ mod peer_mailbox_drain_tests {
         }
     }
 
-    fn bundle() -> PeerMailboxBundle {
-        let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
-        let (funnel, _events) = crate::event_funnel::test_channel();
-        let (reconciler_tx, _reconciler_rx) = unbounded_channel();
-        let router = Arc::new(PeerMailboxRouter::new(
-            ledger.clone(),
-            funnel,
-            reconciler_tx,
-            Limits::default(),
-            "bs".into(),
-        ));
-        PeerMailboxBundle {
-            router,
-            builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
-            ledger,
-        }
-    }
-
-    #[tokio::test]
-    async fn drain_completes_after_quiet_window_with_no_acks() {
-        let bundle = bundle();
-        let target = DelegationId("tgt".into());
-        let message_id: PeerMessageId =
-            serde_json::from_str("\"00000000-0000-0000-0000-000000000701\"").unwrap();
-        bundle
-            .ledger
-            .accept(envelope(message_id, &target))
+    async fn accept_and_walk(
+        fixture: &DrainFixture,
+        message_id: PeerMessageId,
+        target: &DelegationId,
+        final_state: LedgerState,
+    ) {
+        match fixture
+            .bundle
+            .router
+            .accept_or_reject(envelope(message_id, target), &fixture.snapshot)
             .await
-            .unwrap();
-        bundle
+            .unwrap()
+        {
+            Acceptance::Created(_guard) => {}
+            Acceptance::AlreadyAccepted => panic!("expected fresh peer message"),
+        }
+
+        fixture
+            .bundle
             .ledger
             .transition(&message_id, LedgerState::Queued)
             .await
             .unwrap();
-        bundle
+        fixture
+            .bundle
             .ledger
             .transition(&message_id, LedgerState::DeliveredInflight)
             .await
             .unwrap();
-        bundle
-            .ledger
-            .transition(&message_id, LedgerState::Delivered)
-            .await
-            .unwrap();
+
+        match final_state {
+            LedgerState::DeliveredInflight => {}
+            LedgerState::Delivered => {
+                fixture
+                    .bundle
+                    .ledger
+                    .transition(&message_id, LedgerState::Delivered)
+                    .await
+                    .unwrap();
+            }
+            other => panic!("unsupported drain test target state: {other:?}"),
+        }
+    }
+
+    async fn spawn_drain(
+        bundle: PeerMailboxBundle,
+        target: DelegationId,
+        quiet_window: Duration,
+        ack_rx: UnboundedReceiver<()>,
+    ) -> tokio::task::JoinHandle<Duration> {
+        let start = tokio::time::Instant::now();
+        let handle = tokio::spawn(async move {
+            drain_peer_acks_with_timeout(&bundle, &target, quiet_window, ack_rx).await;
+            start.elapsed()
+        });
+        tokio::task::yield_now().await;
+        handle
+    }
+
+    async fn drain_events(events: &mut UnboundedReceiver<SpurEventBody>) -> Vec<SpurEventBody> {
+        let mut out = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(1), events.recv()).await {
+                Ok(Some(event)) => out.push(event),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        out
+    }
+
+    fn ignored_timeout_events(
+        events: &[SpurEventBody],
+        message_id: PeerMessageId,
+        target: &DelegationId,
+    ) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    SpurEventBody::WorkerPeerMessageIgnored {
+                        message_id: event_message_id,
+                        target_delegation_id,
+                        reason,
+                        ..
+                    } if *event_message_id == message_id
+                        && target_delegation_id == target
+                        && reason == "drain_timeout"
+                )
+            })
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_completes_after_quiet_window_with_no_acks() {
+        let mut fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+        let message_id: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000701\"").unwrap();
+        accept_and_walk(&fixture, message_id, &target, LedgerState::Delivered).await;
 
         let (_ack_tx, ack_rx) = unbounded_channel();
         let quiet_window = Duration::from_millis(50);
-        let start = Instant::now();
-        drain_peer_acks_with_timeout(&bundle, &target, quiet_window, ack_rx).await;
-        let elapsed = start.elapsed();
+        let handle =
+            spawn_drain(fixture.bundle.clone(), target.clone(), quiet_window, ack_rx).await;
+
+        tokio::time::advance(quiet_window).await;
+        let elapsed = handle.await.unwrap();
 
         assert!(elapsed >= quiet_window, "elapsed: {elapsed:?}");
-        assert!(elapsed < Duration::from_millis(500), "elapsed: {elapsed:?}");
-        let entry = bundle.ledger.get(&message_id).await.unwrap();
+        assert!(
+            elapsed < quiet_window + Duration::from_millis(1),
+            "elapsed: {elapsed:?}"
+        );
+        let entry = fixture.bundle.ledger.get(&message_id).await.unwrap();
         assert_eq!(entry.state, LedgerState::Ignored);
+        let events = drain_events(&mut fixture.events).await;
+        assert_eq!(ignored_timeout_events(&events, message_id, &target), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_resets_quiet_window_on_each_ack() {
+        let mut fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+        let message_id: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000702\"").unwrap();
+        accept_and_walk(&fixture, message_id, &target, LedgerState::Delivered).await;
+
+        let (ack_tx, ack_rx) = unbounded_channel();
+        let heartbeat_tx = ack_tx.clone();
+        let _hold_open_until_timeout = ack_tx.clone();
+        drop(ack_tx);
+
+        let quiet_window = Duration::from_secs(1);
+        let handle =
+            spawn_drain(fixture.bundle.clone(), target.clone(), quiet_window, ack_rx).await;
+
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            heartbeat_tx.send(()).unwrap();
+            tokio::task::yield_now().await;
+            assert!(
+                !handle.is_finished(),
+                "drain finished before quiet window reset"
+            );
+        }
+        drop(heartbeat_tx);
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(
+            !handle.is_finished(),
+            "drain finished before the final quiet window elapsed"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        let elapsed = handle.await.unwrap();
+        let expected = Duration::from_millis(4 * 900 + 1_000);
+        assert!(
+            elapsed >= expected && elapsed < expected + Duration::from_millis(1),
+            "elapsed: {elapsed:?}, expected: {expected:?}"
+        );
+
+        let entry = fixture.bundle.ledger.get(&message_id).await.unwrap();
+        assert_eq!(entry.state, LedgerState::Ignored);
+        let events = drain_events(&mut fixture.events).await;
+        assert_eq!(ignored_timeout_events(&events, message_id, &target), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_returns_immediately_when_sender_drops_with_no_pending() {
+        let fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+        let (ack_tx, ack_rx) = unbounded_channel();
+        drop(ack_tx);
+
+        let quiet_window = Duration::from_secs(1);
+        let handle = spawn_drain(fixture.bundle.clone(), target, quiet_window, ack_rx).await;
+        let elapsed = handle.await.unwrap();
+
+        assert!(
+            elapsed < quiet_window,
+            "closed sender should bypass quiet window, elapsed: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_forces_delivered_inflight_messages_to_ignored_after_timeout() {
+        let mut fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+        let message_id: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000703\"").unwrap();
+        accept_and_walk(
+            &fixture,
+            message_id,
+            &target,
+            LedgerState::DeliveredInflight,
+        )
+        .await;
+
+        let (ack_tx, ack_rx) = unbounded_channel();
+        let _hold_open_until_timeout = ack_tx.clone();
+        drop(ack_tx);
+
+        let quiet_window = Duration::from_millis(100);
+        let handle =
+            spawn_drain(fixture.bundle.clone(), target.clone(), quiet_window, ack_rx).await;
+        tokio::time::advance(quiet_window).await;
+        let elapsed = handle.await.unwrap();
+
+        assert!(elapsed >= quiet_window, "elapsed: {elapsed:?}");
+        let entry = fixture.bundle.ledger.get(&message_id).await.unwrap();
+        assert_eq!(entry.state, LedgerState::Ignored);
+        let events = drain_events(&mut fixture.events).await;
+        assert_eq!(ignored_timeout_events(&events, message_id, &target), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_late_ack_after_timeout_is_safely_swallowed() {
+        let mut fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+        let message_id: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000704\"").unwrap();
+        accept_and_walk(&fixture, message_id, &target, LedgerState::Delivered).await;
+
+        let (ack_tx, ack_rx) = unbounded_channel();
+        let stale_ack_tx = ack_tx.clone();
+        drop(ack_tx);
+
+        let quiet_window = Duration::from_millis(100);
+        let handle =
+            spawn_drain(fixture.bundle.clone(), target.clone(), quiet_window, ack_rx).await;
+        tokio::time::advance(quiet_window).await;
+        handle.await.unwrap();
+
+        assert!(
+            stale_ack_tx.send(()).is_err(),
+            "late ack should be dropped after drain receiver exits"
+        );
+        assert!(
+            fixture
+                .bundle
+                .router
+                .record_terminal(&message_id, TerminalOutcome::Consumed)
+                .await
+                .is_err(),
+            "terminal lockout must reject Ignored -> Consumed even if a stale ack bypassed the channel"
+        );
+
+        let entry = fixture.bundle.ledger.get(&message_id).await.unwrap();
+        assert_eq!(entry.state, LedgerState::Ignored);
+
+        let events = drain_events(&mut fixture.events).await;
+        assert_eq!(ignored_timeout_events(&events, message_id, &target), 1);
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                SpurEventBody::WorkerPeerMessageConsumed {
+                    message_id: event_message_id,
+                    ..
+                } if *event_message_id == message_id
+            )
+        }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_forces_only_delegations_target_messages_not_unrelated_messages() {
+        let mut fixture = fixture(&["tgt-A", "tgt-B"]);
+        let target_a = DelegationId("tgt-A".into());
+        let target_b = DelegationId("tgt-B".into());
+        let message_a: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000705\"").unwrap();
+        let message_b: PeerMessageId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000706\"").unwrap();
+        accept_and_walk(&fixture, message_a, &target_a, LedgerState::Delivered).await;
+        accept_and_walk(&fixture, message_b, &target_b, LedgerState::Delivered).await;
+
+        let (ack_tx, ack_rx) = unbounded_channel();
+        let _hold_open_until_timeout = ack_tx.clone();
+        drop(ack_tx);
+
+        let quiet_window = Duration::from_millis(100);
+        let handle = spawn_drain(
+            fixture.bundle.clone(),
+            target_a.clone(),
+            quiet_window,
+            ack_rx,
+        )
+        .await;
+        tokio::time::advance(quiet_window).await;
+        handle.await.unwrap();
+
+        let entry_a = fixture.bundle.ledger.get(&message_a).await.unwrap();
+        let entry_b = fixture.bundle.ledger.get(&message_b).await.unwrap();
+        assert_eq!(entry_a.state, LedgerState::Ignored);
+        assert_eq!(entry_b.state, LedgerState::Delivered);
+
+        let events = drain_events(&mut fixture.events).await;
+        assert_eq!(ignored_timeout_events(&events, message_a, &target_a), 1);
+        assert_eq!(ignored_timeout_events(&events, message_b, &target_b), 0);
     }
 }
 
