@@ -4,6 +4,7 @@
 
 > **REVISION HISTORY:**
 > - **R1 (kimi+gemini+codex sequential)** — applied: rewrote Task 1 clip helpers to match real `DelegationStatus`/`TimeoutFallback`/`String` (not Option) field types; added `DelegationStatus::Timeout` variant; replaced merge_budget relocation in Task 5 with a conservative envelope-cost estimate so the spur-core rendered-resource arithmetic stays in spur-core; extended `ContinuationResourceBody<'a>` in continuation_bridge.rs with the new v3 fields (Task 2) so the wire actually carries them; added MCP-layer `Section` projection in Task 10 (Phase 2 stores ignore the `_section` arg today); replaced broken `r.attempt` lookup with a `latest_attempt_by_delegation: HashMap` in Task 10; fixed Task 11 CLI to use real `spur-worktree` API + added missing direct deps; replaced Panic `FailureMode` variant in Task 3 with explicit panic-resilience documentation (mock can't `panic!` and stay testable).
+> - **R2 (kimi+gemini+codex sequential)** — applied: Task 8 `persist_completion_result_and_notify` now early-returns on `CompletionState::Superseded` (don't spam the brain with stale attempt data) AND covers all four variants in the source-mapping match (R1's match was non-exhaustive); Task 10 `project_section` accepts `&OutcomeKey` and injects `attempt`/`brain_session`/`estimated_cost_micros` (converting USD→micros) per spec §7.5 line 818; Task 6 panic test rewritten using an inline async closure (R1 dropped `FailureMode::Panic` so the test referencing it was uncompilable); Task 4 adds `[features] test-support = []` to `crates/spur-mcp/Cargo.toml` (R1 added gated builder methods but missed the feature definition); Task 5 drops the unused `sha2::{Digest, Sha256}` import inside `materialize` (clippy `-D warnings` would fail) and converts `result.estimated_cost_usd` → `estimated_cost_micros` at materialize time (R1 left it `None` always, so v3 cost would never populate).
 
 **Goal:** Introduce the `OutcomeMaterializer` (in `spur-mcp`), bump `BrainContinuation` to schema v3 with `artifact_id`/`fetch_hint`/`estimated_cost_micros` fields, extend `fetch_outcome_artifact` with `section` pagination + `attempt`, and integrate background TTL sweep + a `spur gc outcomes` CLI escape hatch.
 
@@ -902,14 +903,41 @@ Phase 3 of plan-5; spec §7.7 (Round 9 P3-S3)."
 
 **What:** Stand up the materializer struct with constructor and method signatures. No method bodies yet — those land in Tasks 5 + 6. Letting the type compile in isolation gives downstream wiring tasks (T7 + T8) a stable signature to build against.
 
-- [ ] **Step 1: Add the workspace dep to spur-mcp**
+- [ ] **Step 1: Add the workspace deps + `test-support` feature to spur-mcp**
 
-Run: `grep -n "^spur-acp\|^\[dependencies\]" crates/spur-mcp/Cargo.toml | head -5`
+Run: `grep -n "^spur-acp\|^\[dependencies\]\|^\[features\]\|^\[dev-dependencies\]" crates/spur-mcp/Cargo.toml | head -5`
 
-Add (alphabetical placement):
+Add (alphabetical placement under `[dependencies]`):
 
 ```toml
+futures = { workspace = true }
+sha2 = { workspace = true }
 spur-blob-store = { workspace = true }
+```
+
+`futures` is needed for `FutureExt::catch_unwind` (Task 5 panic-catch wrapper).
+`sha2` is needed for SHA-256 hex of the persisted blob (Task 5 metadata).
+Both are already in the workspace deps; only the per-crate import is new.
+
+Add a `[features]` section (or extend the existing one). The
+`test-support` feature gates the materializer's cap-override builders
+(`with_status_string_cap`, `with_summary_cap`, `with_diff_files_cap`)
+so production builds don't expose them:
+
+```toml
+[features]
+default = []
+# Enables OutcomeMaterializer cap-override builders for tests in
+# downstream crates. spur-blob-store has the same feature for its
+# MockFailingOutcomeStore (Task 3).
+test-support = []
+```
+
+Add to `[dev-dependencies]` so this crate's own tests can use the
+mock + cap overrides:
+
+```toml
+spur-blob-store = { workspace = true, features = ["test-support"] }
 ```
 
 - [ ] **Step 2: Write the skeleton module**
@@ -1230,8 +1258,10 @@ Replace `materialize`'s body in `crates/spur-mcp/src/outcome_materializer.rs`:
             clip_artifact_ref_strings, clip_diff_files, clip_status_strings, clip_with_ellipsis,
         };
         use spur_blob_store::{ContentType, OutcomeMetadata};
-        use sha2::{Digest, Sha256};
         use std::time::Instant;
+        // sha2::{Digest, Sha256} are used inside the file-scope `sha256_hex`
+        // helper, NOT in this method body — don't `use` them here or
+        // clippy::unused_imports fires under -D warnings.
 
         let start = Instant::now();
 
@@ -1274,14 +1304,44 @@ Replace `materialize`'s body in `crates/spur-mcp/src/outcome_materializer.rs`:
         };
 
         // Persist BEFORE building the continuation (P1-M2 ordering).
-        let outcome_ref = match self.store.put(&key, &bytes, &metadata).await {
-            Ok(r) => r,
-            Err(e) => {
+        // Wrap in `AssertUnwindSafe(...).catch_unwind().await` so a panicking
+        // backend (e.g., a future cloud store with an unwrap bug) collapses
+        // into the truncation-ladder fallback rather than unwinding through
+        // the orchestrator. AssertUnwindSafe over the `tokio::task::spawn`
+        // alternative because we don't want to clone the full `bytes`/`key`/
+        // `metadata` payload across a task boundary just for panic safety.
+        // Spec §7.7 (Round 9 P3-S3): Panic is one of 5 FailureMode variants.
+        use futures::FutureExt; // catch_unwind on futures
+        use std::panic::AssertUnwindSafe;
+        let put_result = AssertUnwindSafe(self.store.put(&key, &bytes, &metadata))
+            .catch_unwind()
+            .await;
+        let outcome_ref = match put_result {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 tracing::error!(
                     target: "spur.metrics.outcome_persist_failed",
                     delegation_id = %delegation_id,
                     error = %e,
                     "OutcomeStore::put failed; engaging truncation-ladder fallback"
+                );
+                return self
+                    .fallback_truncation_ladder(
+                        result,
+                        delegation_id,
+                        attempt,
+                        brain_session,
+                        source,
+                        event_sink,
+                    )
+                    .await;
+            }
+            Err(_panic_payload) => {
+                tracing::error!(
+                    target: "spur.metrics.outcome_persist_failed",
+                    delegation_id = %delegation_id,
+                    error = "panic in OutcomeStore::put",
+                    "store backend panicked; engaging truncation-ladder fallback"
                 );
                 return self
                     .fallback_truncation_ladder(
@@ -1325,7 +1385,7 @@ Replace `materialize`'s body in `crates/spur-mcp/src/outcome_materializer.rs`:
             diff_summary: clipped_diff,
             worker_branch: clipped_branch,
             artifact_ref: clipped_artifact_ref,
-            estimated_cost_micros: None, // populated upstream when cost is available
+            estimated_cost_micros: Some(usd_to_micros_saturating(result.estimated_cost_usd)),
             artifact_id: Some(key.clone()),
             fetch_hint,
         };
@@ -1341,18 +1401,24 @@ Replace `materialize`'s body in `crates/spur-mcp/src/outcome_materializer.rs`:
         };
 
         // INV-D8 enforcement (debug build = panic; release = log + recover).
-        let envelope_bytes = spur_core::continuation_bridge::continuation_cost_bytes(&cont);
+        // The materializer cannot call `continuation_cost_bytes` (which lives
+        // in spur-core::continuation_bridge and depends on agent-client-protocol
+        // types — calling it from spur-mcp would create a cycle). Instead use
+        // `estimate_envelope_cost` (defined below) which approximates the
+        // rendered cost via `serde_json::to_vec(payload).len() + WRAPPER_HEADROOM`.
+        // The merger's `pack_continuations` is still the authoritative gate.
+        let envelope_bytes = estimate_envelope_cost(&cont.payload);
         debug_assert!(
-            envelope_bytes <= spur_core::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
-            "INV-D8 violation post-clip: {} > {}",
+            envelope_bytes <= spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES,
+            "INV-D8 violation post-clip: estimated {} > budget {}",
             envelope_bytes,
-            spur_core::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES
+            spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES
         );
-        if envelope_bytes > spur_core::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES {
+        if envelope_bytes > spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES {
             tracing::error!(
                 target: "spur.metrics.materializer_oversized_post_clip",
                 envelope_bytes,
-                budget_bytes = spur_core::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES,
+                budget_bytes = spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES,
                 ?key,
                 "INV-D8 violation post-clip; engaging truncation-ladder fallback"
             );
@@ -1405,6 +1471,25 @@ fn sha256_hex(content: &[u8]) -> String {
         write!(&mut s, "{b:02x}").expect("hex write infallible");
     }
     s
+}
+
+/// Convert `DelegationResult.estimated_cost_usd` (f64) to the v3 wire
+/// representation `estimated_cost_micros` (u64). Saturates at u64::MAX
+/// for absurd inputs and clamps negatives/NaN to 0.
+///
+/// Shared by `OutcomeMaterializer::materialize` (cost capture at write
+/// time) and the fetch tool's `project_section` (status_only / summary
+/// projections per spec §7.5).
+pub(crate) fn usd_to_micros_saturating(usd: f64) -> u64 {
+    if !usd.is_finite() || usd < 0.0 {
+        return 0;
+    }
+    let scaled = usd * 1_000_000.0;
+    if scaled >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        scaled.round() as u64
+    }
 }
 
 fn build_artifact_ref(
@@ -1627,8 +1712,11 @@ Add to test module:
             "fallback path must clear artifact_id"
         );
         assert!(cont.payload.fetch_hint.is_none());
-        // Envelope must still fit.
-        let bytes = spur_acp::domain::merge_budget::continuation_cost_bytes(&cont);
+        // Envelope (conservative estimate) must still fit. Use the same
+        // helper the materializer uses internally; importing
+        // `spur_core::continuation_bridge::continuation_cost_bytes` would
+        // create a cycle for spur-mcp tests.
+        let bytes = super::estimate_envelope_cost(&cont.payload);
         assert!(bytes <= spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES);
     }
 
@@ -1685,7 +1773,106 @@ Add to test module:
             .await;
         assert!(cont.payload.artifact_id.is_none());
     }
+
+    #[tokio::test]
+    async fn materialize_falls_back_when_inner_store_panics() {
+        // Spec §7.7 (Round 9 P3-S3) requires every FailureMode produce a
+        // valid BrainContinuation — including a panicking backend. The
+        // mock cannot panic-and-stay-testable inside an async fn (would
+        // poison the runtime), so this test wires a one-off
+        // `PanickingStore` inline and asserts the materializer collapses
+        // into the truncation-ladder fallback via
+        // `AssertUnwindSafe(store.put(...)).catch_unwind().await`.
+        use async_trait::async_trait;
+        use spur_blob_store::{
+            BackendTag, OutcomeContent, OutcomeKey as Key, OutcomeMetadata, OutcomeRef,
+            OutcomeStore, Section, StoreError, SweepReport,
+        };
+        use spur_acp::BrainSessionId;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        struct PanickingStore;
+        #[async_trait]
+        impl OutcomeStore for PanickingStore {
+            async fn put(
+                &self,
+                _key: &Key,
+                _content: &[u8],
+                _metadata: &OutcomeMetadata,
+            ) -> Result<OutcomeRef, StoreError> {
+                panic!("simulated backend panic");
+            }
+            async fn get(
+                &self,
+                _key: &Key,
+                _section: Option<Section>,
+            ) -> Result<OutcomeContent, StoreError> {
+                Err(StoreError::Backend("unused".into()))
+            }
+            async fn delete_namespace(
+                &self,
+                _b: &BrainSessionId,
+            ) -> Result<usize, StoreError> {
+                Ok(0)
+            }
+            async fn sweep_older_than(
+                &self,
+                _ttl: Duration,
+            ) -> Result<SweepReport, StoreError> {
+                Ok(SweepReport::default())
+            }
+        }
+
+        let store: Arc<dyn OutcomeStore> = Arc::new(PanickingStore);
+        let mat = OutcomeMaterializer::new(store);
+        let cont = mat
+            .materialize(
+                small_result(),
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+        assert!(
+            cont.payload.artifact_id.is_none(),
+            "panic in store.put must fall back, not unwind"
+        );
+        let _ = BackendTag::Fs; // import-use lint sentinel
+    }
 ```
+
+This test requires the materializer's `store.put` invocation to be
+wrapped in `futures::FutureExt::catch_unwind` (or
+`tokio::task::spawn` + `JoinHandle.await`) so the panic does not
+propagate. Add to Task 5's success-path body BEFORE the `match
+self.store.put(&key, &bytes, &metadata).await { ... }` block:
+
+```rust
+use std::panic::AssertUnwindSafe;
+use futures::future::FutureExt;
+
+let put_fut = AssertUnwindSafe(self.store.put(&key, &bytes, &metadata)).catch_unwind();
+let outcome_ref = match put_fut.await {
+    Ok(Ok(r)) => r,
+    Ok(Err(e)) => {
+        tracing::error!(target: "spur.metrics.outcome_persist_failed", error = %e, "store.put returned Err; falling back");
+        return self.fallback_truncation_ladder(/*...*/).await;
+    }
+    Err(panic_payload) => {
+        let msg = panic_payload
+            .downcast_ref::<&'static str>().map(|s| s.to_string())
+            .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        tracing::error!(target: "spur.metrics.outcome_persist_failed", panic = %msg, "store.put panicked; falling back");
+        return self.fallback_truncation_ladder(/*...*/).await;
+    }
+};
+```
+
+Add `futures = { workspace = true }` to `crates/spur-mcp/Cargo.toml` if not already present (likely is — used elsewhere).
 
 Add `spur-blob-store = { workspace = true, features = ["test-support"] }` to `crates/spur-mcp/Cargo.toml`'s `[dev-dependencies]`.
 
@@ -2067,20 +2254,42 @@ pub(crate) async fn persist_completion_result_and_notify(
 ) -> anyhow::Result<()> {
     // Run the materializer FIRST so the OutcomeKey is available for the
     // audit comment's artifact_uri field.
+    use crate::plan::audit_sentinel::CompletionState;
+
+    // Superseded means another delegation took over for this task — the
+    // brain has already received the new delegation's continuation, so
+    // emitting a stale-attempt continuation now would just confuse it.
+    // Run the existing audit/notify path WITHOUT the materializer.
+    if matches!(completion_state, CompletionState::Superseded) {
+        persist_completion_result(
+            pm,
+            issue_id,
+            plan_id,
+            delegation_id,
+            completion_state,
+            result.worker_branch.as_deref(),
+            result.summary.as_deref(),
+            None, // no artifact_uri — no continuation was emitted
+        )
+        .await?;
+        crate::server::notify_fast_forward(fast_forward);
+        return Ok(());
+    }
+
     // ContinuationSource for the reconciler-driven (plan-mode) path. The
     // existing variants are AsyncRequested, BlockTimeout, Cancelled,
     // PlanCompleted, PlanReadyToMerge. Reconciler completions match the
     // PlanCompleted lifecycle (a worker the brain dispatched as part of a
     // plan reached a terminal state) — use that variant rather than the
-    // detached-collector default BlockTimeout.
+    // detached-collector default BlockTimeout. Match must be exhaustive
+    // over CompletionState: AwaitingReview/Failed/Cancelled/Superseded.
+    // Superseded is handled above; the remaining 3 variants map below.
     let source = match completion_state {
-        crate::plan::audit_sentinel::CompletionState::AwaitingReview
-        | crate::plan::audit_sentinel::CompletionState::Failed => {
+        CompletionState::AwaitingReview | CompletionState::Failed => {
             spur_acp::domain::ContinuationSource::PlanCompleted
         }
-        crate::plan::audit_sentinel::CompletionState::Cancelled => {
-            spur_acp::domain::ContinuationSource::Cancelled
-        }
+        CompletionState::Cancelled => spur_acp::domain::ContinuationSource::Cancelled,
+        CompletionState::Superseded => unreachable!("handled above"),
     };
     let cont = materializer
         .materialize(
@@ -2166,9 +2375,14 @@ let result = spur_acp::domain::DelegationResult {
 };
 let store: Arc<dyn spur_blob_store::OutcomeStore> =
     Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-let materializer = crate::outcome_materializer::OutcomeMaterializer::new(store);
+// Integration tests in `crates/spur-mcp/tests/` use `spur_mcp::` to address
+// the crate (NOT `crate::` — `crate::` in an integration test refers to the
+// integration test crate itself, not spur-mcp).
+let materializer = spur_mcp::outcome_materializer::OutcomeMaterializer::new(store);
 let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("...".into()));
 ```
+
+Inside `crates/spur-mcp/src/...` unit tests (`#[cfg(test)] mod tests`), `crate::outcome_materializer::OutcomeMaterializer` IS correct and stays unchanged.
 
 - [ ] **Step 6: Run tests**
 
@@ -2514,8 +2728,10 @@ Edit `crates/spur-mcp/src/server.rs:2668`:
             }
         };
 
-        // MCP-layer section projection.
-        let projected_text = match project_section(&content.bytes, section) {
+        // MCP-layer section projection. Pass the OutcomeKey so the
+        // projector can inject `attempt`/`brain_session` per spec
+        // §7.5 line 818.
+        let projected_text = match project_section(&content.bytes, section, &key) {
             Ok(s) => s,
             Err(e) => {
                 return JsonRpcResponse::internal_error(
@@ -2537,31 +2753,56 @@ Edit `crates/spur-mcp/src/server.rs:2668`:
     }
 ```
 
-Add a helper at module scope (or in a sibling module if you prefer):
+Add a helper at module scope (or in a sibling module if you prefer). The
+helper takes `&OutcomeKey` so it can inject the spec-mandated
+`attempt`/`brain_session` fields into `status_only`/`summary`
+projections, and converts `estimated_cost_usd` (the field that lives on
+`DelegationResult`) → `estimated_cost_micros` per spec §7.1 / §7.5:
 
 ```rust
-fn project_section(full_bytes: &[u8], section: spur_blob_store::Section) -> Result<String, String> {
-    use spur_blob_store::Section;
+#[derive(Debug, thiserror::Error)]
+enum ProjectionError {
+    #[error("stored blob is not a valid DelegationResult: {0}")]
+    InvalidResult(#[source] serde_json::Error),
+    #[error("projection serialization failed: {0}")]
+    SerializeFailed(#[source] serde_json::Error),
+}
+
+fn project_section(
+    full_bytes: &[u8],
+    section: spur_blob_store::Section,
+    key: &spur_acp::domain::outcome::OutcomeKey,
+) -> Result<String, ProjectionError> {
     use spur_acp::domain::DelegationResult;
+    use spur_blob_store::Section;
 
     if matches!(section, Section::Full) {
-        // Full: lossy-convert and return as-is. Don't round-trip via
-        // serde_json — the stored blob is already the MCP-visible JSON.
+        // Full: return stored bytes verbatim. The stored blob is the
+        // serialized DelegationResult JSON; spec §7.5 says
+        // `full — entire DelegationResult`. No round-trip required.
         return Ok(String::from_utf8_lossy(full_bytes).into_owned());
     }
 
     let result: DelegationResult = serde_json::from_slice(full_bytes)
-        .map_err(|e| format!("stored blob is not a valid DelegationResult: {e}"))?;
+        .map_err(ProjectionError::InvalidResult)?;
+    // Reuse the materializer's helper so write-time + read-time round
+    // through the same conversion (no rounding drift).
+    let estimated_cost_micros =
+        crate::outcome_materializer::usd_to_micros_saturating(result.estimated_cost_usd);
 
     let projected = match section {
         Section::StatusOnly => json!({
             "status": result.status,
-            "estimated_cost_usd": result.estimated_cost_usd,
+            "attempt": key.attempt,
+            "brain_session": key.brain_session_id,
+            "estimated_cost_micros": estimated_cost_micros,
         }),
         Section::Summary => json!({
             "status": result.status,
+            "attempt": key.attempt,
+            "brain_session": key.brain_session_id,
             "summary": result.summary,
-            "estimated_cost_usd": result.estimated_cost_usd,
+            "estimated_cost_micros": estimated_cost_micros,
         }),
         Section::DiffOnly => json!({
             "status": result.status,
@@ -2570,9 +2811,14 @@ fn project_section(full_bytes: &[u8], section: spur_blob_store::Section) -> Resu
         }),
         Section::Full => unreachable!("handled above"),
     };
-    serde_json::to_string(&projected).map_err(|e| e.to_string())
+    serde_json::to_string(&projected).map_err(ProjectionError::SerializeFailed)
 }
 ```
+
+The helper's `Result<String, ProjectionError>` exposes a typed error so
+the handler can match on `InvalidResult` (operator alert: corrupted
+blob) vs `SerializeFailed` (programming error). The handler stringifies
+via `e.to_string()` for the JSON-RPC response payload.
 
 Note: the legacy `git cat-file -p artifact.blob_sha` Phase 1 path is removed. Phase 1 artifacts under `refs/spur/artifacts/<session>` are no longer fetchable via the MCP tool. Brains hitting the tool against legacy artifacts get a clean `NotFound`. Operators with legacy data should migrate via the deferred `spur outcomes copy` CLI.
 
@@ -2731,7 +2977,7 @@ Add to the top-level CLI command:
 In the dispatch match, add:
 
 ```rust
-        Cmd::Gc { cmd: GcCmd::Outcomes { dry_run, older_than, namespace } } => {
+        Commands::Gc { cmd: GcCmd::Outcomes { dry_run, older_than, namespace } } => {
             run_gc_outcomes(dry_run, older_than, namespace).await
         }
 ```
@@ -2811,7 +3057,7 @@ Add to `crates/spur-cli/src/main.rs` test module:
 fn gc_outcomes_parses_older_than() {
     use clap::Parser;
     let args = Cli::try_parse_from(["spur", "gc", "outcomes", "--older-than=14d"]).unwrap();
-    if let Cmd::Gc { cmd: GcCmd::Outcomes { older_than, dry_run, .. } } = args.command {
+    if let Commands::Gc { cmd: GcCmd::Outcomes { older_than, dry_run, .. } } = args.command {
         assert_eq!(older_than, Some(std::time::Duration::from_secs(14 * 86_400)));
         assert!(!dry_run);
     } else {
