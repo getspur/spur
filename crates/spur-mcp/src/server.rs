@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info};
 
+use spur_acp::domain::clip::clip_with_ellipsis;
 use spur_acp::*;
 use spur_pm::{pidfile::PidFileGuard, IssueFilter, IssueUpdate, PmService, PrParams};
 use spur_worktree::WorktreeManager;
@@ -204,30 +205,6 @@ pub struct DetachedCompletionHandle {
     pub attempt_tracker: Arc<AtomicU32>,
     pub brain_session: SessionId,
     pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
-}
-
-fn clip_with_ellipsis(s: Option<String>, max_bytes: usize) -> (Option<String>, bool) {
-    let Some(s) = s else {
-        return (None, false);
-    };
-
-    if s.len() <= max_bytes {
-        return (Some(s), false);
-    }
-
-    const ELLIPSIS: &str = "…";
-    if max_bytes <= ELLIPSIS.len() {
-        return (Some(ELLIPSIS.to_string()), true);
-    }
-
-    let mut end = max_bytes - ELLIPSIS.len();
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    let mut clipped = s[..end].to_string();
-    clipped.push('…');
-    (Some(clipped), true)
 }
 
 fn new_attempt_tracker() -> Arc<AtomicU32> {

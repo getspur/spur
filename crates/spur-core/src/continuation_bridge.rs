@@ -175,29 +175,7 @@ fn text_block(s: &str) -> ContentBlock {
     ContentBlock::Text(TextContent::new(s))
 }
 
-pub fn clip_with_ellipsis(s: Option<String>, max_bytes: usize) -> (Option<String>, bool) {
-    let Some(s) = s else {
-        return (None, false);
-    };
-
-    if s.len() <= max_bytes {
-        return (Some(s), false);
-    }
-
-    const ELLIPSIS: &str = "…";
-    if max_bytes <= ELLIPSIS.len() {
-        return (Some(ELLIPSIS.to_string()), true);
-    }
-
-    let mut end = max_bytes - ELLIPSIS.len();
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    let mut clipped = s[..end].to_string();
-    clipped.push('…');
-    (Some(clipped), true)
-}
+pub use spur_acp::domain::clip::clip_with_ellipsis;
 
 struct PackedContinuations<'a> {
     delivered: Vec<&'a BrainContinuation>,
