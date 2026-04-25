@@ -10,6 +10,17 @@
 //! Both refs are leaves under the namespace — no D/F conflict with the
 //! legacy `refs/spur/artifacts/<session-id>` ref (which remains
 //! read-only during transition).
+//!
+//! Concurrency: the read-meta → write-blob → write-meta sequence in
+//! `put` is not internally atomic. Two concurrent puts for the same
+//! `(session, delegation, attempt)` key with different content can
+//! both pass the `read_meta` precondition and race on `update-ref`,
+//! producing last-write-wins instead of `ContentMismatch`. The
+//! orchestrator serializes per-delegation work, so this race is not
+//! reachable in production today; if a future caller relaxes that
+//! assumption, switch the meta `update-ref` to the
+//! `<old-value>=<empty>` precondition form so concurrent inserters
+//! get a deterministic conflict.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -109,6 +120,7 @@ impl GitBlobOutcomeStore {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| StoreError::Backend(format!("git spawn: {e}")))?;
         if let Some(mut sin) = child.stdin.take() {
@@ -238,6 +250,11 @@ impl OutcomeStore for GitBlobOutcomeStore {
         key: &OutcomeKey,
         _section: Option<Section>,
     ) -> Result<OutcomeContent, StoreError> {
+        Self::validate_uuid(
+            Self::brain_session_str(&key.brain_session_id),
+            "brain_session_id",
+        )?;
+        Self::validate_uuid(key.delegation_id.as_str(), "delegation_id")?;
         let meta = match self.read_meta(key).await? {
             Some(m) => m,
             None => return Err(StoreError::NotFound(key.clone())),
@@ -270,19 +287,28 @@ impl OutcomeStore for GitBlobOutcomeStore {
         let listing_str = String::from_utf8_lossy(&listing);
         let refs: Vec<&str> = listing_str.lines().filter(|l| !l.is_empty()).collect();
 
-        // Each (blob,meta) pair is one logical blob.
+        // Each (blob,meta) pair is one logical blob. Best-effort:
+        // continue on individual failures so a single jammed ref does
+        // not leave the namespace half-deleted.
         let mut count = 0usize;
         for r in &refs {
-            // Run update-ref -d for each ref (rare batched op; loop is fine).
-            self.run_git(&["update-ref", "-d", r]).await?;
-            if r.ends_with(".meta") {
-                count += 1;
+            match self.run_git(&["update-ref", "-d", r]).await {
+                Ok(_) => {
+                    if r.ends_with(".meta") {
+                        count += 1;
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    target: "spur.metrics.blob_store",
+                    ref_name = %r,
+                    error = %e,
+                    "delete_namespace: skipped ref that failed to delete",
+                ),
             }
         }
 
         // Also clean up the legacy ref for this session if present
-        // (Round 11 MF2: legacy is read-only during transition; deleting
-        // on namespace teardown removes the pre-Plan-5 debt).
+        // (clean-up of pre-Plan-5 debt during transition window).
         let legacy = format!(
             "refs/spur/artifacts/{}",
             Self::brain_session_str(brain_session_id)
@@ -361,6 +387,36 @@ impl OutcomeStore for GitBlobOutcomeStore {
                 }
             }
         }
+
+        // Spec §8.4 (Round 11 MF1+MF2): also walk the legacy
+        // `refs/spur/artifacts/*` namespace. No sidecar metadata exists
+        // for legacy refs, so they are treated as `created_at = epoch`
+        // and pruned unconditionally. Operators get one warning trace
+        // per pruned legacy ref.
+        let legacy_listing = self
+            .run_git(&["for-each-ref", "--format=%(refname)", "refs/spur/artifacts/"])
+            .await?;
+        let legacy_str = String::from_utf8_lossy(&legacy_listing);
+        for line in legacy_str.lines().filter(|l| !l.is_empty()) {
+            match self.run_git(&["update-ref", "-d", line]).await {
+                Ok(_) => {
+                    tracing::warn!(
+                        target: "spur.metrics.blob_store",
+                        ref_name = %line,
+                        "sweep_older_than: pruned pre-Plan-5 legacy artifact ref",
+                    );
+                    report.namespaces_swept += 1;
+                    report.blobs_swept += 1;
+                }
+                Err(e) => tracing::warn!(
+                    target: "spur.metrics.blob_store",
+                    ref_name = %line,
+                    error = %e,
+                    "sweep_older_than: failed to prune legacy ref",
+                ),
+            }
+        }
+
         Ok(report)
     }
 }
