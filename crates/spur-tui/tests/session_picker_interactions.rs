@@ -317,6 +317,42 @@ fn d_key_on_new_session_row_is_noop() {
 }
 
 #[test]
+fn y_emits_copy_session_id_for_highlighted_row() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata({
+        let mut m = spur_tui::session_metadata::SessionMetadata::default();
+        m.last_active_session_id = Some("a1".to_string());
+        m
+    });
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+    );
+    // Cursor lands on a1 by P1.
+    let action = picker.handle_key(key('y'), &test_ctx());
+    match action {
+        Some(Action::CopySessionId(id)) => assert_eq!(id, "a1"),
+        other => panic!("expected CopySessionId(a1), got {other:?}"),
+    }
+}
+
+#[test]
+fn y_on_new_session_row_emits_nothing() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    // Move cursor to [+ New] row (cursor=0).
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
+    assert_eq!(picker.cursor(), 0);
+    // y on [+ New] is a no-op.
+    let action = picker.handle_key(key('y'), &test_ctx());
+    assert!(
+        action.is_none(),
+        "expected None on [+ New] row, got {action:?}"
+    );
+}
+
+#[test]
 fn a_key_toggles_show_archived() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x")]);
