@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/spur-acp",
+    "crates/spur-blob-store",
     "crates/spur-mcp",
     "crates/spur-core",
     "crates/spur-pm",
@@ -82,6 +83,7 @@ licenseseat = "=0.5.3"
 
 # Workspace crates
 spur-acp = { path = "crates/spur-acp" }
+spur-blob-store = { path = "crates/spur-blob-store", version = "0.4.5" }
 spur-mcp = { path = "crates/spur-mcp" }
 spur-core = { path = "crates/spur-core" }
 spur-pm = { path = "crates/spur-pm" }
