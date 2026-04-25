@@ -1098,6 +1098,9 @@ impl View for SessionPickerView {
                                 }
                                 None
                             }
+                            KeyCode::Char('y') => hl_session_id
+                                .clone()
+                                .map(Action::CopySessionId),
                             _ => None,
                         }
                     }
