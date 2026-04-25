@@ -423,12 +423,24 @@ mod tests {
 
     #[tokio::test]
     async fn record_terminal_emits_lifecycle_event_once() {
-        let (router, _ledger, mut events) = fixture().await;
+        let (router, ledger, mut events) = fixture().await;
         let snap = snapshot_allowing("src", "tgt");
         let env = envelope("src", "tgt");
         let message_id = env.message_id;
 
         let guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
+        ledger
+            .transition(&message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::Delivered)
+            .await
+            .unwrap();
         // finalize() is informational only; record_terminal does the work.
         guard
             .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
