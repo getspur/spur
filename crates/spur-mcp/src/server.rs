@@ -2681,16 +2681,25 @@ impl McpCallbackServer {
             }
         };
 
-        let attempt = match args.get("attempt").and_then(|v| v.as_u64()) {
-            Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
-            None => self
+        // Distinguish missing (use latest) from invalid (reject). Without this
+        // split, a non-numeric or negative `attempt` value would silently fall
+        // through to the missing-arg fallback and return data for a different
+        // attempt than the brain asked for.
+        let attempt = match args.get("attempt") {
+            None | Some(serde_json::Value::Null) => self
                 .materializer
                 .latest_attempt(&delegation_id)
                 .await
                 .unwrap_or(1),
-            Some(_) => {
-                return JsonRpcResponse::invalid_params(id, "Invalid 'attempt': must be u32 >= 1");
-            }
+            Some(v) => match v.as_u64() {
+                Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
+                _ => {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        "Invalid 'attempt': must be u32 >= 1",
+                    );
+                }
+            },
         };
 
         let key = spur_acp::domain::outcome::OutcomeKey {
@@ -5201,6 +5210,88 @@ mod fetch_outcome_artifact_tests {
         let pinned: Value = serde_json::from_str(response_text(&pinned_response)).expect("json");
         assert_eq!(pinned["attempt"], 1);
         assert_eq!(pinned["summary"], "attempt one");
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_rejects_invalid_attempt_arg() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let server = build_test_server(td.path(), "any-session").await;
+
+        for invalid in [json!(-1), json!("two"), json!(0), json!(false)] {
+            let response = server
+                .handle_tool_call(
+                    Value::Number(1.into()),
+                    dispatch_args(
+                        "fetch_outcome_artifact",
+                        json!({
+                            "delegation_id": "deadbeef-1111-2222-3333-444455556666",
+                            "attempt": invalid,
+                        }),
+                    ),
+                )
+                .await;
+            let error = response
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("expected InvalidParams for attempt={invalid:?}"));
+            assert_eq!(error.code, -32602);
+            assert!(
+                error.message.contains("Invalid 'attempt'"),
+                "expected attempt rejection, got: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_outcome_artifact_returns_internal_error_on_corrupted_blob() {
+        let td = TempDir::new().unwrap();
+        init_git_repo(td.path()).await;
+
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let brain_session = BrainSessionId::new(SessionId(session_id.into()));
+        let store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let server =
+            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+
+        // Seed the store with bytes that ARE valid UTF-8 but NOT a valid
+        // DelegationResult — exercises ProjectionError::InvalidResult on
+        // a non-Full projection.
+        let delegation_id: DelegationId = "deadbeef-1111-2222-3333-444455556666".into();
+        let key = OutcomeKey {
+            brain_session_id: brain_session.clone(),
+            delegation_id: delegation_id.clone(),
+            attempt: 1,
+        };
+        let bytes = b"not a delegation result";
+        let metadata = outcome_metadata(bytes);
+        store.put(&key, bytes, &metadata).await.expect("put");
+
+        let response = server
+            .handle_tool_call(
+                Value::Number(1.into()),
+                dispatch_args(
+                    "fetch_outcome_artifact",
+                    json!({
+                        "delegation_id": delegation_id.as_str(),
+                        "attempt": 1,
+                        "section": "summary"
+                    }),
+                ),
+            )
+            .await;
+        let error = response
+            .error
+            .as_ref()
+            .expect("expected InternalError on corrupted blob");
+        assert_eq!(error.code, -32603, "InternalError JSON-RPC code");
+        assert!(
+            error.message.to_lowercase().contains("projection")
+                || error.message.contains("DelegationResult"),
+            "expected projection-error context: {error:?}"
+        );
     }
 
     #[tokio::test]
