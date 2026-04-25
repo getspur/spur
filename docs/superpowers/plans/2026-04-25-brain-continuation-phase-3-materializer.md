@@ -2,6 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **REVISION HISTORY:**
+> - **R1 (kimi+gemini+codex sequential)** — applied: rewrote Task 1 clip helpers to match real `DelegationStatus`/`TimeoutFallback`/`String` (not Option) field types; added `DelegationStatus::Timeout` variant; replaced merge_budget relocation in Task 5 with a conservative envelope-cost estimate so the spur-core rendered-resource arithmetic stays in spur-core; extended `ContinuationResourceBody<'a>` in continuation_bridge.rs with the new v3 fields (Task 2) so the wire actually carries them; added MCP-layer `Section` projection in Task 10 (Phase 2 stores ignore the `_section` arg today); replaced broken `r.attempt` lookup with a `latest_attempt_by_delegation: HashMap` in Task 10; fixed Task 11 CLI to use real `spur-worktree` API + added missing direct deps; replaced Panic `FailureMode` variant in Task 3 with explicit panic-resilience documentation (mock can't `panic!` and stay testable).
+
 **Goal:** Introduce the `OutcomeMaterializer` (in `spur-mcp`), bump `BrainContinuation` to schema v3 with `artifact_id`/`fetch_hint`/`estimated_cost_micros` fields, extend `fetch_outcome_artifact` with `section` pagination + `attempt`, and integrate background TTL sweep + a `spur gc outcomes` CLI escape hatch.
 
 **Architecture:** The materializer is the **single producer** of `BrainContinuation` for completed delegations. It runs `persist-then-clip-then-build`: persist the full `DelegationResult` to `OutcomeStore`, then construct a lean envelope with the same Plan-4 clip helpers the truncation-ladder fallback uses. INV-D8 (envelope ≤ MERGE_BUDGET) is enforced by clip + a release-mode `if envelope_bytes > budget` recovery path that drops to the truncation ladder. The clip helpers move from their current scattered locations to `spur-acp::domain::clip` so both the materializer (in `spur-mcp`) and the fallback (in `spur-core::continuation_bridge`) can share them.
@@ -111,41 +114,57 @@ pub fn clip_with_ellipsis(s: Option<String>, max_bytes: usize) -> (Option<String
     (Some(clipped), true)
 }
 
-/// Clip in-place every inline `String` field in `DelegationStatus` so the
-/// status field of `ContinuationPayload` stays bounded. Returns the clipped
-/// status; does NOT mutate the input.
+/// Clip in-place every inline `String` / `Vec<PathBuf>` field in
+/// `DelegationStatus` so the status field of `ContinuationPayload` stays
+/// bounded. Returns the clipped status; does NOT mutate the input.
+///
+/// **Field type reference (verified against
+/// `crates/spur-acp/src/domain/delegation.rs:91`):**
+/// - `Failed { error: String }`
+/// - `Conflict { files: Vec<PathBuf> }`
+/// - `Timeout` (no fields)
+/// - `Rejected { reason: String }`
+/// - `Modified { reviewer_note: String }` — NOT Option
+/// - `TimedOut { waited_for: Duration, fallback: TimeoutFallback }` — NOT
+///   `Box<DelegationStatus>`. `TimeoutFallback::Reject` carries the only
+///   inline string here.
+/// - `Cancelled { reason: String }` — NOT Option
+/// - `Success` (no fields)
 pub fn clip_status_strings(status: &DelegationStatus, max_bytes: usize) -> DelegationStatus {
+    use crate::domain::delegation::TimeoutFallback;
     let mut s = status.clone();
     match &mut s {
         DelegationStatus::Failed { error } => {
-            let (clipped, _) = clip_with_ellipsis(Some(std::mem::take(error)), max_bytes);
-            *error = clipped.unwrap_or_default();
+            *error = clip_with_ellipsis(Some(std::mem::take(error)), max_bytes)
+                .0
+                .unwrap_or_default();
         }
-        DelegationStatus::Conflict { files, .. } => {
+        DelegationStatus::Conflict { files } => {
             clip_path_vec(files, 16, 128);
         }
-        DelegationStatus::Rejected { reason, .. } => {
-            let (clipped, _) = clip_with_ellipsis(Some(std::mem::take(reason)), max_bytes);
-            *reason = clipped.unwrap_or_default();
+        DelegationStatus::Rejected { reason } => {
+            *reason = clip_with_ellipsis(Some(std::mem::take(reason)), max_bytes)
+                .0
+                .unwrap_or_default();
         }
-        DelegationStatus::Modified { reviewer_note, .. } => {
-            if let Some(note) = reviewer_note.take() {
-                let (clipped, _) = clip_with_ellipsis(Some(note), max_bytes);
-                *reviewer_note = clipped;
-            }
+        DelegationStatus::Modified { reviewer_note } => {
+            *reviewer_note = clip_with_ellipsis(Some(std::mem::take(reviewer_note)), max_bytes)
+                .0
+                .unwrap_or_default();
         }
         DelegationStatus::Cancelled { reason } => {
-            if let Some(r) = reason.take() {
-                let (clipped, _) = clip_with_ellipsis(Some(r), max_bytes);
-                *reason = clipped;
+            *reason = clip_with_ellipsis(Some(std::mem::take(reason)), max_bytes)
+                .0
+                .unwrap_or_default();
+        }
+        DelegationStatus::TimedOut { fallback, .. } => {
+            if let TimeoutFallback::Reject { reason } = fallback {
+                *reason = clip_with_ellipsis(Some(std::mem::take(reason)), max_bytes)
+                    .0
+                    .unwrap_or_default();
             }
         }
-        DelegationStatus::TimedOut { fallback } => {
-            // TimedOut wraps another DelegationStatus — recurse.
-            let inner = std::mem::replace(fallback.as_mut(), DelegationStatus::Success);
-            *fallback = Box::new(clip_status_strings(&inner, max_bytes));
-        }
-        DelegationStatus::Success | DelegationStatus::Pending => {}
+        DelegationStatus::Success | DelegationStatus::Timeout => {}
     }
     s
 }
@@ -229,9 +248,12 @@ mod tests {
 
     #[test]
     fn clip_diff_files_truncates_count_and_paths() {
+        // DiffSummary has no Default impl — construct fully.
         let diff = DiffSummary {
+            files_changed: 32,
+            insertions: 0,
+            deletions: 0,
             files: (0..32).map(|i| PathBuf::from("a".repeat(200) + &i.to_string())).collect(),
-            ..Default::default()
         };
         let out = clip_diff_files(&diff, 16);
         assert_eq!(out.files.len(), 16);
@@ -369,8 +391,12 @@ fn estimated_cost_usd_converts_micros_correctly() {
 fn v3_payload_deserializes_from_v2_envelope_with_serde_default() {
     // A v2 producer (Phase 2 brain) wrote a payload without the new fields.
     // A v3 deserializer must accept it via #[serde(default)].
+    //
+    // DelegationStatus has no rename_all attribute — variants serialize
+    // with capitalized names ("Success", not "success"). Verify by
+    // running `serde_json::to_string(&DelegationStatus::Success)`.
     let v2_json = r#"{
-        "status": "success",
+        "status": "Success",
         "summary": null,
         "diff_summary": null,
         "worker_branch": null
@@ -486,48 +512,92 @@ Run: `grep -rn "ContinuationPayload {" crates/ --include="*.rs"`
 
 Update each site to add the three `None` fields. Common locations: tests in `spur-mcp`, `spur-core`, `spur-tui`.
 
-- [ ] **Step 9: Bump schema_version to 3**
+- [ ] **Step 9: Add v3 fields to ContinuationResourceBody + bump schema_version**
 
-Edit `crates/spur-core/src/continuation_bridge.rs:149`:
+`ContinuationResourceBody<'a>` at `crates/spur-core/src/continuation_bridge.rs:131-145` is the **actual wire shape** sent to the brain. It's a borrowed-ref `#[derive(Serialize)]` struct that manually flattens fields from `BrainContinuation` — NOT an opaque pass-through. The schema bump is hollow unless the new fields are explicitly added here.
+
+Edit the struct + builder:
 
 ```rust
+#[derive(Serialize)]
+struct ContinuationResourceBody<'a> {
+    schema_version: u8,
+    delegation_id: &'a spur_acp::domain::DelegationId,
+    attempt: u32,
+    brain_session: &'a SessionId,
+    source: &'a spur_acp::domain::ContinuationSource,
+    status: &'a spur_acp::domain::delegation::DelegationStatus,
+    summary: &'a Option<String>,
+    diff_summary: &'a Option<spur_acp::domain::events::DiffSummary>,
+    worker_branch: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_ref: &'a Option<spur_acp::domain::ArtifactRef>,
+    // NEW (Phase 3) — v3 wire fields. Each has skip_serializing_if so the
+    // schema is wire-compatible with v2 deserializers (older brains
+    // ignore unknown fields; new brains read when present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_cost_micros: &'a Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_id: &'a Option<spur_acp::domain::outcome::OutcomeKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fetch_hint: &'a Option<String>,
+    created_at_wall: &'a chrono::DateTime<chrono::Utc>,
+}
+
+fn continuation_resource_body(c: &BrainContinuation) -> ContinuationResourceBody<'_> {
+    ContinuationResourceBody {
         schema_version: 3,
-```
-
-Also update the test at line 632:
-
-```rust
-fn test_wire_json_schema_version_3() {
-    // ... existing assertions ...
-    assert_eq!(json["schema_version"], Value::from(3));
+        delegation_id: &c.delegation_id,
+        attempt: c.attempt,
+        brain_session: &c.brain_session,
+        source: &c.source,
+        status: &c.payload.status,
+        summary: &c.payload.summary,
+        diff_summary: &c.payload.diff_summary,
+        worker_branch: &c.payload.worker_branch,
+        artifact_ref: &c.payload.artifact_ref,
+        estimated_cost_micros: &c.payload.estimated_cost_micros,
+        artifact_id: &c.payload.artifact_id,
+        fetch_hint: &c.payload.fetch_hint,
+        created_at_wall: &c.created_at_wall,
+    }
 }
 ```
 
-Rename the test function from `test_wire_json_schema_version_2` to `test_wire_json_schema_version_3`.
-
-Add a new backward-compat test:
+Update the test at line 632 (`test_wire_json_schema_version_2`). Rename to `test_wire_json_schema_version_3` and assert:
 
 ```rust
 #[test]
-fn deserializer_accepts_v2_envelope_via_serde_default() {
-    // INV: schema_version is informational, not gating. New brains accept
-    // schema_version ∈ {2, 3} — older payloads in brain-prompt-history
-    // replay must not break.
-    let v2_envelope = r#"{
-        "schema_version": 2,
-        "uri": "spur://continuation/abc",
-        "delegation_id": "abc",
-        "attempt": 1,
-        "brain_session": "550e8400-e29b-41d4-a716-446655440000",
-        "source": {"kind": "block_timeout"},
-        "status": "Success",
-        "summary": null,
-        "created_at_wall": "2026-04-25T00:00:00Z"
-    }"#;
-    let _: ContinuationResourceBody =
-        serde_json::from_str(v2_envelope).expect("v2 envelope must deserialize");
+fn test_wire_json_schema_version_3() {
+    // ... build a continuation with the new fields populated ...
+    assert_eq!(json["schema_version"], Value::from(3));
+    assert!(json["artifact_id"].is_object() || json["artifact_id"].is_null());
 }
 ```
+
+Add a new wire-compat test:
+
+```rust
+#[test]
+fn v3_emits_v2_compatible_json_when_new_fields_are_none() {
+    // ContinuationResourceBody only Serializes (never Deserializes), so
+    // testing v2→v3 deserialize-compat would require a separate v2-style
+    // struct. The relevant guarantee is forward-compat from v3 producer:
+    // when the new fields are None, they MUST NOT appear in the output
+    // (#[serde(skip_serializing_if)]), so a v2 brain ignores them
+    // cleanly.
+    let cont = build_minimal_continuation(); // helper local to this test
+    let json = serde_json::to_value(&continuation_resource_body(&cont)).unwrap();
+    assert_eq!(json["schema_version"], Value::from(3));
+    assert!(json.get("estimated_cost_micros").is_none());
+    assert!(json.get("artifact_id").is_none());
+    assert!(json.get("fetch_hint").is_none());
+}
+```
+
+The `ContinuationPayload` struct itself (in spur-acp) is a `Deserialize` type — its v2-deserialize backward-compat test from Step 1 covers the receive-side; this Step 9 test covers the send-side.
+
+The Step 1 test fixture must use `"Success"` (capitalized) not `"success"` because `DelegationStatus` uses default Rust serde (no `#[serde(rename_all)]`).
 
 - [ ] **Step 10: Workspace check**
 
@@ -617,15 +687,23 @@ use crate::{
 };
 
 /// Failure mode the mock injects on every operation. Each enumerant maps
-/// to a distinct `StoreError` (or panic) so tests can assert behavior per
-/// failure surface, not just one example.
+/// to a distinct `StoreError` so tests can assert materializer behavior
+/// per failure surface, not just one example.
+///
+/// **No `Panic` variant**: while spec §7.7 (Round 9 P3-S3) lists "panic
+/// inside put — exercises materializer's panic catching" as desirable,
+/// `OutcomeStore::put` is `async` and `tokio::task::spawn` + `JoinHandle`
+/// `catch_unwind` plumbing belongs in the materializer (production
+/// concern), not the test mock. Panic resilience is covered by a
+/// dedicated test in `crates/spur-mcp/src/outcome_materializer.rs` that
+/// constructs an inline async closure that panics — the mock stays
+/// `Result`-pure.
 #[derive(Debug, Clone)]
 pub enum FailureMode {
     Io,
     TooLarge,
     Backend(String),
     ContentMismatch,
-    Panic,
 }
 
 /// `OutcomeStore` impl that always fails (or panics) per `FailureMode`.
@@ -656,7 +734,6 @@ impl MockFailingOutcomeStore {
                 existing_sha: "a".repeat(64),
                 new_sha: "b".repeat(64),
             },
-            FailureMode::Panic => panic!("mock panic"),
         }
     }
 }
@@ -685,7 +762,6 @@ impl OutcomeStore for MockFailingOutcomeStore {
         _brain_session_id: &BrainSessionId,
     ) -> Result<usize, StoreError> {
         match &self.mode {
-            FailureMode::Panic => panic!("mock panic"),
             FailureMode::Io => Err(StoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "mock io",
@@ -695,10 +771,7 @@ impl OutcomeStore for MockFailingOutcomeStore {
     }
 
     async fn sweep_older_than(&self, _ttl: Duration) -> Result<SweepReport, StoreError> {
-        match &self.mode {
-            FailureMode::Panic => panic!("mock panic"),
-            _ => Err(StoreError::Backend("mock sweep failure".into())),
-        }
+        Err(StoreError::Backend("mock sweep failure".into()))
     }
 }
 
@@ -747,6 +820,41 @@ mod tests {
         };
         let err = store.put(&key(), b"", &m).await.unwrap_err();
         assert!(matches!(err, StoreError::ContentMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn mock_returns_too_large() {
+        let store = MockFailingOutcomeStore {
+            mode: FailureMode::TooLarge,
+        };
+        let m = OutcomeMetadata {
+            created_at: chrono::Utc::now(),
+            content_type: crate::ContentType::Stdout,
+            original_byte_size: 0,
+            stored_byte_size: 0,
+            sha256: "a".repeat(64),
+        };
+        let err = store.put(&key(), b"", &m).await.unwrap_err();
+        assert!(matches!(err, StoreError::TooLarge { .. }));
+    }
+
+    #[tokio::test]
+    async fn mock_returns_backend_error_with_message() {
+        let store = MockFailingOutcomeStore {
+            mode: FailureMode::Backend("git update-ref failed".into()),
+        };
+        let m = OutcomeMetadata {
+            created_at: chrono::Utc::now(),
+            content_type: crate::ContentType::Stdout,
+            original_byte_size: 0,
+            stored_byte_size: 0,
+            sha256: "a".repeat(64),
+        };
+        let err = store.put(&key(), b"", &m).await.unwrap_err();
+        match err {
+            StoreError::Backend(msg) => assert_eq!(msg, "git update-ref failed"),
+            e => panic!("expected Backend, got {e:?}"),
+        }
     }
 }
 ```
@@ -877,6 +985,25 @@ impl OutcomeMaterializer {
         }
     }
 
+    /// Builder methods for tests that need to exercise truncation paths
+    /// without allocating multi-KB strings. Production callers should use
+    /// `new()` + accept the defaults.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_status_string_cap(mut self, cap: usize) -> Self {
+        self.status_string_cap_bytes = cap;
+        self
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_summary_cap(mut self, cap: usize) -> Self {
+        self.summary_cap_bytes = cap;
+        self
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_diff_files_cap(mut self, cap: usize) -> Self {
+        self.diff_files_cap_count = cap;
+        self
+    }
+
     /// Single entrypoint for both completion call sites (§7.3). Persists the
     /// full result to OutcomeStore, then builds a lean `BrainContinuation`.
     /// On persist failure, falls through to the Plan-4 truncation ladder.
@@ -968,10 +1095,14 @@ mod tests {
     }
 
     fn small_result() -> DelegationResult {
+        // DelegationResult fields verified at
+        // crates/spur-acp/src/domain/delegation.rs:146.
         DelegationResult {
             status: DelegationStatus::Success,
-            summary: Some("done".into()),
+            diff: None,
             diff_summary: None,
+            summary: Some("done".into()),
+            estimated_cost_usd: 0.0,
             worker_branch: Some("spur/worker-x".into()),
             artifact: None,
         }
@@ -1005,8 +1136,10 @@ mod tests {
             status: DelegationStatus::Failed {
                 error: "x".repeat(2000),
             },
-            summary: None,
+            diff: None,
             diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
             worker_branch: None,
             artifact: None,
         };
@@ -1035,17 +1168,21 @@ mod tests {
     async fn materialize_persists_full_result_to_store() {
         // Verify the persisted blob has the FULL (untruncated) error so
         // brains fetching artifact_id get the unclipped content.
+        // MemoryOutcomeStore wraps an Arc<RwLock<...>> internally —
+        // Arc<dyn OutcomeStore> shares the same underlying state without
+        // an extra .clone() of the concrete store.
         use spur_blob_store::Section;
-        let store_concrete = MemoryOutcomeStore::new();
-        let store: Arc<dyn OutcomeStore> = Arc::new(store_concrete.clone());
+        let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
         let mat = OutcomeMaterializer::new(store.clone());
         let oversized_error = "z".repeat(5000);
         let oversized = DelegationResult {
             status: DelegationStatus::Failed {
                 error: oversized_error.clone(),
             },
-            summary: None,
+            diff: None,
             diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
             worker_branch: None,
             artifact: None,
         };
@@ -1318,47 +1455,106 @@ sha2 = { workspace = true }
 
 (if not already present)
 
-- [ ] **Step 4: Add `spur-core` dep so the materializer can call `continuation_cost_bytes` + `MERGE_BUDGET_DEFAULT_BYTES`**
+- [ ] **Step 4: Add MERGE_BUDGET_DEFAULT_BYTES re-export point in spur-acp**
 
-This requires care — `spur-core` already depends on `spur-mcp`, so `spur-mcp` cannot reverse-depend on `spur-core` without creating a cycle.
+The materializer is in spur-mcp. spur-core depends on spur-mcp (existing edge). spur-mcp depends on spur-acp. Therefore spur-mcp CANNOT depend on spur-core (cycle). The materializer needs the merge-budget constant for INV-D8 enforcement.
 
-**Resolution:** move `MERGE_BUDGET_DEFAULT_BYTES` and `continuation_cost_bytes` from `spur-core::continuation_bridge` to `spur-acp::continuation` (or a new `spur-acp::merge_budget` module). They are pure functions over `BrainContinuation` shape; spur-acp owns that type.
+**Resolution:** keep the *exact* `continuation_cost_bytes` (which calls `block_byte_cost(&continuation_resource_block(c))` — the rendered-resource arithmetic depending on `agent-client-protocol` types) in spur-core. Move ONLY the `MERGE_BUDGET_DEFAULT_BYTES` constant to `spur-acp::merge_budget` so the materializer can reference it. The materializer uses a CONSERVATIVE cost estimate (`serde_json::to_vec(payload).len() + WRAPPER_OVERHEAD`); the merger's exact arithmetic at `pack_continuations` remains the authoritative INV-α enforcement.
 
-Do this as a refactor preamble in this task:
+Create `crates/spur-acp/src/domain/merge_budget.rs`:
 
-Run: `grep -n "continuation_cost_bytes\|MERGE_BUDGET_DEFAULT_BYTES" crates/spur-core/src/continuation_bridge.rs`
-
-Move the constant + function to `crates/spur-acp/src/domain/merge_budget.rs` (new module). Re-export from `spur-core::continuation_bridge` to avoid breaking existing `spur-core` callers:
-
-`crates/spur-acp/src/domain/merge_budget.rs`:
 ```rust
-//! Merge-budget arithmetic for `BrainContinuation`. Lives in spur-acp so
-//! both producers (spur-mcp::OutcomeMaterializer) and the truncation-ladder
-//! fallback (spur-core::continuation_bridge) can call it.
-
-use crate::domain::continuation::BrainContinuation;
+//! INV-α merge-budget constant shared between the materializer (spur-mcp)
+//! and the merger (spur-core). Held in spur-acp so spur-mcp can reference
+//! it without introducing a spur-mcp → spur-core cycle.
+//!
+//! The exact rendered-cost arithmetic (`block_byte_cost`,
+//! `continuation_resource_block`) stays in spur-core because it depends
+//! on `agent-client-protocol` types (`ContentBlock`, `EmbeddedResource`).
+//! The materializer uses a CONSERVATIVE upper-bound cost estimate (see
+//! `OutcomeMaterializer::estimate_envelope_cost`) and the merger's
+//! `pack_continuations` is the authoritative INV-α gate.
 
 pub const MERGE_BUDGET_DEFAULT_BYTES: usize = 8192;
 
-pub fn continuation_cost_bytes(c: &BrainContinuation) -> usize {
-    // Move the existing implementation from continuation_bridge.rs verbatim.
-    serde_json::to_vec(c).map(|v| v.len()).unwrap_or(0)
-}
+/// Headroom reserved by the materializer for the JSON-RPC wrapper
+/// (`uri`, `mime_type`, `EmbeddedResource` envelope). Empirically the
+/// rendered envelope adds ~256 B over `serde_json::to_vec(payload).len()`;
+/// 1024 is comfortable headroom and still leaves >7 KiB for payload.
+pub const ENVELOPE_WRAPPER_HEADROOM_BYTES: usize = 1024;
 ```
 
-`crates/spur-acp/src/domain/mod.rs`:
+Add to `crates/spur-acp/src/domain/mod.rs`:
+
 ```rust
 pub mod merge_budget;
 ```
 
-`crates/spur-core/src/continuation_bridge.rs` (replace local definitions):
+Update `crates/spur-core/src/continuation_bridge.rs` to re-export from spur-acp (so existing callers of `spur_core::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES` continue to work; only the constant moves, not the helper functions):
+
 ```rust
-pub use spur_acp::domain::merge_budget::{continuation_cost_bytes, MERGE_BUDGET_DEFAULT_BYTES};
+pub use spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES;
+// continuation_cost_bytes stays here (depends on block_byte_cost +
+// continuation_resource_block which need agent-client-protocol types).
 ```
 
-- [ ] **Step 5: Update materialize body to call `spur_acp::domain::merge_budget::*` instead of `spur_core::continuation_bridge::*`**
+- [ ] **Step 5: Materializer uses conservative envelope estimate**
 
-Replace the two `spur_core::continuation_bridge::` references in the new materialize body with `spur_acp::domain::merge_budget::`.
+Replace the two `spur_core::continuation_bridge::` references in the new materialize body. The materializer cannot call `continuation_cost_bytes` (cycle). Use a conservative bound:
+
+```rust
+fn estimate_envelope_cost(payload: &ContinuationPayload) -> usize {
+    use spur_acp::domain::merge_budget::ENVELOPE_WRAPPER_HEADROOM_BYTES;
+    let payload_bytes = serde_json::to_vec(payload).map(|v| v.len()).unwrap_or(0);
+    payload_bytes + ENVELOPE_WRAPPER_HEADROOM_BYTES
+}
+```
+
+In the materialize body, replace:
+
+```rust
+let envelope_bytes = spur_core::continuation_bridge::continuation_cost_bytes(&cont);
+debug_assert!(envelope_bytes <= spur_core::continuation_bridge::MERGE_BUDGET_DEFAULT_BYTES, ...);
+```
+
+With:
+
+```rust
+let envelope_bytes = estimate_envelope_cost(&cont.payload);
+debug_assert!(
+    envelope_bytes <= spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES,
+    "INV-D8 conservative estimate violation: {} > {} (post-clip)",
+    envelope_bytes,
+    spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES
+);
+if envelope_bytes > spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES {
+    tracing::error!(
+        target: "spur.metrics.materializer_oversized_post_clip",
+        envelope_bytes,
+        budget_bytes = spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES,
+        ?key,
+        "INV-D8 conservative estimate breached; engaging truncation-ladder fallback"
+    );
+    return self.fallback_truncation_ladder(/*...*/).await;
+}
+```
+
+The conservative estimate is intentionally pessimistic (over-counts wrapper). The merger's `pack_continuations` (in spur-core) does the real cost computation at delivery time and remains the authoritative INV-α gate. If a real envelope sneaks past the materializer's conservative check but fails the merger's exact check, the existing merger fallback (drop / spill) handles it — no regression.
+
+Add a regression test in `crates/spur-core/tests/` (NEW FILE: `merge_budget_consistency.rs`) that asserts: for any `BrainContinuation`, `estimate_envelope_cost(&payload)` is ≥ `continuation_cost_bytes(&cont)`. This is the contract that lets us use the estimate as a safety check.
+
+```rust
+// crates/spur-core/tests/merge_budget_consistency.rs
+use spur_acp::domain::*;
+use spur_core::continuation_bridge::{continuation_cost_bytes, MERGE_BUDGET_DEFAULT_BYTES};
+
+#[test]
+fn conservative_estimate_dominates_exact_cost() {
+    // Build a representative BrainContinuation and assert the materializer's
+    // conservative estimate is always ≥ the merger's exact rendered cost.
+    // ... see Phase 2 test patterns for how to build a continuation literal ...
+}
+```
 
 - [ ] **Step 6: Verify compilation + run success-path tests**
 
@@ -1569,29 +1765,31 @@ Replace the `fallback_truncation_ladder` body in `crates/spur-mcp/src/outcome_ma
             created_at_mono: Instant::now(),
         };
 
-        // Step 1: emergency re-clip if envelope still oversized (Plan-4 step 5).
-        let mut envelope_bytes =
-            spur_acp::domain::merge_budget::continuation_cost_bytes(&cont);
+        // Step 1: emergency re-clip if envelope (conservative estimate)
+        // still oversized. Re-uses the same cost estimator as the
+        // success path so both code paths see the same view of the
+        // budget.
+        let mut envelope_bytes = estimate_envelope_cost(&cont.payload);
         let budget = spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES;
         if envelope_bytes > budget {
             // Step 2: drop summary entirely.
             cont.payload.summary = None;
-            envelope_bytes = spur_acp::domain::merge_budget::continuation_cost_bytes(&cont);
+            envelope_bytes = estimate_envelope_cost(&cont.payload);
         }
         if envelope_bytes > budget {
             // Step 3: drop diff_summary.
             cont.payload.diff_summary = None;
-            envelope_bytes = spur_acp::domain::merge_budget::continuation_cost_bytes(&cont);
+            envelope_bytes = estimate_envelope_cost(&cont.payload);
         }
         if envelope_bytes > budget {
             // Step 4: drop artifact_ref.
             cont.payload.artifact_ref = None;
-            envelope_bytes = spur_acp::domain::merge_budget::continuation_cost_bytes(&cont);
+            envelope_bytes = estimate_envelope_cost(&cont.payload);
         }
         if envelope_bytes > budget {
             // Step 5: emergency re-clip status to 128 B.
             cont.payload.status = clip_status_strings(&cont.payload.status, 128);
-            envelope_bytes = spur_acp::domain::merge_budget::continuation_cost_bytes(&cont);
+            envelope_bytes = estimate_envelope_cost(&cont.payload);
         }
 
         if envelope_bytes > budget {
@@ -1677,8 +1875,10 @@ Add to `crates/spur-mcp/src/server.rs`'s test module (the `continuation_producer
         let mat = crate::outcome_materializer::OutcomeMaterializer::new(store);
         let result = DelegationResult {
             status: spur_acp::domain::delegation::DelegationStatus::Success,
-            summary: Some("done".into()),
+            diff: None,
             diff_summary: None,
+            summary: Some("done".into()),
+            estimated_cost_usd: 0.0,
             worker_branch: Some("spur/worker-x".into()),
             artifact: None,
         };
@@ -1867,13 +2067,28 @@ pub(crate) async fn persist_completion_result_and_notify(
 ) -> anyhow::Result<()> {
     // Run the materializer FIRST so the OutcomeKey is available for the
     // audit comment's artifact_uri field.
+    // ContinuationSource for the reconciler-driven (plan-mode) path. The
+    // existing variants are AsyncRequested, BlockTimeout, Cancelled,
+    // PlanCompleted, PlanReadyToMerge. Reconciler completions match the
+    // PlanCompleted lifecycle (a worker the brain dispatched as part of a
+    // plan reached a terminal state) — use that variant rather than the
+    // detached-collector default BlockTimeout.
+    let source = match completion_state {
+        crate::plan::audit_sentinel::CompletionState::AwaitingReview
+        | crate::plan::audit_sentinel::CompletionState::Failed => {
+            spur_acp::domain::ContinuationSource::PlanCompleted
+        }
+        crate::plan::audit_sentinel::CompletionState::Cancelled => {
+            spur_acp::domain::ContinuationSource::Cancelled
+        }
+    };
     let cont = materializer
         .materialize(
             result.clone(),
             spur_acp::DelegationId::from(delegation_id),
             attempt,
             brain_session_id.clone(),
-            spur_acp::domain::ContinuationSource::BlockTimeout, // see SF15 below
+            source,
             None,
         )
         .await;
@@ -1942,8 +2157,10 @@ For each test callsite, construct a `DelegationResult` literal:
 ```rust
 let result = spur_acp::domain::DelegationResult {
     status: spur_acp::domain::delegation::DelegationStatus::Success,
-    summary: Some("test".into()),
+    diff: None,
     diff_summary: None,
+    summary: Some("test".into()),
+    estimated_cost_usd: 0.0,
     worker_branch: Some("spur/worker-test".into()),
     artifact: None,
 };
@@ -2188,7 +2405,34 @@ Add to `mod fetch_outcome_artifact_tests`:
 
 (The full bodies follow the existing `fetch_outcome_artifact_returns_persisted_blob_text` pattern. Inline them when filling Step 4.)
 
-- [ ] **Step 3: Update handler to read from OutcomeStore**
+- [ ] **Step 3a: Add a `latest_attempt_by_delegation` field to `McpCallbackServer`**
+
+`DelegationResult` does NOT have an `attempt` field (verified at `crates/spur-acp/src/domain/delegation.rs:146`). The materializer in Task 5 receives `attempt: u32` as an explicit parameter. Plumb that into a separate per-server map so the fetch tool can answer "latest known attempt" when the caller doesn't pin one.
+
+In Task 7 (`McpCallbackServer` constructor), add the field:
+
+```rust
+pub(crate) latest_attempt_by_delegation: Arc<tokio::sync::Mutex<
+    std::collections::HashMap<DelegationId, u32>
+>>,
+```
+
+Initialize it as empty in `new()`. In Task 5 (`OutcomeMaterializer::materialize`) and the success-callbacks at server.rs callsites, after a successful materialize, update the map:
+
+```rust
+{
+    let mut map = self.latest_attempt_by_delegation.lock().await;
+    map.entry(delegation_id.clone())
+        .and_modify(|cur| *cur = (*cur).max(attempt))
+        .or_insert(attempt);
+}
+```
+
+(Place this update in the McpCallbackServer wrapper that invokes `materializer.materialize` — keep the materializer struct itself store-agnostic.)
+
+- [ ] **Step 3b: Update handler to use the new tracker + MCP-layer section projection**
+
+Phase 2's `MemoryOutcomeStore::get` and `GitBlobOutcomeStore::get` ignore the `_section` parameter (verified — both prefix the arg with `_`). For Phase 3, do MCP-layer projection: load the full JSON via `Section::Full`, deserialize, project to the requested section, re-serialize. This keeps Phase 2's stores untouched.
 
 Edit `crates/spur-mcp/src/server.rs:2668`:
 
@@ -2201,12 +2445,13 @@ Edit `crates/spur-mcp/src/server.rs:2668`:
             _ => return JsonRpcResponse::invalid_params(id, "Missing or empty 'delegation_id'"),
         };
 
-        let section = match args.get("section").and_then(|v| v.as_str()) {
-            None | Some("full") => Section::Full,
-            Some("status_only") => Section::StatusOnly,
-            Some("summary") => Section::Summary,
-            Some("diff_only") => Section::DiffOnly,
-            Some(other) => {
+        let section_str = args.get("section").and_then(|v| v.as_str()).unwrap_or("full");
+        let section = match section_str {
+            "full" => Section::Full,
+            "status_only" => Section::StatusOnly,
+            "summary" => Section::Summary,
+            "diff_only" => Section::DiffOnly,
+            other => {
                 return JsonRpcResponse::invalid_params(
                     id,
                     format!(
@@ -2216,16 +2461,11 @@ Edit `crates/spur-mcp/src/server.rs:2668`:
             }
         };
 
-        // Look up attempt: explicit arg, else latest known via completed_delegations.
         let attempt = match args.get("attempt").and_then(|v| v.as_u64()) {
             Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
             None => {
-                // Default = the latest attempt this server saw for this delegation_id.
-                let map = self.completed_delegations.lock().await;
-                match map.get(&delegation_id) {
-                    Some((r, _)) => r.attempt.unwrap_or(1),
-                    None => 1,
-                }
+                let map = self.latest_attempt_by_delegation.lock().await;
+                map.get(&delegation_id).copied().unwrap_or(1)
             }
             Some(_) => {
                 return JsonRpcResponse::invalid_params(id, "Invalid 'attempt': must be u32 ≥ 1");
@@ -2240,13 +2480,15 @@ Edit `crates/spur-mcp/src/server.rs:2668`:
         };
 
         let start = std::time::Instant::now();
-        let content = match self.outcome_store.get(&key, Some(section)).await {
+        // Always read Section::Full from the store (Phase 2 stores ignore
+        // section), then project at the MCP layer.
+        let content = match self.outcome_store.get(&key, Some(Section::Full)).await {
             Ok(c) => c,
             Err(spur_blob_store::StoreError::NotFound(_)) => {
                 tracing::warn!(
                     target: "spur.metrics.outcome_fetch_not_found",
                     ?key,
-                    ?section,
+                    section = section_str,
                     "outcome not found; possible hallucinated id, post-GC read, or in-flight race"
                 );
                 return JsonRpcResponse::error(
@@ -2272,20 +2514,67 @@ Edit `crates/spur-mcp/src/server.rs:2668`:
             }
         };
 
+        // MCP-layer section projection.
+        let projected_text = match project_section(&content.bytes, section) {
+            Ok(s) => s,
+            Err(e) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("Section projection failed: {e}"),
+                );
+            }
+        };
+
         tracing::info!(
             target: "spur.metrics.outcome_fetched",
             ?key,
-            ?section,
-            byte_size = content.bytes.len() as u64,
+            section = section_str,
+            byte_size = projected_text.len() as u64,
             latency_ms = start.elapsed().as_millis() as u64,
         );
 
-        let text = String::from_utf8_lossy(&content.bytes).into_owned();
-        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": projected_text }] }))
     }
 ```
 
-Note: the handler now reads from `self.outcome_store` (the shared `Arc<dyn OutcomeStore>` added in Task 7). The legacy `git cat-file -p artifact.blob_sha` path is removed — Phase 1 artifacts written to the legacy `refs/spur/artifacts/<session>` namespace are no longer fetchable via the MCP tool. **This is OK only if no production data depends on it.** If older artifacts exist, document the migration: brains hitting the tool against legacy artifacts get a clean `NotFound` response, and the operator can use `spur outcomes copy` (deferred to Phase 4) for migration.
+Add a helper at module scope (or in a sibling module if you prefer):
+
+```rust
+fn project_section(full_bytes: &[u8], section: spur_blob_store::Section) -> Result<String, String> {
+    use spur_blob_store::Section;
+    use spur_acp::domain::DelegationResult;
+
+    if matches!(section, Section::Full) {
+        // Full: lossy-convert and return as-is. Don't round-trip via
+        // serde_json — the stored blob is already the MCP-visible JSON.
+        return Ok(String::from_utf8_lossy(full_bytes).into_owned());
+    }
+
+    let result: DelegationResult = serde_json::from_slice(full_bytes)
+        .map_err(|e| format!("stored blob is not a valid DelegationResult: {e}"))?;
+
+    let projected = match section {
+        Section::StatusOnly => json!({
+            "status": result.status,
+            "estimated_cost_usd": result.estimated_cost_usd,
+        }),
+        Section::Summary => json!({
+            "status": result.status,
+            "summary": result.summary,
+            "estimated_cost_usd": result.estimated_cost_usd,
+        }),
+        Section::DiffOnly => json!({
+            "status": result.status,
+            "diff": result.diff,
+            "diff_summary": result.diff_summary,
+        }),
+        Section::Full => unreachable!("handled above"),
+    };
+    serde_json::to_string(&projected).map_err(|e| e.to_string())
+}
+```
+
+Note: the legacy `git cat-file -p artifact.blob_sha` Phase 1 path is removed. Phase 1 artifacts under `refs/spur/artifacts/<session>` are no longer fetchable via the MCP tool. Brains hitting the tool against legacy artifacts get a clean `NotFound`. Operators with legacy data should migrate via the deferred `spur outcomes copy` CLI.
 
 - [ ] **Step 4: Implement the test bodies (from Step 2)**
 
@@ -2293,7 +2582,15 @@ Use `MemoryOutcomeStore` pre-populated via `OutcomeStore::put` to seed test data
 
 ```rust
 let store: Arc<dyn spur_blob_store::OutcomeStore> = Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-let result = serde_json::to_vec(&DelegationResult { /* ... */ }).unwrap();
+let result = serde_json::to_vec(&DelegationResult {
+    status: DelegationStatus::Success,
+    diff: None,
+    diff_summary: None,
+    summary: Some("seed".into()),
+    estimated_cost_usd: 0.0,
+    worker_branch: None,
+    artifact: None,
+}).unwrap();
 let metadata = OutcomeMetadata { /* ... sha256 of result, ContentType::Json */ };
 let key = OutcomeKey { /* ... attempt: 1 */ };
 store.put(&key, &result, &metadata).await.unwrap();
@@ -2346,13 +2643,16 @@ Run: `grep -n "fn new\|fn build\|self.outcome_store" crates/spur-core/src/orches
 Find the orchestrator constructor (where `outcome_store` was added in Task 7). Append after construction:
 
 ```rust
-        // Phase 3 (§8.2): background TTL sweep on startup.
+        // Phase 3 (§8.2): background TTL sweep on startup. Tracked
+        // JoinHandle so the orchestrator can `.abort()` on shutdown
+        // (avoids leaking in-flight `git` subprocesses, which run with
+        // `kill_on_drop(true)` per Phase 2's GitBlobOutcomeStore).
         let ttl_days: u64 = std::env::var("SPUR_OUTCOME_TTL_DAYS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(7);
         let sweep_store = self.outcome_store.clone();
-        tokio::spawn(async move {
+        let sweep_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
             let ttl = std::time::Duration::from_secs(ttl_days * 86_400);
             match sweep_store.sweep_older_than(ttl).await {
                 Ok(report) => tracing::info!(
@@ -2368,6 +2668,9 @@ Find the orchestrator constructor (where `outcome_store` was added in Task 7). A
                 ),
             }
         });
+        // Stash for graceful shutdown; orchestrator's Drop / shutdown
+        // hook calls `sweep_handle.abort()`.
+        self.background_tasks.push(sweep_handle);
 ```
 
 The constructor must NOT `.await` the spawned task — startup stays fast.
@@ -2396,9 +2699,21 @@ enum GcCmd {
 }
 
 fn parse_duration_days(s: &str) -> Result<std::time::Duration, String> {
-    // Accept "30d", "7d", "1d" only — TTL floor is 1 day.
-    let n_str = s.strip_suffix('d').ok_or("expected suffix 'd', e.g. '30d'")?;
-    let n: u64 = n_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+    // Accept "30d", "30days", or bare "30" — interpret as days.
+    // Hour-resolution ('h') is intentionally rejected because Phase 2's
+    // FsOutcomeStore enforces a 1-day TTL floor (Round 9 P2-S3).
+    let s = s.trim();
+    let n_str = s
+        .strip_suffix("days")
+        .or_else(|| s.strip_suffix('d'))
+        .unwrap_or(s);
+    let n: u64 = n_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("expected integer days, got {s:?}"))?;
+    if n == 0 {
+        return Err("TTL floor is 1 day (Phase 2 / Round 9 P2-S3)".into());
+    }
     Ok(std::time::Duration::from_secs(n * 86_400))
 }
 ```
@@ -2421,7 +2736,15 @@ In the dispatch match, add:
         }
 ```
 
-Implement `run_gc_outcomes`:
+Add direct deps to `crates/spur-cli/Cargo.toml` (the existing spur-core transitive isn't usable cross-crate):
+
+```toml
+spur-blob-store = { workspace = true }
+spur-worktree = { workspace = true }
+spur-acp = { workspace = true }
+```
+
+Implement `run_gc_outcomes` using the same `std::env::current_dir()` discovery pattern that the existing CLI uses (verified at `crates/spur-cli/src/main.rs:296`):
 
 ```rust
 async fn run_gc_outcomes(
@@ -2433,12 +2756,15 @@ async fn run_gc_outcomes(
     use spur_worktree::git_blob_store::GitBlobOutcomeStore;
     use std::sync::Arc;
 
-    let repo_root = spur_worktree::manager::detect_repo_root()?;
+    // Discover repo root via the CLI's existing convention: cwd is the
+    // repo root for `spur` commands. (Other CLI subcommands use the same
+    // pattern at main.rs:296.)
+    let repo_root = std::env::current_dir()?;
     let store: Arc<dyn OutcomeStore> = Arc::new(GitBlobOutcomeStore::new(repo_root));
 
     if let Some(ns) = namespace {
-        // Per-namespace path.
-        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(ns.into()));
+        // Per-namespace path. SessionId wraps a String — pass via .into().
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId(ns));
         if dry_run {
             println!("Would delete namespace {session_id}");
             return Ok(());
@@ -2494,10 +2820,22 @@ fn gc_outcomes_parses_older_than() {
 }
 
 #[test]
-fn parse_duration_days_rejects_unknown_suffix() {
-    assert!(parse_duration_days("30h").is_err());
+fn parse_duration_days_accepts_common_forms() {
+    assert!(parse_duration_days("30d").is_ok());
+    assert!(parse_duration_days("30").is_ok());
+    assert!(parse_duration_days("30days").is_ok());
+    assert_eq!(
+        parse_duration_days("30").unwrap(),
+        std::time::Duration::from_secs(30 * 86_400)
+    );
+}
+
+#[test]
+fn parse_duration_days_rejects_invalid_input() {
+    assert!(parse_duration_days("30h").is_err()); // hour resolution unsupported
     assert!(parse_duration_days("notanumber").is_err());
-    assert!(parse_duration_days("7d").is_ok());
+    assert!(parse_duration_days("0").is_err()); // TTL floor
+    assert!(parse_duration_days("0d").is_err());
 }
 ```
 
