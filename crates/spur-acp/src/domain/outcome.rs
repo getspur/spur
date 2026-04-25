@@ -53,6 +53,47 @@ pub struct OutcomeRef {
     pub backend: BackendTag,
 }
 
+trait BrainSessionIdOutcomeExt {
+    fn as_str(&self) -> &str;
+}
+
+impl BrainSessionIdOutcomeExt for BrainSessionId {
+    fn as_str(&self) -> &str {
+        self.as_session_id().0.as_str()
+    }
+}
+
+use crate::domain::artifact::{ArtifactKind as WorkerArtifactKind, WorkerArtifact};
+
+impl OutcomeRef {
+    /// Backcompat adapter: project a GitBlob-backed `OutcomeRef` into
+    /// the legacy `WorkerArtifact` shape. Returns `None` for non-git
+    /// backends. Phase 2 callers use this to preserve
+    /// `DelegationResult.artifact` behavior during transition; Phase 3
+    /// cleanup may remove or deprecate.
+    ///
+    /// Round 11 (MF2): returns the REAL per-(session, delegation, attempt)
+    /// ref under `refs/spur/outcomes/`, NOT the legacy shared-per-session
+    /// `refs/spur/artifacts/<session>` ref. The legacy ref is read-only
+    /// during Phase 1 transition; new writes go to the new namespace.
+    pub fn as_worker_artifact(&self, kind: WorkerArtifactKind) -> Option<WorkerArtifact> {
+        match &self.backend {
+            BackendTag::GitBlob => Some(WorkerArtifact {
+                object_ref: format!(
+                    "refs/spur/outcomes/{}/{}-{}.blob",
+                    self.key.brain_session_id.as_str(),
+                    self.key.delegation_id.as_str(),
+                    self.key.attempt,
+                ),
+                blob_sha: self.sha256.clone(),
+                size_bytes: self.byte_size as usize,
+                kind,
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +147,44 @@ mod tests {
         let mut s = HashSet::new();
         s.insert(key());
         assert!(s.contains(&key()));
+    }
+
+    #[test]
+    fn as_worker_artifact_maps_git_blob_backend_only() {
+        use crate::domain::artifact::ArtifactKind as WorkerArtifactKind;
+
+        let r = OutcomeRef {
+            key: key(),
+            sha256: "a".repeat(40),
+            byte_size: 99,
+            backend: BackendTag::GitBlob,
+        };
+        let wa = r
+            .as_worker_artifact(WorkerArtifactKind::Output)
+            .expect("git_blob backend should map");
+        assert_eq!(
+            wa.object_ref,
+            format!(
+                "refs/spur/outcomes/{}/{}-{}.blob",
+                r.key.brain_session_id.as_str(),
+                r.key.delegation_id.as_str(),
+                r.key.attempt,
+            )
+        );
+        assert_eq!(wa.blob_sha, r.sha256);
+        assert_eq!(wa.size_bytes, 99);
+    }
+
+    #[test]
+    fn as_worker_artifact_returns_none_for_fs_backend() {
+        use crate::domain::artifact::ArtifactKind as WorkerArtifactKind;
+
+        let r = OutcomeRef {
+            key: key(),
+            sha256: "a".repeat(40),
+            byte_size: 99,
+            backend: BackendTag::Fs,
+        };
+        assert!(r.as_worker_artifact(WorkerArtifactKind::Output).is_none());
     }
 }
