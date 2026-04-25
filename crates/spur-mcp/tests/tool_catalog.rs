@@ -11,6 +11,7 @@ const EXPECTED: &[&str] = &[
     "delegate_to_worker",
     "delegate_parallel",
     "check_delegation_status",
+    "fetch_outcome_artifact",
     "cancel_delegation",
     "list_available_workers",
     "get_issue",
