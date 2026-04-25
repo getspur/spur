@@ -17,14 +17,33 @@ use crate::session_metadata::SessionMetadata;
 
 use super::View;
 
-const FOOTER_HINT: &str = "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} d archive \u{00b7} a show-archived \u{00b7} p pin \u{00b7} P preview \u{00b7} r refresh \u{00b7} Esc back";
+fn footer_hint(
+    state: &PickerState,
+    rename_active: bool,
+    confirm_active: bool,
+) -> &'static str {
+    if confirm_active {
+        return "y/Enter confirm \u{00b7} n/Esc cancel";
+    }
+    if rename_active {
+        return "type new title \u{00b7} Enter save \u{00b7} Esc cancel";
+    }
+    match state {
+        PickerState::Loading => "Esc back",
+        PickerState::Error { .. } => "r retry \u{00b7} Esc back",
+        PickerState::Populated {
+            search_focused: true,
+            ..
+        } => "type to filter \u{00b7} Enter commit \u{00b7} Esc exit search",
+        PickerState::Populated { .. } => {
+            "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} d archive \u{00b7} y yank-id \u{00b7} P preview \u{00b7} Esc back"
+        }
+    }
+}
 
-fn render_footer_hint(frame: &mut Frame, area: Rect) {
+fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str) {
     frame.render_widget(
-        Paragraph::new(Span::styled(
-            FOOTER_HINT,
-            Style::default().fg(Color::DarkGray),
-        )),
+        Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
         area,
     );
 }
@@ -482,7 +501,7 @@ impl SessionPickerView {
                 flag_summary,
             },
         );
-        render_footer_hint(frame, chunks[2]);
+        render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));
     }
 
     // Refactoring to a props struct is deferred — the signature is stable and
@@ -774,7 +793,12 @@ impl SessionPickerView {
                 },
             );
         }
-        render_footer_hint(frame, chunks[footer_idx]);
+        let hint = footer_hint(
+            &self.state,
+            self.rename_state.is_some(),
+            self.confirm_switch.is_some(),
+        );
+        render_footer_hint(frame, chunks[footer_idx], hint);
     }
 
     fn render_error(
@@ -836,7 +860,7 @@ impl SessionPickerView {
                 flag_summary,
             },
         );
-        render_footer_hint(frame, chunks[2]);
+        render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));
     }
 
     #[cfg(test)]

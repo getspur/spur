@@ -541,3 +541,19 @@ fn enter_on_new_session_row_with_draft_shows_confirm() {
     let action = picker.handle_key(key('y'), &test_ctx());
     assert!(matches!(action, Some(Action::NewSessionRequested)));
 }
+
+#[test]
+fn footer_hint_changes_with_mode() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+
+    assert!(!picker.is_rename_active());
+    assert!(!picker.is_confirm_switch_visible());
+
+    let _ = picker.handle_key(key('R'), &test_ctx());
+    assert!(picker.is_rename_active());
+
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
+    assert!(!picker.is_rename_active());
+}
