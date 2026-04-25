@@ -34,7 +34,8 @@ pub struct OutcomeMetadata {
     pub original_byte_size: u64,
     /// Size of the STORED content (after stored-cap truncation).
     pub stored_byte_size: u64,
-    /// 64-char lowercase hex SHA-256 of the stored content. Authoritative.
+    /// Round 11 (SF1): SHA-256 hex of stored content. Single source of truth
+    /// for `ContentMismatch` detection — read here, never re-hashed from disk.
     pub sha256: String,
 }
 
@@ -122,9 +123,18 @@ mod tests {
 
     #[test]
     fn section_serializes_as_snake_case() {
-        assert_eq!(serde_json::to_string(&Section::StatusOnly).expect("ser"), "\"status_only\"");
-        assert_eq!(serde_json::to_string(&Section::DiffOnly).expect("ser"), "\"diff_only\"");
-        assert_eq!(serde_json::to_string(&Section::Full).expect("ser"), "\"full\"");
+        assert_eq!(
+            serde_json::to_string(&Section::StatusOnly).expect("ser"),
+            "\"status_only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Section::DiffOnly).expect("ser"),
+            "\"diff_only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Section::Full).expect("ser"),
+            "\"full\""
+        );
     }
 
     #[test]
