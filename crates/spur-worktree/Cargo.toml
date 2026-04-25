@@ -7,12 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 spur-acp = { workspace = true }
+spur-blob-store = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
