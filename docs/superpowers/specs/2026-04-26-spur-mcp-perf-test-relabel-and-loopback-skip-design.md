@@ -21,16 +21,20 @@ The goal is to make the perf framing visible from `cargo test` output and from a
 
 ### 1.2 Loopback-bind tests fail in restricted sandboxes
 
-`McpCallbackServer::start()` at `crates/spur-mcp/src/server.rs:1933` does `TcpListener::bind("127.0.0.1:0").await`. Six integration tests reach this path and currently hard-fail with `EPERM` ("Operation not permitted") when run inside a sandbox whose seccomp profile denies loopback `bind(2)`:
+`McpCallbackServer::start()` at `crates/spur-mcp/src/server.rs:1933` does `TcpListener::bind("127.0.0.1:0").await`. Verified via `rg '\.start\(\)' crates/spur-mcp/tests/` at `d9ba89c`, **four** test files reach this path:
 
-- `tests/rmcp_streamable_http.rs`
-- `tests/e2e_closure_v0e.rs`
-- `tests/pidfile_single_brain.rs`
-- `tests/server_start_pidfile.rs`
-- `tests/parallel_response_shape.rs`
-- `tests/block_timeout_continuation.rs`
+- `tests/rmcp_streamable_http.rs` (1 call site)
+- `tests/server_start_pidfile.rs` (3 call sites across 2 tests)
+- `tests/persisted_authority_flip.rs` (2 call sites)
+- `tests/reconciler_tick.rs` (2 call sites)
 
-Other tests in the same crate may also reach `start()`. The implementation pass (planning skill) will produce the authoritative list via `grep -rn '\.start()' crates/spur-mcp/tests/`.
+In `persisted_authority_flip.rs` and `reconciler_tick.rs`, four of the call sites already have **ad-hoc post-bind skip logic** that catches `Err(error)` where `format!("{error:#}").contains("Failed to bind TCP listener")` and `eprintln!` + `return`. These work in restricted sandboxes today but pay the full pre-bind setup cost (TempDir, PmService construction, set_workers, etc.) before bailing. This spec migrates them to the new pre-bind macro for consistency and to skip the wasted setup.
+
+In `server_start_pidfile.rs`, only **one of the two tests** needs the skip macro:
+- `dropping_server_handle_releases_pidfile_for_next_start` — needs the macro.
+- `beads_backed_start_requires_repo_root_before_listener_boot` — does **NOT** need the macro and must not receive it. This test deliberately exercises the pre-bind `repo_root` invariant at `server.rs:1898-1914`, which fires *before* `TcpListener::bind` at line 1933. In a sandbox the test still receives the expected `"repo_root not set"` error and passes.
+
+Other tests in the crate construct `McpCallbackServer::new(...)` (in-memory) but do not call `.start()`, so they do not bind a TCP listener and are out of scope.
 
 The goal is for these tests to **skip gracefully** in restricted sandboxes (eprintln + early return) the same way `mutation_pagination.rs` already skips when `br` or `sqlite3` are absent, while running normally on hosts where loopback bind succeeds. This is a test-boundary fix only — `McpCallbackServer::start()` itself is unchanged.
 
@@ -69,6 +73,7 @@ The goal is for these tests to **skip gracefully** in restricted sandboxes (epri
        use spur_mcp::plan::mutation_executor::apply_mutation;
        use spur_pm::{IssueFilter, PmService};
        use std::sync::Arc;
+       use tempfile::TempDir;
        use uuid::Uuid;
 
        #[tokio::test]
@@ -78,6 +83,8 @@ The goal is for these tests to **skip gracefully** in restricted sandboxes (epri
        }
    }
    ```
+
+   The named-import list omits `tempfile::TempDir` from `super::{...}` (it's not declared at parent scope as a re-exportable item; it comes from `use tempfile::TempDir;` at file scope). Re-import directly with `use tempfile::TempDir;` inside the sub-module — clearest reading and avoids `super::TempDir` ambiguity.
 
 5. Helpers (`br_available`, `sqlite_available`, `run_br`, `run_sql`, `br_id`, `task_draft`, `mutation_batch`, `seed_filler_issues`, `set_issue_timestamp`) and `FILLER_COUNT` stay private at file scope. No `pub` mutation needed.
 
@@ -169,18 +176,59 @@ Each loopback-touching integration test gets two additions:
    - Tests with `async fn name()` return `()` use the unary form: `skip_if_no_loopback!("name");`
    - `rmcp_streamable_http.rs::rmcp_client_can_initialize_list_tools_and_call_tool` returns `Result<(), Box<dyn std::error::Error>>`; it uses the binary form: `skip_if_no_loopback!("rmcp_client_can_initialize_list_tools_and_call_tool", Ok(()));`
 
-The implementation pass produces the exact list of tests via `grep -rn '\.start()' crates/spur-mcp/tests/` and audits each match. The expected list at design time:
+The implementation plan **MUST regenerate the wiring list** via `rg '\.start\(\)' crates/spur-mcp/tests/` and audit each match. Do not copy the table below; it is descriptive at commit `d9ba89c` and may drift in future commits.
 
-| Test file | Test name | Macro arm |
-|-----------|-----------|-----------|
-| `rmcp_streamable_http.rs` | `rmcp_client_can_initialize_list_tools_and_call_tool` | binary, `Ok(())` |
-| `e2e_closure_v0e.rs` | (per-test, see implementation pass) | unary |
-| `pidfile_single_brain.rs` | (per-test) | unary |
-| `server_start_pidfile.rs` | (per-test) | unary |
-| `parallel_response_shape.rs` | (per-test) | unary |
-| `block_timeout_continuation.rs` | (per-test) | unary |
+Verified wiring at `d9ba89c`:
 
-Tests in the same binary that do **not** call `start()` are not modified — the skip is per-test, not per-binary, so unrelated tests in the same file still run (and on a sandbox host, the cached `false` from the probe still costs only one bind attempt for the binary as a whole).
+| File | Test fn | Action | Macro arm | Notes |
+|------|---------|--------|-----------|-------|
+| `rmcp_streamable_http.rs` | `rmcp_client_can_initialize_list_tools_and_call_tool` (line 15) | new wiring | binary, `Ok(())` | Returns `Result<(), Box<dyn Error>>`. |
+| `server_start_pidfile.rs` | `dropping_server_handle_releases_pidfile_for_next_start` (line 90) | new wiring | unary | Three `.start()` sites in the test (lines 115, 135 inside loop). One macro at fn entry suffices. |
+| `server_start_pidfile.rs` | `beads_backed_start_requires_repo_root_before_listener_boot` (line 57) | **EXCLUDED** | — | See subsection below. |
+| `persisted_authority_flip.rs` | test containing `.start()` at line 688 | migrate | unary | Replace ad-hoc post-bind skip at lines 691–700. |
+| `persisted_authority_flip.rs` | test containing `.start()` at line 755 | migrate | unary | Replace ad-hoc post-bind skip at lines 758–767. |
+| `reconciler_tick.rs` | test containing `.start()` at line 1304 | migrate | unary | Replace ad-hoc post-bind skip at line 1309. |
+| `reconciler_tick.rs` | test containing `.start()` at line 1421 | migrate | unary | Replace ad-hoc post-bind skip at line 1426. |
+
+Function names for the `persisted_authority_flip.rs` and `reconciler_tick.rs` rows are resolved during the planning grep pass by walking back from each `.start()` line to the enclosing `async fn`.
+
+#### Excluded test: `beads_backed_start_requires_repo_root_before_listener_boot`
+
+This test in `server_start_pidfile.rs` deliberately exercises a **pre-bind invariant**: it constructs a beads-backed server *without* setting `repo_root` and asserts that `start()` returns `Err("repo_root not set on McpCallbackServer")`. The check at `crates/spur-mcp/src/server.rs:1898–1914` runs **before** `TcpListener::bind` at line 1933, so in any environment (sandboxed or not) the test reaches the expected error and passes. Adding the skip macro to this test would be wrong — it would skip a test that has nothing to do with the listener.
+
+Implementation rule: when auditing each `.start()` match, distinguish between *use-the-listener* tests (need the macro) and *exercise-pre-bind-invariants* tests (must not get the macro). The deciding question is "does this test expect `start()` to succeed?" — if no, audit whether the failure path is pre- or post-bind in `server.rs::start()`.
+
+#### Migrating ad-hoc post-bind skips
+
+Existing pattern at `persisted_authority_flip.rs:688-700` (representative):
+```rust
+let started = Arc::clone(&server).start().await;
+let (_url, handle) = match started {
+    Ok(started) => started,
+    Err(error) => {
+        let message = format!("{error:#}");
+        if message.contains("Failed to bind TCP listener") {
+            eprintln!("skipping <test_name>: {message}");
+            return;
+        }
+        panic!("start server: {message}");
+    }
+};
+```
+
+After migration:
+```rust
+skip_if_no_loopback!("<test_name>");
+// ... (existing setup unchanged) ...
+let (_url, handle) = Arc::clone(&server).start().await.expect("start server");
+```
+
+The migration:
+1. Inserts the macro at function entry, before any side effect (TempDir, PmService, set_repo_root, set_reconciler_enabled).
+2. Replaces the post-bind match-on-error with a plain `.expect()` since the macro guarantees we don't reach `start()` in a sandbox.
+3. Saves the test the cost of building the full setup before bailing.
+
+Tests in the same binary that do **not** call `.start()` are not modified — the skip is per-test, not per-binary.
 
 ### 3.4 Section 3 — Verification
 
@@ -207,7 +255,13 @@ All seven checks must pass before claiming the work complete:
    `grep -rn '#\[ignore' crates/spur-mcp/tests/` returns no new lines vs `main`.
 
 7. **Both macro arms exercised.**
-   `grep -rn 'skip_if_no_loopback!' crates/spur-mcp/tests/` shows at least one unary-arm call site and at least one binary-arm call site. If only one arm is used in practice, drop the unused arm before merging.
+   `grep -rn 'skip_if_no_loopback!' crates/spur-mcp/tests/` shows at least one unary-arm call site (the `server_start_pidfile`, `persisted_authority_flip`, `reconciler_tick` tests) and at least one binary-arm call site (`rmcp_streamable_http`). If only one arm is used in practice, drop the unused arm before merging.
+
+8. **Ad-hoc post-bind skip removal.**
+   `grep -rn 'Failed to bind TCP listener' crates/spur-mcp/tests/` returns zero matches after implementation. The four existing post-bind match-on-error patterns at `persisted_authority_flip.rs:691-700`, `persisted_authority_flip.rs:758-767`, `reconciler_tick.rs:1309`, `reconciler_tick.rs:1426` are fully replaced by the pre-bind macro.
+
+9. **Excluded test still passes.**
+   `cargo test -p spur-mcp --test server_start_pidfile beads_backed_start_requires_repo_root_before_listener_boot` runs and passes both on a normal host and in the sandbox (without the macro, by virtue of the pre-bind `repo_root` check firing at `server.rs:1898–1914`).
 
 ### 3.5 Rollout sequence
 
@@ -229,7 +283,9 @@ The implementation plan will follow this order; each step is independently commi
 
 - **Future test with a third return shape:** if a new loopback-touching test returns, e.g., `Result<NonUnit, Error>`, neither macro arm fits. The binary arm will accept any expression of the right type, so this isn't strictly a third arm — the test author writes `skip_if_no_loopback!("name", Ok(my_default_value));`. If multiple tests grow exotic shapes, consider adding a third `expr` arm or just inlining the skip logic at the call site.
 
-- **Side-effect ordering:** the macro must precede *all* side effects in each test (temp dirs, PmService construction, pidfile acquisition). The implementation plan calls this out per-test; review during planning confirms placement.
+- **Side-effect ordering:** the macro must precede *all* side effects in each test (temp dirs, PmService construction, pidfile acquisition). The implementation plan calls this out per-test; review during planning confirms placement. Verified at design time for `rmcp_streamable_http.rs` (line 17 is the first body line, all subsequent constructors are in-memory until `.start()` at line 36).
+
+- **Pre-bind probe vs. post-bind skip semantic difference:** the four migrated ad-hoc skips matched on the post-bind error string `"Failed to bind TCP listener"` — they would have skipped on *any* bind failure, including (theoretically) `EADDRINUSE` from a port collision. The pre-bind macro probes `127.0.0.1:0` upfront with a 3-attempt retry budget. On a host where `127.0.0.1:0` succeeds (kernel allocates an unused ephemeral port — `EADDRINUSE` here is essentially impossible) the macro returns `true` and the test runs; if a real `start()` later fails for any reason, the test panics rather than skips. This is acceptable: `EADDRINUSE` on `0` is not a realistic failure mode, and the failure modes the existing skip was guarding against (sandbox `EPERM`) are exactly what the new probe catches.
 
 ## 5. Out of scope
 
@@ -245,3 +301,9 @@ The implementation plan will follow this order; each step is independently commi
 - **TCP-bind sandbox skip strategy:** option **B3** chosen — shared `tests/common/mod.rs` helper, not inline-per-test or env-var-gated.
 - **Async cache primitive:** `tokio::sync::OnceCell` over `std::sync::OnceLock` (caught in review iteration; needed because the probe is async).
 - **Macro shape:** two arms (unary + binary expr) over `Default::default()` trick (caught in review iteration; needed because `rmcp_streamable_http.rs` returns `Result<...>` and one of the other tests doesn't).
+- **Triple-review amendments (gemini, kimi, codex on `d9ba89c`):**
+  - Added `tempfile::TempDir` import inside the `mod perf_regressions` block (gemini caught: file-scope `use tempfile::TempDir;` does not propagate into the wrap module via `super::TempDir` in the named-import list).
+  - Replaced the loopback-test wiring table with the verified 4-file list: `rmcp_streamable_http`, `server_start_pidfile`, `persisted_authority_flip`, `reconciler_tick` (codex + kimi independently verified via `rg '\.start\(\)'`). Removed three files that don't call `.start()` (`e2e_closure_v0e`, `pidfile_single_brain`, `parallel_response_shape`, `block_timeout_continuation`) and added two that do (`persisted_authority_flip`, `reconciler_tick`).
+  - Added explicit exclusion for `beads_backed_start_requires_repo_root_before_listener_boot` (kimi caught: deliberately exercises pre-bind `repo_root` invariant at `server.rs:1898–1914`, must not receive the macro).
+  - Expanded scope to migrate four existing ad-hoc post-bind skip patterns (`persisted_authority_flip.rs:691-700, 758-767`; `reconciler_tick.rs:1309, 1426`) to the pre-bind macro for consistency. Adds verification step 8 (`grep` for the old error string returns zero matches post-implementation).
+  - Mandated that the implementation plan regenerate the wiring list via `rg '\.start\(\)'` rather than copy from the spec table (codex's recommendation).
