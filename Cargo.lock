@@ -4408,6 +4408,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-blob-store"
+version = "0.4.5"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spur-acp",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "spur-bot"
 version = "0.4.5"
 dependencies = [
