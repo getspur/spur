@@ -73,10 +73,10 @@ impl OutcomeRef {
     /// ref is read-only during transition; new writes go to the new
     /// namespace.
     ///
-    /// `byte_size` saturates to `usize::MAX` on 32-bit targets where a
-    /// >4 GiB outcome would otherwise wrap silently. Worker artifacts
-    /// are bounded by the Plan-4 truncation ladder well below that, so
-    /// saturation is defensive — callers will never see it in practice.
+    /// `byte_size` saturates to `usize::MAX` on 32-bit targets where an
+    /// outcome larger than 4 GiB would otherwise wrap silently. Worker
+    /// artifacts are bounded by the Plan-4 truncation ladder well below
+    /// that; saturation is defensive — callers won't see it in practice.
     pub fn as_worker_artifact(&self, kind: WorkerArtifactKind) -> Option<WorkerArtifact> {
         match (&self.backend, &self.git_blob_sha) {
             (BackendTag::GitBlob, Some(git_sha)) => Some(WorkerArtifact {
