@@ -19,6 +19,11 @@ pub async fn run_startup_reconcile(
     brain_session_id: String,
     drain_quiet_window: Duration,
 ) -> ReconcileCounts {
+    // TODO(peer-mailbox): drain_quiet_window is currently unused;
+    // run_startup_reconcile forces terminal transitions immediately
+    // on boot. Future work: respect the quiet window so an orchestrator
+    // restarting mid-flight gives in-flight workers a grace period
+    // before forcing them to terminal. Tracked separately.
     let _ = drain_quiet_window;
     let entries = ledger.non_terminal_entries().await;
     let mut counts = ReconcileCounts::default();
