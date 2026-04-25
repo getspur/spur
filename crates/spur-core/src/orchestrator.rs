@@ -5886,6 +5886,16 @@ mod peer_mailbox_drain_tests {
             .unwrap();
         bundle
             .ledger
+            .transition(&message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        bundle
+            .ledger
+            .transition(&message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+        bundle
+            .ledger
             .transition(&message_id, LedgerState::Delivered)
             .await
             .unwrap();
