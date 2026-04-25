@@ -7,6 +7,7 @@
 
 use std::time::SystemTime;
 
+use spur_acp::domain::delegation::DelegationId;
 use spur_acp::{DelegationStatus, SpurEvent, SpurEventBody};
 
 use super::projection::ExecutorLineage;
@@ -38,6 +39,8 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 last_error: None,
                 stream_buffer: std::collections::VecDeque::new(),
                 issue_id: None,
+                delegation_id: None,
+                peer_edges: Vec::new(),
             });
             // Replay any events (e.g. an early `BrainRetired`) that arrived
             // before this spawn was projected. Symmetric with the
@@ -95,6 +98,8 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 last_error: None,
                 stream_buffer: std::collections::VecDeque::new(),
                 issue_id: None,
+                delegation_id: None,
+                peer_edges: Vec::new(),
             };
             match parent {
                 Some(p) => lineage.attach_child(&p, node),
@@ -103,13 +108,14 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             // Drain any `DelegationDispatched` payload that arrived before
             // this `WorkerSpawned` (orphan-dispatch buffer). The authoritative
             // request_id→executor_id mapping was stashed at dispatch time.
-            if let Some((task, issue_id)) = lineage
+            if let Some((task, issue_id, delegation_id)) = lineage
                 .pending_dispatch_by_executor_id_mut()
                 .remove(&session.0)
             {
                 if let Some(n) = lineage.node_mut_public(&ExecutorId::new(session.0.clone())) {
                     n.task_spec = task;
                     n.issue_id = issue_id;
+                    n.delegation_id = Some(delegation_id);
                 }
             }
         }
@@ -170,13 +176,15 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 lineage.pending_task_by_request_id_mut().remove(request_id)
             {
                 let eid = ExecutorId::new(executor_id.clone());
+                let delegation_id = DelegationId(request_id.clone());
                 if let Some(n) = lineage.node_mut_public(&eid) {
                     n.task_spec = task;
                     n.issue_id = issue_id;
+                    n.delegation_id = Some(delegation_id);
                 } else {
                     lineage
                         .pending_dispatch_by_executor_id_mut()
-                        .insert(executor_id.clone(), (task, issue_id));
+                        .insert(executor_id.clone(), (task, issue_id, delegation_id));
                 }
             }
         }

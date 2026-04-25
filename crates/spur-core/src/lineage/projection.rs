@@ -22,11 +22,15 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use spur_acp::domain::delegation::DelegationId;
+use spur_acp::domain::peer_message::PeerMessageId;
 use spur_acp::{SpurEvent, SpurEventBody};
 
 use spur_acp::LifecycleState;
 
-use super::types::{Attempt, AttemptStatus, ExecutorId, ExecutorNode, ReviewRequest};
+use super::types::{
+    Attempt, AttemptStatus, ExecutorId, ExecutorNode, PeerEdge, PeerEdgeState, ReviewRequest,
+};
 
 const MAX_ORPHAN_BUFFER_PER_EXEC: usize = 128;
 
@@ -49,8 +53,8 @@ pub struct ExecutorLineage {
     pending_task_by_request_id: HashMap<String, (String, Option<String>)>,
     /// Buffer for `DelegationDispatched` events that arrive before the
     /// corresponding `WorkerSpawned`/`ExecutorSpawned`. Key is `executor_id`.
-    /// Value is `(task_spec, issue_id)` drained when the node appears.
-    pending_dispatch_by_executor_id: HashMap<String, (String, Option<String>)>,
+    /// Value is `(task_spec, issue_id, delegation_id)` drained when the node appears.
+    pending_dispatch_by_executor_id: HashMap<String, (String, Option<String>, DelegationId)>,
 }
 
 impl ExecutorLineage {
@@ -114,6 +118,8 @@ impl ExecutorLineage {
                     last_error: None,
                     stream_buffer: VecDeque::new(),
                     issue_id: None,
+                    delegation_id: None,
+                    peer_edges: Vec::new(),
                 };
                 match parent {
                     Some(p) => {
@@ -320,6 +326,53 @@ impl ExecutorLineage {
                 }
             }
 
+            SpurEventBody::WorkerPeerMessageAccepted {
+                message_id,
+                source_delegation_id,
+                target_delegation_id,
+                kind,
+                ..
+            } => {
+                self.attach_peer_edge(PeerEdge {
+                    message_id: *message_id,
+                    source_delegation_id: source_delegation_id.clone(),
+                    target_delegation_id: target_delegation_id.clone(),
+                    kind: *kind,
+                    state: PeerEdgeState::Accepted,
+                    injected_chars: 0,
+                });
+            }
+
+            SpurEventBody::WorkerPeerMessageDelivered {
+                message_id,
+                injected_chars,
+                ..
+            } => {
+                self.update_peer_edge_state(
+                    message_id,
+                    PeerEdgeState::Delivered,
+                    Some(*injected_chars),
+                );
+            }
+
+            SpurEventBody::WorkerPeerMessageConsumed { message_id, .. } => {
+                self.update_peer_edge_state(message_id, PeerEdgeState::Consumed, None);
+            }
+
+            SpurEventBody::WorkerPeerMessageIgnored { message_id, .. } => {
+                self.update_peer_edge_state(message_id, PeerEdgeState::Ignored, None);
+            }
+
+            SpurEventBody::WorkerPeerMessageRejected { .. }
+            | SpurEventBody::WorkerPeerMessageExpired { .. }
+            | SpurEventBody::WorkerPeerMessageDropped { .. }
+            | SpurEventBody::WorkerPeerMessageUndeliverable { .. }
+            | SpurEventBody::WorkerPeerMessageQueued { .. }
+            | SpurEventBody::WorkerPeerMessageAuditFailed { .. }
+            | SpurEventBody::WorkerPeerMailboxReconciled { .. } => {
+                // Lifecycle events that don't currently mutate the edge graph.
+            }
+
             SpurEventBody::BrainRetired { session, .. } => {
                 let eid = ExecutorId::new(session.0.clone());
                 if !self.nodes.contains_key(&eid) {
@@ -422,6 +475,12 @@ impl ExecutorLineage {
         self.nodes.get(id)
     }
 
+    pub fn peer_edges_for_delegation(&self, delegation_id: &DelegationId) -> Vec<PeerEdge> {
+        self.find_node_by_delegation(delegation_id)
+            .map(|node| node.peer_edges.clone())
+            .unwrap_or_default()
+    }
+
     pub fn root_ids(&self) -> &[ExecutorId] {
         &self.roots
     }
@@ -485,8 +544,55 @@ impl ExecutorLineage {
     /// on `WorkerSpawned`/`ExecutorSpawned` arrival.
     pub(crate) fn pending_dispatch_by_executor_id_mut(
         &mut self,
-    ) -> &mut HashMap<String, (String, Option<String>)> {
+    ) -> &mut HashMap<String, (String, Option<String>, DelegationId)> {
         &mut self.pending_dispatch_by_executor_id
+    }
+
+    fn attach_peer_edge(&mut self, edge: PeerEdge) {
+        if let Some(node) = self.find_node_mut_by_delegation(&edge.source_delegation_id) {
+            if node
+                .peer_edges
+                .iter()
+                .any(|existing| existing.message_id == edge.message_id)
+            {
+                return;
+            }
+            node.peer_edges.push(edge);
+        }
+    }
+
+    fn update_peer_edge_state(
+        &mut self,
+        message_id: &PeerMessageId,
+        new_state: PeerEdgeState,
+        injected_chars: Option<u32>,
+    ) {
+        for node in self.nodes.values_mut() {
+            for edge in &mut node.peer_edges {
+                if &edge.message_id == message_id {
+                    edge.state = new_state;
+                    if let Some(injected_chars) = injected_chars {
+                        edge.injected_chars = injected_chars;
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    fn find_node_by_delegation(&self, delegation_id: &DelegationId) -> Option<&ExecutorNode> {
+        self.nodes.values().find(|node| {
+            node.delegation_id.as_ref() == Some(delegation_id) || node.id.0 == delegation_id.0
+        })
+    }
+
+    fn find_node_mut_by_delegation(
+        &mut self,
+        delegation_id: &DelegationId,
+    ) -> Option<&mut ExecutorNode> {
+        self.nodes.values_mut().find(|node| {
+            node.delegation_id.as_ref() == Some(delegation_id) || node.id.0 == delegation_id.0
+        })
     }
 }
 

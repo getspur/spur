@@ -22,8 +22,8 @@ pub mod skip_perm;
 pub mod spur_ext_interp;
 
 pub use lineage::{
-    Attempt, AttemptStatus, ExecutorId, ExecutorLineage, ExecutorNode, ReviewRequest,
-    WorkerStreamEntry, WorkerStreamKind,
+    Attempt, AttemptStatus, ExecutorId, ExecutorLineage, ExecutorNode, PeerEdge, PeerEdgeState,
+    ReviewRequest, WorkerStreamEntry, WorkerStreamKind,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use orchestrator::test_support;
