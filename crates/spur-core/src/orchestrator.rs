@@ -4882,12 +4882,24 @@ async fn run_one_worker_attempt(
         worker_success = false;
         output_text = format!("Failed to prompt worker: {e}");
     } else if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
+        use crate::peer_mailbox::ledger::is_terminal;
         use spur_acp::domain::peer_message::LedgerState;
 
         let target_delegation_id =
             spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
 
         for inj in pc.injection_records {
+            if let Some(entry) = bundle.ledger.get(&inj.message_id).await {
+                if is_terminal(entry.state) {
+                    tracing::debug!(
+                        message_id = ?inj.message_id,
+                        state = ?entry.state,
+                        "post-prompt transition skipped: already terminal"
+                    );
+                    continue;
+                }
+            }
+
             match bundle
                 .ledger
                 .transition(&inj.message_id, LedgerState::DeliveredInflight)
