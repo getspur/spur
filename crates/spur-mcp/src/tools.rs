@@ -265,19 +265,24 @@ fn check_delegation_status_def() -> ToolDefinition {
 fn fetch_outcome_artifact_def() -> ToolDefinition {
     ToolDefinition {
         name: "fetch_outcome_artifact".into(),
-        description: "Fetch the side-channel artifact (oversized stdout) associated with a completed delegation. Use this when a delegation result references an artifact (via continuation payload's artifact_ref) and you need the full content. Phase 1 supports section='full' only; future phases will add status_only/summary/diff_only.".into(),
+        description: "Fetch the side-channel artifact (full or sectioned) for a completed delegation. Use when continuation.payload.artifact_id is Some(_) and you need fuller context. Sections let you pick what to fetch: pass 'status_only' for just status fields (~100B), 'summary' for the inline summary, 'diff_only' for full diff text, or 'full' for the entire DelegationResult JSON.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "delegation_id": {
                     "type": "string",
-                    "description": "The delegation_id whose artifact you want to fetch. The artifact's brain session is implicit (this server's session); cross-session reads are not supported."
+                    "description": "The delegation_id whose artifact you want to fetch."
+                },
+                "attempt": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional attempt number. Default: latest known attempt for this delegation. Pin a specific attempt for forensic queries on retried delegations."
                 },
                 "section": {
                     "type": "string",
-                    "enum": ["full"],
+                    "enum": ["status_only", "summary", "diff_only", "full"],
                     "default": "full",
-                    "description": "Phase 1 supports 'full' only."
+                    "description": "Which section to fetch. Phase 3."
                 }
             },
             "required": ["delegation_id"]
@@ -734,7 +739,7 @@ mod schema_truthfulness_tests {
     }
 
     #[test]
-    fn fetch_outcome_artifact_schema_advertises_phase1_section_only() {
+    fn fetch_outcome_artifact_schema_advertises_phase3_sections() {
         let def = fetch_outcome_artifact_def();
         let props = def
             .input_schema
@@ -749,8 +754,8 @@ mod schema_truthfulness_tests {
             .unwrap_or_default();
         assert_eq!(
             enum_values,
-            vec!["full"],
-            "Phase 1 must advertise section='full' only"
+            vec!["status_only", "summary", "diff_only", "full"],
+            "Phase 3 must advertise all fetchable sections"
         );
 
         let required: Vec<&str> = def
