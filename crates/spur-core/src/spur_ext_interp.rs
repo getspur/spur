@@ -6,16 +6,17 @@
 //! corresponding `SpurEventBody` variant through the event funnel.
 //!
 //! Worker-supplied `_spur/peer_message_ignored` reasons are capped at this
-//! boundary. `PEER_MESSAGE_IGNORED_REASON_ALLOWLIST` is the low-cardinality
-//! contract dashboards may group directly; unknown short reasons are
-//! `worker:`-namespaced and oversized reasons are hashed.
+//! boundary. `REASON_ALLOWLIST` is the low-cardinality contract dashboards may
+//! group directly; every other reason collapses to a fixed worker bucket so
+//! funnel metrics stay strictly bounded. Worker-side logs and OTel keep any raw
+//! diagnostic detail that operators need.
 
 use spur_acp::connection::ExtNotificationPayload;
 use spur_acp::domain::events::{FileTouchKind, SpurEventBody};
 
 use crate::event_funnel::FunnelHandle;
 
-pub(crate) const PEER_MESSAGE_IGNORED_REASON_ALLOWLIST: &[&str] = &[
+pub(crate) const REASON_ALLOWLIST: &[&str] = &[
     "worker_ignored",
     "drain_timeout",
     "out_of_scope",
@@ -23,21 +24,17 @@ pub(crate) const PEER_MESSAGE_IGNORED_REASON_ALLOWLIST: &[&str] = &[
     "stale_plan_version",
 ];
 
-const PEER_MESSAGE_IGNORED_REASON_MAX_BYTES: usize = 128;
+pub(crate) const REASON_OVERSIZED_BYTES: usize = 128;
 
 pub(crate) fn cap_reason(raw: &str) -> String {
-    if PEER_MESSAGE_IGNORED_REASON_ALLOWLIST.contains(&raw) {
+    if REASON_ALLOWLIST.contains(&raw) {
         return raw.to_string();
     }
-    if raw.len() > PEER_MESSAGE_IGNORED_REASON_MAX_BYTES {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        raw.hash(&mut hasher);
-        return format!("worker:{:08x}", hasher.finish() & 0xFFFF_FFFF);
+    if raw.len() > REASON_OVERSIZED_BYTES {
+        "worker:other_oversized".to_string()
+    } else {
+        "worker:other".to_string()
     }
-    format!("worker:{raw}")
 }
 
 /// Caller supplies `brain_session_id` and `executor_id` from the worker's
@@ -153,7 +150,7 @@ pub async fn interpret_peer_message_terminal(
             } else {
                 format!("malformed_message_id: {err}")
             };
-            tracing::warn!(
+            tracing::debug!(
                 method = %method,
                 error = %err,
                 "_spur/*: malformed peer terminal 'message_id' param"
@@ -995,7 +992,7 @@ mod tests {
                 matches!(
                     event,
                     SpurEventBody::WorkerPeerMessageIgnored { message_id: id, reason, .. }
-                        if id == message_id && reason == "worker:not_needed"
+                        if id == message_id && reason == "worker:other"
                 )
             });
         assert!(ignored, "expected WorkerPeerMessageIgnored event");
@@ -1107,23 +1104,35 @@ mod tests {
 
     #[test]
     fn cap_reason_passes_allowlist_through() {
-        for reason in PEER_MESSAGE_IGNORED_REASON_ALLOWLIST {
+        for reason in REASON_ALLOWLIST {
             assert_eq!(cap_reason(reason), *reason);
         }
     }
 
     #[test]
-    fn cap_reason_namespaces_unknown_short_string() {
-        assert_eq!(cap_reason("plan_diverged"), "worker:plan_diverged");
+    fn cap_reason_collapses_unknown_short_string_to_other() {
+        assert_eq!(cap_reason("plan_diverged"), "worker:other");
     }
 
     #[test]
-    fn cap_reason_hashes_oversized_string() {
-        let capped = cap_reason(&"x".repeat(200));
-        let hash = capped
-            .strip_prefix("worker:")
-            .expect("oversized reason should be worker namespaced");
-        assert_eq!(hash.len(), 8);
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    fn cap_reason_collapses_oversized_string_to_other_oversized() {
+        assert_eq!(cap_reason(&"x".repeat(200)), "worker:other_oversized");
+    }
+
+    #[test]
+    fn cap_reason_bounds_cardinality_strictly() {
+        let mut buckets = std::collections::HashSet::new();
+        for reason in REASON_ALLOWLIST {
+            buckets.insert(cap_reason(reason));
+        }
+        for i in 0..1000 {
+            let raw = if i % 2 == 0 {
+                format!("random_reason_{i}")
+            } else {
+                format!("random_reason_{i}_{}", "x".repeat(160))
+            };
+            buckets.insert(cap_reason(&raw));
+        }
+        assert!(buckets.len() <= REASON_ALLOWLIST.len() + 2);
     }
 }

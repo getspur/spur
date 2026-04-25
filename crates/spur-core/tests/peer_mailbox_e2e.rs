@@ -332,6 +332,9 @@ async fn malformed_terminal_notification_emits_malformed_funnel_event() {
     assert!(events
         .iter()
         .all(|event| !matches!(event, SpurEventBody::WorkerPeerMessageConsumed { .. })));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, SpurEventBody::WorkerPeerMessageIgnored { .. })));
 }
 
 #[tokio::test]
