@@ -377,7 +377,6 @@ impl SessionPickerView {
         sessions.iter().any(|s| s.cwd != *first)
     }
 
-    #[allow(dead_code)]
     fn brains_are_heterogeneous(sessions: &[SessionInfo], metadata: &SessionMetadata) -> bool {
         if sessions.len() <= 1 {
             return false;
@@ -580,6 +579,8 @@ impl SessionPickerView {
             Style::default().fg(Color::DarkGray),
         )));
 
+        let show_brain = Self::brains_are_heterogeneous(sessions, &self.metadata);
+
         for (display_i, real_i) in indices.iter().enumerate().skip(scroll).take(visible_height) {
             let session = &sessions[*real_i];
             let is_selected = cursor == display_i + 1;
@@ -593,64 +594,52 @@ impl SessionPickerView {
                 .map(Self::relative_time)
                 .unwrap_or_default();
 
-            let suffix = if show_cwd {
+            let cwd_suffix = if show_cwd {
                 format!("  {}/", Self::cwd_basename(&session.cwd))
             } else {
                 String::new()
             };
 
-            let archived = self
-                .metadata
-                .sessions
-                .get(session.session_id.0.as_ref())
-                .map(|e| e.archived)
-                .unwrap_or(false);
+            let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
+            let archived = entry.map(|e| e.archived).unwrap_or(false);
+            let pinned = entry.map(|e| e.pinned).unwrap_or(false);
+            let brain = entry.and_then(|e| e.brain_name.as_deref()).unwrap_or("");
 
-            let style = if archived {
-                Style::default().fg(Color::DarkGray)
-            } else if is_selected {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            let id_style = if archived {
+            let title_style = if archived {
                 Style::default().fg(Color::DarkGray)
             } else if is_selected {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default()
             };
+            let muted_style = Style::default().fg(Color::DarkGray);
 
-            let pinned = self
-                .metadata
-                .sessions
-                .get(session.session_id.0.as_ref())
-                .map(|e| e.pinned)
-                .unwrap_or(false);
-            let mut spans: Vec<Span> = Vec::with_capacity(8);
-            spans.push(Span::styled(prefix, style));
-            if pinned {
-                spans.push(Span::styled(
-                    "\u{2b50} ",
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            spans.push(Span::styled(short_id, id_style));
+            let mut spans: Vec<Span> = Vec::with_capacity(10);
             spans.push(Span::styled(
-                " \u{00b7} ",
-                Style::default().fg(Color::DarkGray),
+                prefix,
+                if is_selected {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                },
             ));
-            spans.push(Span::styled(display, style));
-            spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
+            if pinned {
+                spans.push(Span::styled("\u{2b50} ", Style::default().fg(Color::Yellow)));
+            }
+            spans.push(Span::styled(display, title_style));
+            spans.push(Span::styled(cwd_suffix, muted_style));
+            if show_brain {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(brain.to_string(), muted_style));
+            }
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(time_str, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(time_str, muted_style));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(short_id.to_string(), muted_style));
             if archived {
-                spans.push(Span::styled(
-                    " [archived]",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled(" [archived]", muted_style));
             }
             lines.push(Line::from(spans));
         }
