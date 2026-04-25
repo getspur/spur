@@ -103,7 +103,7 @@ fn populated_single_brain_no_filter() {
         "",
         "",
         "",
-        "j/k nav · Enter resume · / search · n new · R rename · d ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
         "j/k nav · Enter resume · / search · n new · R rename · d archive · y yank-id · P",
     ];
     assert_render(&mut picker, expected);
@@ -219,7 +219,7 @@ fn populated_multi_brain_no_filter() {
         "",
         "",
         "",
-        "j/k nav · Enter resume · / search · n new · R rename · d ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
         "j/k nav · Enter resume · / search · n new · R rename · d archive · y yank-id · P",
     ];
     assert_render(&mut picker, expected);
@@ -388,7 +388,7 @@ fn populated_with_preview_visible() {
         "",
         "",
         "",
-        "j/k nav · Enter resume · / search · n new · R rename · d ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
         "j/k nav · Enter resume · / search · n new · R rename · d archive · y yank-id · P",
     ];
     assert_render(&mut picker, expected);
@@ -429,7 +429,7 @@ fn populated_with_archived_shown() {
         "",
         "",
         "",
-        "j/k nav · Enter resume · / search · n new · R rename · d ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
         "j/k nav · Enter resume · / search · n new · R rename · d archive · y yank-id · P",
     ];
     assert_render(&mut picker, expected);
