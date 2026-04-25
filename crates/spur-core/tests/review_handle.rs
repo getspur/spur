@@ -30,6 +30,7 @@ async fn review_handle_emit_routes_to_funnel_and_carries_receiver() {
         error: None,
         delegation_plan: None,
         chosen_matches_dispatched: None,
+        peer_influence: None,
     };
     handle.emit_requested(&funnel, ReviewKind::Completion, payload);
 

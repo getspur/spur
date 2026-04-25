@@ -41,7 +41,7 @@ use spur_worktree::git_blob_store::GitBlobOutcomeStore;
 use spur_worktree::WorktreeManager;
 
 use crate::lineage::ExecutorId;
-use crate::review_sink::{ReviewSink, ReviewSinkError};
+use crate::review_sink::ReviewSink;
 use crate::scheduler::TurnGuard;
 
 type McpGuarded<T> = (T, AbortOnDropHandle<()>);
@@ -770,7 +770,13 @@ impl Orchestrator {
         // flows through `funnel.emit(body)`; the funnel task stamps
         // monotonic seq + wall-clock time and forwards on `event_tx`.
         let event_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let funnel = crate::event_funnel::spawn_funnel(event_tx.clone(), event_seq.clone());
+        let lineage =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::lineage::ExecutorLineage::new()));
+        let funnel = crate::event_funnel::spawn_funnel_with_lineage(
+            event_tx.clone(),
+            event_seq.clone(),
+            lineage,
+        );
         // S3 — durable JSONL sink subscribes to the same broadcast.
         let max_bytes = feature_gate
             .as_ref()
@@ -3812,15 +3818,6 @@ impl Orchestrator {
                 );
             }
 
-            let review_payload = ReviewPayload {
-                summary: outcome.summary.clone().unwrap_or_default(),
-                diff_summary: outcome.diff_summary.clone(),
-                pr_url: None,
-                error: None,
-                delegation_plan: delegation_plan.clone(),
-                chosen_matches_dispatched,
-            };
-
             if let Some(bundle) = peer_mailbox.as_ref() {
                 let quiet_window =
                     std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
@@ -3837,6 +3834,45 @@ impl Orchestrator {
                 )
                 .await;
             }
+
+            let peer_influence = if peer_mailbox.is_some() {
+                use crate::lineage::types::PeerEdgeState;
+
+                let target = spur_acp::domain::delegation::DelegationId(request_id.clone());
+                let mut summary = spur_acp::PeerInfluenceSummary::default();
+                if let Some(lineage) = funnel.lineage_snapshot().await {
+                    let inbound = lineage.peer_edges_inbound_for_delegation(&target);
+                    let outbound = lineage.peer_edges_for_delegation(&target);
+
+                    for edge in inbound {
+                        match edge.state {
+                            PeerEdgeState::Consumed => summary.inbound_consumed += 1,
+                            PeerEdgeState::Ignored => summary.inbound_ignored += 1,
+                            PeerEdgeState::Undeliverable
+                            | PeerEdgeState::Dropped
+                            | PeerEdgeState::Expired
+                            | PeerEdgeState::Rejected => summary.undelivered += 1,
+                            _ => {}
+                        }
+                    }
+                    summary.outbound_emitted = u32::try_from(outbound.len()).unwrap_or(u32::MAX);
+                }
+                // from_unreviewed_source stays false in Stage 1; it needs
+                // brain-state lookup that is intentionally out of scope here.
+                Some(summary)
+            } else {
+                None
+            };
+
+            let review_payload = ReviewPayload {
+                summary: outcome.summary.clone().unwrap_or_default(),
+                diff_summary: outcome.diff_summary.clone(),
+                pr_url: None,
+                error: None,
+                delegation_plan: delegation_plan.clone(),
+                chosen_matches_dispatched,
+                peer_influence,
+            };
 
             // Emit via the handle — type-enforced: no handle → no emit.
             handle.emit_requested(&funnel, ReviewKind::Completion, review_payload);
@@ -5497,9 +5533,9 @@ pub mod test_support {
     // ─── Review gate helpers ──────────────────────────────────────────
     // Test-only. Production code uses ReviewSink::register_handle (INV-4).
 
+    use crate::review_sink::ReviewSinkError;
     use super::{
-        apply_decision_to_candidate, DelegationStatus, ExecutorId, ReviewSink, ReviewSinkError,
-        TimeoutFallback,
+        apply_decision_to_candidate, DelegationStatus, ExecutorId, ReviewSink, TimeoutFallback,
     };
 
     /// Register a pending review on the sink. Returns the receiver the
@@ -5760,6 +5796,7 @@ pub async fn review_dispatcher_loop(mut rx: mpsc::Receiver<InteractiveInput>, si
     }
 }
 
+#[cfg(test)]
 fn apply_decision_to_candidate(
     decision: spur_acp::ReviewDecision,
     candidate: DelegationStatus,
