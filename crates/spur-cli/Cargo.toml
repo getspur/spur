@@ -20,6 +20,7 @@ duckdb = ["spur-context/duckdb"]
 
 [dependencies]
 spur-acp = { workspace = true }
+spur-blob-store = { workspace = true }
 spur-core = { workspace = true }
 spur-cost = { workspace = true }
 spur-context = { workspace = true }
@@ -28,6 +29,7 @@ spur-license = { workspace = true }
 spur-tui = { workspace = true }
 spur-interactive = { workspace = true }
 spur-bot = { workspace = true }
+spur-worktree = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
