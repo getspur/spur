@@ -74,6 +74,42 @@ fn lineage_peer_message_accepted_creates_edge_on_source_node() {
 }
 
 #[test]
+fn lineage_finds_peer_edges_inbound_to_target_delegation() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&spawn("src-a", None));
+    l.apply(&spawn("src-b", None));
+
+    let target = DelegationId("target".into());
+    let first = PeerMessageId(uuid::Uuid::new_v4());
+    let second = PeerMessageId(uuid::Uuid::new_v4());
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerPeerMessageAccepted {
+        brain_session_id: "brain".into(),
+        message_id: first,
+        source_delegation_id: DelegationId("src-a".into()),
+        target_delegation_id: target.clone(),
+        kind: MessageKind::Handoff,
+        sequence: 1,
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerPeerMessageAccepted {
+        brain_session_id: "brain".into(),
+        message_id: second,
+        source_delegation_id: DelegationId("src-b".into()),
+        target_delegation_id: target.clone(),
+        kind: MessageKind::Question,
+        sequence: 2,
+    }));
+
+    let inbound = l.peer_edges_inbound_for_delegation(&target);
+    let mut ids: Vec<_> = inbound.iter().map(|edge| edge.message_id).collect();
+    ids.sort_by_key(|id| id.0);
+
+    let mut expected = vec![first, second];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(ids, expected);
+    assert!(l.peer_edges_for_delegation(&target).is_empty());
+}
+
+#[test]
 fn phase_change_updates_node_phase() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("brain-1", None));
@@ -133,6 +169,7 @@ fn review_requested_populates_pending_review_and_phase() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
 
@@ -161,6 +198,7 @@ fn review_resolved_clears_pending_review() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
     l.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewResolved {
@@ -432,6 +470,7 @@ fn review_cancelled_clears_pending_review() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     });
     lineage.apply(&req);
@@ -587,6 +626,7 @@ fn brain_retired_drains_pending_review_for_cascaded_ids() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
     assert_eq!(l.pending_reviews().len(), 1);

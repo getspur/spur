@@ -30,6 +30,7 @@ fn review_req(id: &str) -> SpurEvent {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     })
 }

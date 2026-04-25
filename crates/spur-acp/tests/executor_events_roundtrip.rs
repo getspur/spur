@@ -78,6 +78,7 @@ fn executor_review_requested_roundtrips() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     });
     let json = serde_json::to_string(&ev).unwrap();
@@ -102,6 +103,7 @@ fn executor_review_requested_carries_attempt_n() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     };
     let event = SpurEvent::now(body);

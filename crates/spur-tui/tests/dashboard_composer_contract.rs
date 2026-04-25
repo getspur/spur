@@ -97,6 +97,7 @@ fn empty_review_tab_decision_routes_pre_key() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
 
@@ -224,6 +225,7 @@ fn vim_normal_review_tab_decision_routes_to_view() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
 

@@ -488,6 +488,7 @@ fn review_cancelled_with_timeout_reason_clears_pending_review() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
 
@@ -544,6 +545,7 @@ fn review_cancelled_with_sender_dropped_reason_clears_pending_review() {
             error: None,
             delegation_plan: None,
             chosen_matches_dispatched: None,
+            peer_influence: None,
         },
     }));
 

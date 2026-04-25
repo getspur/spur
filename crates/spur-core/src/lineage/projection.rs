@@ -481,6 +481,18 @@ impl ExecutorLineage {
             .unwrap_or_default()
     }
 
+    pub fn peer_edges_inbound_for_delegation(&self, target: &DelegationId) -> Vec<PeerEdge> {
+        let mut out = Vec::new();
+        for node in self.nodes.values() {
+            for edge in &node.peer_edges {
+                if &edge.target_delegation_id == target {
+                    out.push(edge.clone());
+                }
+            }
+        }
+        out
+    }
+
     pub fn root_ids(&self) -> &[ExecutorId] {
         &self.roots
     }

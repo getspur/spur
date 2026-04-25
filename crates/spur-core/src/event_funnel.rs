@@ -15,12 +15,18 @@ use std::time::SystemTime;
 
 use tokio::sync::{broadcast, mpsc};
 
+use crate::lineage::ExecutorLineage;
 use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+
+enum FunnelCommand {
+    Event(SpurEventBody),
+    LineageSnapshot(tokio::sync::oneshot::Sender<Option<ExecutorLineage>>),
+}
 
 /// Handle returned by `spawn_funnel`. Clone cheaply; call `emit`.
 #[derive(Clone)]
 pub struct FunnelHandle {
-    tx: mpsc::UnboundedSender<SpurEventBody>,
+    tx: mpsc::UnboundedSender<FunnelCommand>,
 }
 
 impl FunnelHandle {
@@ -28,7 +34,13 @@ impl FunnelHandle {
     /// Silently drops if the funnel task has terminated (treated as
     /// orchestrator shutdown).
     pub fn emit(&self, body: SpurEventBody) {
-        let _ = self.tx.send(body);
+        let _ = self.tx.send(FunnelCommand::Event(body));
+    }
+
+    pub async fn lineage_snapshot(&self) -> Option<ExecutorLineage> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(FunnelCommand::LineageSnapshot(tx));
+        rx.await.ok().flatten()
     }
 }
 
@@ -48,8 +60,21 @@ pub fn test_channel() -> (
     FunnelHandle,
     tokio::sync::mpsc::UnboundedReceiver<SpurEventBody>,
 ) {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    (FunnelHandle { tx }, rx)
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (body_tx, body_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                FunnelCommand::Event(body) => {
+                    let _ = body_tx.send(body);
+                }
+                FunnelCommand::LineageSnapshot(reply) => {
+                    let _ = reply.send(None);
+                }
+            }
+        }
+    });
+    (FunnelHandle { tx }, body_rx)
 }
 
 /// Spawn the singleton funnel task. The returned `FunnelHandle` is
@@ -58,17 +83,48 @@ pub fn spawn_funnel(
     broadcast_tx: broadcast::Sender<SpurEvent>,
     seq: Arc<AtomicU64>,
 ) -> FunnelHandle {
-    let (tx, mut rx) = mpsc::unbounded_channel::<SpurEventBody>();
+    spawn_funnel_inner(broadcast_tx, seq, None)
+}
+
+pub fn spawn_funnel_with_lineage(
+    broadcast_tx: broadcast::Sender<SpurEvent>,
+    seq: Arc<AtomicU64>,
+    lineage: Arc<std::sync::Mutex<ExecutorLineage>>,
+) -> FunnelHandle {
+    spawn_funnel_inner(broadcast_tx, seq, Some(lineage))
+}
+
+fn spawn_funnel_inner(
+    broadcast_tx: broadcast::Sender<SpurEvent>,
+    seq: Arc<AtomicU64>,
+    lineage: Option<Arc<std::sync::Mutex<ExecutorLineage>>>,
+) -> FunnelHandle {
+    let (tx, mut rx) = mpsc::unbounded_channel::<FunnelCommand>();
 
     tokio::spawn(async move {
-        while let Some(body) = rx.recv().await {
-            let s = seq.fetch_add(1, Ordering::Relaxed);
-            let event = SpurEvent {
-                occurred_at: SystemTime::now(),
-                seq: s,
-                body,
-            };
-            let _ = broadcast_tx.send(event);
+        while let Some(command) = rx.recv().await {
+            match command {
+                FunnelCommand::Event(body) => {
+                    let s = seq.fetch_add(1, Ordering::Relaxed);
+                    let event = SpurEvent {
+                        occurred_at: SystemTime::now(),
+                        seq: s,
+                        body,
+                    };
+                    if let Some(lineage) = lineage.as_ref() {
+                        if let Ok(mut lineage) = lineage.lock() {
+                            lineage.apply(&event);
+                        }
+                    }
+                    let _ = broadcast_tx.send(event);
+                }
+                FunnelCommand::LineageSnapshot(reply) => {
+                    let snapshot = lineage
+                        .as_ref()
+                        .and_then(|lineage| lineage.lock().ok().map(|lineage| lineage.clone()));
+                    let _ = reply.send(snapshot);
+                }
+            }
         }
     });
 
@@ -139,5 +195,28 @@ mod tests {
         seen.sort();
         expected.sort();
         assert_eq!(seen, expected, "every seq 0..800 must appear exactly once");
+    }
+
+    #[tokio::test]
+    async fn lineage_snapshot_includes_prior_funnel_events() {
+        let (bcast_tx, _bcast_rx) = broadcast::channel(16);
+        let seq = Arc::new(AtomicU64::new(0));
+        let lineage = Arc::new(std::sync::Mutex::new(crate::lineage::ExecutorLineage::new()));
+        let handle = spawn_funnel_with_lineage(bcast_tx, seq, lineage);
+
+        handle.emit(SpurEventBody::ExecutorSpawned {
+            id: "worker-1".into(),
+            parent_id: None,
+            session_id: spur_acp::SessionId("session-1".into()),
+            agent: "kiro".into(),
+            role: spur_acp::Role::Executor,
+            task_spec: "task".into(),
+        });
+
+        let snapshot = handle.lineage_snapshot().await.unwrap();
+
+        assert!(snapshot
+            .node(&crate::lineage::ExecutorId::new("worker-1"))
+            .is_some());
     }
 }
