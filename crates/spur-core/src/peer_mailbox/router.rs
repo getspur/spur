@@ -58,6 +58,10 @@ impl PeerMailboxRouter {
         }
     }
 
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
     pub async fn accept_or_reject(
         &self,
         request: PeerMessageEnvelope,
