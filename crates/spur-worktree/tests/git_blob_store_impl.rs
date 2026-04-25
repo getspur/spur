@@ -1,0 +1,176 @@
+//! Integration test: GitBlobOutcomeStore against a real (tempfile) git repo.
+
+use chrono::Utc;
+use sha2::{Digest, Sha256};
+use spur_acp::{BrainSessionId, SessionId};
+use spur_blob_store::{
+    BackendTag, ContentType, OutcomeKey, OutcomeMetadata, OutcomeStore, Section, StoreError,
+};
+use spur_worktree::git_blob_store::GitBlobOutcomeStore;
+use std::process::Command;
+use tempfile::TempDir;
+
+fn sha256_hex(content: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(content);
+    let d = h.finalize();
+    let mut s = String::with_capacity(64);
+    for b in d {
+        use std::fmt::Write;
+        write!(&mut s, "{b:02x}").unwrap();
+    }
+    s
+}
+
+fn init_repo(p: &std::path::Path) {
+    let r = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    assert!(r.status.success());
+    Command::new("git")
+        .args(["config", "user.email", "t@e.com"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+}
+
+fn key(s: &str, d: &str, a: u32) -> OutcomeKey {
+    OutcomeKey {
+        brain_session_id: BrainSessionId::new(SessionId(s.into())),
+        delegation_id: d.into(),
+        attempt: a,
+    }
+}
+
+fn metadata(content: &[u8]) -> OutcomeMetadata {
+    OutcomeMetadata {
+        created_at: Utc::now(),
+        content_type: ContentType::Stdout,
+        original_byte_size: content.len() as u64,
+        stored_byte_size: content.len() as u64,
+        sha256: sha256_hex(content),
+    }
+}
+
+#[tokio::test]
+async fn git_blob_store_put_get_roundtrip() {
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let k = key(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "deadbeef-1111-2222-3333-444455556666",
+        1,
+    );
+    let body = b"hello git\n".to_vec();
+    let r = store.put(&k, &body, &metadata(&body)).await.unwrap();
+    assert_eq!(r.backend, BackendTag::GitBlob);
+    assert_eq!(r.byte_size, body.len() as u64);
+
+    let got = store.get(&k, Some(Section::Full)).await.unwrap();
+    assert_eq!(got.bytes, body);
+}
+
+#[tokio::test]
+async fn git_blob_store_idempotent_put() {
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let k = key(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "deadbeef-1111-2222-3333-444455556666",
+        1,
+    );
+    let body = b"same".to_vec();
+    let m = metadata(&body);
+    let a = store.put(&k, &body, &m).await.unwrap();
+    let b = store.put(&k, &body, &m).await.unwrap();
+    assert_eq!(a.sha256, b.sha256);
+}
+
+#[tokio::test]
+async fn git_blob_store_content_mismatch() {
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let k = key(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "deadbeef-1111-2222-3333-444455556666",
+        1,
+    );
+    store.put(&k, b"first", &metadata(b"first")).await.unwrap();
+    let err = store
+        .put(&k, b"second", &metadata(b"second"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::ContentMismatch { .. }));
+}
+
+#[tokio::test]
+async fn git_blob_store_namespace_isolation() {
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let session_a = "550e8400-e29b-41d4-a716-446655440000";
+    let session_b = "550e8400-e29b-41d4-a716-aaaaaaaaaaaa";
+    let k_a = key(session_a, "deadbeef-1111-2222-3333-444455556666", 1);
+    let k_b = key(session_b, "deadbeef-1111-2222-3333-bbbbbbbbbbbb", 1);
+    store.put(&k_a, b"A", &metadata(b"A")).await.unwrap();
+    store.put(&k_b, b"B", &metadata(b"B")).await.unwrap();
+
+    let removed = store
+        .delete_namespace(&BrainSessionId::new(SessionId(session_a.into())))
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+    assert!(store.get(&k_a, None).await.is_err());
+    assert!(store.get(&k_b, None).await.is_ok());
+}
+
+#[tokio::test]
+async fn git_blob_store_rejects_non_uuid() {
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let bad = OutcomeKey {
+        brain_session_id: BrainSessionId::new(SessionId("../etc/passwd".into())),
+        delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
+        attempt: 1,
+    };
+    let err = store.put(&bad, b"x", &metadata(b"x")).await.unwrap_err();
+    assert!(matches!(err, StoreError::Backend(ref s) if s.contains("non-uuid")));
+}
+
+#[tokio::test]
+async fn git_blob_store_per_attempt_granularity() {
+    // Verifies Round 11 MF1 fix: distinct attempts under same delegation
+    // get distinct refs (legacy bug overwrote the shared session ref).
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let session = "550e8400-e29b-41d4-a716-446655440000";
+    let delegation = "deadbeef-1111-2222-3333-444455556666";
+    let k1 = key(session, delegation, 1);
+    let k2 = key(session, delegation, 2);
+
+    store
+        .put(&k1, b"first attempt", &metadata(b"first attempt"))
+        .await
+        .unwrap();
+    store
+        .put(&k2, b"second attempt", &metadata(b"second attempt"))
+        .await
+        .unwrap();
+
+    let g1 = store.get(&k1, None).await.unwrap();
+    let g2 = store.get(&k2, None).await.unwrap();
+    assert_eq!(g1.bytes, b"first attempt");
+    assert_eq!(g2.bytes, b"second attempt");
+}
