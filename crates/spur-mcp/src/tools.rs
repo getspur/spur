@@ -262,6 +262,29 @@ fn check_delegation_status_def() -> ToolDefinition {
     }
 }
 
+fn fetch_outcome_artifact_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "fetch_outcome_artifact".into(),
+        description: "Fetch the side-channel artifact (oversized stdout) associated with a completed delegation. Use this when a delegation result references an artifact (via continuation payload's artifact_ref) and you need the full content. Phase 1 supports section='full' only; future phases will add status_only/summary/diff_only.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "delegation_id": {
+                    "type": "string",
+                    "description": "The delegation_id whose artifact you want to fetch. The artifact's brain session is implicit (this server's session); cross-session reads are not supported."
+                },
+                "section": {
+                    "type": "string",
+                    "enum": ["full"],
+                    "default": "full",
+                    "description": "Phase 1 supports 'full' only."
+                }
+            },
+            "required": ["delegation_id"]
+        }),
+    }
+}
+
 fn cancel_delegation_def() -> ToolDefinition {
     ToolDefinition {
         name: "cancel_delegation".into(),
@@ -646,6 +669,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         delegate_to_worker_def(),
         delegate_parallel_def(),
         check_delegation_status_def(),
+        fetch_outcome_artifact_def(),
         cancel_delegation_def(),
         list_available_workers_def(),
         get_issue_def(),
@@ -696,6 +720,48 @@ mod schema_truthfulness_tests {
         assert!(
             !props_of(&def).contains(&"source".to_string()),
             "update_issue must not advertise `source` until multi-backend lands",
+        );
+    }
+
+    #[test]
+    fn fetch_outcome_artifact_appears_in_tools_list() {
+        let tools = tools_list();
+        let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"fetch_outcome_artifact"),
+            "fetch_outcome_artifact must appear in tools/list, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_outcome_artifact_schema_advertises_phase1_section_only() {
+        let def = fetch_outcome_artifact_def();
+        let props = def
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("properties");
+        let section = props.get("section").expect("section property");
+        let enum_values: Vec<&str> = section
+            .get("enum")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            enum_values,
+            vec!["full"],
+            "Phase 1 must advertise section='full' only"
+        );
+
+        let required: Vec<&str> = def
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            required.contains(&"delegation_id"),
+            "delegation_id must be required"
         );
     }
 }
