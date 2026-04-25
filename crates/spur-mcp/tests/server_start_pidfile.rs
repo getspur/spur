@@ -8,6 +8,8 @@ use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use spur_pm::PmService;
 use tempfile::TempDir;
 
+mod common;
+
 fn test_continuation_ctx() -> DetachedContinuationCtx {
     DetachedContinuationCtx {
         on_complete: Arc::new(|_cont, _worker| Box::pin(async {})),
@@ -94,6 +96,7 @@ async fn dropping_server_handle_releases_pidfile_for_next_start() {
         );
         return;
     }
+    skip_if_no_loopback!("dropping_server_handle_releases_pidfile_for_next_start");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
