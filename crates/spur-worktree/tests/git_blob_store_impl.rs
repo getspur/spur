@@ -174,3 +174,71 @@ async fn git_blob_store_per_attempt_granularity() {
     assert_eq!(g1.bytes, b"first attempt");
     assert_eq!(g2.bytes, b"second attempt");
 }
+
+
+#[tokio::test]
+async fn git_blob_store_sweep_prunes_legacy_artifact_refs() {
+    // Spec §8.4 (Round 11 MF1+MF2): sweep_older_than walks both
+    // refs/spur/outcomes/ AND legacy refs/spur/artifacts/. Legacy
+    // refs have no sidecar metadata and are pruned unconditionally.
+    use std::time::Duration;
+
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+
+    // Hand-create a legacy refs/spur/artifacts/<session> ref so we
+    // can confirm sweep removes it. Use git hash-object + update-ref
+    // to mimic Phase 1 worktree::artifact::persist behavior.
+    let blob_sha = String::from_utf8(
+        Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(td.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.as_mut().unwrap().write_all(b"legacy debt").unwrap();
+                c.wait_with_output()
+            })
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let legacy_ref = "refs/spur/artifacts/550e8400-e29b-41d4-a716-446655440000";
+    let r = Command::new("git")
+        .args(["update-ref", legacy_ref, &blob_sha])
+        .current_dir(td.path())
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "set legacy ref");
+
+    // Confirm legacy ref exists pre-sweep.
+    let pre = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", legacy_ref])
+        .current_dir(td.path())
+        .output()
+        .unwrap();
+    assert!(pre.status.success(), "legacy ref exists pre-sweep");
+
+    // Run sweep with a 1-day TTL — irrelevant for legacy refs (they
+    // are treated as created_at = epoch, always eligible).
+    let report = store.sweep_older_than(Duration::from_secs(86_400)).await.unwrap();
+
+    // Legacy refs should be reported as pruned.
+    assert!(
+        report.namespaces_swept >= 1,
+        "expected at least one namespace pruned (legacy debt)",
+    );
+
+    // Confirm legacy ref is gone post-sweep.
+    let post = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", legacy_ref])
+        .current_dir(td.path())
+        .output()
+        .unwrap();
+    assert!(!post.status.success(), "legacy ref pruned post-sweep");
+}
