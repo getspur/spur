@@ -170,4 +170,72 @@ mod tests {
             } if brain_session_id == "brain-session"
         ));
     }
+
+    #[tokio::test]
+    async fn reconcile_handles_mixed_non_terminal_states_in_single_pass() {
+        let ledger = Arc::new(InMemoryLedger::new());
+        let injected = envelope();
+        let uninjected = envelope();
+        let accepted = envelope();
+
+        ledger.accept(injected.clone()).await.unwrap();
+        ledger
+            .record_injection(&injected.message_id, "target-prompt")
+            .await
+            .unwrap();
+        ledger
+            .transition(&injected.message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&injected.message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+
+        ledger.accept(uninjected.clone()).await.unwrap();
+        ledger
+            .transition(&uninjected.message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&uninjected.message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+
+        ledger.accept(accepted.clone()).await.unwrap();
+
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        let counts = run_startup_reconcile(
+            ledger.clone(),
+            funnel,
+            "brain-session".into(),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert_eq!(counts.inflight_forced_to_delivered, 1);
+        assert_eq!(counts.inflight_reverted_to_queued, 1);
+        assert_eq!(counts.guards_re_wrapped, 1);
+
+        let injected_entry = ledger.get(&injected.message_id).await.unwrap();
+        assert_eq!(injected_entry.state, LedgerState::Delivered);
+        let uninjected_entry = ledger.get(&uninjected.message_id).await.unwrap();
+        assert_eq!(uninjected_entry.state, LedgerState::Queued);
+        let accepted_entry = ledger.get(&accepted.message_id).await.unwrap();
+        assert_eq!(accepted_entry.state, LedgerState::Accepted);
+
+        let event = events.recv().await.expect("reconciled event");
+        assert!(matches!(
+            event,
+            SpurEventBody::WorkerPeerMailboxReconciled {
+                brain_session_id,
+                audit_failed_emitted: 0,
+                inflight_forced_to_delivered: 1,
+                inflight_reverted_to_queued: 1,
+                guards_re_wrapped: 1,
+            } if brain_session_id == "brain-session"
+        ));
+        assert!(events.try_recv().is_err());
+    }
 }
