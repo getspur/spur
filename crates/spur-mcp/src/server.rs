@@ -244,7 +244,13 @@ fn map_worker_artifact_ref(
         kind: ContinuationArtifactKind::Other("worker_artifact".into()),
         uri: format!("spur://artifact/{}", delegation_id.as_str()),
         byte_size: artifact.size_bytes as u64,
-        sha256: None,
+        // Phase 1 fix: WorkerArtifact carries blob_sha (40-char hex) which
+        // serves as the SHA-1 git blob identifier. Populate sha256 with it
+        // for now; in Phase 3 OutcomeMetadata.sha256 will carry SHA-256
+        // separately. Until then, the field name is historical.
+        sha256: Some(artifact.blob_sha.clone()),
+        git_object_ref: Some(artifact.object_ref.clone()),
+        git_blob_sha: Some(artifact.blob_sha.clone()),
     })
 }
 
@@ -4661,7 +4667,42 @@ mod continuation_producer_tests {
         );
         assert_eq!(artifact_ref.uri, "spur://artifact/del-cont-1");
         assert_eq!(artifact_ref.byte_size, 1_234);
-        assert_eq!(artifact_ref.sha256, None);
+        assert_eq!(artifact_ref.sha256.as_deref(), Some("0".repeat(40).as_str()));
+        assert_eq!(
+            artifact_ref.git_object_ref.as_deref(),
+            Some("refs/spur/artifacts/abc123")
+        );
+        assert_eq!(
+            artifact_ref.git_blob_sha.as_deref(),
+            Some("0".repeat(40).as_str())
+        );
+    }
+
+    #[test]
+    fn map_worker_artifact_ref_preserves_git_metadata() {
+        let delegation_id: DelegationId = "uuid-test".into();
+        let worker = WorkerArtifact {
+            object_ref: "refs/spur/artifacts/sess-abc".into(),
+            blob_sha: "a".repeat(40),
+            size_bytes: 12_345,
+            kind: WorkerArtifactKind::Output,
+        };
+
+        let mapped = super::map_worker_artifact_ref(&delegation_id, Some(&worker))
+            .expect("Some artifact yields Some ArtifactRef");
+
+        assert_eq!(
+            mapped.git_object_ref.as_deref(),
+            Some("refs/spur/artifacts/sess-abc"),
+            "git_object_ref must survive the mapping (Phase 1 bug fix)"
+        );
+        assert_eq!(
+            mapped.git_blob_sha.as_deref(),
+            Some("a".repeat(40).as_str()),
+            "git_blob_sha must survive the mapping"
+        );
+        assert_eq!(mapped.byte_size, 12_345);
+        assert!(mapped.uri.starts_with("spur://artifact/"));
     }
 }
 
