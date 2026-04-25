@@ -5,6 +5,9 @@ use spur_acp::domain::peer_message::{
 use spur_acp::SpurEventBody;
 use spur_core::peer_mailbox::guard::GuardOutcome;
 use spur_core::peer_mailbox::ledger::{InjectionOutcome, TransitionOutcome};
+use spur_core::peer_mailbox::limits::{
+    aggregate_budget_for_context_window, effective_max_message_size,
+};
 use spur_core::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
 use spur_core::peer_mailbox::router::Acceptance;
 use spur_core::peer_mailbox::{
@@ -152,6 +155,76 @@ async fn full_stage1_flow_accept_inject_consume() {
     assert!(events
         .iter()
         .any(|event| matches!(event, SpurEventBody::WorkerPeerMessageConsumed { .. })));
+}
+
+#[tokio::test]
+async fn carry_forward_re_injects_after_pre_delivery_failure() {
+    let ledger = Arc::new(InMemoryLedger::new());
+    let (router, _bcast_rx) = router_with_broadcast(ledger.clone());
+    let builder = PeerPromptContextBuilder::new(ledger.clone());
+    let snap = snapshot();
+    let target = DelegationId("tgt".into());
+
+    let body = format!("retry budget marker {}TAIL_BEYOND_CAP", "X".repeat(450));
+    let env = envelope(&body);
+    let mid = env.message_id;
+    let guard1 = match router.accept_or_reject(env, &snap).await.unwrap() {
+        Acceptance::Created(g) => g,
+        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+    };
+    assert_eq!(ledger.get(&mid).await.unwrap().state, LedgerState::Accepted);
+
+    let ctx1 = builder.build_for_target(&target, 32_000, 8, 2_048).await;
+    assert_eq!(ctx1.injection_records.len(), 1);
+    assert_eq!(ctx1.injection_records[0].message_id, mid);
+    assert!(ctx1
+        .orchestrator_authored_text
+        .contains("retry budget marker"));
+
+    let first = ledger
+        .record_injection(&mid, &ctx1.target_prompt_id)
+        .await
+        .unwrap();
+    assert!(matches!(first, InjectionOutcome::Injected));
+
+    drop(guard1);
+    assert_eq!(ledger.get(&mid).await.unwrap().state, LedgerState::Accepted);
+
+    let ctx2 = builder.build_for_target(&target, 32_000, 8, 2_048).await;
+    assert_eq!(ctx2.injection_records.len(), 1);
+    assert_eq!(ctx2.injection_records[0].message_id, mid);
+    assert_ne!(ctx2.target_prompt_id, ctx1.target_prompt_id);
+
+    let second = ledger
+        .record_injection(&mid, &ctx2.target_prompt_id)
+        .await
+        .unwrap();
+    assert!(matches!(second, InjectionOutcome::Injected));
+
+    let entry = ledger.get(&mid).await.unwrap();
+    assert_eq!(entry.state, LedgerState::Accepted);
+    assert!(entry.injected_into_prompts.contains(&ctx1.target_prompt_id));
+    assert!(entry.injected_into_prompts.contains(&ctx2.target_prompt_id));
+    assert_eq!(entry.injected_into_prompts.len(), 2);
+
+    let aggregate_budget = aggregate_budget_for_context_window(32_000) as usize;
+    let per_message_cap = effective_max_message_size(2_048, aggregate_budget as u64, 8);
+    assert_eq!(per_message_cap, 400);
+    assert!(ctx2.orchestrator_authored_text.len() <= aggregate_budget);
+    assert!(!ctx2.orchestrator_authored_text.contains("TAIL_BEYOND_CAP"));
+    assert!(ctx2.injection_records[0].injected_bytes as usize <= per_message_cap + 100);
+
+    let cleanup = ledger
+        .transition(&mid, LedgerState::Undeliverable)
+        .await
+        .unwrap();
+    assert!(matches!(
+        cleanup,
+        TransitionOutcome::Changed {
+            from: LedgerState::Accepted,
+            to: LedgerState::Undeliverable
+        }
+    ));
 }
 
 #[tokio::test]
