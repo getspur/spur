@@ -14,8 +14,19 @@
 //! single-source-of-truth: meta.sha256 not re-hashed from disk).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Process-local monotonic counter that disambiguates concurrent `put`s
+/// from different async tasks within the same process. `std::process::id()`
+/// alone is not sufficient — two threads writing the same key simultaneously
+/// would collide on the temp filename. Gemini Plan-2 Task 5 review.
+static TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_tmp_nonce() -> u64 {
+    TEMP_NONCE.fetch_add(1, Ordering::Relaxed)
+}
 
 use async_trait::async_trait;
 use chrono::DateTime;
@@ -132,11 +143,22 @@ impl OutcomeStore for FsOutcomeStore {
 
         fs::create_dir_all(&dir).await?;
 
-        let tmp_bin = dir.join(format!("{}.bin.tmp.{}", key.attempt, std::process::id()));
+        let pid = std::process::id();
+        let tmp_bin = dir.join(format!(
+            "{}.bin.tmp.{}.{}",
+            key.attempt,
+            pid,
+            next_tmp_nonce()
+        ));
         fs::write(&tmp_bin, content).await?;
         fs::rename(&tmp_bin, &bin_path).await?;
 
-        let tmp_meta = dir.join(format!("{}.meta.tmp.{}", key.attempt, std::process::id()));
+        let tmp_meta = dir.join(format!(
+            "{}.meta.tmp.{}.{}",
+            key.attempt,
+            pid,
+            next_tmp_nonce()
+        ));
         let meta_bytes = serde_json::to_vec(metadata)
             .map_err(|e| StoreError::Backend(format!("metadata serialize: {e}")))?;
         fs::write(&tmp_meta, &meta_bytes).await?;
@@ -156,10 +178,16 @@ impl OutcomeStore for FsOutcomeStore {
         _section: Option<Section>,
     ) -> Result<OutcomeContent, StoreError> {
         let (_, bin_path, meta_path) = self.paths_for(key);
-        if !meta_path.exists() {
-            return Err(StoreError::NotFound(key.clone()));
-        }
-        let raw_meta = fs::read(&meta_path).await?;
+        // No exists() pre-check — eliminates TOCTOU race with concurrent
+        // delete_namespace/sweep (gemini Plan-2 Task 5 review). Map
+        // io::ErrorKind::NotFound directly to StoreError::NotFound.
+        let raw_meta = match fs::read(&meta_path).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::NotFound(key.clone()));
+            }
+            Err(e) => return Err(StoreError::Io(e)),
+        };
         let metadata: OutcomeMetadata = serde_json::from_slice(&raw_meta)
             .map_err(|e| StoreError::Backend(format!("corrupt sidecar: {e}")))?;
         let bytes = fs::read(&bin_path).await?;
