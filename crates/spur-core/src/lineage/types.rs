@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::SystemTime;
 
+use spur_acp::domain::delegation::DelegationId;
+use spur_acp::domain::peer_message::{MessageKind, PeerMessageId};
 use spur_acp::SessionId;
 
 pub use spur_acp::{
@@ -52,6 +54,28 @@ pub struct ReviewRequest {
     /// Carried from the event; used by the dispatcher to reject stale
     /// decisions targeting a superseded attempt.
     pub attempt_n: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerEdge {
+    pub message_id: PeerMessageId,
+    pub source_delegation_id: DelegationId,
+    pub target_delegation_id: DelegationId,
+    pub kind: MessageKind,
+    pub state: PeerEdgeState,
+    pub injected_chars: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PeerEdgeState {
+    Accepted,
+    Delivered,
+    Consumed,
+    Ignored,
+    Expired,
+    Dropped,
+    Undeliverable,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +144,12 @@ pub struct ExecutorNode {
     /// Issue ID linked to this executor via delegation (if any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_id: Option<String>,
+    /// Delegation request id linked to this executor, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_id: Option<DelegationId>,
+    /// Outbound peer-message edges projected from worker peer events.
+    #[serde(default)]
+    pub peer_edges: Vec<PeerEdge>,
 }
 
 impl ExecutorNode {
