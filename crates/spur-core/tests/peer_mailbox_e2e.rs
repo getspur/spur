@@ -69,7 +69,11 @@ fn router_with_broadcast(
     (router, bcast_rx)
 }
 
-fn bundle_with_broadcast() -> (PeerMailboxBundle, broadcast::Receiver<spur_acp::SpurEvent>) {
+fn bundle_with_broadcast() -> (
+    PeerMailboxBundle,
+    broadcast::Receiver<spur_acp::SpurEvent>,
+    spur_core::event_funnel::FunnelHandle,
+) {
     let ledger: Arc<dyn PeerMailboxLedger> = Arc::new(InMemoryLedger::new());
     let (bcast_tx, bcast_rx) = broadcast::channel(4096);
     let seq = Arc::new(AtomicU64::new(0));
@@ -77,7 +81,7 @@ fn bundle_with_broadcast() -> (PeerMailboxBundle, broadcast::Receiver<spur_acp::
     let (recon_tx, _recon_rx) = unbounded_channel();
     let router = Arc::new(PeerMailboxRouter::new(
         ledger.clone(),
-        funnel,
+        funnel.clone(),
         recon_tx,
         Limits::default(),
         "bs".into(),
@@ -91,6 +95,7 @@ fn bundle_with_broadcast() -> (PeerMailboxBundle, broadcast::Receiver<spur_acp::
             ledger,
         },
         bcast_rx,
+        funnel,
     )
 }
 
@@ -110,7 +115,7 @@ async fn drain_broadcast_events(
 
 #[tokio::test]
 async fn worker_ack_during_accepted_state_consumes_message() {
-    let (bundle, mut bcast_rx) = bundle_with_broadcast();
+    let (bundle, mut bcast_rx, funnel) = bundle_with_broadcast();
     let snap = snapshot();
     let env = envelope("Worker B: consume this during prompt");
     let mid = env.message_id;
@@ -129,6 +134,9 @@ async fn worker_ack_during_accepted_state_consumes_message() {
         json!({ "message_id": mid }),
         &bundle,
         &ack_tx,
+        &funnel,
+        "bs",
+        "exec-1",
     )
     .await;
 
@@ -148,7 +156,7 @@ async fn worker_ack_during_accepted_state_consumes_message() {
 
 #[tokio::test]
 async fn post_prompt_skip_via_error_arm_does_not_emit_audit_failed() {
-    let (bundle, mut bcast_rx) = bundle_with_broadcast();
+    let (bundle, mut bcast_rx, funnel) = bundle_with_broadcast();
     let snap = Arc::new(snapshot());
     let mid = PeerMessageId(Uuid::new_v4());
     let payload = json!({
@@ -184,6 +192,9 @@ async fn post_prompt_skip_via_error_arm_does_not_emit_audit_failed() {
         json!({ "message_id": mid }),
         &bundle,
         &ack_tx,
+        &funnel,
+        "bs",
+        "exec-1",
     )
     .await;
     assert!(ack_rx.try_recv().is_ok());
@@ -293,6 +304,34 @@ async fn full_stage1_flow_accept_inject_consume() {
     assert!(events
         .iter()
         .any(|event| matches!(event, SpurEventBody::WorkerPeerMessageConsumed { .. })));
+}
+
+#[tokio::test]
+async fn malformed_terminal_notification_emits_malformed_funnel_event() {
+    let (bundle, mut bcast_rx, funnel) = bundle_with_broadcast();
+    let (ack_tx, mut ack_rx) = unbounded_channel();
+
+    spur_core::spur_ext_interp::interpret_peer_message_terminal(
+        "_spur/peer_message_consumed",
+        json!({ "message_id": null }),
+        &bundle,
+        &ack_tx,
+        &funnel,
+        "bs",
+        "exec-1",
+    )
+    .await;
+
+    assert!(ack_rx.try_recv().is_ok());
+    let events = drain_broadcast_events(&mut bcast_rx).await;
+    let malformed_events = events
+        .iter()
+        .filter(|event| matches!(event, SpurEventBody::WorkerPeerMessageMalformed { .. }))
+        .count();
+    assert_eq!(malformed_events, 1);
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, SpurEventBody::WorkerPeerMessageConsumed { .. })));
 }
 
 #[tokio::test]

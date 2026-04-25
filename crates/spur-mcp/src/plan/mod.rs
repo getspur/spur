@@ -1265,6 +1265,7 @@ pub fn completion_is_superseded(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn persist_completion_result(
     pm: &dyn PmLike,
     issue_id: &str,
