@@ -33,6 +33,7 @@ tempfile = "3"
 thiserror = { workspace = true }
 directories = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 # `start_paused = true` on `#[tokio::test]` + `tokio::time::advance` require
