@@ -165,7 +165,7 @@ impl AsyncEngine {
 
 // ─── Tests ────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "duckdb"))]
 mod tests {
     use super::*;
 

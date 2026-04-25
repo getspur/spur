@@ -947,6 +947,7 @@ fn run_cost_sqlite(
     Ok(())
 }
 
+#[cfg(feature = "duckdb")]
 fn run_cost_duckdb(
     today: bool,
     week: bool,
@@ -1052,6 +1053,19 @@ fn run_cost_duckdb(
     Ok(())
 }
 
+#[cfg(not(feature = "duckdb"))]
+fn run_cost_duckdb(
+    _today: bool,
+    _week: bool,
+    _range: Option<&str>,
+    _export: Option<&str>,
+) -> Result<()> {
+    eprintln!("Error: DuckDB support is not compiled into this build.");
+    eprintln!("       Rebuild with --features duckdb or use the default features.");
+    std::process::exit(2);
+}
+
+#[cfg(feature = "duckdb")]
 fn parse_range(range: Option<&str>, today: bool, _week: bool) -> Result<spur_context::ReportRange> {
     use anyhow::Context;
     use chrono::{DateTime, NaiveDate, Utc};
