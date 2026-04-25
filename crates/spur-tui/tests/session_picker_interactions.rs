@@ -23,6 +23,55 @@ fn session(id: &str, title: &str) -> SessionInfo {
 }
 
 #[test]
+fn cursor_default_lands_on_last_active_when_present() {
+    let mut picker = SessionPickerView::new();
+    let mut meta = spur_tui::session_metadata::SessionMetadata::default();
+    meta.last_active_session_id = Some("a2".to_string());
+    picker.set_metadata(meta);
+    picker.set_sessions(
+        "t".into(),
+        vec![
+            session("a1", "alpha"),
+            session("a2", "beta"),
+            session("a3", "gamma"),
+        ],
+    );
+    // a2 is the second session; in virtual cursor space [+ New]=0, a1=1, a2=2.
+    assert_eq!(picker.cursor(), 2);
+}
+
+#[test]
+fn cursor_default_falls_back_to_first_row_when_last_active_absent() {
+    let mut picker = SessionPickerView::new();
+    let meta = spur_tui::session_metadata::SessionMetadata::default();
+    picker.set_metadata(meta);
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+    );
+    assert_eq!(picker.cursor(), 1);
+}
+
+#[test]
+fn cursor_default_falls_back_to_zero_when_no_sessions() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
+    picker.set_sessions("t".into(), vec![]);
+    assert_eq!(picker.cursor(), 0);
+}
+
+#[test]
+fn cursor_default_falls_back_when_last_active_not_in_visible_list() {
+    let mut picker = SessionPickerView::new();
+    let mut meta = spur_tui::session_metadata::SessionMetadata::default();
+    meta.last_active_session_id = Some("does-not-exist".to_string());
+    picker.set_metadata(meta);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    // last_active id is unknown → fall back to row 1.
+    assert_eq!(picker.cursor(), 1);
+}
+
+#[test]
 fn n_key_on_picker_emits_new_session_requested() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("test-agent".into(), vec![]);
@@ -119,11 +168,7 @@ fn esc_in_list_with_no_filter_navigates_back() {
 fn p_key_emits_toggle_pin_for_highlighted_session() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x"), session("a2", "y")]);
-    // Move cursor to first real session (index 1, [+ New] is at 0).
-    let _ = picker.handle_key(
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    // Cursor defaults to first real session (index 1, [+ New] is at 0).
     let action = picker.handle_key(key('p'), &test_ctx());
     match action {
         Some(Action::ToggleSessionPin { session_id }) => {
@@ -137,6 +182,7 @@ fn p_key_emits_toggle_pin_for_highlighted_session() {
 fn p_key_on_new_session_row_is_noop() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     let action = picker.handle_key(key('p'), &test_ctx());
     assert!(action.is_none());
 }
@@ -160,6 +206,7 @@ fn d_key_emits_toggle_archive_for_highlighted_session() {
 fn d_key_on_new_session_row_is_noop() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     let action = picker.handle_key(key('d'), &test_ctx());
     assert!(action.is_none());
 }
@@ -362,10 +409,6 @@ fn enter_on_same_session_id_does_not_show_confirm() {
     );
     picker.set_current_session_has_draft(Some("a1".to_string()));
     // Cursor on a1 (cursor=1).
-    let _ = picker.handle_key(
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        &test_ctx(),
-    );
     let action = picker.handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &test_ctx(),
@@ -380,6 +423,7 @@ fn enter_on_new_session_row_with_draft_shows_confirm() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
     picker.set_current_session_has_draft(Some("a1".to_string()));
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     // Cursor is at [+ New session] (cursor=0).
     let action = picker.handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),

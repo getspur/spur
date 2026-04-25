@@ -160,19 +160,62 @@ impl SessionPickerView {
     }
 
     pub fn set_sessions(&mut self, agent: String, sessions: Vec<SessionInfo>) {
-        let (prev_cursor, prev_filter) = match &self.state {
-            PickerState::Populated { cursor, filter, .. } => (*cursor, filter.clone()),
-            _ => (0, String::new()),
+        // P2 (cursor preservation by session_id) — only meaningful when we
+        // were already Populated. Captured here so it sees the *previous*
+        // state before we overwrite it.
+        let prev_highlight = self.highlighted_session_id();
+        let prev_cursor_was_new = matches!(
+            &self.state,
+            PickerState::Populated { cursor: 0, .. }
+        );
+        let prev_filter = match &self.state {
+            PickerState::Populated { filter, .. } => filter.clone(),
+            _ => String::new(),
         };
-        // Clamp cursor to new session list length (cursor max is sessions.len();
-        // 0 = [+ New] row, 1..=len = sessions).
-        let max_cursor = sessions.len();
-        let clamped_cursor = prev_cursor.min(max_cursor);
+
+        let indices = Self::filtered_indices(
+            &sessions,
+            &prev_filter,
+            &self.metadata,
+            self.show_archived,
+        );
+
+        let cursor = if prev_cursor_was_new {
+            // P2 special case: user explicitly selected [+ New] before refresh — don't move them.
+            0
+        } else if let Some(c) = prev_highlight.as_ref().and_then(|id| {
+            indices
+                .iter()
+                .position(|&i| sessions[i].session_id.0.as_ref() == id.as_str())
+                .map(|p| p + 1)
+        }) {
+            // P2: preserve highlight by session_id when possible.
+            c
+        } else if let Some(c) = self
+            .metadata
+            .last_active_session_id
+            .as_deref()
+            .and_then(|id| {
+                indices
+                    .iter()
+                    .position(|&i| sessions[i].session_id.0.as_ref() == id)
+                    .map(|p| p + 1)
+            })
+        {
+            // P1: fall back to last-active session.
+            c
+        } else if !indices.is_empty() {
+            // P1: fall back to the first visible row.
+            1
+        } else {
+            // P1: no sessions at all — cursor on [+ New].
+            0
+        };
 
         self.state = PickerState::Populated {
             agent,
             sessions,
-            cursor: clamped_cursor,
+            cursor,
             search_focused: false,
             filter: prev_filter,
         };
