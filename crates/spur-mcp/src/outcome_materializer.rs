@@ -43,9 +43,12 @@ pub struct OutcomeMaterializer {
     /// only has `&OutcomeMaterializer` access — can update the map.
     /// Memory bound: ~40 B per delegation. A long-running brain session
     /// with thousands of completions sits in tens of KB; not pruned.
-    latest_attempt_by_delegation: Arc<tokio::sync::Mutex<
-        std::collections::HashMap<DelegationId, u32>
-    >>,
+    ///
+    /// `std::sync::Mutex` (not `tokio::sync::Mutex`): the critical section
+    /// is a HashMap get/insert with no `.await` inside, so the async
+    /// scheduler-yielding mutex would only add overhead.
+    latest_attempt_by_delegation:
+        Arc<std::sync::Mutex<std::collections::HashMap<DelegationId, u32>>>,
     summary_cap_bytes: usize,
     worker_branch_cap_bytes: usize,
     fetch_hint_cap_bytes: usize,
@@ -59,7 +62,13 @@ impl std::fmt::Debug for OutcomeMaterializer {
         f.debug_struct("OutcomeMaterializer")
             .field("summary_cap_bytes", &self.summary_cap_bytes)
             .field("worker_branch_cap_bytes", &self.worker_branch_cap_bytes)
+            .field("fetch_hint_cap_bytes", &self.fetch_hint_cap_bytes)
+            .field("diff_files_cap_count", &self.diff_files_cap_count)
             .field("status_string_cap_bytes", &self.status_string_cap_bytes)
+            .field(
+                "artifact_ref_string_cap_bytes",
+                &self.artifact_ref_string_cap_bytes,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -68,7 +77,7 @@ impl OutcomeMaterializer {
     pub fn new(store: Arc<dyn OutcomeStore>) -> Self {
         Self {
             store,
-            latest_attempt_by_delegation: Arc::new(tokio::sync::Mutex::new(
+            latest_attempt_by_delegation: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             summary_cap_bytes: DEFAULT_SUMMARY_CAP_BYTES,
@@ -83,8 +92,14 @@ impl OutcomeMaterializer {
     /// Look up the highest attempt the materializer has materialized for
     /// `delegation_id`. Used by `fetch_outcome_artifact` (Task 10) when
     /// the caller doesn't pin a specific attempt.
+    ///
+    /// `async fn` is preserved for forward compatibility (T10 may move
+    /// the lookup behind the OutcomeStore), even though the body is sync.
     pub async fn latest_attempt(&self, delegation_id: &DelegationId) -> Option<u32> {
-        let map = self.latest_attempt_by_delegation.lock().await;
+        let map = self
+            .latest_attempt_by_delegation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         map.get(delegation_id).copied()
     }
 
@@ -92,16 +107,19 @@ impl OutcomeMaterializer {
     /// without allocating multi-KB strings. Production callers should use
     /// `new()` + accept the defaults.
     #[cfg(any(test, feature = "test-support"))]
+    #[must_use = "consuming builder; the returned value carries the override"]
     pub fn with_status_string_cap(mut self, cap: usize) -> Self {
         self.status_string_cap_bytes = cap;
         self
     }
     #[cfg(any(test, feature = "test-support"))]
+    #[must_use = "consuming builder; the returned value carries the override"]
     pub fn with_summary_cap(mut self, cap: usize) -> Self {
         self.summary_cap_bytes = cap;
         self
     }
     #[cfg(any(test, feature = "test-support"))]
+    #[must_use = "consuming builder; the returned value carries the override"]
     pub fn with_diff_files_cap(mut self, cap: usize) -> Self {
         self.diff_files_cap_count = cap;
         self
