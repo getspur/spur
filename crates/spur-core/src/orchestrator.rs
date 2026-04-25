@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
@@ -29,12 +30,14 @@ use agent_client_protocol::{
     ProtocolVersion, SessionInfo, SessionUpdate, SetSessionModeRequest, TextContent,
 };
 
+use spur_blob_store::{ContentType, OutcomeKey, OutcomeMetadata, OutcomeStore};
 use spur_cost::CostTracker;
 use spur_license::SpurLicense;
 use spur_mcp::{
     build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
 };
 use spur_pm::PmService;
+use spur_worktree::git_blob_store::GitBlobOutcomeStore;
 use spur_worktree::WorktreeManager;
 
 use crate::lineage::ExecutorId;
@@ -3626,6 +3629,7 @@ impl Orchestrator {
                     agent: &agent,
                     task: &current_task,
                     request_id: &request_id,
+                    attempt: attempt_n,
                     agent_config: &agent_config,
                     delegation_plan: delegation_plan.clone(),
                     issue_id: issue_id.clone(),
@@ -4521,6 +4525,7 @@ struct WorkerAttemptCtx<'a> {
     agent: &'a str,
     task: &'a str,
     request_id: &'a str,
+    attempt: u32,
     agent_config: &'a spur_acp::config::AgentConfig,
     delegation_plan: Option<spur_acp::domain::DelegationPlan>,
     issue_id: Option<String>,
@@ -4752,30 +4757,69 @@ async fn run_one_worker_attempt(
     // bytes to truncate_summary — the predicate is purely size-based
     // so mixed workers (diff + long rationale) and failure diagnostics
     // are both covered.
-    let persist_result: Option<Result<spur_acp::WorkerArtifact, String>> =
-        if output_text.len() > summary_cap_bytes() {
-            let kind = if worker_success {
-                spur_acp::ArtifactKind::Output
-            } else {
-                spur_acp::ArtifactKind::Diagnostic
-            };
-            match worktrees
-                .persist_artifact(&worker_session, &output_text, kind)
-                .await
-            {
-                Ok(a) => Some(Ok(a)),
-                Err(e) => {
-                    tracing::warn!(
-                        session = %worker_session,
-                        error = %e,
-                        "artifact persistence failed"
-                    );
-                    Some(Err(e.to_string()))
+    let persist_result: Option<Result<spur_acp::WorkerArtifact, String>> = if output_text.len()
+        > summary_cap_bytes()
+    {
+        let kind = if worker_success {
+            spur_acp::ArtifactKind::Output
+        } else {
+            spur_acp::ArtifactKind::Diagnostic
+        };
+        let output_bytes = output_text.as_bytes();
+        let byte_size = u64::try_from(output_bytes.len()).unwrap_or(u64::MAX);
+        let key = OutcomeKey {
+            brain_session_id: ctx.brain_session_id.clone(),
+            delegation_id: spur_acp::DelegationId::from(ctx.request_id),
+            attempt: ctx.attempt,
+        };
+        let metadata = OutcomeMetadata {
+            created_at: chrono::Utc::now(),
+            content_type: ContentType::Stdout,
+            original_byte_size: byte_size,
+            stored_byte_size: byte_size,
+            sha256: sha256_hex_for_outcome(output_bytes),
+        };
+        let store = GitBlobOutcomeStore::new(worktrees.repo_root.clone());
+        let outcome_store_result = match store.put(&key, output_bytes, &metadata).await {
+            Ok(outcome_ref) => outcome_ref.as_worker_artifact(kind).ok_or_else(|| {
+                "outcome store returned a non-git backend for worker artifact projection"
+                    .to_string()
+            }),
+            Err(e) => Err(e.to_string()),
+        };
+        match outcome_store_result {
+            Ok(a) => Some(Ok(a)),
+            Err(primary_error) => {
+                tracing::warn!(
+                    session = %worker_session,
+                    delegation_id = %ctx.request_id,
+                    attempt = ctx.attempt,
+                    error = %primary_error,
+                    "outcome store artifact persistence failed; falling back to legacy artifact store"
+                );
+                match worktrees
+                    .persist_artifact(&worker_session, &output_text, kind)
+                    .await
+                {
+                    Ok(a) => Some(Ok(a)),
+                    Err(fallback_error) => {
+                        let error = format!(
+                            "outcome store failed: {primary_error}; \
+                             legacy artifact fallback failed: {fallback_error}"
+                        );
+                        tracing::warn!(
+                            session = %worker_session,
+                            error = %error,
+                            "artifact persistence failed"
+                        );
+                        Some(Err(error))
+                    }
                 }
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
 
     // Build the summary FIRST so the error-extraction path on the
     // failure branch can read from it — preserving the existing
@@ -4907,6 +4951,18 @@ fn summary_cap_bytes() -> usize {
 
 fn truncate_summary_env_default(text: &str) -> String {
     truncate_summary(text, summary_cap_bytes())
+}
+
+fn sha256_hex_for_outcome(content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(&mut hex, "{byte:02x}").expect("hex write infallible");
+    }
+    hex
 }
 
 /// Apply the calibrated artifact-vs-transport failure rule. Pure.
@@ -6578,6 +6634,14 @@ mod phase5_orchestrator_finalization_tests {
 mod artifact_decision_tests {
     use super::*;
     use spur_acp::{ArtifactKind, DelegationStatus, WorkerArtifact};
+
+    #[test]
+    fn outcome_sha256_hex_uses_lowercase_content_digest() {
+        assert_eq!(
+            sha256_hex_for_outcome(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     fn sample_artifact() -> WorkerArtifact {
         WorkerArtifact {
