@@ -4773,6 +4773,9 @@ async fn run_one_worker_attempt(
     } else if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
         use spur_acp::domain::peer_message::LedgerState;
 
+        let target_delegation_id =
+            spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
+
         for inj in pc.injection_records {
             match bundle
                 .ledger
@@ -4793,6 +4796,16 @@ async fn run_one_worker_attempt(
                         ?err,
                         "peer mailbox: delivered-inflight transition failed"
                     );
+                    // Spec audit-failed rule: every state-transition failure
+                    // must emit a corresponding event so operators can
+                    // detect partial deliveries from the funnel alone.
+                    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageAuditFailed {
+                        brain_session_id: ctx.brain_session_id.to_string(),
+                        message_id: inj.message_id,
+                        target_delegation_id: target_delegation_id.clone(),
+                        transition_kind: "delivered_inflight".into(),
+                        error: err.to_string(),
+                    });
                 }
             }
 
@@ -4805,9 +4818,7 @@ async fn run_one_worker_attempt(
                     funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDelivered {
                         brain_session_id: ctx.brain_session_id.to_string(),
                         message_id: inj.message_id,
-                        target_delegation_id: spur_acp::domain::delegation::DelegationId(
-                            ctx.request_id.to_string(),
-                        ),
+                        target_delegation_id: target_delegation_id.clone(),
                         target_prompt_id: pc.target_prompt_id.clone(),
                         injected_chars: inj.injected_bytes,
                     });
@@ -4827,6 +4838,13 @@ async fn run_one_worker_attempt(
                         ?err,
                         "peer mailbox: delivered transition failed"
                     );
+                    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageAuditFailed {
+                        brain_session_id: ctx.brain_session_id.to_string(),
+                        message_id: inj.message_id,
+                        target_delegation_id: target_delegation_id.clone(),
+                        transition_kind: "delivered".into(),
+                        error: err.to_string(),
+                    });
                 }
             }
         }
