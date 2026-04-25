@@ -154,6 +154,7 @@ pub struct ReconcilerDispatchCtx {
     pub task_tracker: TaskTracker,
     pub brain_session_id: spur_acp::BrainSessionId,
     pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+    pub materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,
 }
 
 pub struct ReconcilerConfig {
@@ -359,13 +360,14 @@ impl Reconciler {
             }
 
             let delegation_id = uuid::Uuid::new_v4().to_string();
+            let task_attempt = task.attempt;
             crate::plan::persist_dispatch_intent(
                 self.pm.as_ref(),
                 &summary.id,
                 plan_id,
                 &delegation_id,
                 &task.spec.agent,
-                task.attempt,
+                task_attempt,
             )
             .await?;
 
@@ -379,7 +381,9 @@ impl Reconciler {
                 brain_session_id: dispatch.brain_session_id.clone(),
                 delegation_plan: None,
                 issue_id: task.spec.issue_id.clone(),
-                attempt_tracker: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1)),
+                attempt_tracker: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
+                    task_attempt,
+                )),
             };
 
             if let Err(error) = dispatch.delegation_tx.send(request).await {
@@ -405,6 +409,8 @@ impl Reconciler {
             let delegation_id_for_completion = delegation_id.clone();
             let fast_forward = Arc::clone(&self.fast_forward);
             let event_sink = dispatch.event_sink.clone();
+            let brain_session_id = dispatch.brain_session_id.clone();
+            let materializer = Arc::clone(&dispatch.materializer);
             dispatch.task_tracker.spawn(async move {
                 let Ok(result) = rx.await else {
                     tracing::warn!(
@@ -424,10 +430,11 @@ impl Reconciler {
                     &plan_id,
                     &delegation_id_for_completion,
                     completion_state,
-                    result.worker_branch.as_deref(),
-                    result.summary.as_deref(),
-                    None,
                     &Some(Arc::clone(&fast_forward)),
+                    &result,
+                    &brain_session_id,
+                    task_attempt,
+                    &materializer,
                 )
                 .await
                 {
@@ -870,6 +877,9 @@ mod tests {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
             event_sink: None,
+            materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
+                Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            )),
         };
 
         let cloned = ctx.clone();

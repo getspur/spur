@@ -1566,6 +1566,7 @@ impl McpCallbackServer {
             plan_sink,
             plan_pm,
             self.reconciler_fast_forward.as_ref().cloned(),
+            Arc::new(self.materializer.clone()),
         ));
     }
 
@@ -1960,6 +1961,7 @@ impl McpCallbackServer {
                         task_tracker: self.task_tracker.clone(),
                         brain_session_id: self.brain_session_id.clone(),
                         event_sink: self.event_sink.clone(),
+                        materializer: Arc::new(self.materializer.clone()),
                     };
                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                     reconciler_cancel_tx = Some(cancel_tx);

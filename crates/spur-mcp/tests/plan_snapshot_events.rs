@@ -15,6 +15,12 @@ use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
+fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
+    Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    ))
+}
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -376,6 +382,7 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
             task_tracker: tracker.clone(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: Some(sink_ref),
+            materializer: test_materializer(),
         }),
         Some(plan_id.clone()),
     );

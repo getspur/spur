@@ -10,6 +10,12 @@ use spur_mcp::McpEventSink;
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
+fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
+    Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    ))
+}
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -241,6 +247,7 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: Some(sink_ref),
+            materializer: test_materializer(),
         }),
         Some("P1".into()),
     );
@@ -409,6 +416,7 @@ async fn closed_epic_backfill_emits_plan_completed_event() {
             task_tracker: tokio_util::task::TaskTracker::new(),
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: Some(sink_ref),
+            materializer: test_materializer(),
         }),
         Some("P2".into()),
     );
