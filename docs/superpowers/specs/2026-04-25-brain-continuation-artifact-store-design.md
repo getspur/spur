@@ -3,7 +3,7 @@
 - **Date:** 2026-04-25
 - **Status:** Draft (ready for human review)
 - **Authors:** Kevin Truong (kevin.truong.ds@gmail.com), with Claude Opus 4.7 as design pair
-- **Reviewers:** codex (rounds 1–2, 5b, 6a, 7), kimi (rounds 3–4, 5a, 6b), gemini (rounds 5c, 7)
+- **Reviewers:** codex (rounds 1–2, 5b, 6a, 7), kimi (rounds 3–4, 5a, 6b), gemini (rounds 5c, 7), L9 grounding pass (round 9 — see `docs/superpowers/reviews/2026-04-25-brain-continuation-l9-evaluation.md`)
 - **Supersedes:** `docs/superpowers/specs/2026-04-24-brain-continuation-producer-envelope-fit-design.md` (Plan-4 truncation-ladder approach)
 - **Related:**
   - `docs/superpowers/specs/2026-04-24-brain-continuation-delivery-guarantees.md` (v3.1, merge `6b1e6980`)
@@ -103,7 +103,16 @@ Background sweeper
 
 **Bound:** clipped status + clipped diff_summary (counts + capped file list, max 16 entries × 128 B paths) + capped summary (512 B) + capped worker_branch (256 B) + capped fetch_hint (256 B) + ArtifactRef (~400 B) + OutcomeKey (~200 B) ≤ ~3.5 KB inline, comfortably under `MERGE_BUDGET_DEFAULT_BYTES = 8192`.
 
-**Enforcement test** (in `crates/spur-mcp/tests/`): proptest with `arb_delegation_status` (every variant with adversarial-large strings) → call `OutcomeMaterializer::materialize` → assert `continuation_cost_bytes(cont) ≤ MERGE_BUDGET_DEFAULT_BYTES` for 1024 cases. **CI gate.** Co-located with INV-D9's exhaustive-match proptest.
+**Enforcement test** (in `crates/spur-mcp/tests/`): proptest with adversarial generators → call `OutcomeMaterializer::materialize` → assert `continuation_cost_bytes(cont) ≤ MERGE_BUDGET_DEFAULT_BYTES`. **CI gate.** Co-located with INV-D9's exhaustive-match proptest.
+
+**Round 9 (TST-S1/S2) — broadened generator coverage and case counts:**
+
+- `arb_delegation_status` — every variant with adversarial-large strings (Failed.error = 10 KB, Conflict.files = 1024 paths × 256 B, etc.).
+- `arb_diff_summary` — 0–1024 files × paths up to 256 B; counts up to `u32::MAX`.
+- `arb_summary` — strings 0–10 KB including null bytes and high-bit code points.
+- `arb_worker_branch` — strings 0–10 KB.
+- `arb_artifact_ref` — `uri` and `git_object_ref` 0–10 KB (covers N1's defensive-clip branch).
+- 1024 cases per CI run; nightly job runs `PROPTEST_CASES=100_000` for high-confidence regression detection on the critical envelope bound.
 
 The merger's `OversizedSingleItem` branch becomes unreachable for `OutcomeMaterializer`-produced continuations. Other producers (none expected post-Plan-5) remain subject to the merger fallback.
 
@@ -150,6 +159,11 @@ Fix: extend `ArtifactRef` to preserve git-blob metadata.
 // in spur-acp/src/domain/continuation.rs
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {
+    /// PRESERVE existing #[serde(flatten)] — current code at continuation.rs:46
+    /// has this attribute. Removing it would change the wire shape from
+    /// `{"kind":"patch","uri":...}` to `{"kind":{"kind":"patch"},...}`.
+    /// **Round 9 (P1-M1) — flatten retention is mandatory; round-trip test enforced.**
+    #[serde(flatten)]
     pub kind: ArtifactKind,
     pub uri: String,
     pub byte_size: u64,
@@ -165,6 +179,8 @@ pub struct ArtifactRef {
 ```
 
 Update `map_worker_artifact_ref` to populate both new fields. Existing consumers see `Option::None` for both — backward-compatible.
+
+**Round 9 round-trip test (mandatory CI gate):** `crates/spur-acp/tests/artifact_ref_wire_compat.rs` deserializes a stored pre-Phase-1 envelope (golden JSON file at `crates/spur-acp/tests/data/artifact_ref_v0.json` produced from current code), re-serializes, and asserts byte-for-byte equality on the `kind` projection. Catches regressions where `flatten` is accidentally removed during refactoring.
 
 ### 5.2 Add `fetch_outcome_artifact` MCP tool (minimal)
 
@@ -186,6 +202,8 @@ async fn handle_fetch_outcome_artifact(&self, args: &Value) -> Result<String, St
 **Authorization scoping (per codex SF3):** the tool reads `self.brain_session_id` from `McpCallbackServer` (server.rs:301), NOT from a user-supplied argument. Cross-session reads rejected.
 
 **Phase 1 scope:** read-only access to the existing git-blob-backed `WorkerArtifact` payloads.
+
+**Persist-before-publish ordering invariant (round 9 / P1-M2).** A brain that calls `fetch_outcome_artifact(delegation_id)` learns the `delegation_id` only by receiving a `BrainContinuation` carrying it. The orchestrator's `worktrees.persist_artifact` runs **synchronously before** `build_detached_continuation` produces the `BrainContinuation`, and the continuation is pushed to the merger only after the artifact is persisted. Therefore: a fetch for a *known* `delegation_id` cannot race the persist — the artifact provably exists by the time the brain has the id. `NotFound` is reserved for (a) hallucinated/malformed ids, (b) ids whose namespace was already swept by GC. This ordering is preserved in Phase 3 by the materializer's persist-then-build sequence (§7.2).
 
 **SF9 (round 6) — backport `section` parameter to Phase 1.** Original phasing deferred section pagination to Phase 3, but kimi flagged the sharp edge: a brain calling `fetch_outcome_artifact` against a 512 KiB stdout blob blows its own context. Cheap fix — add the `section` parameter in Phase 1 with a single supported value `Full` (current behavior). Phase 3 widens the supported sections (`StatusOnly`, `Summary`, `DiffOnly`). The wire schema is forward-compatible:
 
@@ -275,11 +293,14 @@ pub struct OutcomeRef {
     pub backend: BackendTag,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Round 9 (P2-S1): NOT Copy. Future cloud variants will need to carry
+// String configuration (region, bucket); removing Copy later would be a
+// breaking change. Doing it now costs one extra .clone() per use.
 pub enum BackendTag {
     Fs,
     GitBlob,
-    // Future: S3, GCS, ...
+    // Future: Cloud { region: String, bucket: String }, ...
 }
 ```
 
@@ -337,8 +358,22 @@ pub enum Section {
 pub enum StoreError {
     #[error("io: {0}")] Io(#[from] std::io::Error),
     #[error("not found: {0:?}")] NotFound(OutcomeKey),
-    #[error("authorization: caller session != artifact session")] Unauthorized,
+    #[error("authorization: caller session != artifact session (requested={requested:?}, actual={actual:?})")]
+    Unauthorized {
+        requested: OutcomeKey,
+        actual: spur_acp::BrainSessionId,
+    },
     #[error("content too large: {actual} > {limit}")] TooLarge { actual: u64, limit: u64 },
+    /// Round 9 (N2): same key + different content. Surfaces upstream
+    /// invariant violation (each (brain_session, delegation, attempt)
+    /// triple should produce exactly one content). Caller decides
+    /// whether to error, log, or treat as terminal.
+    #[error("content mismatch for {key:?}: existing sha={existing_sha}, new sha={new_sha}")]
+    ContentMismatch {
+        key: OutcomeKey,
+        existing_sha: String,
+        new_sha: String,
+    },
     #[error("backend: {0}")] Backend(String),
 }
 ```
@@ -347,10 +382,12 @@ pub enum StoreError {
 
 **`FsOutcomeStore`** (in `spur-blob-store::fs_store`):
 - Path layout: `<root>/<brain_session_id>/<delegation_id>/<attempt>.json`
+- **Round 9 (P2-S2) — UUID validation in `put`:** assert that `brain_session_id.as_str()` and `delegation_id.as_str()` parse via `uuid::Uuid::parse_str(...)`; reject with `StoreError::Backend("non-uuid identifier")` otherwise. Prevents directory traversal (`..`) and shell-meta characters from compromising the path layout.
 - `put` writes atomically via `tempfile` + rename.
 - `get` reads via `tokio::fs::read`.
 - `delete_namespace` recursively deletes `<root>/<brain_session_id>/`.
-- `sweep_older_than` walks namespaces, checks newest mtime, deletes older ones.
+- `sweep_older_than` walks namespaces, reads `created_at` from sidecar `OutcomeMetadata` (see below), deletes older ones. **Round 9 (P2-S3): minimum supported TTL = 1 day; sub-day TTLs not supported on all filesystems.**
+- **Round 9 (N2) — same-key-different-content semantics:** before atomic-rename, `put` compares SHA-256 of new content against existing sidecar metadata (if present). If `existing.sha256 != new.sha256`, returns `StoreError::ContentMismatch { key, existing_sha, new_sha }` without overwriting. Idempotent re-puts (matching SHA) succeed and return the existing `OutcomeRef`.
 - Default root: `$SPUR_DATA_DIR/outcomes/` (uses `directories` crate fallback per `spur-context` precedent).
 
 **`GitBlobOutcomeStore`** (in `spur-worktree`, NOT in `spur-blob-store`):
@@ -359,6 +396,9 @@ pub enum StoreError {
 - Existing `WorkerArtifact { object_ref, blob_sha, size_bytes, kind }` shape preserved on the wire.
 - Internal layout: continues using `refs/spur/artifacts/<session-id>` git refs.
 - `delete_namespace` invokes `git update-ref -d refs/spur/artifacts/<session-id>`.
+- **Round 9 (GC-M1) — sidecar metadata for sweep correctness:** alongside the artifact blob, `put` writes `OutcomeMetadata` (incl. `created_at`) as a separate small git blob keyed at `refs/spur/artifacts/<session-id>/<delegation>-<attempt>.meta`. `sweep_older_than` reads `created_at` from the sidecar, NOT filesystem mtime — filesystem mtime of `.git/refs/...` is unreliable for packed refs (the entire `packed-refs` file shares one mtime). Sidecar approach is reliable across loose/packed ref states.
+- `delete_namespace` removes both content and `.meta` refs in a single git transaction.
+- `ContentMismatch` semantics: same as `FsOutcomeStore` — read existing `.meta` blob, compare SHA, return `StoreError::ContentMismatch` if mismatch.
 
 **`MemoryOutcomeStore`** (test impl, in `spur-blob-store::memory_store`):
 - `Arc<RwLock<HashMap<OutcomeKey, (Vec<u8>, OutcomeMetadata)>>>`.
@@ -493,7 +533,20 @@ pub struct ContinuationPayload {
 **Round 8 (MF2/MF3) — design changes:**
 
 - **Clipping is mandatory on every materializer entrypoint, not just the truncation-fallback path.** The success path persists the full `DelegationResult` to OutcomeStore (preserves fidelity for brain-fetch), then constructs the lean continuation by **calling the same Plan-4 clip helpers** that the fallback path uses. INV-D8 holds because the materializer is the single producer (§7.2). The Plan-4 truncation ladder remains the persist-failure fallback only (§7.7).
-- **`estimated_cost_micros: Option<u64>`** replaces the round-6 `estimated_cost_usd: Option<f64>`. Rationale: `f64` does not implement `Eq`, which would break `#[derive(Eq)]` on `ContinuationPayload` (used by `DelegationKey`'s eq/hash). Cost is fundamentally integer (LLM token pricing is denominated in fractions of cents); micros gives 6-digit precision without floats. Conversion is a trivial `cost_usd = cost_micros as f64 / 1_000_000.0` at display time.
+- **`estimated_cost_micros: Option<u64>`** replaces the round-6 `estimated_cost_usd: Option<f64>`. Rationale: `f64` does not implement `Eq`, which would break `#[derive(Eq)]` on `ContinuationPayload` (used by `DelegationKey`'s eq/hash). Cost is fundamentally integer (LLM token pricing is denominated in fractions of cents); micros gives 6-digit precision without floats. **Round 9 (P3-S1) — centralize the conversion:**
+
+```rust
+// spur-acp/src/domain/continuation.rs — co-located with ContinuationPayload
+impl ContinuationPayload {
+    /// Display-time conversion. Single canonical source for micros → USD.
+    /// Rendered by TUI and ops dashboards; brain may reference it in prompts.
+    pub fn estimated_cost_usd(&self) -> Option<f64> {
+        self.estimated_cost_micros.map(|m| m as f64 / 1_000_000.0)
+    }
+}
+```
+
+Prevents every consumer (TUI, dashboards, brain prompts) from doing its own (potentially incorrect) conversion arithmetic.
 
 **Why keep DelegationStatus inline rather than introduce a `LeanStatus` enum:**
 
@@ -561,13 +614,30 @@ impl OutcomeMaterializer {
    - `clipped_diff = result.diff_summary.as_ref().map(|d| clip_diff_files(d, diff_files_cap_count))`
    - `clipped_summary = clip(&result.summary, summary_cap_bytes)` with "…" sentinel
    - `clipped_branch = clip(&result.worker_branch, worker_branch_cap_bytes)`
+   - **Round 9 (N1) — defensive `ArtifactRef` clipping:** `clipped_artifact_ref = result.artifact.as_ref().map(|a| clip_artifact_ref_strings(a, 256))`. Caps `uri` and `git_object_ref` at 256 B each. Today's constructor produces structurally bounded URIs, but INV-D8 must hold as a property of `ContinuationPayload`, not as a property of the constructor. Defensive clipping closes the proof.
    - `fetch_hint = build_fetch_hint(&clipped_status, &clipped_diff)` (≤ 256 B)
-5. **Build lean `BrainContinuation`** with `artifact_id: Some(key)`, `artifact_ref: legacy_artifact_ref(&result)` (Phase 1 backcompat), and the clipped fields above.
-6. **Debug-assert envelope size** (panic in test/debug, INV-D9 proptest catches violations in CI):
+5. **Build lean `BrainContinuation`** with `artifact_id: Some(key)`, `artifact_ref: clipped_artifact_ref` (Phase 1 backcompat), and the clipped fields above.
+6. **Envelope-size enforcement (round 9 / N3 — release-build hardening):**
    ```rust
-   debug_assert!(continuation_cost_bytes(&cont) <= MERGE_BUDGET_DEFAULT_BYTES);
+   let envelope_bytes = continuation_cost_bytes(&cont);
+   debug_assert!(envelope_bytes <= MERGE_BUDGET_DEFAULT_BYTES);
+   if envelope_bytes > MERGE_BUDGET_DEFAULT_BYTES {
+       // Release-build path: log + fall through to truncation ladder.
+       // Restores INV-α even if a future variant slipped past the clip pass.
+       tracing::error!(
+           target: "spur.metrics.materializer_oversized_post_clip",
+           envelope_bytes,
+           budget_bytes = MERGE_BUDGET_DEFAULT_BYTES,
+           ?key,
+           "INV-D8 violation post-clip; engaging truncation-ladder fallback"
+       );
+       return self.fall_back_to_truncation_ladder(...).await;
+   }
    ```
+   `debug_assert!` catches violations loudly in tests; the release-mode `if` provides recovery + observability in production. Belt + suspenders.
 7. **Emit telemetry** — `tracing::info!(target: "spur.metrics.outcome_persisted", ...)`.
+
+**Persist-before-publish ordering (round 9 / P1-M2 reaffirmed for Phase 3):** `materialize` returns the `BrainContinuation` only after `store.put` has succeeded (or after the truncation-ladder fallback has produced a fitted handle). The orchestrator's `push_continuation` runs *after* `materialize` returns. Therefore the brain only ever sees `delegation_id` values whose artifacts are already persisted. Brain-initiated `fetch_outcome_artifact(delegation_id)` for a known id cannot race the persist; `NotFound` is reserved for hallucinated ids and post-GC reads (§9.7).
 
 **On store failure** (persist-then-clip-then-build aborts at step 3):
 
@@ -576,9 +646,28 @@ impl OutcomeMaterializer {
 
 INV-α holds either way. The success path's clipping helpers are the *same functions* the fallback uses; one set of clip rules to maintain.
 
-**Clipping helpers — moved from spur-core to spur-acp::domain::clip (round 8):**
+**Clipping helpers — `spur-acp::domain::clip` (round 8 + round 9):**
 
-The clip helpers (`clip_status_strings`, `clip_diff_files`) are needed by both the materializer (in spur-mcp) and the truncation-ladder fallback. Round-6's spec placed them in spur-core. Round 8 moves them to `spur-acp::domain::clip` so both consumers (spur-mcp materializer + spur-core continuation_bridge fallback) can call them without a back-edge. spur-acp gains no new deps (clip helpers are pure functions over its own domain types). The Plan-4 spec §6 ladder is amended to reference `spur_acp::domain::clip::*` instead of its current local helpers.
+The clip helpers (`clip_status_strings`, `clip_diff_files`, `clip_artifact_ref_strings`) are needed by both the materializer (in spur-mcp) and the truncation-ladder fallback. Round-6's spec placed them in spur-core. Round 8 moved them to `spur-acp::domain::clip` so both consumers (spur-mcp materializer + spur-core continuation_bridge fallback) can call them without a back-edge. spur-acp gains no new deps (clip helpers are pure functions over its own domain types). The Plan-4 spec §6 ladder is amended to reference `spur_acp::domain::clip::*` instead of its current local helpers.
+
+**Round 9 (P3-S2) — module access:** `pub mod clip` with module-level doc comment:
+
+```rust
+//! Bounded-string clipping for continuation materialization.
+//!
+//! These helpers are part of the INV-D8 enforcement contract: the
+//! materializer (`spur-mcp::OutcomeMaterializer`) and truncation-ladder
+//! fallback (`spur-core::continuation_bridge`) both call into this module
+//! to bound the lean payload's inline strings.
+//!
+//! **Do not call these helpers from random consumer code.** Adding a new
+//! `BrainContinuation` producer that bypasses this module is a violation
+//! of INV-D8 and will surface as oversized-drop failures in the merger.
+//! New producers must route through `OutcomeMaterializer::materialize`.
+pub mod clip { ... }
+```
+
+The `pub` visibility is required because spur-mcp (a different crate) consumes these helpers; the doc comment is the social-enforcement complement to the technical mechanism.
 
 **Persist-failure metrics** include the truncation events from the fallback, so operators see both "store failed" and "fallback engaged" in a single trace event group.
 
@@ -701,7 +790,26 @@ Key requirements preserved from Plan-4:
 - INV-D9 schema-evolution guard (proptest with exhaustive `arb_delegation_status`).
 - All `ContinuationFieldTruncated` events emitted via `event_sink`.
 
-**Bit-rot guard (per gemini's failure-mode coverage):** the proptest harness uses a `MockFailingOutcomeStore` (returns `StoreError::Backend(...)` from `put`) to force the fallback path on every CI run. Without this, the ladder is rarely exercised in practice and would bit-rot.
+**Bit-rot guard (per gemini's failure-mode coverage):** the proptest harness uses a `MockFailingOutcomeStore` to force the fallback path on every CI run. Without this, the ladder is rarely exercised in practice and would bit-rot.
+
+**Round 9 (P3-S3) — parameterize the mock by failure mode:**
+
+```rust
+// crates/spur-blob-store/src/test_helpers.rs (test-only public)
+pub struct MockFailingOutcomeStore {
+    pub mode: FailureMode,
+}
+
+pub enum FailureMode {
+    Io,                 // returns StoreError::Io(...)
+    TooLarge,           // returns StoreError::TooLarge { ... }
+    Backend,            // returns StoreError::Backend("...")
+    ContentMismatch,    // returns StoreError::ContentMismatch { ... }
+    Panic,              // panics inside put — exercises materializer's panic catching
+}
+```
+
+CI matrix runs the materializer-fallback proptest once per `FailureMode`. Each mode must produce a valid `BrainContinuation` (not panic, not drop) so INV-α holds for the full failure surface, not just one example.
 
 ## 8. GC and lifecycle policy
 
@@ -718,7 +826,19 @@ Session-terminate triggers:
 
 If the orchestrator crashes mid-session, the namespace persists. On restart:
 
-1. Sweep any namespace whose newest artifact mtime is older than `SPUR_OUTCOME_TTL_DAYS` (default 7).
+1. **Round 9 (GC-S1) — sweep runs in a background tokio task; orchestrator startup does NOT block on it:**
+   ```rust
+   // in scheduler/orchestrator startup
+   let store = self.outcome_store.clone();
+   let ttl = Duration::from_days(ttl_days);
+   tokio::spawn(async move {
+       match store.sweep_older_than(ttl).await {
+           Ok(report) => tracing::info!(target: "spur.metrics.outcome_swept", ?report),
+           Err(e)    => tracing::warn!(target: "spur.metrics.outcome_swept_failed", error = %e),
+       }
+   });
+   ```
+   With many old namespaces (e.g., after long downtime), the sweep can take seconds. Blocking startup would delay the brain's first turn; spawning is non-blocking and gives clean operational semantics. Errors are non-fatal — the sweep retries on next startup.
 2. Emit `tracing::info!(target: "spur.metrics.outcome_swept", ...)` with namespace count.
 
 This handles ungraceful crashes without explicit reference counting (rejected by all reviewers as over-engineered).
@@ -731,11 +851,22 @@ spur gc outcomes [--dry-run] [--older-than=30d] [--namespace=<session_id>]
 
 Lists or removes namespaces matching criteria. Useful for ops emergencies (disk pressure, debug cleanup).
 
-### 8.4 Existing `refs/spur/artifacts/*` debt
+### 8.4 Existing `refs/spur/artifacts/*` debt + per-backend sweep semantics
 
-The current git-blob path accumulates refs without cleanup. The unified GC sweeper handles them too: when `GitBlobOutcomeStore::sweep_older_than` runs, it checks `refs/spur/artifacts/<session>` mtimes and prunes accordingly.
+**Round 9 (GC-M1) — per-backend `sweep_older_than` semantics:** filesystem mtime / git ref mtime are not interchangeable. The trait contract is "delete namespaces whose `created_at` is older than `ttl`," but the source of `created_at` differs:
 
-**Net win:** existing debt that pre-dates Plan-5 gets cleaned up by the same mechanism.
+| Backend | `created_at` source | Why |
+|---|---|---|
+| `FsOutcomeStore` | filesystem mtime of `<root>/<session>/` | Reliable on APFS/ext4; subject to minimum 1-day TTL (P2-S3) |
+| `GitBlobOutcomeStore` | sidecar `OutcomeMetadata.created_at` (stored as a git blob next to content per §6.4) | Filesystem mtime of `.git/refs/...` is broken under packed-refs (the entire `packed-refs` file shares one mtime). Sidecar metadata is reliable across loose/packed states. |
+
+The trait method signature is unchanged; the per-backend implementations honor the same contract through different mechanisms.
+
+**Pre-Plan-5 debt:** the current git-blob path accumulates refs without cleanup. Once `GitBlobOutcomeStore` ships in Phase 2, the unified GC sweeper handles pre-existing artifacts too — but those don't have sidecar `OutcomeMetadata`. Migration step:
+
+- On first sweep after Phase 2 deploys, any artifact ref *without* a sidecar `.meta` blob is treated as `created_at = epoch` (i.e., immediately eligible for sweep). Operators get one warning trace per pruned legacy ref. After one sweep cycle, all surviving artifacts have sidecar metadata.
+
+**Net win:** pre-Plan-5 debt is purged by the same mechanism on first sweep; subsequent runs use the reliable sidecar metadata path.
 
 ## 9. Failure modes
 
@@ -800,6 +931,8 @@ Operator-visible behavior: in-flight fetch during session terminate **may succee
 | `spur.metrics.outcome_persist_failed` | ERROR | `OutcomeMaterializer` | Put failure → fallback path engaged. Fields: `key, error, fallback_engaged` |
 | `spur.metrics.outcome_fetched` | INFO | `fetch_outcome_artifact` | Successful get. Fields: `key, section, byte_size, latency_ms, brain_session` |
 | `spur.metrics.outcome_fetch_unauthorized` | WARN | `fetch_outcome_artifact` | Cross-session attempt rejected. Fields: `requested_session, actual_session, delegation_id` |
+| `spur.metrics.outcome_fetch_not_found` | WARN | `fetch_outcome_artifact` | **Round 9 (OBS-S1).** `NotFound` returned. Distinct from `unauthorized` (security) and `outcome_persist_failed` (write path). Indicates one of: hallucinated id, post-GC read, or in-flight race (rare; persist-before-publish makes known-id race impossible). Fields: `key, attempt, section, brain_session` |
+| `spur.metrics.materializer_oversized_post_clip` | ERROR | `OutcomeMaterializer` | **Round 9 (N3).** INV-D8 violation post-clip; truncation-ladder fallback engaged. Should be unreachable in practice; non-zero indicates a clip helper bug or new variant added without registration. Fields: `key, envelope_bytes, budget_bytes` |
 | `spur.metrics.outcome_namespace_deleted` | INFO | GC sweeper | On session terminate or TTL sweep. Fields: `brain_session_id, artifact_count, total_bytes` |
 | `spur.metrics.outcome_swept` | INFO | Startup sweeper | TTL-based cleanup. Fields: `namespaces_swept, total_bytes_freed, ttl_days` |
 | `spur.metrics.continuation_dropped_oversized` | ERROR | merger fallback | Should be unreachable post-Plan-5; ops alert if non-zero |
@@ -835,6 +968,7 @@ When `OutcomeMaterializer` persists successfully, the lean continuation is emitt
 
 ### Phase 3
 - Schema bump: `2 → 3`. Wire-format-compatible (additive optional fields). Old brains see `artifact_id` and `fetch_hint` as unknown-but-ignored.
+- **Round 9 (N4) — explicit bidirectional compatibility:** new brains accept `schema_version ∈ {2, 3}`; missing optional fields default to `None` via `#[serde(default)]`. This handles brain-prompt-history replay where older continuations live in the prompt context after a brain upgrade. No deserializer should error on `schema_version != current`; the version field is informational, not gating.
 - Rollback: orchestrator wires `OutcomeMaterializer` back to a no-op materializer that builds full continuations inline. Trait abstraction stays in place.
 - Plan-4 truncation ladder remains as fallback regardless.
 
@@ -909,6 +1043,8 @@ When ContextEngine Phase 1 ships, no spur-blob-store changes are required. The c
 | 7a | gemini (round-7 verification) | 2026-04-25 | REJECT-WITH-MUST-FIX | INV-D8 still false on success path: `DelegationStatus::Failed.error` and `Conflict.files`/`diff_summary.files` are unbounded inline; lean payload can carry MB-scale stderr. Round-6 "lean by construction" claim was wrong. Plus 1 SHOULD-FIX (Phase-1↔3 fetch tool content-type discontinuity) and 1 NIT (legacy WorkerArtifactKind caller note). |
 | 7b | codex (round-7 verification) | 2026-04-25 | REJECT-WITH-MUST-FIX | (1) MF1 only moved key types; `OutcomeMaterializer` in spur-core still creates `spur-mcp → spur-core` cycle once §7.3 wires it into spur-mcp callsites. (2) INV-D8 still false on success path (same finding as gemini). (3) `ContinuationPayload` derives `Eq` but `estimated_cost_usd: Option<f64>` does not impl Eq → won't compile. Plus SF7/SF8 (reconciler runtime path has full `DelegationResult`; fetch tool needs `attempt`). |
 | 8 | self (round-7 fold) | 2026-04-25 | — | **MF1**: relocate `OutcomeMaterializer` to spur-mcp (single hop downstream of all callers; no cycle). **MF2**: clipping is mandatory on every materializer success path — same Plan-4 helpers as fallback; INV-D8 reframed as "enforced-by-clip" (single producer; debug_assert + CI proptest). Move `clip_status_strings`/`clip_diff_files` to `spur-acp::domain::clip` so both materializer and fallback share them. **MF3**: `estimated_cost_usd: Option<f64>` → `estimated_cost_micros: Option<u64>`; restores `Eq` derive. **SF7**: drop `materialize_metadata_only`; reconciler has full `DelegationResult` from `rx.await`; single materializer entrypoint with `&DelegationResult` parameter. **SF8**: `fetch_outcome_artifact` accepts `attempt: Option<u32>` (default = latest). **NITs**: `fetch_hint` gains `#[serde(default, skip_serializing_if)]`. |
+| 9a | self (L9 grounding pass via sequential-thinking MCTS) | 2026-04-25 | — | Cross-checked L9 evaluation file (`docs/superpowers/reviews/2026-04-25-brain-continuation-l9-evaluation.md`) §1–§7 against round-8 spec state and current code. Confirmed 3 MUST-FIX (P1-M1 serde-flatten drift verified at `continuation.rs:46`; P1-M2 fetch race resolvable via persist-before-publish ordering; GC-M1 git ref mtime unreliable for packed refs). Confirmed P3-M1 single-producer claim is structurally satisfied (production constructor is `server.rs:273`, all other matches are `#[cfg(test)]`). Surfaced 4 NEW findings: **N1** `ArtifactRef.uri`/`git_object_ref` are unbounded `String` — INV-D8 must bound them by clip, not by constructor discipline. **N2** concurrent-put-different-content semantics undefined → `StoreError::ContentMismatch`. **N3** `debug_assert!` is release no-op → add release-build tracing + fallback recovery for INV-α. **N4** schema-version backward-accept needs explicit statement. |
+| 9b | self (round-9 amendment fold) | 2026-04-25 | — | Folded all 4 MUST-FIX (P1-M1, P1-M2, GC-M1, N1), 8 SHOULD-FIX (P2-S1, P2-S2, P3-S1, P3-S2, P3-S3, GC-S1, OBS-S1, TST-S1/S2), 1 NIT (N4) into spec text. Sections amended: §4 (broadened proptest generators), §5.1 (flatten preserved + round-trip CI test), §5.2 (Phase-1 ordering invariant), §6.3 (BackendTag non-`Copy`; `StoreError::ContentMismatch`/`Unauthorized` carry context), §6.4 (UUID validation in FsOutcomeStore; sidecar metadata for GitBlobOutcomeStore), §7.1 (`estimated_cost_usd()` helper), §7.2 (defensive `clip_artifact_ref_strings`; release-build oversize tracing + fallback; persist-before-publish reaffirmed; `clip` module access policy), §7.7 (parameterized `MockFailingOutcomeStore`), §8.2 (background-task sweep via `tokio::spawn`), §8.4 (per-backend mtime semantics + pre-Plan-5 debt migration), §10.1 (`outcome_fetch_not_found` + `materializer_oversized_post_clip` events), §11 (schema-version bidirectional compat). |
 
 ## 15. Appendix
 
