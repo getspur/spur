@@ -362,6 +362,7 @@ pub enum SpurEventBody {
         brain_session_id: String,
         message_id: crate::domain::peer_message::PeerMessageId,
         source_delegation_id: crate::domain::delegation::DelegationId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
         reason: String,
     },
     WorkerPeerMessageQueued {
@@ -395,6 +396,7 @@ pub enum SpurEventBody {
     WorkerPeerMessageDropped {
         brain_session_id: String,
         message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
         reason: String,
     },
     WorkerPeerMessageUndeliverable {
@@ -406,10 +408,12 @@ pub enum SpurEventBody {
     WorkerPeerMessageAuditFailed {
         brain_session_id: String,
         message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
         transition_kind: String,
         error: String,
     },
     WorkerPeerMailboxReconciled {
+        brain_session_id: String,
         audit_failed_emitted: u32,
         inflight_forced_to_delivered: u32,
         inflight_reverted_to_queued: u32,
@@ -1051,6 +1055,7 @@ mod worker_peer_event_tests {
     #[test]
     fn worker_peer_mailbox_reconciled_carries_counts() {
         let body = SpurEventBody::WorkerPeerMailboxReconciled {
+            brain_session_id: "bs-1".into(),
             audit_failed_emitted: 2,
             inflight_forced_to_delivered: 1,
             inflight_reverted_to_queued: 0,
@@ -1059,6 +1064,77 @@ mod worker_peer_event_tests {
         let json = serde_json::to_string(&body).unwrap();
         let back: SpurEventBody = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, SpurEventBody::WorkerPeerMailboxReconciled { .. }));
+    }
+
+    #[test]
+    fn worker_peer_message_rejected_carries_target_delegation_id() {
+        use crate::domain::peer_message::PeerMessageId;
+        use uuid::Uuid;
+
+        let body = SpurEventBody::WorkerPeerMessageRejected {
+            brain_session_id: "bs-1".into(),
+            message_id: PeerMessageId(Uuid::new_v4()),
+            source_delegation_id: crate::domain::delegation::DelegationId("src".into()),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            reason: "not_in_dag".into(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        if let SpurEventBody::WorkerPeerMessageRejected {
+            target_delegation_id, ..
+        } = back
+        {
+            assert_eq!(target_delegation_id.0, "tgt");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn worker_peer_message_dropped_carries_target_delegation_id() {
+        use crate::domain::peer_message::PeerMessageId;
+        use uuid::Uuid;
+
+        let body = SpurEventBody::WorkerPeerMessageDropped {
+            brain_session_id: "bs-1".into(),
+            message_id: PeerMessageId(Uuid::new_v4()),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            reason: "plan_version_changed".into(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        if let SpurEventBody::WorkerPeerMessageDropped {
+            target_delegation_id, ..
+        } = back
+        {
+            assert_eq!(target_delegation_id.0, "tgt");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn worker_peer_message_audit_failed_carries_target_delegation_id() {
+        use crate::domain::peer_message::PeerMessageId;
+        use uuid::Uuid;
+
+        let body = SpurEventBody::WorkerPeerMessageAuditFailed {
+            brain_session_id: "bs-1".into(),
+            message_id: PeerMessageId(Uuid::new_v4()),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            transition_kind: "delivered".into(),
+            error: "beads write failed".into(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        if let SpurEventBody::WorkerPeerMessageAuditFailed {
+            target_delegation_id, ..
+        } = back
+        {
+            assert_eq!(target_delegation_id.0, "tgt");
+        } else {
+            panic!("wrong variant");
+        }
     }
 }
 
