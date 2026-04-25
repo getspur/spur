@@ -823,6 +823,12 @@ impl Orchestrator {
         self.continuation_overflow = Some(overflow);
     }
 
+    /// Stage-1 opt-in peer mailbox bundle attachment. Callers that enable
+    /// `SpurConfig::peer_mailbox_enabled` wire the bundle after construction.
+    pub fn attach_peer_mailbox(&mut self, bundle: crate::peer_mailbox::PeerMailboxBundle) {
+        self.peer_mailbox = Some(bundle);
+    }
+
     /// Build a `DetachedContinuationCtx` for `McpCallbackServer::new`.
     ///
     /// Wires the `on_complete` async callback to `report_detached_completion`.

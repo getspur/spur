@@ -369,6 +369,10 @@ pub struct SpurConfig {
     /// Runtime SPUR knobs (v0e+).
     #[serde(default)]
     pub spur: SpurRuntimeConfig,
+    /// Stage-1 worker peer mailbox feature flag. Default off until explicitly
+    /// opted in by production callers.
+    #[serde(default)]
+    pub peer_mailbox_enabled: bool,
 }
 
 /// Runtime knobs for `delegate_to_worker` / `delegate_parallel` dispatch.
@@ -799,6 +803,15 @@ mod tests {
     fn spur_runtime_defaults_auto_merge_to_false() {
         let cfg: SpurConfig = toml::from_str("").unwrap();
         assert!(!cfg.spur.auto_merge_approved_plans);
+    }
+
+    #[test]
+    fn spur_config_default_has_peer_mailbox_disabled() {
+        let cfg = SpurConfig::default();
+        assert!(!cfg.peer_mailbox_enabled);
+
+        let parsed: SpurConfig = toml::from_str("").unwrap();
+        assert!(!parsed.peer_mailbox_enabled);
     }
 
     #[test]
