@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod clip;
 pub mod continuation;
 pub mod delegation;
 pub mod events;
