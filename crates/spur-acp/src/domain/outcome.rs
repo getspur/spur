@@ -52,6 +52,13 @@ pub struct OutcomeRef {
     /// Size in bytes of the STORED content (post-truncation if applicable).
     pub byte_size: u64,
     pub backend: BackendTag,
+    /// 40-char hex SHA-1 of the underlying git blob, when the backend is
+    /// `BackendTag::GitBlob`. Phase 1's `fetch_outcome_artifact` MCP tool
+    /// resolves blobs via `git cat-file -p <git_blob_sha>`, which expects
+    /// the git object SHA-1 — distinct from the content SHA-256 stored in
+    /// `OutcomeRef.sha256`. Non-git backends leave this as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_blob_sha: Option<String>,
 }
 
 impl OutcomeRef {
@@ -71,13 +78,13 @@ impl OutcomeRef {
     /// are bounded by the Plan-4 truncation ladder well below that, so
     /// saturation is defensive — callers will never see it in practice.
     pub fn as_worker_artifact(&self, kind: WorkerArtifactKind) -> Option<WorkerArtifact> {
-        match &self.backend {
-            BackendTag::GitBlob => Some(WorkerArtifact {
+        match (&self.backend, &self.git_blob_sha) {
+            (BackendTag::GitBlob, Some(git_sha)) => Some(WorkerArtifact {
                 object_ref: format!(
                     "refs/spur/outcomes/{}/{}-{}.blob",
                     self.key.brain_session_id, self.key.delegation_id, self.key.attempt,
                 ),
-                blob_sha: self.sha256.clone(),
+                blob_sha: git_sha.clone(),
                 size_bytes: usize::try_from(self.byte_size).unwrap_or(usize::MAX),
                 kind,
             }),
@@ -117,12 +124,14 @@ mod tests {
             sha256: "a".repeat(64),
             byte_size: 1024,
             backend: BackendTag::Fs,
+            git_blob_sha: None,
         };
         let s = serde_json::to_string(&r).expect("serialize");
         let back: OutcomeRef = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(back.sha256, r.sha256);
         assert_eq!(back.byte_size, r.byte_size);
         assert_eq!(back.backend, BackendTag::Fs);
+        assert!(back.git_blob_sha.is_none());
     }
 
     #[test]
@@ -152,6 +161,7 @@ mod tests {
             sha256: "a".repeat(64),
             byte_size: 99,
             backend: BackendTag::GitBlob,
+            git_blob_sha: Some("c".repeat(40)),
         };
         let wa = r
             .as_worker_artifact(WorkerArtifactKind::Output)
@@ -161,7 +171,9 @@ mod tests {
             "refs/spur/outcomes/550e8400-e29b-41d4-a716-446655440000/\
              deadbeef-1111-2222-3333-444455556666-1.blob"
         );
-        assert_eq!(wa.blob_sha, r.sha256);
+        // blob_sha must be the 40-char git SHA-1, NOT the content SHA-256.
+        // Phase 1's fetch_outcome_artifact runs `git cat-file -p blob_sha`.
+        assert_eq!(wa.blob_sha, "c".repeat(40));
         assert_eq!(wa.size_bytes, 99);
         assert_eq!(wa.kind, WorkerArtifactKind::Output);
     }
@@ -175,6 +187,7 @@ mod tests {
             sha256: "a".repeat(64),
             byte_size: 1,
             backend: BackendTag::GitBlob,
+            git_blob_sha: Some("c".repeat(40)),
         };
         let wa = r
             .as_worker_artifact(WorkerArtifactKind::Diagnostic)
@@ -188,12 +201,28 @@ mod tests {
     }
 
     #[test]
+    fn as_worker_artifact_returns_none_when_git_blob_sha_missing() {
+        // GitBlob backend without git_blob_sha is an upstream invariant
+        // violation; adapter returns None defensively rather than producing
+        // a WorkerArtifact whose blob_sha is unfetchable by Phase 1's tool.
+        let r = OutcomeRef {
+            key: key(),
+            sha256: "a".repeat(64),
+            byte_size: 99,
+            backend: BackendTag::GitBlob,
+            git_blob_sha: None,
+        };
+        assert!(r.as_worker_artifact(WorkerArtifactKind::Output).is_none());
+    }
+
+    #[test]
     fn as_worker_artifact_returns_none_for_fs_backend() {
         let r = OutcomeRef {
             key: key(),
             sha256: "a".repeat(64),
             byte_size: 99,
             backend: BackendTag::Fs,
+            git_blob_sha: None,
         };
         assert!(r.as_worker_artifact(WorkerArtifactKind::Output).is_none());
     }
