@@ -38,15 +38,20 @@ pub enum FailureMode {
     ContentMismatch,
 }
 
-/// `OutcomeStore` impl that always fails (or panics) per `FailureMode`.
-/// Used to exercise the materializer's truncation-ladder fallback path.
+/// `OutcomeStore` impl that always fails per `FailureMode`. Used to exercise
+/// the materializer's truncation-ladder fallback path. Panic resilience is
+/// covered by a dedicated test in the materializer (T6), not here.
 #[derive(Debug, Clone)]
 pub struct MockFailingOutcomeStore {
     pub mode: FailureMode,
 }
 
 impl MockFailingOutcomeStore {
-    pub fn new(mode: FailureMode) -> Arc<dyn OutcomeStore> {
+    /// Returns `Arc<Self>` (not `Arc<dyn OutcomeStore>`) so callers retain
+    /// access to `pub mode`. Unsized coercion to `Arc<dyn OutcomeStore>`
+    /// happens automatically at the call site (e.g., when wiring the
+    /// materializer in T6).
+    pub fn new(mode: FailureMode) -> Arc<Self> {
         Arc::new(Self { mode })
     }
 
