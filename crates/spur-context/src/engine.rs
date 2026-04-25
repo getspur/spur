@@ -3,15 +3,23 @@
 //! The engine connects to DuckDB, initializes SQL convert views for each agent,
 //! loads pricing data, and exposes typed query methods for reports and live mode.
 
-use anyhow::{Context, Result};
+#[cfg(feature = "duckdb")]
+use anyhow::Context;
+use anyhow::Result;
 use chrono::NaiveDate;
+#[cfg(feature = "duckdb")]
 use duckdb::{params, Connection};
+#[cfg(feature = "duckdb")]
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "duckdb")]
+use std::path::PathBuf;
+#[cfg(feature = "duckdb")]
 use tracing;
 
 // ─── SQL Definitions ──────────────────────────────────────────────────
 
+#[cfg(feature = "duckdb")]
 const SCHEMA_SQL: &str = include_str!("sql/schema.sql");
 
 /// Cost-enrichment view.
@@ -26,6 +34,7 @@ const SCHEMA_SQL: &str = include_str!("sql/schema.sql");
 ///
 /// The pricing table is small (O(100) rows), so the correlated LATERAL
 /// scan is effectively free; DuckDB runs it once per distinct model.
+#[cfg(feature = "duckdb")]
 const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
     CREATE OR REPLACE VIEW all_events_with_cost AS
     SELECT
@@ -67,10 +76,12 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
 /// repeated `prepare()` calls for the same SQL are cheap (cache hit).
 /// There is no need for an additional prepared-statement caching layer
 /// in this struct.
+#[cfg(feature = "duckdb")]
 pub struct AnalyticsEngine {
     conn: Connection,
 }
 
+#[cfg(feature = "duckdb")]
 impl AnalyticsEngine {
     /// Open a persistent DuckDB database.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -1288,8 +1299,123 @@ impl AnalyticsEngine {
     }
 
     /// Get the underlying DuckDB connection (for advanced use).
+    #[cfg(feature = "duckdb")]
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+}
+
+// ─── Stub (DuckDB disabled) ───────────────────────────────────────────
+
+#[cfg(not(feature = "duckdb"))]
+/// Stub analytics engine when DuckDB is disabled at compile time.
+///
+/// All query methods return empty results; the engine is a no-op.
+pub struct AnalyticsEngine;
+
+#[cfg(not(feature = "duckdb"))]
+impl AnalyticsEngine {
+    /// Open a persistent DuckDB database (stub).
+    pub fn open<P: AsRef<Path>>(_path: P) -> Result<Self> {
+        Ok(Self)
+    }
+
+    /// Open an in-memory DuckDB (stub).
+    pub fn open_in_memory() -> Result<Self> {
+        Ok(Self)
+    }
+
+    /// Initialize base schema (stub).
+    pub fn initialize(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Refresh cache (stub).
+    pub fn refresh_cache(&self) -> Result<i64> {
+        Ok(0)
+    }
+
+    /// Use cached events (stub).
+    pub fn use_cached_events(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Create agent views (stub).
+    pub fn create_agent_views(&self) -> Result<AgentViewStatus> {
+        Ok(AgentViewStatus::default())
+    }
+
+    /// Load pricing (stub).
+    pub fn load_pricing(&self, _registry: &spur_cost::PricingRegistry) -> Result<()> {
+        Ok(())
+    }
+
+    /// Daily report (stub).
+    pub fn daily_report(&self, _days: u32) -> Result<Vec<DailyRow>> {
+        Ok(vec![])
+    }
+
+    /// Weekly report (stub).
+    pub fn weekly_report(&self, _weeks: u32) -> Result<Vec<WeeklyRow>> {
+        Ok(vec![])
+    }
+
+    /// Monthly report (stub).
+    pub fn monthly_report(&self, _months: u32) -> Result<Vec<MonthlyRow>> {
+        Ok(vec![])
+    }
+
+    /// Daily report range (stub).
+    pub fn daily_report_range(&self, _start: NaiveDate, _end: NaiveDate) -> Result<Vec<DailyRow>> {
+        Ok(vec![])
+    }
+
+    /// Weekly report range (stub).
+    pub fn weekly_report_range(
+        &self,
+        _start: NaiveDate,
+        _end: NaiveDate,
+    ) -> Result<Vec<WeeklyRow>> {
+        Ok(vec![])
+    }
+
+    /// Monthly report range (stub).
+    pub fn monthly_report_range(
+        &self,
+        _start: NaiveDate,
+        _end: NaiveDate,
+    ) -> Result<Vec<MonthlyRow>> {
+        Ok(vec![])
+    }
+
+    /// Live recent sessions (stub).
+    pub fn live_recent_sessions(&self, _minutes: u32) -> Result<Vec<LiveBlockRow>> {
+        Ok(vec![])
+    }
+
+    /// Model breakdown (stub).
+    pub fn model_breakdown(&self) -> Result<Vec<ModelRow>> {
+        Ok(vec![])
+    }
+
+    /// Project breakdown (stub).
+    pub fn project_breakdown(&self) -> Result<Vec<ProjectRow>> {
+        Ok(vec![])
+    }
+
+    /// Session detail (stub).
+    pub fn session_detail(&self, _session_id: &str) -> Result<Option<SessionRow>> {
+        Ok(None)
+    }
+
+    /// Live session snapshot (stub).
+    pub fn live_session_snapshot(&self, _session_id: &str) -> Result<Option<LiveSnapshot>> {
+        Ok(None)
+    }
+
+    /// Raw SQL query (stub).
+    pub fn query_json(&self, _sql: &str) -> Result<Vec<serde_json::Value>> {
+        Ok(vec![])
     }
 }
 
@@ -1385,6 +1511,7 @@ pub struct AgentViewStatus {
 
 /// Intermediate row shape used when copying OpenCode messages from SQLite
 /// into DuckDB via the appender. Not part of the public API.
+#[cfg(feature = "duckdb")]
 #[derive(Debug)]
 struct OpenCodeRow {
     timestamp_ms: i64,
@@ -1432,7 +1559,7 @@ pub struct LiveSnapshot {
 
 // ─── Tests ────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "duckdb"))]
 mod tests {
     use super::*;
     use std::io::Write;

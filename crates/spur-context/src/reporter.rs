@@ -558,7 +558,7 @@ fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
 
 // ─── Tests ────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "duckdb"))]
 mod tests {
     use super::*;
     use crate::engine::AnalyticsEngine;
