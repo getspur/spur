@@ -2184,6 +2184,7 @@ impl McpCallbackServer {
             "delegate_to_worker" => self.handle_delegate_to_worker(id, arguments).await,
             "delegate_parallel" => self.handle_delegate_parallel(id, arguments).await,
             "check_delegation_status" => self.handle_check_delegation_status(id, arguments).await,
+            "fetch_outcome_artifact" => self.handle_fetch_outcome_artifact(id, arguments).await,
             "cancel_delegation" => self.handle_cancel_delegation(id, arguments).await,
             "list_available_workers" => self.handle_list_available_workers(id).await,
             "get_issue" => self.handle_get_issue(id, arguments).await,
@@ -2638,6 +2639,111 @@ impl McpCallbackServer {
         }
 
         JsonRpcResponse::error(id, -32602, format!("Unknown delegation: {delegation_id}"))
+    }
+
+    /// Phase 1 of plan-5 brain-continuation artifact store.
+    /// Reads an existing oversized-stdout artifact via the git-blob path
+    /// previously stored by `worktrees.persist_artifact`. Authorization is
+    /// scoped to `self.brain_session_id` — the caller does NOT supply
+    /// `brain_session_id` as an argument.
+    ///
+    /// Phase 1 args:
+    ///   { "delegation_id": String, "section": Option<"full"> }  // default "full"
+    ///
+    /// Returns: { "content": [{ "type": "text", "text": <full text> }] }
+    ///
+    /// Future-compat: Phase 3 widens `section` to status_only|summary|diff_only|full
+    /// and adds an `attempt: Option<u32>` arg.
+    async fn handle_fetch_outcome_artifact(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let delegation_id: DelegationId = match args.get("delegation_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.into(),
+            _ => {
+                return JsonRpcResponse::invalid_params(id, "Missing or empty 'delegation_id'");
+            }
+        };
+
+        // Phase 1: only "full" is supported. Anything else is a clean
+        // InvalidParams response, NOT a serde deserialization error.
+        match args.get("section").and_then(|v| v.as_str()) {
+            None | Some("full") => {}
+            Some(other) => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!(
+                        "Phase 1 only supports section='full' (got '{other}'). \
+                         Phase 3 will add: status_only, summary, diff_only."
+                    ),
+                );
+            }
+        }
+
+        // Look up the artifact from completed_delegations WITHOUT removing
+        // (the entry remains until TTL expires; multiple fetches allowed).
+        // Persist-before-publish ordering (orchestrator persists before the
+        // continuation is built) guarantees that any delegation_id known to
+        // the brain has already had its blob written. NotFound is reserved
+        // for hallucinated/wrong ids.
+        let entry = {
+            let map = self.completed_delegations.lock().await;
+            map.get(&delegation_id).map(|(r, _)| r.clone())
+        };
+        let result = match entry {
+            Some(r) => r,
+            None => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32004,
+                    format!("Outcome artifact not found for delegation_id={delegation_id}"),
+                );
+            }
+        };
+
+        let artifact = match result.artifact.as_ref() {
+            Some(a) => a,
+            None => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32004,
+                    format!("Delegation {delegation_id} has no side-channel artifact"),
+                );
+            }
+        };
+
+        let repo_root = match &self.repo_root {
+            Some(r) => r.clone(),
+            None => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    "fetch_outcome_artifact requires repo_root to be configured",
+                );
+            }
+        };
+
+        let text = match run_git_capture(
+            &repo_root,
+            None,
+            &["cat-file", "-p", artifact.blob_sha.as_str()],
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!(
+                        "git cat-file failed for blob {}: {error}",
+                        artifact.blob_sha
+                    ),
+                );
+            }
+        };
+
+        JsonRpcResponse::success(
+            id,
+            json!({
+                "content": [{ "type": "text", "text": text }]
+            }),
+        )
     }
 
     async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
