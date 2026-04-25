@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use spur_acp::domain::delegation::DelegationId;
+use spur_acp::domain::peer_message::{MessageKind, PeerMessageId};
 use spur_acp::{
     Artifact, DelegationStatus, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
     SessionId, SpurEvent, SpurEventBody,
@@ -46,6 +48,29 @@ fn spawn_links_child_under_parent() {
 
     let child = l.node(&ExecutorId::new("worker-1")).unwrap();
     assert_eq!(child.parent_id, Some(ExecutorId::new("brain-1")));
+}
+
+#[test]
+fn lineage_peer_message_accepted_creates_edge_on_source_node() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&spawn("src", None));
+
+    let message_id = PeerMessageId(uuid::Uuid::new_v4());
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerPeerMessageAccepted {
+        brain_session_id: "brain".into(),
+        message_id,
+        source_delegation_id: DelegationId("src".into()),
+        target_delegation_id: DelegationId("tgt".into()),
+        kind: MessageKind::Handoff,
+        sequence: 1,
+    }));
+
+    let edges = l.peer_edges_for_delegation(&DelegationId("src".into()));
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].message_id, message_id);
+    assert_eq!(edges[0].source_delegation_id, DelegationId("src".into()));
+    assert_eq!(edges[0].target_delegation_id, DelegationId("tgt".into()));
+    assert_eq!(edges[0].kind, MessageKind::Handoff);
 }
 
 #[test]
