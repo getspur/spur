@@ -2,6 +2,7 @@ pub mod guard;
 pub mod ledger;
 pub mod limits;
 pub mod prompt_builder;
+pub mod reconciler;
 pub mod router;
 
 use std::sync::Arc;
