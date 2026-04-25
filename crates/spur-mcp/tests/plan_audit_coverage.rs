@@ -203,6 +203,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
         false,
         Some("feat/worker-branch-1"),
         Some("3 files changed"),
+        None,
     )
     .await;
 
@@ -446,6 +447,7 @@ async fn completion_success_writes_ready_for_review_and_completion_audit() {
         CompletionState::AwaitingReview,
         Some("feat/task"),
         Some("worker finished cleanly"),
+        None,
     )
     .await
     .expect("persist completion");
@@ -512,6 +514,7 @@ async fn completion_failed_closes_issue_and_emits_completion_audit() {
         CompletionState::Failed,
         None,
         Some("worker failed"),
+        None,
     )
     .await
     .expect("persist completion");
@@ -585,6 +588,7 @@ async fn completion_cancelled_closes_issue_and_emits_completion_audit() {
         CompletionState::Cancelled,
         None,
         Some("worker cancelled"),
+        None,
     )
     .await
     .expect("persist completion");

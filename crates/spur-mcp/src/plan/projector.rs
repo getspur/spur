@@ -590,6 +590,7 @@ mod tests {
             superseded: false,
             worker_branch: Some("feat/task".into()),
             result_summary: Some("3 files changed".into()),
+            artifact_uri: None,
         }];
 
         let facts = super::latest_completion_facts(&audits).expect("completion facts");
@@ -628,6 +629,7 @@ mod tests {
             superseded: false,
             worker_branch: Some("feat/task".into()),
             result_summary: Some("looks good".into()),
+            artifact_uri: None,
         }];
 
         let status = super::project_status_for_issue(&issue, &audits, true, "closed");
@@ -664,6 +666,7 @@ mod tests {
             superseded: false,
             worker_branch: None,
             result_summary: Some("cargo test failed".into()),
+            artifact_uri: None,
         }];
 
         let status = super::project_closed_status(&issue, &audits);

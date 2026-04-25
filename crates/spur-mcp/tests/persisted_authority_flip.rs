@@ -257,6 +257,7 @@ async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
         CompletionState::AwaitingReview,
         Some("feat/task"),
         Some("worker finished"),
+        None,
     )
     .await
     .expect("persist completion");
@@ -581,6 +582,7 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
         CompletionState::Superseded,
         Some("feat/stale"),
         Some("late completion"),
+        None,
     )
     .await
     .expect("persist superseded completion");

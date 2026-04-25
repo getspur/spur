@@ -1003,6 +1003,7 @@ pub async fn emit_completion_audit(
     superseded: bool,
     worker_branch: Option<&str>,
     result_summary: Option<&str>,
+    artifact_uri: Option<&str>,
 ) {
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
@@ -1014,6 +1015,7 @@ pub async fn emit_completion_audit(
         superseded,
         worker_branch: worker_branch.map(String::from),
         result_summary: result_summary.map(String::from),
+        artifact_uri: artifact_uri.map(str::to_string),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
@@ -1277,6 +1279,7 @@ pub async fn persist_completion_result(
     completion_state: crate::plan::audit_sentinel::CompletionState,
     worker_branch: Option<&str>,
     result_summary: Option<&str>,
+    artifact_uri: Option<&str>,
 ) -> anyhow::Result<()> {
     let update = match completion_state {
         crate::plan::audit_sentinel::CompletionState::AwaitingReview => completion_success_update(),
@@ -1299,6 +1302,7 @@ pub async fn persist_completion_result(
         completion_state == crate::plan::audit_sentinel::CompletionState::Superseded,
         worker_branch,
         result_summary,
+        artifact_uri,
     )
     .await;
 
@@ -1314,6 +1318,7 @@ pub(crate) async fn persist_completion_result_and_notify(
     completion_state: crate::plan::audit_sentinel::CompletionState,
     worker_branch: Option<&str>,
     result_summary: Option<&str>,
+    artifact_uri: Option<&str>,
     fast_forward: &Option<Arc<tokio::sync::Notify>>,
 ) -> anyhow::Result<()> {
     persist_completion_result(
@@ -1324,6 +1329,7 @@ pub(crate) async fn persist_completion_result_and_notify(
         completion_state,
         worker_branch,
         result_summary,
+        artifact_uri,
     )
     .await?;
     crate::server::notify_fast_forward(fast_forward);
@@ -1482,6 +1488,7 @@ pub async fn run_plan(
                                 completion_state,
                                 result_worker_branch.as_deref(),
                                 result_summary.as_deref(),
+                                None,
                                 &fast_forward_ref,
                             )
                             .await
@@ -3801,6 +3808,7 @@ mod tests {
             "plan-1",
             "del-A",
             crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            None,
             None,
             None,
             &Some(Arc::clone(&notify)),
