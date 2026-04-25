@@ -546,4 +546,42 @@ mod tests {
             other => panic!("expected typed InvalidTransition, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn router_error_preserves_ledger_already_terminal_typed() {
+        let (router, ledger, _events) = fixture().await;
+        let snap = snapshot_allowing("src", "tgt");
+        let env = envelope("src", "tgt");
+        let message_id = env.message_id;
+
+        let _guard = unwrap_created(router.accept_or_reject(env.clone(), &snap).await.unwrap());
+        ledger
+            .transition(&message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+        ledger
+            .transition(&message_id, LedgerState::Delivered)
+            .await
+            .unwrap();
+        router
+            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .await
+            .unwrap();
+
+        let err = router.accept_or_reject(env, &snap).await.unwrap_err();
+
+        match err {
+            RouterError::Ledger(crate::peer_mailbox::ledger::LedgerError::AlreadyTerminal {
+                state,
+                ..
+            }) => {
+                assert_eq!(state, LedgerState::Consumed);
+            }
+            other => panic!("expected typed AlreadyTerminal, got {other:?}"),
+        }
+    }
 }
