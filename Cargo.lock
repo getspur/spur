@@ -4656,8 +4656,12 @@ name = "spur-worktree"
 version = "0.4.5"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
+ "serde_json",
+ "sha2",
  "spur-acp",
+ "spur-blob-store",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
