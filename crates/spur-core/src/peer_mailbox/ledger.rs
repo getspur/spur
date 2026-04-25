@@ -53,7 +53,8 @@ pub struct LedgerEntry {
     pub injected_into_prompts: HashSet<String>,
 }
 
-fn is_terminal(state: LedgerState) -> bool {
+#[doc(hidden)]
+pub fn is_terminal(state: LedgerState) -> bool {
     matches!(
         state,
         LedgerState::Rejected
@@ -65,7 +66,8 @@ fn is_terminal(state: LedgerState) -> bool {
     )
 }
 
-fn is_valid_transition(from: LedgerState, to: LedgerState) -> bool {
+#[doc(hidden)]
+pub fn is_valid_transition(from: LedgerState, to: LedgerState) -> bool {
     if from == to {
         return true;
     }
@@ -78,6 +80,16 @@ fn is_valid_transition(from: LedgerState, to: LedgerState) -> bool {
         (
             LedgerState::Accepted,
             LedgerState::Queued | LedgerState::DeliveredInflight | LedgerState::Undeliverable
+        )
+        // Workers may ack at any non-terminal state; drain may force terminal
+        // on in-flight messages.
+        | (LedgerState::Accepted, LedgerState::Consumed | LedgerState::Ignored)
+        | (
+            LedgerState::DeliveredInflight,
+            LedgerState::Consumed
+                | LedgerState::Ignored
+                | LedgerState::Expired
+                | LedgerState::Dropped
         ) | (
             LedgerState::Queued,
             LedgerState::DeliveredInflight
@@ -166,7 +178,7 @@ impl PeerMailboxLedger for InMemoryLedger {
         let mut g = self.inner.lock().await;
         let entry = g
             .get_mut(message_id)
-            .ok_or_else(|| LedgerError::NotFound(*message_id))?;
+            .ok_or(LedgerError::NotFound(*message_id))?;
         // Idempotency: same-state transitions are observable no-ops.
         if entry.state == next {
             return Ok(TransitionOutcome::Unchanged(next));
@@ -190,7 +202,7 @@ impl PeerMailboxLedger for InMemoryLedger {
         let mut g = self.inner.lock().await;
         let entry = g
             .get_mut(message_id)
-            .ok_or_else(|| LedgerError::NotFound(*message_id))?;
+            .ok_or(LedgerError::NotFound(*message_id))?;
         if entry.injected_into_prompts.insert(target_prompt_id.into()) {
             Ok(InjectionOutcome::Injected)
         } else {
@@ -341,17 +353,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transition_accepted_to_consumed_is_invalid() {
+    async fn transition_accepted_to_consumed_is_legal_after_relaxation() {
         let ledger = InMemoryLedger::new();
         let env = envelope("hi");
         ledger.accept(env.clone()).await.unwrap();
 
-        let err = ledger
+        ledger
             .transition(&env.message_id, LedgerState::Consumed)
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(err, LedgerError::InvalidTransition { .. }));
+        assert_eq!(
+            ledger.get(&env.message_id).await.unwrap().state,
+            LedgerState::Consumed
+        );
+    }
+
+    #[tokio::test]
+    async fn transition_accepted_to_ignored_is_legal_after_relaxation() {
+        let ledger = InMemoryLedger::new();
+        let env = envelope("hi");
+        ledger.accept(env.clone()).await.unwrap();
+
+        ledger
+            .transition(&env.message_id, LedgerState::Ignored)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ledger.get(&env.message_id).await.unwrap().state,
+            LedgerState::Ignored
+        );
     }
 
     #[tokio::test]
@@ -366,6 +398,24 @@ mod tests {
 
         let err = ledger
             .transition(&env.message_id, LedgerState::Ignored)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LedgerError::InvalidTransition { .. }));
+    }
+
+    #[tokio::test]
+    async fn transition_queued_to_consumed_is_still_rejected() {
+        let ledger = InMemoryLedger::new();
+        let env = envelope("hi");
+        ledger.accept(env.clone()).await.unwrap();
+        ledger
+            .transition(&env.message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+
+        let err = ledger
+            .transition(&env.message_id, LedgerState::Consumed)
             .await
             .unwrap_err();
 
@@ -443,6 +493,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transition_delivered_inflight_to_ignored_is_legal_after_relaxation() {
+        let ledger = InMemoryLedger::new();
+        let env = envelope("hi");
+        ledger.accept(env.clone()).await.unwrap();
+        ledger
+            .transition(&env.message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&env.message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+
+        ledger
+            .transition(&env.message_id, LedgerState::Ignored)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ledger.get(&env.message_id).await.unwrap().state,
+            LedgerState::Ignored
+        );
+    }
+
+    #[tokio::test]
+    async fn transition_delivered_inflight_to_consumed_is_legal_after_relaxation() {
+        let ledger = InMemoryLedger::new();
+        let env = envelope("hi");
+        ledger.accept(env.clone()).await.unwrap();
+        ledger
+            .transition(&env.message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&env.message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+
+        ledger
+            .transition(&env.message_id, LedgerState::Consumed)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ledger.get(&env.message_id).await.unwrap().state,
+            LedgerState::Consumed
+        );
+    }
+
+    #[tokio::test]
     async fn transition_terminal_state_rejects_any_outgoing() {
         let ledger = InMemoryLedger::new();
         let env = envelope("hi");
@@ -455,6 +555,32 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, LedgerError::InvalidTransition { .. }));
+    }
+
+    #[tokio::test]
+    async fn transition_returns_invalid_transition_with_terminal_from_when_message_already_consumed(
+    ) {
+        let ledger = InMemoryLedger::new();
+        let env = envelope("hi");
+        ledger.accept(env.clone()).await.unwrap();
+        ledger
+            .transition(&env.message_id, LedgerState::Consumed)
+            .await
+            .unwrap();
+
+        let err = ledger
+            .transition(&env.message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap_err();
+
+        match err {
+            LedgerError::InvalidTransition { from, to } => {
+                assert!(is_terminal(from));
+                assert_eq!(from, LedgerState::Consumed);
+                assert_eq!(to, LedgerState::DeliveredInflight);
+            }
+            other => panic!("expected InvalidTransition with terminal from, got {other:?}"),
+        }
     }
 
     #[tokio::test]
