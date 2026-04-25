@@ -823,13 +823,25 @@ impl Orchestrator {
             peer_mailbox: None,
         };
 
-        let ttl_days: u64 = std::env::var("SPUR_OUTCOME_TTL_DAYS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(7);
+        let ttl_days: u64 = match std::env::var("SPUR_OUTCOME_TTL_DAYS") {
+            Ok(raw) => match raw.parse::<u64>() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    tracing::warn!(
+                        env = %raw,
+                        "SPUR_OUTCOME_TTL_DAYS is set but not a positive integer; using default 7"
+                    );
+                    7
+                }
+            },
+            Err(_) => 7,
+        };
         let sweep_store = orchestrator.outcome_store.clone();
         let sweep_handle = tokio::spawn(async move {
-            let ttl = Duration::from_secs(ttl_days * 86_400);
+            // saturating_mul caps at u64::MAX seconds for absurd inputs; the
+            // sweep would take longer than the heat death of the universe but
+            // wouldn't panic in debug or wrap silently in release.
+            let ttl = Duration::from_secs(ttl_days.saturating_mul(86_400));
             match sweep_store.sweep_older_than(ttl).await {
                 Ok(report) => tracing::info!(
                     target: "spur.metrics.outcome_swept",

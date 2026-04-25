@@ -96,9 +96,14 @@ impl GitBlobOutcomeStore {
     }
 
     async fn run_git(&self, args: &[&str]) -> Result<Vec<u8>, StoreError> {
+        // kill_on_drop matches run_git_with_stdin: the orchestrator's
+        // background TTL sweep aborts JoinHandles on shutdown, and we want
+        // any in-flight `git for-each-ref` / `git update-ref` / `git cat-file`
+        // subprocess to die with the future rather than leaking.
         let output = Command::new("git")
             .args(args)
             .current_dir(&*self.repo_root)
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|e| StoreError::Backend(format!("git spawn: {e}")))?;
