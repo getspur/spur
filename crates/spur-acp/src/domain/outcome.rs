@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::artifact::{ArtifactKind as WorkerArtifactKind, WorkerArtifact};
 use crate::{BrainSessionId, DelegationId};
 
 /// Identifier for a single delegation outcome blob.
@@ -53,40 +54,31 @@ pub struct OutcomeRef {
     pub backend: BackendTag,
 }
 
-trait BrainSessionIdOutcomeExt {
-    fn as_str(&self) -> &str;
-}
-
-impl BrainSessionIdOutcomeExt for BrainSessionId {
-    fn as_str(&self) -> &str {
-        self.as_session_id().0.as_str()
-    }
-}
-
-use crate::domain::artifact::{ArtifactKind as WorkerArtifactKind, WorkerArtifact};
-
 impl OutcomeRef {
     /// Backcompat adapter: project a GitBlob-backed `OutcomeRef` into
     /// the legacy `WorkerArtifact` shape. Returns `None` for non-git
-    /// backends. Phase 2 callers use this to preserve
-    /// `DelegationResult.artifact` behavior during transition; Phase 3
-    /// cleanup may remove or deprecate.
+    /// backends — the destination upstream (`DelegationResult.artifact`)
+    /// is itself `Option<WorkerArtifact>`, so `None` cleanly signals "no
+    /// git-blob projection" without ambiguity vs. a hard failure.
     ///
-    /// Round 11 (MF2): returns the REAL per-(session, delegation, attempt)
-    /// ref under `refs/spur/outcomes/`, NOT the legacy shared-per-session
-    /// `refs/spur/artifacts/<session>` ref. The legacy ref is read-only
-    /// during Phase 1 transition; new writes go to the new namespace.
+    /// `object_ref` is the per-(session, delegation, attempt) ref under
+    /// `refs/spur/outcomes/`. The legacy `refs/spur/artifacts/<session>`
+    /// ref is read-only during transition; new writes go to the new
+    /// namespace.
+    ///
+    /// `byte_size` saturates to `usize::MAX` on 32-bit targets where a
+    /// >4 GiB outcome would otherwise wrap silently. Worker artifacts
+    /// are bounded by the Plan-4 truncation ladder well below that, so
+    /// saturation is defensive — callers will never see it in practice.
     pub fn as_worker_artifact(&self, kind: WorkerArtifactKind) -> Option<WorkerArtifact> {
         match &self.backend {
             BackendTag::GitBlob => Some(WorkerArtifact {
                 object_ref: format!(
                     "refs/spur/outcomes/{}/{}-{}.blob",
-                    self.key.brain_session_id.as_str(),
-                    self.key.delegation_id.as_str(),
-                    self.key.attempt,
+                    self.key.brain_session_id, self.key.delegation_id, self.key.attempt,
                 ),
                 blob_sha: self.sha256.clone(),
-                size_bytes: self.byte_size as usize,
+                size_bytes: usize::try_from(self.byte_size).unwrap_or(usize::MAX),
                 kind,
             }),
             _ => None,
@@ -97,6 +89,7 @@ impl OutcomeRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::artifact::ArtifactKind as WorkerArtifactKind;
     use crate::SessionId;
 
     fn key() -> OutcomeKey {
@@ -134,7 +127,10 @@ mod tests {
 
     #[test]
     fn backend_tag_serializes_as_snake_case() {
-        assert_eq!(serde_json::to_string(&BackendTag::Fs).expect("ser"), "\"fs\"");
+        assert_eq!(
+            serde_json::to_string(&BackendTag::Fs).expect("ser"),
+            "\"fs\""
+        );
         assert_eq!(
             serde_json::to_string(&BackendTag::GitBlob).expect("ser"),
             "\"git_blob\""
@@ -151,11 +147,9 @@ mod tests {
 
     #[test]
     fn as_worker_artifact_maps_git_blob_backend_only() {
-        use crate::domain::artifact::ArtifactKind as WorkerArtifactKind;
-
         let r = OutcomeRef {
             key: key(),
-            sha256: "a".repeat(40),
+            sha256: "a".repeat(64),
             byte_size: 99,
             backend: BackendTag::GitBlob,
         };
@@ -164,24 +158,40 @@ mod tests {
             .expect("git_blob backend should map");
         assert_eq!(
             wa.object_ref,
-            format!(
-                "refs/spur/outcomes/{}/{}-{}.blob",
-                r.key.brain_session_id.as_str(),
-                r.key.delegation_id.as_str(),
-                r.key.attempt,
-            )
+            "refs/spur/outcomes/550e8400-e29b-41d4-a716-446655440000/\
+             deadbeef-1111-2222-3333-444455556666-1.blob"
         );
         assert_eq!(wa.blob_sha, r.sha256);
         assert_eq!(wa.size_bytes, 99);
+        assert_eq!(wa.kind, WorkerArtifactKind::Output);
+    }
+
+    #[test]
+    fn as_worker_artifact_uses_attempt_in_ref_path() {
+        let mut k = key();
+        k.attempt = 5;
+        let r = OutcomeRef {
+            key: k,
+            sha256: "a".repeat(64),
+            byte_size: 1,
+            backend: BackendTag::GitBlob,
+        };
+        let wa = r
+            .as_worker_artifact(WorkerArtifactKind::Diagnostic)
+            .expect("git_blob backend should map");
+        assert_eq!(
+            wa.object_ref,
+            "refs/spur/outcomes/550e8400-e29b-41d4-a716-446655440000/\
+             deadbeef-1111-2222-3333-444455556666-5.blob"
+        );
+        assert_eq!(wa.kind, WorkerArtifactKind::Diagnostic);
     }
 
     #[test]
     fn as_worker_artifact_returns_none_for_fs_backend() {
-        use crate::domain::artifact::ArtifactKind as WorkerArtifactKind;
-
         let r = OutcomeRef {
             key: key(),
-            sha256: "a".repeat(40),
+            sha256: "a".repeat(64),
             byte_size: 99,
             backend: BackendTag::Fs,
         };
