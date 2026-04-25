@@ -14,9 +14,14 @@ use crate::{
     OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section, StoreError, SweepReport,
 };
 
-#[derive(Debug)]
 pub struct MeasuredOutcomeStore<S: OutcomeStore> {
     inner: S,
+}
+
+impl<S: OutcomeStore> std::fmt::Debug for MeasuredOutcomeStore<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeasuredOutcomeStore").finish_non_exhaustive()
+    }
 }
 
 impl<S: OutcomeStore> MeasuredOutcomeStore<S> {
@@ -80,15 +85,26 @@ impl<S: OutcomeStore> OutcomeStore for MeasuredOutcomeStore<S> {
                 elapsed_us,
                 ?section,
             ),
-            Err(e) => event!(
-                target: "spur.metrics.blob_store",
-                tracing::Level::DEBUG,
-                op = "get",
-                outcome = "err",
-                elapsed_us,
-                error = %e,
-                ?section,
-            ),
+            Err(e) => match e {
+                StoreError::NotFound(_) => event!(
+                    target: "spur.metrics.blob_store",
+                    tracing::Level::DEBUG,
+                    op = "get",
+                    outcome = "err",
+                    elapsed_us,
+                    error = %e,
+                    ?section,
+                ),
+                _ => event!(
+                    target: "spur.metrics.blob_store",
+                    tracing::Level::WARN,
+                    op = "get",
+                    outcome = "err",
+                    elapsed_us,
+                    error = %e,
+                    ?section,
+                ),
+            },
         }
         result
     }
