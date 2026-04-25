@@ -426,6 +426,7 @@ impl Reconciler {
                     completion_state,
                     result.worker_branch.as_deref(),
                     result.summary.as_deref(),
+                    None,
                     &Some(Arc::clone(&fast_forward)),
                 )
                 .await
