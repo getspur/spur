@@ -4,6 +4,8 @@ use rmcp::{model::CallToolRequestParams, transport::StreamableHttpClientTranspor
 use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer, WorkerInfo};
 
+mod common;
+
 fn test_continuation_ctx() -> DetachedContinuationCtx {
     // No-op on_complete: test harnesses don't route continuations.
     DetachedContinuationCtx {
@@ -14,6 +16,10 @@ fn test_continuation_ctx() -> DetachedContinuationCtx {
 #[tokio::test]
 async fn rmcp_client_can_initialize_list_tools_and_call_tool(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    skip_if_no_loopback!(
+        "rmcp_client_can_initialize_list_tools_and_call_tool",
+        Ok(())
+    );
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, _channel) = McpCallbackServer::new(
         &brain_sid,
