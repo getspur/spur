@@ -7,27 +7,37 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-schemars = { workspace = true }
-spur-acp = { workspace = true }
-spur-pm = { workspace = true }
-spur-worktree = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
+anyhow = { workspace = true }
 async-trait = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+parking_lot = "0.12"
+rmcp = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tracing = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-uuid = { workspace = true, features = ["v4", "serde"] }
-axum = { workspace = true }
-rmcp = { workspace = true }
-parking_lot = "0.12"
-chrono = { workspace = true }
 sha2 = { workspace = true }
+spur-acp = { workspace = true }
+spur-blob-store = { workspace = true }
+spur-pm = { workspace = true }
+spur-worktree = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+[features]
+default = []
+# Enables OutcomeMaterializer cap-override builders for tests in
+# downstream crates. spur-blob-store has the same feature for its
+# MockFailingOutcomeStore (Task 3).
+test-support = []
 
 [dev-dependencies]
-toml = { workspace = true }
+spur-blob-store = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 # start_paused = true on #[tokio::test] requires test-util feature.
 tokio = { version = "1", features = ["full", "test-util"] }
+toml = { workspace = true }

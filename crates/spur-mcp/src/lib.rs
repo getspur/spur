@@ -1,4 +1,5 @@
 pub mod events;
+pub mod outcome_materializer;
 pub mod plan;
 pub mod server;
 pub mod tool_schemas;
