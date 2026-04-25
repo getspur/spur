@@ -41,6 +41,11 @@ pub enum ArtifactKind {
 }
 
 /// Reference to a persisted continuation artifact.
+///
+/// **INVARIANT:** the `#[serde(flatten)]` attribute on `kind` is mandatory.
+/// Removing it changes the wire shape from `{"kind":"patch","uri":...}` to
+/// `{"kind":{"kind":"patch"},...}`. The golden round-trip test in
+/// `crates/spur-acp/tests/artifact_ref_wire_compat.rs` enforces this.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {
     #[serde(flatten)]
@@ -49,6 +54,12 @@ pub struct ArtifactRef {
     pub byte_size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Git ref path (e.g., `"refs/spur/artifacts/<session>"`) when stored as a git blob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_object_ref: Option<String>,
+    /// 40-char hex SHA-1 of the git blob; survives ref deletion until git GC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_blob_sha: Option<String>,
 }
 
 /// Narrow projection of a worker outcome for scheduler consumption.
@@ -161,6 +172,8 @@ mod tests {
                 uri: "spur://artifact/abc".into(),
                 byte_size: 42,
                 sha256: Some("a".repeat(64)),
+                git_object_ref: None,
+                git_blob_sha: None,
             }),
         };
         assert_eq!(p.summary.as_deref(), Some("done"));
@@ -198,6 +211,8 @@ mod tests {
                     uri: "spur://artifact/abc".into(),
                     byte_size: 42,
                     sha256: Some("f".repeat(64)),
+                    git_object_ref: None,
+                    git_blob_sha: None,
                 }),
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
