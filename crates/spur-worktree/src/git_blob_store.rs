@@ -200,13 +200,24 @@ impl OutcomeStore for GitBlobOutcomeStore {
             )));
         }
 
+        let blob_ref = Self::blob_ref(key);
+
         if let Some(existing) = self.read_meta(key).await? {
             if existing.sha256 == new_sha {
+                // Recover the git SHA-1 of the existing blob ref so the
+                // returned OutcomeRef carries it for backcompat consumers.
+                let existing_git_sha = self
+                    .run_git(&["rev-parse", "--verify", &blob_ref])
+                    .await
+                    .ok()
+                    .map(|out| String::from_utf8_lossy(&out).trim().to_string())
+                    .filter(|s| !s.is_empty());
                 return Ok(OutcomeRef {
                     key: key.clone(),
                     sha256: new_sha,
                     byte_size: existing.stored_byte_size,
                     backend: BackendTag::GitBlob,
+                    git_blob_sha: existing_git_sha,
                 });
             }
             return Err(StoreError::ContentMismatch {
@@ -221,27 +232,44 @@ impl OutcomeStore for GitBlobOutcomeStore {
             .run_git_with_stdin(&["hash-object", "-w", "--stdin"], content)
             .await?;
         let blob_sha = String::from_utf8_lossy(&blob_sha_bytes).trim().to_string();
-        let blob_ref = Self::blob_ref(key);
         self.run_git(&["update-ref", &blob_ref, &blob_sha]).await?;
 
-        // Write the meta blob.
-        let meta_bytes = serde_json::to_vec(metadata)
-            .map_err(|e| StoreError::Backend(format!("metadata serialize: {e}")))?;
-        let meta_blob_sha_bytes = self
+        // Write the meta blob. If meta-side ops fail, delete the orphan
+        // .blob ref so the next put doesn't trip the (sha256, no-meta)
+        // edge case and so sweep_older_than's metadata-keyed sweeper
+        // can't miss the leak.
+        let meta_bytes = match serde_json::to_vec(metadata) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = self.run_git(&["update-ref", "-d", &blob_ref]).await;
+                return Err(StoreError::Backend(format!("metadata serialize: {e}")));
+            }
+        };
+        let meta_blob_sha_bytes = match self
             .run_git_with_stdin(&["hash-object", "-w", "--stdin"], &meta_bytes)
-            .await?;
+            .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = self.run_git(&["update-ref", "-d", &blob_ref]).await;
+                return Err(e);
+            }
+        };
         let meta_blob_sha = String::from_utf8_lossy(&meta_blob_sha_bytes)
             .trim()
             .to_string();
         let meta_ref = Self::meta_ref(key);
-        self.run_git(&["update-ref", &meta_ref, &meta_blob_sha])
-            .await?;
+        if let Err(e) = self.run_git(&["update-ref", &meta_ref, &meta_blob_sha]).await {
+            let _ = self.run_git(&["update-ref", "-d", &blob_ref]).await;
+            return Err(e);
+        }
 
         Ok(OutcomeRef {
             key: key.clone(),
             sha256: new_sha,
             byte_size: metadata.stored_byte_size,
             backend: BackendTag::GitBlob,
+            git_blob_sha: Some(blob_sha),
         })
     }
 

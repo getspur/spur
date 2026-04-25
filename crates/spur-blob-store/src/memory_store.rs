@@ -71,6 +71,7 @@ impl OutcomeStore for MemoryOutcomeStore {
                 sha256: existing_meta.sha256.clone(),
                 byte_size: existing_meta.stored_byte_size,
                 backend: BackendTag::Fs,
+                git_blob_sha: None,
             });
         }
 
@@ -80,6 +81,7 @@ impl OutcomeStore for MemoryOutcomeStore {
             sha256: new_sha,
             byte_size: metadata.stored_byte_size,
             backend: BackendTag::Fs,
+            git_blob_sha: None,
         })
     }
 

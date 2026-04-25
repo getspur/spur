@@ -132,6 +132,7 @@ impl OutcomeStore for FsOutcomeStore {
                     sha256: new_sha,
                     byte_size: existing_meta.stored_byte_size,
                     backend: BackendTag::Fs,
+                    git_blob_sha: None,
                 });
             }
             return Err(StoreError::ContentMismatch {
@@ -169,6 +170,7 @@ impl OutcomeStore for FsOutcomeStore {
             sha256: new_sha,
             byte_size: metadata.stored_byte_size,
             backend: BackendTag::Fs,
+            git_blob_sha: None,
         })
     }
 
