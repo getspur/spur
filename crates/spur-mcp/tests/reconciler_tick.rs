@@ -37,6 +37,8 @@ use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
+mod common;
+
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -1274,6 +1276,7 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
         );
         return;
     }
+    skip_if_no_loopback!("submit_plan_default_notify_path_dispatches_ready_task");
 
     let dir = TempDir::new().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
@@ -1301,20 +1304,10 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
     server.set_reconciler_enabled(true, None);
 
     let server = Arc::new(server);
-    let started = Arc::clone(&server).start().await;
-    let (_url, _handle) = match started {
-        Ok(started) => started,
-        Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("Failed to bind TCP listener") {
-                eprintln!(
-                    "skipping submit_plan_default_notify_path_dispatches_ready_task: {message}"
-                );
-                return;
-            }
-            panic!("start server: {message}");
-        }
-    };
+    let (_url, _handle) = Arc::clone(&server)
+        .start()
+        .await
+        .expect("start server (loopback bind already probed at fn entry)");
 
     let response = server
         .__test_call_submit_plan(serde_json::json!({
@@ -1347,6 +1340,7 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
         );
         return;
     }
+    skip_if_no_loopback!("execute_epic_default_notify_path_dispatches_ready_task");
 
     let dir = TempDir::new().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
@@ -1418,20 +1412,10 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
     }]);
 
     let server = Arc::new(server);
-    let started = Arc::clone(&server).start().await;
-    let (_url, _handle) = match started {
-        Ok(started) => started,
-        Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("Failed to bind TCP listener") {
-                eprintln!(
-                    "skipping execute_epic_default_notify_path_dispatches_ready_task: {message}"
-                );
-                return;
-            }
-            panic!("start server: {message}");
-        }
-    };
+    let (_url, _handle) = Arc::clone(&server)
+        .start()
+        .await
+        .expect("start server (loopback bind already probed at fn entry)");
 
     let response = server
         .__test_call_execute_epic(&epic_id, Some("codex"))
