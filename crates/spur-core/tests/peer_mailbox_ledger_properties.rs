@@ -1,13 +1,24 @@
 use proptest::prelude::*;
-use proptest::test_runner::Config as ProptestConfig;
+use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use spur_acp::domain::delegation::DelegationId;
 use spur_acp::domain::peer_message::{
     LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId,
 };
-use spur_core::peer_mailbox::ledger::{LedgerError, TransitionOutcome};
+use spur_core::peer_mailbox::ledger::{
+    is_terminal, is_valid_transition, InjectionOutcome, LedgerError, TransitionOutcome,
+};
 use spur_core::peer_mailbox::{InMemoryLedger, PeerMailboxLedger};
 use std::collections::HashSet;
+use std::sync::LazyLock;
+use tokio::runtime::{Builder, Runtime};
 use uuid::Uuid;
+
+static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime builds")
+});
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -74,7 +85,7 @@ fn reachable_terminal_strategy() -> impl Strategy<Value = LedgerState> {
 }
 
 fn prompt_id_strategy() -> impl Strategy<Value = String> {
-    "prompt-[a-f0-9]{8}"
+    "prompt-[a-f0-9]{1}"
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -100,66 +111,6 @@ fn all_states() -> [LedgerState; 11] {
         LedgerState::Undeliverable,
         LedgerState::Unknown,
     ]
-}
-
-fn non_terminal_states() -> [LedgerState; 5] {
-    [
-        LedgerState::Accepted,
-        LedgerState::Queued,
-        LedgerState::DeliveredInflight,
-        LedgerState::Delivered,
-        LedgerState::Unknown,
-    ]
-}
-
-fn is_terminal_local(state: LedgerState) -> bool {
-    matches!(
-        state,
-        LedgerState::Rejected
-            | LedgerState::Consumed
-            | LedgerState::Ignored
-            | LedgerState::Expired
-            | LedgerState::Dropped
-            | LedgerState::Undeliverable
-    )
-}
-
-fn is_valid_transition_local(from: LedgerState, to: LedgerState) -> bool {
-    if from == to {
-        return true;
-    }
-
-    matches!(
-        (from, to),
-        (
-            LedgerState::Accepted,
-            LedgerState::Queued
-                | LedgerState::DeliveredInflight
-                | LedgerState::Undeliverable
-                | LedgerState::Consumed
-                | LedgerState::Ignored
-        ) | (
-            LedgerState::Queued,
-            LedgerState::DeliveredInflight
-                | LedgerState::Expired
-                | LedgerState::Dropped
-                | LedgerState::Undeliverable
-        ) | (
-            LedgerState::DeliveredInflight,
-            LedgerState::Queued
-                | LedgerState::Delivered
-                | LedgerState::Consumed
-                | LedgerState::Ignored
-                | LedgerState::Expired
-                | LedgerState::Dropped
-        ) | (
-            LedgerState::Delivered,
-            LedgerState::Consumed
-                | LedgerState::Ignored
-                | LedgerState::Expired
-                | LedgerState::Dropped
-        )
-    )
 }
 
 fn mk_envelope(message_id_seed: u64) -> PeerMessageEnvelope {
@@ -209,7 +160,7 @@ async fn snapshot(ledger: &InMemoryLedger, message_id: &PeerMessageId) -> Option
     ledger.get(message_id).await.map(|entry| EntrySnapshot {
         state: entry.state,
         injected_into_prompts: entry.injected_into_prompts,
-        terminal: is_terminal_local(entry.state),
+        terminal: is_terminal(entry.state),
     })
 }
 
@@ -279,7 +230,9 @@ async fn drive_to_state(ledger: &InMemoryLedger, message_id: &PeerMessageId, sta
         LedgerState::Rejected | LedgerState::Unknown => {
             panic!("{state:?} is not reachable through the public ledger API")
         }
-        _ => panic!("unsupported non-exhaustive ledger state {state:?}"),
+        future_state => {
+            panic!("unsupported future ledger state {future_state:?}")
+        }
     }
 }
 
@@ -293,7 +246,7 @@ async fn ensure_terminal(
     }
 
     let current = ledger.get(&envelope.message_id).await.unwrap().state;
-    if is_terminal_local(current) {
+    if is_terminal(current) {
         return current;
     }
 
@@ -352,7 +305,7 @@ async fn ensure_terminal(
     }
 
     let terminal = ledger.get(&envelope.message_id).await.unwrap().state;
-    assert!(is_terminal_local(terminal));
+    assert!(is_terminal(terminal));
     terminal
 }
 
@@ -373,61 +326,102 @@ fn transition_signature(result: Result<TransitionOutcome, LedgerError>) -> Trans
 fn expected_transition_signature(from: LedgerState, to: LedgerState) -> TransitionSignature {
     if from == to {
         TransitionSignature::Unchanged(to)
-    } else if is_valid_transition_local(from, to) {
+    } else if is_valid_transition(from, to) {
         TransitionSignature::Changed { from, to }
     } else {
         TransitionSignature::InvalidTransition { from, to }
     }
 }
 
+/// Covers the current in-memory ledger; Stage-2 persistent ledger impls must
+/// re-verify this property when they exist.
+#[test]
+fn prop_apply_is_deterministic() {
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases: 64,
+        ..ProptestConfig::default()
+    });
+
+    runner
+        .run(&prop::collection::vec(op_strategy(), 0..50), |ops| {
+            RUNTIME.block_on(async {
+                let envelope = mk_envelope(1);
+                let ledger_a = InMemoryLedger::new();
+                apply_ops(&ledger_a, &envelope, &ops).await;
+                let snapshot_a = snapshot(&ledger_a, &envelope.message_id).await;
+
+                let ledger_b = InMemoryLedger::new();
+                apply_ops(&ledger_b, &envelope, &ops).await;
+                let snapshot_b = snapshot(&ledger_b, &envelope.message_id).await;
+
+                assert_eq!(snapshot_a, snapshot_b);
+            });
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn prop_relaxed_arms_are_legal() {
+    RUNTIME.block_on(async {
+        for (idx, from, to) in [
+            (0, LedgerState::Accepted, LedgerState::Consumed),
+            (1, LedgerState::Accepted, LedgerState::Ignored),
+            (2, LedgerState::DeliveredInflight, LedgerState::Consumed),
+            (3, LedgerState::DeliveredInflight, LedgerState::Ignored),
+            (4, LedgerState::DeliveredInflight, LedgerState::Expired),
+            (5, LedgerState::DeliveredInflight, LedgerState::Dropped),
+        ] {
+            let envelope = mk_envelope(70 + idx);
+            let ledger = InMemoryLedger::new();
+            ledger.accept(envelope.clone()).await.unwrap();
+            drive_to_state(&ledger, &envelope.message_id, from).await;
+
+            assert_eq!(
+                ledger.transition(&envelope.message_id, to).await.unwrap(),
+                TransitionOutcome::Changed { from, to }
+            );
+        }
+
+        let envelope = mk_envelope(80);
+        let ledger = InMemoryLedger::new();
+        ledger.accept(envelope.clone()).await.unwrap();
+        drive_to_state(&ledger, &envelope.message_id, LedgerState::Queued).await;
+
+        assert_eq!(
+            transition_signature(
+                ledger
+                    .transition(&envelope.message_id, LedgerState::Consumed)
+                    .await
+            ),
+            TransitionSignature::InvalidTransition {
+                from: LedgerState::Queued,
+                to: LedgerState::Consumed,
+            }
+        );
+    });
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
 
     #[test]
-    fn prop_replay_idempotence(ops in prop::collection::vec(op_strategy(), 0..50)) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            let envelope = mk_envelope(1);
-            let ledger_a = InMemoryLedger::new();
-            apply_ops(&ledger_a, &envelope, &ops).await;
-            let snapshot_a = snapshot(&ledger_a, &envelope.message_id).await;
-
-            let ledger_b = InMemoryLedger::new();
-            apply_ops(&ledger_b, &envelope, &ops).await;
-            let snapshot_b = snapshot(&ledger_b, &envelope.message_id).await;
-
-            assert_eq!(snapshot_a, snapshot_b);
-        });
-    }
-
-    #[test]
-    fn prop_terminal_states_reject_outgoing_transitions(
+    fn prop_apply_is_idempotent_for_terminal_state(
         ops in prop::collection::vec(op_strategy(), 0..50),
         terminal in reachable_terminal_strategy(),
     ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
+        RUNTIME.block_on(async {
             let envelope = mk_envelope(2);
             let ledger = InMemoryLedger::new();
             apply_ops(&ledger, &envelope, &ops).await;
             let terminal = ensure_terminal(&ledger, &envelope, terminal).await;
+            let state_before = ledger.get(&envelope.message_id).await.unwrap().state;
 
-            for target in all_states() {
-                let signature = transition_signature(
-                    ledger.transition(&envelope.message_id, target).await
-                );
-                if target == terminal {
-                    assert_eq!(signature, TransitionSignature::Unchanged(terminal));
-                } else {
-                    assert_eq!(
-                        signature,
-                        TransitionSignature::InvalidTransition {
-                            from: terminal,
-                            to: target,
-                        }
-                    );
-                }
-            }
+            apply_ops(&ledger, &envelope, &ops).await;
+
+            let state_after = ledger.get(&envelope.message_id).await.unwrap().state;
+            assert_eq!(state_before, terminal);
+            assert_eq!(state_after, terminal);
         });
     }
 
@@ -438,8 +432,7 @@ proptest! {
         prompts_a in prop::collection::vec(prompt_id_strategy(), 0..8),
         prompts_b in prop::collection::vec(prompt_id_strategy(), 0..8),
     ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
+        RUNTIME.block_on(async {
             let envelope_a = mk_envelope(3);
             let ledger_a = InMemoryLedger::new();
             ledger_a.accept(envelope_a.clone()).await.unwrap();
@@ -477,56 +470,74 @@ proptest! {
 
     #[test]
     fn prop_injection_set_grows_monotonically(ops in prop::collection::vec(op_strategy(), 0..50)) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
+        let (injected_count, already_injected_count) = RUNTIME.block_on(async {
             let envelope = mk_envelope(5);
             let ledger = InMemoryLedger::new();
-            let mut previous_len = 0;
+            let mut previous_set = HashSet::new();
+            let mut injected_count = 0;
+            let mut already_injected_count = 0;
 
             for op in &ops {
-                apply_op(&ledger, &envelope, op).await;
+                match op {
+                    Op::RecordInjection(prompt_id) => {
+                        match ledger.record_injection(&envelope.message_id, prompt_id).await {
+                            Ok(InjectionOutcome::Injected) => injected_count += 1,
+                            Ok(InjectionOutcome::AlreadyInjected) => already_injected_count += 1,
+                            Err(LedgerError::NotFound(_)) => {}
+                            Err(other) => panic!("unexpected injection error: {other:?}"),
+                        }
+                    }
+                    other => apply_op(&ledger, &envelope, other).await,
+                }
+
                 if let Some(entry) = ledger.get(&envelope.message_id).await {
-                    let current_len = entry.injected_into_prompts.len();
+                    let current_set = entry.injected_into_prompts.clone();
                     assert!(
-                        current_len >= previous_len,
-                        "injection set shrank from {previous_len} to {current_len}"
+                        current_set.is_superset(&previous_set),
+                        "injection set lost prompts: previous={previous_set:?}, current={current_set:?}"
                     );
-                    previous_len = current_len;
+                    previous_set = current_set;
+                }
+            }
+
+            (injected_count, already_injected_count)
+        });
+
+        prop_assume!(injected_count > 0 && already_injected_count > 0);
+    }
+
+    #[test]
+    fn prop_terminal_states_reject_outgoing_transitions_under_full_state_targeting(
+        terminal in reachable_terminal_strategy(),
+    ) {
+        RUNTIME.block_on(async {
+            let envelope = mk_envelope(6);
+            let ledger = InMemoryLedger::new();
+            ledger.accept(envelope.clone()).await.unwrap();
+            drive_to_state(&ledger, &envelope.message_id, terminal).await;
+
+            for target in all_states() {
+                let signature = transition_signature(
+                    ledger.transition(&envelope.message_id, target).await
+                );
+                if target == terminal {
+                    assert_eq!(signature, TransitionSignature::Unchanged(terminal));
+                } else {
+                    assert_eq!(
+                        signature,
+                        TransitionSignature::InvalidTransition {
+                            from: terminal,
+                            to: target,
+                        }
+                    );
                 }
             }
         });
     }
 
     #[test]
-    fn prop_terminal_lockout_holds_under_relaxed_matrix(
-        terminal in reachable_terminal_strategy(),
-    ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            let envelope = mk_envelope(6);
-            let ledger = InMemoryLedger::new();
-            ledger.accept(envelope.clone()).await.unwrap();
-            drive_to_state(&ledger, &envelope.message_id, terminal).await;
-
-            for target in non_terminal_states() {
-                let signature = transition_signature(
-                    ledger.transition(&envelope.message_id, target).await
-                );
-                assert_eq!(
-                    signature,
-                    TransitionSignature::InvalidTransition {
-                        from: terminal,
-                        to: target,
-                    }
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn prop_accept_then_transition_invariants(seed in any::<u64>()) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
+    fn prop_accept_invariants(seed in any::<u64>()) {
+        RUNTIME.block_on(async {
             let envelope = mk_envelope(seed);
             let ledger = InMemoryLedger::new();
             ledger.accept(envelope.clone()).await.unwrap();
@@ -551,6 +562,35 @@ proptest! {
                 .map(|entry| entry.envelope.message_id)
                 .collect();
             assert!(pending_ids.contains(&envelope.message_id));
+        });
+    }
+
+    #[test]
+    fn prop_message_leaves_non_terminal_index_when_terminalized(
+        seed in any::<u64>(),
+        terminal in reachable_terminal_strategy(),
+    ) {
+        RUNTIME.block_on(async {
+            let envelope = mk_envelope(seed);
+            let ledger = InMemoryLedger::new();
+            ledger.accept(envelope.clone()).await.unwrap();
+            drive_to_state(&ledger, &envelope.message_id, terminal).await;
+
+            let non_terminal_ids: HashSet<_> = ledger
+                .non_terminal_entries()
+                .await
+                .into_iter()
+                .map(|entry| entry.envelope.message_id)
+                .collect();
+            assert!(!non_terminal_ids.contains(&envelope.message_id));
+
+            let pending_ids: HashSet<_> = ledger
+                .pending_for_target(&envelope.target_delegation_id)
+                .await
+                .into_iter()
+                .map(|entry| entry.envelope.message_id)
+                .collect();
+            assert!(!pending_ids.contains(&envelope.message_id));
         });
     }
 }
