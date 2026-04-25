@@ -2,6 +2,7 @@ pub mod artifact;
 pub mod continuation;
 pub mod delegation;
 pub mod events;
+pub mod outcome;
 pub mod peer_message;
 
 pub use artifact::{ArtifactKind, WorkerArtifact};
@@ -18,6 +19,7 @@ pub use events::{
     HistoryEntry, IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan,
     LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind, SpurEvent, SpurEventBody,
 };
+pub use outcome::{BackendTag, OutcomeKey, OutcomeRef};
 pub use peer_message::{
     LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
 };
