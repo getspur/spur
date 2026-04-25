@@ -141,12 +141,18 @@ struct ContinuationResourceBody<'a> {
     worker_branch: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_ref: &'a Option<spur_acp::domain::ArtifactRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_cost_micros: &'a Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_id: &'a Option<spur_acp::domain::outcome::OutcomeKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fetch_hint: &'a Option<String>,
     created_at_wall: &'a chrono::DateTime<chrono::Utc>,
 }
 
 fn continuation_resource_body(c: &BrainContinuation) -> ContinuationResourceBody<'_> {
     ContinuationResourceBody {
-        schema_version: 2,
+        schema_version: 3,
         delegation_id: &c.delegation_id,
         attempt: c.attempt,
         brain_session: &c.brain_session,
@@ -156,6 +162,9 @@ fn continuation_resource_body(c: &BrainContinuation) -> ContinuationResourceBody
         diff_summary: &c.payload.diff_summary,
         worker_branch: &c.payload.worker_branch,
         artifact_ref: &c.payload.artifact_ref,
+        estimated_cost_micros: &c.payload.estimated_cost_micros,
+        artifact_id: &c.payload.artifact_id,
+        fetch_hint: &c.payload.fetch_hint,
         created_at_wall: &c.created_at_wall,
     }
 }
@@ -321,6 +330,9 @@ mod tests {
                 diff_summary: None,
                 worker_branch: None,
                 artifact_ref: None,
+                estimated_cost_micros: None,
+                artifact_id: None,
+                fetch_hint: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),
@@ -607,20 +619,52 @@ mod tests {
     }
 
     #[test]
-    fn test_wire_json_schema_version_2() {
-        let continuation = mk_cont(
+    fn test_wire_json_schema_version_3() {
+        let mut continuation = mk_cont(
             "id-1",
             1,
             ContinuationSource::AsyncRequested,
             Some("done".into()),
         );
+        continuation.payload.estimated_cost_micros = Some(12_345);
+        continuation.payload.artifact_id = Some(spur_acp::domain::outcome::OutcomeKey {
+            brain_session_id: spur_acp::BrainSessionId::new(SessionId(
+                "550e8400-e29b-41d4-a716-446655440000".into(),
+            )),
+            delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
+            attempt: 1,
+        });
+        continuation.payload.fetch_hint = Some("Call fetch_outcome_artifact.".into());
         let outcome = render_autonomous_turn_with_spill_v2(
             std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
         );
         let json = first_resource_json(&outcome.blocks);
 
-        assert_eq!(json["schema_version"], Value::from(2));
+        assert_eq!(json["schema_version"], Value::from(3));
+        assert_eq!(json["estimated_cost_micros"], Value::from(12_345));
+        assert!(json["artifact_id"].is_object());
+        assert_eq!(
+            json["fetch_hint"],
+            Value::from("Call fetch_outcome_artifact.")
+        );
+    }
+
+    #[test]
+    fn v3_emits_v2_compatible_json_when_new_fields_are_none() {
+        let continuation = mk_cont(
+            "id-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("done".into()),
+        );
+        let json = serde_json::to_value(continuation_resource_body(&continuation))
+            .expect("continuation resource body must serialize");
+
+        assert_eq!(json["schema_version"], Value::from(3));
+        assert!(json.get("estimated_cost_micros").is_none());
+        assert!(json.get("artifact_id").is_none());
+        assert!(json.get("fetch_hint").is_none());
     }
 
     #[test]

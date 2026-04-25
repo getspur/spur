@@ -5539,10 +5539,10 @@ pub mod test_support {
     // ─── Review gate helpers ──────────────────────────────────────────
     // Test-only. Production code uses ReviewSink::register_handle (INV-4).
 
-    use crate::review_sink::ReviewSinkError;
     use super::{
         apply_decision_to_candidate, DelegationStatus, ExecutorId, ReviewSink, TimeoutFallback,
     };
+    use crate::review_sink::ReviewSinkError;
 
     /// Register a pending review on the sink. Returns the receiver the
     /// caller awaits.
@@ -6594,6 +6594,9 @@ mod interactive_input_tests {
                 diff_summary: None,
                 worker_branch: None,
                 artifact_ref: None,
+                estimated_cost_micros: None,
+                artifact_id: None,
+                fetch_hint: None,
             },
             created_at_wall: Utc::now(),
             created_at_mono: Instant::now(),
@@ -6678,6 +6681,9 @@ mod phase5_orchestrator_finalization_tests {
                 diff_summary: None,
                 worker_branch: None,
                 artifact_ref: None,
+                estimated_cost_micros: None,
+                artifact_id: None,
+                fetch_hint: None,
             },
             created_at_wall: Utc::now(),
             created_at_mono: Instant::now(),

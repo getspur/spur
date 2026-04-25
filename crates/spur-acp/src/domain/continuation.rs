@@ -77,6 +77,18 @@ pub struct ContinuationPayload {
     /// to retrievable storage rather than inlining the bytes into ACP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_ref: Option<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<crate::domain::outcome::OutcomeKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_hint: Option<String>,
+}
+
+impl ContinuationPayload {
+    pub fn estimated_cost_usd(&self) -> Option<f64> {
+        self.estimated_cost_micros.map(|m| m as f64 / 1_000_000.0)
+    }
 }
 
 /// One detached delegation result awaiting brain re-entry.
@@ -175,6 +187,9 @@ mod tests {
                 git_object_ref: None,
                 git_blob_sha: None,
             }),
+            estimated_cost_micros: None,
+            artifact_id: None,
+            fetch_hint: None,
         };
         assert_eq!(p.summary.as_deref(), Some("done"));
         assert!(matches!(p.status, DelegationStatus::Success));
@@ -182,6 +197,63 @@ mod tests {
             p.artifact_ref.as_ref().map(|artifact| artifact.byte_size),
             Some(42)
         );
+    }
+
+    #[test]
+    fn continuation_payload_v3_round_trips_through_serde() {
+        use crate::domain::outcome::OutcomeKey;
+        use crate::types::SessionId;
+        use crate::BrainSessionId;
+
+        let payload = ContinuationPayload {
+            status: DelegationStatus::Success,
+            summary: Some("ok".into()),
+            diff_summary: None,
+            worker_branch: Some("spur/worker-x".into()),
+            artifact_ref: None,
+            estimated_cost_micros: Some(12_345),
+            artifact_id: Some(OutcomeKey {
+                brain_session_id: BrainSessionId::new(SessionId(
+                    "550e8400-e29b-41d4-a716-446655440000".into(),
+                )),
+                delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
+                attempt: 1,
+            }),
+            fetch_hint: Some("Full diff truncated. Call fetch_outcome_artifact.".into()),
+        };
+        let s = serde_json::to_string(&payload).expect("serialize");
+        let back: ContinuationPayload = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn estimated_cost_usd_converts_micros_correctly() {
+        let payload = ContinuationPayload {
+            status: DelegationStatus::Success,
+            summary: None,
+            diff_summary: None,
+            worker_branch: None,
+            artifact_ref: None,
+            estimated_cost_micros: Some(1_234_567),
+            artifact_id: None,
+            fetch_hint: None,
+        };
+        let usd = payload.estimated_cost_usd().expect("Some");
+        assert!((usd - 1.234567).abs() < 1e-9);
+    }
+
+    #[test]
+    fn v3_payload_deserializes_from_v2_envelope_with_serde_default() {
+        let v2_json = r#"{
+            "status": "Success",
+            "summary": null,
+            "diff_summary": null,
+            "worker_branch": null
+        }"#;
+        let back: ContinuationPayload = serde_json::from_str(v2_json).expect("deserialize");
+        assert!(back.estimated_cost_micros.is_none());
+        assert!(back.artifact_id.is_none());
+        assert!(back.fetch_hint.is_none());
     }
 
     #[test]
@@ -214,6 +286,9 @@ mod tests {
                     git_object_ref: None,
                     git_blob_sha: None,
                 }),
+                estimated_cost_micros: None,
+                artifact_id: None,
+                fetch_hint: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),
@@ -258,6 +333,9 @@ mod tests {
                 diff_summary: None,
                 worker_branch: None,
                 artifact_ref: None,
+                estimated_cost_micros: None,
+                artifact_id: None,
+                fetch_hint: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),
