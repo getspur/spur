@@ -181,7 +181,13 @@ async fn test_no_double_delivery_on_block_timeout() {
     };
 
     let brain_sid = BrainSessionId::new(SessionId::new());
-    let (mut server, mut channel) = McpCallbackServer::new(&brain_sid, None, None, ctx);
+    let (mut server, mut channel) = McpCallbackServer::new(
+        &brain_sid,
+        None,
+        None,
+        ctx,
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server.set_workers(vec![WorkerInfo {
         name: "worker-slow".into(),
         tier: Some("generalist".into()),
@@ -305,7 +311,13 @@ async fn test_no_double_delivery_on_fast_path() {
     };
 
     let brain_sid = BrainSessionId::new(SessionId::new());
-    let (mut server, mut channel) = McpCallbackServer::new(&brain_sid, None, None, ctx);
+    let (mut server, mut channel) = McpCallbackServer::new(
+        &brain_sid,
+        None,
+        None,
+        ctx,
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server.set_workers(vec![WorkerInfo {
         name: "worker-fast".into(),
         tier: Some("generalist".into()),

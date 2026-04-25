@@ -7,6 +7,12 @@ use spur_mcp::server::{DetachedCompletionHandle, DetachedContinuationCtx, Detach
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+fn test_materializer() -> spur_mcp::outcome_materializer::OutcomeMaterializer {
+    spur_mcp::outcome_materializer::OutcomeMaterializer::new(Arc::new(
+        spur_blob_store::MemoryOutcomeStore::new(),
+    ))
+}
+
 #[tokio::test]
 async fn test_block_timeout_fires_continuation() {
     let result_received = Arc::new(tokio::sync::Mutex::new(false));
@@ -50,6 +56,7 @@ async fn test_block_timeout_fires_continuation() {
         attempt_tracker: Arc::new(AtomicU32::new(1)),
         brain_session: SessionId("brain-session-1".into()),
         event_sink: None,
+        materializer: test_materializer(),
     });
 
     let request_id: spur_acp::DelegationId = "test-request-123".into();
@@ -111,6 +118,7 @@ async fn test_attempt_threaded_into_continuation() {
         attempt_tracker: Arc::clone(&attempt_tracker),
         brain_session: SessionId("brain-session-2".into()),
         event_sink: None,
+        materializer: test_materializer(),
     });
 
     let request_id: spur_acp::DelegationId = "test-request-456".into();

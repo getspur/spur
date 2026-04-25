@@ -391,8 +391,13 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
 
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
-    let (mut server, mut channel) =
-        McpCallbackServer::new(&session_id, Some(pm), None, continuation_ctx());
+    let (mut server, mut channel) = McpCallbackServer::new(
+        &session_id,
+        Some(pm),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server.set_repo_root(dir.path().to_path_buf());
 
     // 1. submit_plan(persist_as_epic=true) must not dispatch directly

@@ -593,8 +593,13 @@ async fn persisted_submit_fixture() -> PersistedSubmitFixture {
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
-    let (mut server, channel) =
-        McpCallbackServer::new(&session_id, Some(pm), None, continuation_ctx());
+    let (mut server, channel) = McpCallbackServer::new(
+        &session_id,
+        Some(pm),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+    );
     server.set_repo_root(dir.path().to_path_buf());
     PersistedSubmitFixture {
         _dir: dir,

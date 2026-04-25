@@ -30,7 +30,9 @@ use agent_client_protocol::{
     ProtocolVersion, SessionInfo, SessionUpdate, SetSessionModeRequest, TextContent,
 };
 
-use spur_blob_store::{ContentType, OutcomeKey, OutcomeMetadata, OutcomeStore};
+use spur_blob_store::{
+    ContentType, MeasuredOutcomeStore, OutcomeKey, OutcomeMetadata, OutcomeStore,
+};
 use spur_cost::CostTracker;
 use spur_license::SpurLicense;
 use spur_mcp::{
@@ -608,6 +610,7 @@ pub struct Orchestrator {
     pub review_sink: ReviewSink, // Clone type, shares inner Arc<Mutex>
     repo_root: PathBuf,
     pub pm_service: Option<Arc<PmService>>,
+    outcome_store: Arc<dyn OutcomeStore>,
     /// INV-6: per-delegation cancellation token registry.
     cancellation_control: CancellationControl,
     /// Sender half of the `run_interactive` ingress channel.  Set by
@@ -746,6 +749,9 @@ impl Orchestrator {
     ) -> Result<Self> {
         let registry = AgentRegistry::load(config.agents.entries.clone());
         let worktrees = WorktreeManager::new(repo_root.clone());
+        let outcome_store: Arc<dyn OutcomeStore> = Arc::new(MeasuredOutcomeStore::new(
+            GitBlobOutcomeStore::new(worktrees.repo_root.clone()),
+        ));
 
         // Try to open cost tracker (non-fatal if it fails).
         let cost_tracker = {
@@ -797,6 +803,7 @@ impl Orchestrator {
             review_sink,
             repo_root,
             pm_service: None,
+            outcome_store,
             cancellation_control: CancellationControl::new(),
             continuation_tx: None,
             continuation_overflow: None,
@@ -983,8 +990,13 @@ impl Orchestrator {
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let adhoc_ctx = self.build_continuation_ctx(session_id.clone());
-        let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink, adhoc_ctx);
+        let (mcp_server, delegation_channel) = McpCallbackServer::new(
+            &brain_session_id,
+            self.pm_service.clone(),
+            sink,
+            adhoc_ctx,
+            self.outcome_store.clone(),
+        );
         let mut mcp_server = mcp_server;
 
         // Populate available workers.
@@ -2376,8 +2388,13 @@ impl Orchestrator {
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let cont_ctx = self.build_continuation_ctx(session_id.clone());
-        let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink, cont_ctx);
+        let (mcp_server, delegation_channel) = McpCallbackServer::new(
+            &brain_session_id,
+            self.pm_service.clone(),
+            sink,
+            cont_ctx,
+            self.outcome_store.clone(),
+        );
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
@@ -2578,8 +2595,13 @@ impl Orchestrator {
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
         let cont_ctx = self.build_continuation_ctx(session_id.clone());
-        let (mcp_server, delegation_channel) =
-            McpCallbackServer::new(&brain_session_id, self.pm_service.clone(), sink, cont_ctx);
+        let (mcp_server, delegation_channel) = McpCallbackServer::new(
+            &brain_session_id,
+            self.pm_service.clone(),
+            sink,
+            cont_ctx,
+            self.outcome_store.clone(),
+        );
         let mut mcp_server = mcp_server;
 
         let workers: Vec<WorkerInfo> = self
