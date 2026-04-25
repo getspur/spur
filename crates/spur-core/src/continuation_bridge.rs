@@ -107,7 +107,7 @@ use agent_client_protocol::{
     ContentBlock, EmbeddedResource, EmbeddedResourceResource, TextContent, TextResourceContents,
 };
 
-pub const MERGE_BUDGET_DEFAULT_BYTES: usize = 8192;
+pub use spur_acp::domain::merge_budget::MERGE_BUDGET_DEFAULT_BYTES;
 pub const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 
 const MARKER_AUTONOMOUS: &str =
@@ -233,7 +233,7 @@ fn pack_continuations<'a>(
     }
 }
 
-fn continuation_cost_bytes(c: &BrainContinuation) -> usize {
+pub fn continuation_cost_bytes(c: &BrainContinuation) -> usize {
     block_byte_cost(&continuation_resource_block(c))
 }
 
