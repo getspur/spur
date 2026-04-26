@@ -11,7 +11,7 @@ use spur_acp::session_liveness::{SessionLivenessProbe, SessionLivenessProbeResul
 use spur_acp::{session_liveness::SelfHeldSet, BrainSessionId};
 use spur_worktree::manager::parse_v2_branch;
 use tokio::process::Command;
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct AuthorityConfig {
@@ -70,7 +70,6 @@ pub struct WorktreeAuthority {
     self_held: SelfHeldSet,
     config: AuthorityConfig,
     last_seen_alive: tokio::sync::Mutex<HashMap<BrainSessionId, Instant>>,
-    #[allow(dead_code)] // wired up in Task 15 (sweep_once) for SweepReport telemetry
     funnel: crate::event_funnel::FunnelHandle,
 }
 
@@ -160,6 +159,29 @@ impl WorktreeAuthority {
                 }
             }
         }
+        // Spec algorithm step 3: prune once after all sweeps complete.
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&*self.repo_root)
+            .output()
+            .await;
+
+        // Spec algorithm step 4: emit telemetry. SpurEventBody does not yet
+        // have a WorktreeAuthoritySweep variant; a later task will add it.
+        // For now, log via tracing so the counters are visible, and reference
+        // self.funnel so the field remains part of the authority surface.
+        let _ = &self.funnel;
+        info!(
+            probed = report.probed,
+            swept = report.swept,
+            skipped_self = report.skipped_self,
+            skipped_live = report.skipped_live,
+            skipped_quarantine = report.skipped_quarantine,
+            skipped_unknown_owner = report.skipped_unknown_owner,
+            skipped_fs_unsafe = report.skipped_fs_unsafe,
+            remove_failures = report.remove_failures,
+            "WorktreeAuthority sweep complete"
+        );
         Ok(report)
     }
 
@@ -229,16 +251,24 @@ impl WorktreeAuthority {
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
         }
-        let _ = Command::new("git")
+        match Command::new("git")
             .args(["branch", "-D", branch])
             .current_dir(&*self.repo_root)
             .output()
-            .await;
-        let _ = Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(&*self.repo_root)
-            .output()
-            .await;
+            .await
+        {
+            Ok(o) if !o.status.success() => {
+                warn!(
+                    branch = %branch,
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "git branch -D failed during authority sweep; v2 branch may be leaked"
+                );
+            }
+            Err(e) => {
+                warn!(branch = %branch, error = %e, "git branch -D spawn failed during authority sweep");
+            }
+            Ok(_) => {}
+        }
         Ok(())
     }
 }
