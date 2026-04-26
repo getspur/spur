@@ -680,12 +680,12 @@ impl SessionPickerView {
             spans.push(Span::styled(cwd_suffix, muted_style));
             if show_brain {
                 spans.push(Span::raw("  "));
-                spans.push(Span::styled(brain.to_string(), muted_style));
+                spans.push(Span::styled(brain, muted_style));
             }
             spans.push(Span::raw("  "));
             spans.push(Span::styled(time_str, muted_style));
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(short_id.to_string(), muted_style));
+            spans.push(Span::styled(short_id, muted_style));
             if archived {
                 spans.push(Span::styled(" [archived]", muted_style));
             }
