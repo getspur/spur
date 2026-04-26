@@ -30,6 +30,20 @@ use agent_client_protocol::{
 use crate::connection::AgentConnection;
 use crate::types::AgentHealth;
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn spawn_stdio_for_test(
+    command: &str,
+    args: &[&str],
+) -> std::io::Result<tokio::process::Child> {
+    tokio::process::Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+}
+
 /// Manages a persistent subprocess and translates raw stdin/stdout into ACP message types.
 ///
 /// Unlike `CliWrapAdapter`, which spawns a fresh process for every `prompt()` call,
@@ -90,6 +104,7 @@ impl StdioAdapter {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 self.health_status = AgentHealth::Error(format!("Failed to spawn process: {e}"));
