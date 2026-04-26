@@ -117,6 +117,14 @@ impl FeatureKey {
     pub const CORE_CORE_CANCELLABLE_SEMAPHORE: Self = Self("core_core_cancellable_semaphore");
     pub const CORE_PRO_WORKER_HEARTBEAT_WATCHDOG: Self = Self("core_pro_worker_heartbeat_watchdog");
 
+    // --- spur-core: event pipeline (5) ---
+    pub const CORE_CORE_EVENT_FUNNEL_BROADCAST: Self = Self("core_core_event_funnel_broadcast");
+    pub const CORE_CORE_EVENT_SINK_NDJSON_128MB: Self = Self("core_core_event_sink_ndjson_128mb");
+    pub const CORE_CORE_EXECUTOR_LINEAGE_PROJECTION: Self =
+        Self("core_core_executor_lineage_projection");
+    pub const CORE_CORE_NOTIFICATION_PUMP: Self = Self("core_core_notification_pump");
+    pub const CORE_PRO_BROADCAST_LAGGED_RECOVERY: Self = Self("core_pro_broadcast_lagged_recovery");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -241,6 +249,17 @@ impl FeatureKey {
             Some(Self::CORE_CORE_CANCELLABLE_SEMAPHORE)
         } else if bytes_eq(b, b"core_pro_worker_heartbeat_watchdog") {
             Some(Self::CORE_PRO_WORKER_HEARTBEAT_WATCHDOG)
+        // spur-core: event pipeline
+        } else if bytes_eq(b, b"core_core_event_funnel_broadcast") {
+            Some(Self::CORE_CORE_EVENT_FUNNEL_BROADCAST)
+        } else if bytes_eq(b, b"core_core_event_sink_ndjson_128mb") {
+            Some(Self::CORE_CORE_EVENT_SINK_NDJSON_128MB)
+        } else if bytes_eq(b, b"core_core_executor_lineage_projection") {
+            Some(Self::CORE_CORE_EXECUTOR_LINEAGE_PROJECTION)
+        } else if bytes_eq(b, b"core_core_notification_pump") {
+            Some(Self::CORE_CORE_NOTIFICATION_PUMP)
+        } else if bytes_eq(b, b"core_pro_broadcast_lagged_recovery") {
+            Some(Self::CORE_PRO_BROADCAST_LAGGED_RECOVERY)
         } else {
             None
         }
@@ -561,6 +580,19 @@ mod tests {
             "core_core_parallel_workers",
             "core_core_cancellable_semaphore",
             "core_pro_worker_heartbeat_watchdog",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_core_event_pipeline_keys_registered() {
+        for s in &[
+            "core_core_event_funnel_broadcast",
+            "core_core_event_sink_ndjson_128mb",
+            "core_core_executor_lineage_projection",
+            "core_core_notification_pump",
+            "core_pro_broadcast_lagged_recovery",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
