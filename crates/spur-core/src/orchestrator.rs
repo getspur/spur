@@ -858,6 +858,38 @@ impl Orchestrator {
         });
         orchestrator.background_tasks.push(sweep_handle);
 
+        if orchestrator.config.peer_mailbox_enabled {
+            let ledger: Arc<dyn crate::peer_mailbox::PeerMailboxLedger> =
+                Arc::new(crate::peer_mailbox::InMemoryLedger::new());
+            let (reconciler_tx, reconciler_rx) = tokio::sync::mpsc::unbounded_channel();
+            let session_slot: Arc<tokio::sync::RwLock<Option<String>>> =
+                Arc::new(Default::default());
+
+            let router = Arc::new(crate::peer_mailbox::PeerMailboxRouter::new(
+                ledger.clone(),
+                orchestrator.funnel.clone(),
+                reconciler_tx,
+                crate::peer_mailbox::Limits::default(),
+            ));
+            let builder = Arc::new(
+                crate::peer_mailbox::prompt_builder::PeerPromptContextBuilder::new(ledger.clone()),
+            );
+            orchestrator.peer_mailbox = Some(crate::peer_mailbox::PeerMailboxBundle {
+                router,
+                builder,
+                ledger: ledger.clone(),
+                brain_session_id_slot: session_slot.clone(),
+            });
+
+            let reconciler_handle = tokio::spawn(crate::peer_mailbox::run_reconciler_loop(
+                reconciler_rx,
+                ledger,
+                orchestrator.funnel.clone(),
+                session_slot,
+            ));
+            orchestrator.background_tasks.push(reconciler_handle);
+        }
+
         Ok(orchestrator)
     }
 
@@ -879,10 +911,23 @@ impl Orchestrator {
         self.continuation_overflow = Some(overflow);
     }
 
-    /// Stage-1 opt-in peer mailbox bundle attachment. Callers that enable
-    /// `SpurConfig::peer_mailbox_enabled` wire the bundle after construction.
+    /// Stage-1 peer mailbox bundle attachment for tests and custom embedding.
+    /// Production opt-in construction happens in `Orchestrator::new`.
     pub fn attach_peer_mailbox(&mut self, bundle: crate::peer_mailbox::PeerMailboxBundle) {
         self.peer_mailbox = Some(bundle);
+    }
+
+    /// Expose the production peer-mailbox bundle for integration tests and
+    /// diagnostic callers that need to inspect opt-in state.
+    pub fn peer_mailbox_bundle(&self) -> Option<&crate::peer_mailbox::PeerMailboxBundle> {
+        self.peer_mailbox.as_ref()
+    }
+
+    /// Return the reconciler task abort handle when the production peer mailbox
+    /// is attached. The reconciler is pushed immediately after bundle creation.
+    pub fn peer_mailbox_reconciler_abort_handle(&self) -> Option<tokio::task::AbortHandle> {
+        self.peer_mailbox.as_ref()?;
+        self.background_tasks.last().map(JoinHandle::abort_handle)
     }
 
     /// Build a `DetachedContinuationCtx` for `McpCallbackServer::new`.
@@ -1145,8 +1190,12 @@ impl Orchestrator {
                 .map(|n| n as usize)
                 .unwrap_or(self.config.worktree.max_concurrent);
             if let Some(bundle) = self.peer_mailbox.clone() {
+                *bundle.brain_session_id_slot.write().await = Some(brain_session_id.to_string());
                 let drain_quiet_window =
                     std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
+                // Idempotent: safe to call across multiple session boundaries because
+                // run_startup_reconcile only emits WorkerPeerMailboxReconciled on Changed
+                // (bd-cpf.5b). Stage-2 may consolidate these into a single helper.
                 let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
                     bundle.ledger.clone(),
                     self.funnel.clone(),
@@ -2535,8 +2584,12 @@ impl Orchestrator {
             .map(|n| n as usize)
             .unwrap_or(self.config.worktree.max_concurrent);
         if let Some(bundle) = self.peer_mailbox.clone() {
+            *bundle.brain_session_id_slot.write().await = Some(brain_session_id.to_string());
             let drain_quiet_window =
                 std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
+            // Idempotent: safe to call across multiple session boundaries because
+            // run_startup_reconcile only emits WorkerPeerMailboxReconciled on Changed
+            // (bd-cpf.5b). Stage-2 may consolidate these into a single helper.
             let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
                 bundle.ledger.clone(),
                 self.funnel.clone(),
@@ -2801,8 +2854,12 @@ impl Orchestrator {
             .map(|n| n as usize)
             .unwrap_or(self.config.worktree.max_concurrent);
         if let Some(bundle) = self.peer_mailbox.clone() {
+            *bundle.brain_session_id_slot.write().await = Some(brain_session_id.to_string());
             let drain_quiet_window =
                 std::time::Duration::from_millis(bundle.router.limits().drain_quiet_window_ms);
+            // Idempotent: safe to call across multiple session boundaries because
+            // run_startup_reconcile only emits WorkerPeerMailboxReconciled on Changed
+            // (bd-cpf.5b). Stage-2 may consolidate these into a single helper.
             let _ = crate::peer_mailbox::reconciler::run_startup_reconcile(
                 bundle.ledger.clone(),
                 self.funnel.clone(),
@@ -5358,6 +5415,7 @@ async fn drain_peer_acks_with_timeout(
         if let Err(err) = bundle
             .router
             .record_terminal(
+                brain_session_id.as_session_id().0.as_str(),
                 &message_id,
                 TerminalOutcome::Ignored {
                     reason: reason.into(),
@@ -6042,12 +6100,12 @@ mod peer_mailbox_drain_tests {
             funnel.clone(),
             reconciler_tx,
             Limits::default(),
-            "bs".into(),
         ));
         let bundle = PeerMailboxBundle {
             router,
             builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
             ledger,
+            brain_session_id_slot: Arc::new(tokio::sync::RwLock::new(Some("bs".into()))),
         };
 
         let mut delegation_to_task = HashMap::new();
@@ -6102,7 +6160,7 @@ mod peer_mailbox_drain_tests {
         match fixture
             .bundle
             .router
-            .accept_or_reject(envelope(message_id, target), &fixture.snapshot)
+            .accept_or_reject("bs", envelope(message_id, target), &fixture.snapshot)
             .await
             .unwrap()
         {
@@ -6622,7 +6680,7 @@ mod peer_mailbox_drain_tests {
         let err = fixture
             .bundle
             .router
-            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .record_terminal("bs", &message_id, TerminalOutcome::Consumed)
             .await
             .unwrap_err();
         match err {

@@ -175,7 +175,11 @@ pub async fn interpret_peer_message_terminal(
         _ => return,
     };
 
-    if let Err(err) = bundle.router.record_terminal(&message_id, outcome).await {
+    if let Err(err) = bundle
+        .router
+        .record_terminal(brain_session_id, &message_id, outcome)
+        .await
+    {
         tracing::warn!(
             method = %method,
             message_id = ?message_id,
@@ -203,6 +207,7 @@ pub async fn interpret_peer_message(
     source_executor_id: String,
     source_issue_id: String,
     source_plan_task_id: String,
+    brain_session_id: &str,
     payload: serde_json::Value,
 ) -> Result<crate::peer_mailbox::router::Acceptance, crate::peer_mailbox::router::RouterError> {
     use crate::peer_mailbox::router::RouterError;
@@ -300,7 +305,9 @@ pub async fn interpret_peer_message(
         sequence,
     };
 
-    router.accept_or_reject(envelope, snapshot).await
+    router
+        .accept_or_reject(brain_session_id, envelope, snapshot)
+        .await
 }
 
 #[cfg(test)]
@@ -432,7 +439,6 @@ mod tests {
             funnel.clone(),
             tx,
             Limits::default(),
-            "bs".into(),
         ));
 
         let mut delegation_to_task = HashMap::new();
@@ -492,6 +498,7 @@ mod tests {
             "ex".into(),
             "i1".into(),
             "ta".into(),
+            "bs",
             payload,
         )
         .await;
@@ -585,7 +592,6 @@ mod tests {
             funnel,
             tx,
             Limits::default(),
-            "bs".into(),
         ));
         let mut delegation_to_task = HashMap::new();
         delegation_to_task.insert(DelegationId("src".into()), "ta".into());
@@ -617,6 +623,7 @@ mod tests {
             "ex".into(),
             "i1".into(),
             "ta".into(),
+            "bs",
             payload,
         )
         .await
@@ -796,12 +803,12 @@ mod tests {
             funnel.clone(),
             reconciler_tx,
             Limits::default(),
-            "bs".into(),
         ));
         let bundle = PeerMailboxBundle {
             router: router.clone(),
             builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
             ledger: ledger.clone(),
+            brain_session_id_slot: Arc::new(tokio::sync::RwLock::new(Some("bs".into()))),
         };
 
         let mut delegation_to_task = HashMap::new();
@@ -835,6 +842,7 @@ mod tests {
             "ex".into(),
             "i1".into(),
             "ta".into(),
+            "bs",
             payload,
         )
         .await
@@ -908,12 +916,12 @@ mod tests {
             funnel.clone(),
             reconciler_tx,
             Limits::default(),
-            "bs".into(),
         ));
         let bundle = PeerMailboxBundle {
             router: router.clone(),
             builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
             ledger: ledger.clone(),
+            brain_session_id_slot: Arc::new(tokio::sync::RwLock::new(Some("bs".into()))),
         };
 
         let mut delegation_to_task = HashMap::new();
@@ -947,6 +955,7 @@ mod tests {
             "ex".into(),
             "i1".into(),
             "ta".into(),
+            "bs",
             payload,
         )
         .await
@@ -1016,12 +1025,12 @@ mod tests {
             funnel.clone(),
             reconciler_tx,
             Limits::default(),
-            "bs".into(),
         ));
         let bundle = PeerMailboxBundle {
             router,
             builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
             ledger,
+            brain_session_id_slot: Arc::new(tokio::sync::RwLock::new(Some("bs".into()))),
         };
 
         let (ack_tx, mut ack_rx) = unbounded_channel();
@@ -1072,12 +1081,12 @@ mod tests {
             funnel.clone(),
             reconciler_tx,
             Limits::default(),
-            "bs".into(),
         ));
         let bundle = PeerMailboxBundle {
             router,
             builder: Arc::new(PeerPromptContextBuilder::new(ledger.clone())),
             ledger,
+            brain_session_id_slot: Arc::new(tokio::sync::RwLock::new(Some("bs".into()))),
         };
 
         let (ack_tx, mut ack_rx) = unbounded_channel();

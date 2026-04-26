@@ -19,4 +19,5 @@ pub struct PeerMailboxBundle {
     pub router: Arc<router::PeerMailboxRouter>,
     pub builder: Arc<prompt_builder::PeerPromptContextBuilder>,
     pub ledger: Arc<dyn ledger::PeerMailboxLedger>,
+    pub brain_session_id_slot: Arc<tokio::sync::RwLock<Option<String>>>,
 }
