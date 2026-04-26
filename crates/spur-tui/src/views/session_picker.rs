@@ -35,6 +35,11 @@ fn footer_hint(
             search_focused: true,
             ..
         } => "type to filter \u{00b7} Enter commit \u{00b7} Esc exit search",
+        PickerState::Populated {
+            cursor: 0,
+            search_focused: false,
+            ..
+        } => "j/k nav \u{00b7} Enter new session \u{00b7} / search \u{00b7} P preview \u{00b7} Esc back",
         PickerState::Populated { .. } => {
             "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} p pin \u{00b7} d archive \u{00b7} y yank-id \u{00b7} P preview \u{00b7} Esc back"
         }
@@ -59,6 +64,11 @@ fn footer_hint_compact(
             search_focused: true,
             ..
         } => "\u{2191}\u{2193} pick \u{00b7} Esc",
+        PickerState::Populated {
+            cursor: 0,
+            search_focused: false,
+            ..
+        } => "j/k nav \u{00b7} \u{21b5} new \u{00b7} / search \u{00b7} Esc",
         PickerState::Populated { .. } => {
             "j/k nav \u{00b7} \u{21b5} resume \u{00b7} / search \u{00b7} y yank \u{00b7} Esc"
         }
