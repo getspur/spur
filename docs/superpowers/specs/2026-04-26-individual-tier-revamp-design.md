@@ -154,13 +154,15 @@ Risk-blocked features cite the relevant Risk # from `architecture.md` §8.
 | `core_core_ext_notification` | F | v1 | `AgentExtNotification` boundary injection (incl. `_spur/peer_message` routing) |
 
 #### Reliability & lifecycle
+**Revised 2026-04-26 (Wave 4 gate-review pass).** Per gemini findings symmetric with Task 7 review-key revision: dropped `basic_` prefix (impl leak); moved `plan_orphan_recovery` (Risk #13 safety baseline) and `background_task_tracker` (Risk #6 lifecycle hygiene) from Pro to Free. Free users persisting plans must not lose work to startup-time orphans; Rust async hygiene is not a premium feature. Pro retains `event_replay` as the only true upsell (full lineage rebuild beyond live re-attach).
+
 | Key | Tier | Status | Description |
 |---|---|---|---|
-| `core_core_basic_session_resume` | F | v1 | Process-restart re-attach to live brain session |
-| `core_pro_session_resume_event_replay` | P | **v1.1-Q3** | Full lineage rebuild from NDJSON replay (Risk #9 fix) |
-| `core_core_basic_plan_persistence` | F | v1 | Single in-flight plan survives restart |
-| `core_pro_plan_orphan_recovery` | P | v1 | `recover_persisted_plans()` startup orphan reclamation (Risk #13 partial) |
-| `core_pro_background_task_tracker` | P | v1 | `JoinHandle` + abort-on-Drop tracking (Risk #6 mitigation) |
+| `core_core_session_resume` | F | v1 | Process-restart re-attach to live brain session |
+| `core_pro_session_resume_event_replay` | P | **v1.1-Q3** | Full lineage rebuild from NDJSON replay (Risk #9 fix) — Pro upgrade beyond live re-attach |
+| `core_core_plan_persistence` | F | v1 | Single in-flight plan survives restart |
+| `core_core_plan_orphan_recovery` | F | v1 | `recover_persisted_plans()` startup orphan reclamation (Risk #13 partial) — safety baseline; Free plans must not orphan permanently |
+| `core_core_background_task_tracker` | F | v1 | `JoinHandle` + abort-on-Drop tracking (Risk #6 mitigation) — Rust async hygiene baseline |
 
 ### 4.3 `spur-mcp` (Brain→SPUR bridge — 14 keys)
 
@@ -382,7 +384,8 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "core_core_conflict_detection", "core_core_rate_limit_detection",
         "core_core_license_event_broadcast",
         "core_core_permission_request_prompt", "core_core_ext_notification",
-        "core_core_basic_session_resume", "core_core_basic_plan_persistence",
+        "core_core_session_resume", "core_core_plan_persistence",
+        "core_core_plan_orphan_recovery", "core_core_background_task_tracker",
 
         "mcp_core_server_dispatch", "mcp_core_delegate_basic",
         "mcp_core_outcome_fetch", "mcp_core_pm_basic",
@@ -444,8 +447,6 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "core_pro_review_timeout_routing",
         "core_pro_review_retry_config",
         "core_pro_peer_mailbox_router",
-        "core_pro_plan_orphan_recovery",
-        "core_pro_background_task_tracker",
 
         "skills_pro_custom", "skills_pro_role_gating",
 
@@ -670,7 +671,7 @@ Features marked `[v1.1-Q3]` in §4 cannot ship until specific architecture risks
 | `parallel_workers` | `core_core_parallel_workers` | Naming convention |
 | `event_persistence` | `core_core_event_sink_ndjson_128mb` | Atomic + correct size |
 | `extended_retention` | (removed; subsumed by quota lift) | Quota-only |
-| `session_resume` | `core_core_basic_session_resume` (Free) + `core_pro_session_resume_event_replay` (Pro v1.1) | Split |
+| `session_resume` | `core_core_session_resume` (Free) + `core_pro_session_resume_event_replay` (Pro v1.1) | Split |
 | `manual_review` | (folded into `core_core_review_sink` per gemini gate-review 2026-04-26) | Subsumed |
 | `auto_review_policies` | `core_pro_review_policy_auto_approve` + custom `timeout_fallback`/`retry_backoff` (basics moved to Free) | Split + re-tiered |
 | `tui_dashboard` | `tui_core_view_dashboard` | Naming convention |
