@@ -784,7 +784,9 @@ Parser arms:
 
 ## Task 11: Add spur-core reliability & lifecycle keys (5)
 
-Adds: basic_session_resume, session_resume_event_replay, basic_plan_persistence, plan_orphan_recovery, background_task_tracker.
+**REVISED 2026-04-26 (Wave 4 gate-review pass).** Per gemini findings symmetric with Task 7: dropped `basic_` prefix; moved orphan_recovery (Risk #13 safety) and background_task_tracker (Risk #6 hygiene) from Pro to Free. Final 4F + 1P (event_replay only Pro upsell).
+
+Adds: session_resume, session_resume_event_replay, plan_persistence, plan_orphan_recovery, background_task_tracker.
 
 - [ ] **Step 1: Write failing test**
 
@@ -792,11 +794,11 @@ Adds: basic_session_resume, session_resume_event_replay, basic_plan_persistence,
     #[test]
     fn spur_core_reliability_keys_registered() {
         for s in &[
-            "core_core_basic_session_resume",
+            "core_core_session_resume",
             "core_pro_session_resume_event_replay",
-            "core_core_basic_plan_persistence",
-            "core_pro_plan_orphan_recovery",
-            "core_pro_background_task_tracker",
+            "core_core_plan_persistence",
+            "core_core_plan_orphan_recovery",
+            "core_core_background_task_tracker",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -808,27 +810,29 @@ Adds: basic_session_resume, session_resume_event_replay, basic_plan_persistence,
 
 ```rust
     // --- spur-core: reliability & lifecycle (5) ---
-    pub const CORE_CORE_BASIC_SESSION_RESUME: Self = Self("core_core_basic_session_resume");
-    pub const CORE_PRO_SESSION_RESUME_EVENT_REPLAY: Self = Self("core_pro_session_resume_event_replay");
-    pub const CORE_CORE_BASIC_PLAN_PERSISTENCE: Self = Self("core_core_basic_plan_persistence");
-    pub const CORE_PRO_PLAN_ORPHAN_RECOVERY: Self = Self("core_pro_plan_orphan_recovery");
-    pub const CORE_PRO_BACKGROUND_TASK_TRACKER: Self = Self("core_pro_background_task_tracker");
+    pub const CORE_CORE_SESSION_RESUME: Self = Self("core_core_session_resume");
+    pub const CORE_PRO_SESSION_RESUME_EVENT_REPLAY: Self =
+        Self("core_pro_session_resume_event_replay");
+    pub const CORE_CORE_PLAN_PERSISTENCE: Self = Self("core_core_plan_persistence");
+    pub const CORE_CORE_PLAN_ORPHAN_RECOVERY: Self = Self("core_core_plan_orphan_recovery");
+    pub const CORE_CORE_BACKGROUND_TASK_TRACKER: Self =
+        Self("core_core_background_task_tracker");
 ```
 
 Parser arms:
 
 ```rust
         // spur-core: reliability & lifecycle
-        } else if bytes_eq(b, b"core_core_basic_session_resume") {
-            Some(Self::CORE_CORE_BASIC_SESSION_RESUME)
+        } else if bytes_eq(b, b"core_core_session_resume") {
+            Some(Self::CORE_CORE_SESSION_RESUME)
         } else if bytes_eq(b, b"core_pro_session_resume_event_replay") {
             Some(Self::CORE_PRO_SESSION_RESUME_EVENT_REPLAY)
-        } else if bytes_eq(b, b"core_core_basic_plan_persistence") {
-            Some(Self::CORE_CORE_BASIC_PLAN_PERSISTENCE)
-        } else if bytes_eq(b, b"core_pro_plan_orphan_recovery") {
-            Some(Self::CORE_PRO_PLAN_ORPHAN_RECOVERY)
-        } else if bytes_eq(b, b"core_pro_background_task_tracker") {
-            Some(Self::CORE_PRO_BACKGROUND_TASK_TRACKER)
+        } else if bytes_eq(b, b"core_core_plan_persistence") {
+            Some(Self::CORE_CORE_PLAN_PERSISTENCE)
+        } else if bytes_eq(b, b"core_core_plan_orphan_recovery") {
+            Some(Self::CORE_CORE_PLAN_ORPHAN_RECOVERY)
+        } else if bytes_eq(b, b"core_core_background_task_tracker") {
+            Some(Self::CORE_CORE_BACKGROUND_TASK_TRACKER)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
