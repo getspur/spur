@@ -356,14 +356,14 @@ Wave 7 dropped both candidate keys. `notif_core_in_tui` was redundant with alrea
 
 Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-core/src/skills/`) but are listed in their own row below for grep-discoverability; they're counted in the Skills row, not double-counted under spur-core.
 
-**Revised 2026-04-27 (Wave 8 L9-MCTS second-order composition pass).** Total **v1 registry** keys reduced from 99 to **64** after Wave 8 rationalization (135 → 123 → 107 → 99 → 64 across Waves 5+6+7+8). Wave 8 amendment to the core principle: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities AND each key's on/off must compose validly with sibling keys in its family.* Wave 8 identified 15 over-decomposed families where partial enablement breaks tier integrity (compile-coupled APIs, all-or-nothing valid substates, producer/consumer chains where one half is meaningless without the other) and consolidated each family into a single umbrella key. Plus 4 additional drops (ghost adapters, mechanism plumbing) and 5 vaporware deferrals. See **§4.16 Deferred-keys backlog** for full Wave-8 detail. Counts below show only what's in the v1 Plan A registry post-Wave-8.
+**Revised 2026-04-27 (Wave 9 Iceberg framework + dual-reviewer tier shifts).** Total **v1 registry** keys remain at **64** post-Wave-9 — Wave 9 was 2 surgical Pro→Free tier-shifts (with const renames), not consolidations or drops. Tier composition shifted: Free 46→48, Pro v1 17→15, Pro v1.1 1→1. Trajectory across all waves: 135 → 123 → 107 → 99 → 64 (Wave 8) → 64 (Wave 9 tier composition only). Wave 8 amendment to the core principle: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities AND each key's on/off must compose validly with sibling keys in its family.* Wave 8 identified 15 over-decomposed families where partial enablement breaks tier integrity (compile-coupled APIs, all-or-nothing valid substates, producer/consumer chains where one half is meaningless without the other) and consolidated each family into a single umbrella key. Plus 4 additional drops (ghost adapters, mechanism plumbing) and 5 vaporware deferrals. See **§4.16 Deferred-keys backlog** for full Wave-8 detail. Counts below show only what's in the v1 Plan A registry post-Wave-8.
 
 | Crate / Subsystem | Free keys | Pro keys (v1) | Pro keys (v1.1) | Team-deferred |
 |---|---|---|---|---|
 | `spur-acp` (transports + 4 implemented adapters + 1 session_attach; -3 ghost adapters dropped, -1 degraded_nolock merged) | 7 | 0 | 0 | 0 |
-| `spur-core` (post-Wave-8: brain trio→1, workers pair→1, event sextet→1, review trio→1, peer_mailbox trio→1, plan_persistence pair→1) | 8 | 4 | 1 | 0 |
+| `spur-core` (post-Wave-8 consolidations; Wave 9 tier-shifted review_retry_config Pro→Free) | 9 | 3 | 1 | 0 |
 | `skills_*` (in spur-core) — Wave 8 quartet→1 | 1 | 1 | 0 | 0 |
-| `spur-mcp` (post-Wave-8: delegate absorbs materializer, plan_durable absorbs notify, signal_watcher absorbs mutation_executor) | 6 | 4 | 0 | 0 |
+| `spur-mcp` (post-Wave-8: delegate absorbs materializer, plan_durable absorbs notify, signal_watcher absorbs mutation_executor; Wave 9 tier-shifted graph_tools Pro→Free) | 7 | 3 | 0 | 0 |
 | `spur-tui` (post-Wave-8: dashboard absorbs landing+composer; notification_drain absorbed by core_core_event_pipeline) | 7 | 0 | 0 | 0 |
 | `spur-cli` (KEEP_ATOMIC) | 9 | 0 | 0 | 0 |
 | `spur-pm` (KEEP_ATOMIC; advanced→basic prereq) | 4 | 1 | 0 | 0 |
@@ -375,9 +375,9 @@ Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-c
 | `spur-blob-store` | 0 | 1 | 0 | 0 |
 | `spur-interactive` | 0 | 0 | 0 | 0 |
 | Notifications (cross-crate) | 0 | 0 | 0 | 0 |
-| **Total** | **46** | **17** | **1** | **0** |
+| **Total** | **48** | **15** | **1** | **0** |
 
-**Total v1 atomic feature keys: 64** (46 + 17 + 1 + 0) — was 99 post-Wave-7, 107 post-Wave-6, 123 post-Wave-5, 135 before Wave 5. Wave 8 net reduction of 35 keys reflects: (a) 15 family consolidations (compile-coupled / all-or-nothing substate space) — see §4.16 Wave 8 consolidations table; (b) 4 additional drops (`background_task_tracker` mechanism plumbing + 3 ghost ACP adapters with no `AgentKind` variants); (c) 5 vaporware deferrals to v1.1 backlog (`brain_failover_auto_pool`, `broadcast_lagged_recovery`, `conflict_detection`, `rate_limit_detection`, `mcp_pro_custom_tools` — all confirmed no production code by codex tracing). Pro v1.1 column shrinks from 5 to 1 because all 4 prior v1.1-tagged keys (auto_pool, lagged_recovery, peer_mailbox_ledger, peer_mailbox_stranded_recon) were either deferred to §4.16 or absorbed into umbrella consolidations.
+**Total v1 atomic feature keys: 64** (48 + 15 + 1 + 0) post-Wave-9 — was 99 post-Wave-7, 107 post-Wave-6, 123 post-Wave-5, 135 before Wave 5. Wave 8 net reduction of 35 keys reflects: (a) 15 family consolidations (compile-coupled / all-or-nothing substate space) — see §4.16 Wave 8 consolidations table; (b) 4 additional drops (`background_task_tracker` mechanism plumbing + 3 ghost ACP adapters with no `AgentKind` variants); (c) 5 vaporware deferrals to v1.1 backlog (`brain_failover_auto_pool`, `broadcast_lagged_recovery`, `conflict_detection`, `rate_limit_detection`, `mcp_pro_custom_tools` — all confirmed no production code by codex tracing). Pro v1.1 column shrinks from 5 to 1 because all 4 prior v1.1-tagged keys (auto_pool, lagged_recovery, peer_mailbox_ledger, peer_mailbox_stranded_recon) were either deferred to §4.16 or absorbed into umbrella consolidations.
 
 Wave 7 net reduction of 8 keys (preserved historical record): (a) 6 keys dropped as trait-impl variants / production invariants / always-on infrastructure (`blob_core_memory_backend`, `blob_core_fs_backend`, `blob_pro_measured_backend`, `interactive_core_frontend_host`, `interactive_core_review_lane_mpsc`, `interactive_core_shutdown_orchestrator`); (b) 1 key dropped as redundant with already-merged keys (`notif_core_in_tui`); (c) 1 key deferred to §4.16 v1.1 backlog (`notif_pro_external_channels`); (d) 1 key kept with rename (`blob_pro_delete_namespace` → `blob_pro_namespace_deletion`).
 
@@ -424,6 +424,15 @@ The following keys were proposed in earlier drafts but deferred to v1.1 or v2, o
 | `interactive_core_review_lane_mpsc` | Production correctness invariant — `SubmitReview` is rejected on the command lane at `crates/spur-interactive/src/host.rs:21`; the lane separation is a sound-architecture requirement, not a tier feature. Toggling it off would break interactive_core_frontend_host's contract. | 7 |
 | `interactive_core_shutdown_orchestrator` | Lifecycle hygiene; tightly coupled to `interactive_core_frontend_host` (no host = no shutdown). Always-on safety infrastructure that *must* run. | 7 |
 | `notif_core_in_tui` | Redundant with already-merged `core_core_notification_pump` (producer at `crates/spur-core/src/notification_pump.rs:30`) + `tui_core_notification_drain` (consumer at `crates/spur-tui/src/app.rs:2552`); triple-naming the same path with no documented boundary. The `notif_*` namespace's only justification (cross-crate clarity) is undermined when the Free key duplicates per-crate keys. | 7 |
+
+#### Wave 9 — Tier-shifted Pro→Free (Iceberg framework + dual-reviewer synthesis)
+
+Per Wave 9 first-principles + Iceberg framework analysis (gemini strategy/positioning + codex code-grounded dual review with L9-MCTS judge synthesis). Both reviewers converged: 2 keys belong on the Free side of the iceberg to strengthen acquisition without weakening Pro's 5+ headline triggers. Both shifts include `pub const` renames (Pro→Free naming convention). Net to total v1 registry count: 0.
+
+| Original key | Renamed to | Reason | Wave |
+|---|---|---|---|
+| `mcp_pro_graph_tools` | `mcp_core_graph_tools` | Viral acquisition surface — Plan/dependency graph diagnostics belong above the iceberg waterline as Free demo material. **Codex grounding (narrowed from brain's claim):** output is raw `bv` JSON or Mermaid TEXT at `crates/spur-mcp/src/server.rs:3331-3415`, NOT rendered visual material. Marketing copy: "MCP graph diagnostics / Mermaid text output" — not "Twitter-shareable visual demo." Pro retains `mcp_pro_plan_durable` + `mcp_pro_signal_watcher_scope_drift` as the planning execution-muscle anchors. | 9 |
+| `core_pro_review_retry_config` | `core_core_review_retry_config` | Free-tier reliability baseline (Wave 4 safety/liveness precedent: retry resilience is "make Free reliable" not a Pro lever). Composes validly with `core_core_review` umbrella when both are Free — retry only runs when `review_required` is enabled (`crates/spur-core/src/orchestrator.rs:4376-4408`). **Codex grounding (narrowed from brain's claim):** only `max_review_retries` is config; backoff is hard-coded at `crates/spur-core/src/orchestrator.rs:4767-4775`. Marketing copy: "Review retry limit" — not "configurable retry policy." Pro retains `core_pro_review_auto_approve` as the autonomy lever. | 9 |
 
 #### Dropped (capability is not gateable per first-principles analysis)
 
@@ -893,23 +902,25 @@ All `acp_core_adapter_*` (7), all `core_core_skill_*` + `skills_core_render_per_
 
 | Capability | Free | Pro |
 |---|---|---|
-| **Cross-vendor orchestration** | All 7 ACP agents (Claude/Kiro/Codex/Gemini/Cursor/OpenCode/Kimi) | Same |
+| **Cross-vendor orchestration** | 4 ACP agents (Claude/Kiro/Codex/Gemini) — Wave-8 dropped 3 ghost adapters | Same |
 | **Parallel workers** | 2 concurrent | 10 concurrent |
-| **Rate-limit recovery** | One-keystroke manual switch | Silent automatic *(coming Q3)* |
-| **Worktree isolation** | ✓ | ✓ |
-| **Manual review gate** | ✓ | ✓ |
-| **Auto-approve policies** | ✗ | ✓ |
-| **Closed-loop PR creation** | Manual | **Automatic on success** ★ |
-| **Linear / Plane sync** | Read-only | **Bidirectional** ★ |
-| **Telegram remote-control** | ✗ | **Single-operator bot** ★ |
-| **Multi-session epic plans** | Single-plan ephemeral | **Durable, cross-session** ★ |
-| **Custom MCP tools / skills** | ✗ | ✓ |
-| **DuckDB analytics + reports** | ✗ | ✓ |
-| **Per-project cost tracking** | Per-session only | Per-project + per-day |
-| **Budget caps** | Soft warning | **Hard caps** *(coming Q3)* |
-| **Session resume** | Process-restart re-attach | **Full event-log replay** *(coming Q3)* |
-| **External notifications** | In-TUI only | **Slack/Discord/webhook** *(coming Q3)* |
-| **Bundled skills** | All 17 × 7 vendors | Same + custom org skills |
+| **Rate-limit recovery** | One-keystroke manual switch | Silent automatic *(deferred to v1.1 — Risk #8)* |
+| **Worktree isolation + orphan cleanup** | ✓ | ✓ |
+| **Review gate (sink+timeout+retry)** | ✓ (with retry-limit config — Wave 9 shift) | Same + auto-approve policy |
+| **Auto-approve on review timeout** | ✗ | ✓ ★ |
+| **MCP graph diagnostics** | ✓ (raw JSON / Mermaid text — Wave 9 shift) | Same |
+| **Closed-loop PR creation** | Manual | **Automatic on success via reconciler** ★ |
+| **Telegram remote-control** | ✗ | **Single-operator bot + inline review** ★ |
+| **Multi-session durable plans** | Single-plan ephemeral | **Durable, cross-session + signal watcher** ★ |
+| **Peer-mailbox multi-agent routing** | ✗ | ✓ *(default-off; opt-in)* |
+| **Custom skills / role gating** | Bundled skills only | **Custom skill overrides** ★ |
+| **DuckDB analytics engine** | ✗ | ✓ *(experimental flag today)* |
+| **Per-project cost tracking** | Per-session only | All-time per-project rollup *(billing-export shipping later)* |
+| **Budget caps** | Soft warning | **Hard caps** *(deferred to v1.1 — Risk #17)* |
+| **Session resume** | Process-restart re-attach | **Full event-log replay** *(v1.1)* |
+| **External notifications** | (TUI/bot path; deferred external channels v1.1) | **Slack/Discord/webhook** *(deferred to v1.1)* |
+| **Bundled skills** | All bundled + atomic-installation + render-per-vendor (Wave-8 umbrella) | Same + custom org skills + role gating |
+| **License resilience** | n/a | Revocation polling + offline grace period |
 | **Monthly subscription** | n/a | $12/mo |
 | **Annual subscription** | n/a | $99/yr (save $45) |
 | **Lifetime license** | n/a | $99 (v1.x, includes Q3 roadmap) |
@@ -924,7 +935,7 @@ All `acp_core_adapter_*` (7), all `core_core_skill_*` + `skills_core_render_per_
 >
 > Solve the #1 problem with AI coding agents (rate-limit fragility) without paying anything. Switch between Claude, Kiro, Codex, Gemini, Cursor, OpenCode, and Kimi with one keystroke. Run 2 workers in parallel. Browse your Linear/GitHub issues. Create PRs manually when you're ready. Worktree-isolated, locally-orchestrated, signed-policy free tier with no expiration date.
 >
-> When you want SPUR to *do this for you* — auto-create PRs, sync Linear status, run while you're at lunch, take phone approvals — that's Pro.
+> When you want SPUR to *do this for you* — auto-create PRs, run while you're at lunch, take phone approvals via Telegram — that's Pro.
 
 ### 9.3 Pro tier copy (pro-tier.md headline section)
 
@@ -967,6 +978,72 @@ All `acp_core_adapter_*` (7), all `core_core_skill_*` + `skills_core_render_per_
 > - **TraceSource palette wiring**
 >
 > Status: 14-20 engineer-weeks remaining. Internal target: July 2026. External commitment: Q3 2026 (August buffer).
+
+### 9.5 Iceberg framework analysis (Wave 9 dual-reviewer synthesis)
+
+The Free vs Pro stack is best evaluated through the Iceberg framework: features have visible above-water value (drives acquisition + conversion) AND invisible below-water value (drives retention + LTV). Wave 9 (gemini strategy + codex code-grounded dual review with L9-MCTS judge synthesis) produced this calibrated view.
+
+**Free above-water (acquisition iceberg, ~9 ★ hooks):**
+1. Cross-vendor orchestration (4 implemented adapters: Claude / Kiro / Codex / Gemini)
+2. Full TUI dashboard + 5 functional views (dashboard, session_detail, plan_inspector, palette_overlay, issue_browser)
+3. One-keystroke manual rate-limit recovery
+4. Plan persistence + session resume + review with retry config
+5. Beads PM (basic + browse + PR + graph_adapter + MCP graph diagnostics)
+6. Per-session cost display + pricing registry
+7. Multi-worker parallel (2 concurrent quota)
+8. 9 CLI commands (init, agents, sessions, run, exec, tui, cost, connect, license_activate)
+9. Worktree isolation + orphan cleanup
+
+**Free below-water (retention/lock-in iceberg, NOT advertised):**
+- Beads PM data lock-in (`.beads/` directory; switching cost compounds with usage)
+- Skills muscle memory (custom prompts learned via skills_core_registry)
+- TUI keybinding sunk cost
+- Plan + session history locked in local SQLite
+- Per-token cost transparency trust (Free users see full pricing detail; Pro adds aggregation only)
+
+**Pro above-water (conversion triggers, 5+ ★ headlines):**
+1. ★ **Remote Control** — telegram_solo + inline_review (production code; AFK ship-from-couch)
+2. ★ **Multi-Agent Coordination** — peer_mailbox_router + signal_watcher_scope_drift + plan_durable (router default-off + in-memory today; durable plans production-ready)
+3. ★ **Review Control Plane** — auto_approve (timeout fallback / permission fast-path; NOT autonomous review judgement) + worker_heartbeat_watchdog (default-off until heartbeat emitters ship) + mcp_pro_review (manual approve/reject control surface)
+4. ★ **Cost Insights** — per_project_tracking (all-time rollup; billing-export shipping later) + duckdb_engine (experimental flag; CLI by-agent today)
+5. ★ **Extensibility** — skills_pro_custom + pm_pro_beads_advanced
+
+**Pro below-water (LTV anchors):**
+- Lifetime $99 = "ownership flip" psychology
+- v1.x roadmap commitment (lifetime users get all v1.1-Q3 features as they ship)
+- Annual = lifetime parity ($99) signals "this product will keep growing"
+- Sunk cost from extended Free → Pro psychological bridge
+
+**Persona model (4 archetypes; B2D-realistic conversion baseline 2-5%):**
+
+| # | Persona | TAM share | Primary trigger | 90-day conversion baseline |
+|---|---|---|---|---|
+| **P1** | Solo Indie Developer | ~50% | telegram_solo (AFK trigger) | 2-4% |
+| **P2** | Agency / Multi-Client Freelancer | ~15% | per_project_tracking + inline_review | 6-12% (real billing pain shortens window) |
+| **P4** | Senior Engineer @ BigCo (personal license) | ~15% | mcp_pro_review (control surface) + lifetime $99 | 2-3%/yr (slow but high LTV via lifetime) |
+| **P5** | ML / AI Researcher (cost-obsessed) | ~5% | per_project_tracking + duckdb_engine | 5-8% |
+
+*Persona P3 ("Team 2-dev") was removed in Wave 9 dual-review synthesis: it conflated `peer_mailbox_router` (inter-AGENT message routing — see `crates/spur-acp/src/config/mod.rs:372-375`) with inter-HUMAN team collaboration. SPUR has no human team UX in v1; multi-user RBAC is v2. Team-tier pricing is therefore deferred to v2 per spec §4.16 (`bot_team_multi_chat`).*
+
+**Wave 9 strategic decisions (dual-reviewer convergence):**
+
+1. **2 surgical tier-shifts Pro→Free** (per Wave 9 §4.16 entries):
+   - `mcp_pro_graph_tools` → `mcp_core_graph_tools` (acquisition surface)
+   - `core_pro_review_retry_config` → `core_core_review_retry_config` (Free reliability baseline)
+
+2. **Marketing groupings (5 Pro headline categories above)** — codex grounded each name in actual code reality. NOT in Wave 9 marketing copy: any phrase implying autonomous-judgement review (mcp_pro_review is manual control plane), Twitter-shareable visual (graph_tools is text output), or team collaboration (peer_mailbox is inter-agent routing).
+
+3. **Below-water amplifiers explicitly DEFERRED to Plan D/E** (not Wave 9 scope):
+   - 7-day Pro trial (per spec §6.2; CLI auth has no trial mechanism today — `crates/spur-cli/src/commands/auth.rs:15-40`)
+   - Capability-tease modals (TUI has modal primitive at `crates/spur-tui/src/components/collision_modal.rs:11-99` but no locked-Pro tease pattern)
+   - Skills marketplace publish/discover (fully greenfield; only local bundled+overrides today)
+
+4. **Pricing held at $12/mo + $99 annual + $99 lifetime.** Team tier pricing deferred to v2.
+
+**Risk acknowledgements (codex top-3):**
+- *Registry tier shifts ≠ runtime enforcement.* Wave-9 const renames update the registry only; actual `FeatureGate::has` use is sparse today (`crates/spur-license/src/gate.rs:40-66`). Plan B is the policy/enforcement work.
+- *Persona copy must match implementation completeness.* Avoid marketing surfaces that are engine-only or control-plane-only (cost billing export, autonomous review judgement, DuckDB project reports — all need narrowing).
+- *Trial + tease modals + marketplace are not ready as conversion amplifiers.* Plan D scope.
 
 ---
 
