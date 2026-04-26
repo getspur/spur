@@ -1,5 +1,7 @@
+peer_mailbox_enabled = false
+
 [brain]
-default = "claude-code-sj"
+default = "claude-code"
 fallback = [
     "kiro",
     "claude-code",
@@ -370,6 +372,9 @@ cooldown_minutes = 30
 [worktree]
 max_concurrent = 5
 stale_cleanup_hours = 24
+worker_heartbeat_watchdog_enabled = false
+worker_heartbeat_timeout_secs = 90
+worker_heartbeat_initial_grace_secs = 60
 
 [cost]
 db_path = "~/.spur/cost.db"
