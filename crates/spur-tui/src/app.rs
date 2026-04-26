@@ -350,8 +350,7 @@ impl App {
         if let crate::landing::LandingDecision::SetupRequired = &app.landing {
             app.dashboard.set_agents_configured(false);
         }
-        app.dashboard
-            .set_worker_snapshot(app.build_worker_snapshot());
+        app.sync_dashboard_workers();
 
         app.license_badge = license_badge_from_state(&app.license_state);
         app.flag_summary = compute_flag_summary();
@@ -676,6 +675,13 @@ impl App {
                 }),
             })
             .collect()
+    }
+
+    /// Refresh Dashboard's worker mention snapshot from the current app config.
+    /// This is the canonical hook point for any future config-reload event.
+    pub(crate) fn sync_dashboard_workers(&mut self) {
+        let workers = self.build_worker_snapshot();
+        self.dashboard.set_worker_snapshot(workers);
     }
 
     /// Dispatch a crossterm event (keyboard, resize, mouse, etc.) to the active view.
@@ -1103,6 +1109,7 @@ impl App {
             SpurEventBody::BrainSpawned { agent, session } => {
                 self.brain_status = BrainStatus::Thinking;
                 self.brain_name = Some(agent.clone());
+                self.sync_dashboard_workers();
 
                 // Only create a new SessionDetailView if none exists or the
                 // session ID changed. Replacing unconditionally would wipe any
