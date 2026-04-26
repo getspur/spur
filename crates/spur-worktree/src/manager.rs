@@ -441,25 +441,28 @@ impl WorktreeManager {
     /// Remove a worker's worktree and its branch, cleaning up all resources.
     pub async fn remove_worktree(&mut self, session_id: &SessionId) -> Result<()> {
         let session_str = session_id.to_string();
+        // PEEK, do not remove yet — fix codex's ordering bug.
         let info = self
             .active
-            .remove(&session_str)
+            .get(&session_str)
             .ok_or_else(|| anyhow!("no active worktree for session {session_str}"))?;
-
         let path_str = info
             .path
             .to_str()
             .ok_or_else(|| anyhow!("worktree path is not valid UTF-8"))?
             .to_string();
+        let branch = info.branch.clone();
 
-        self.run_git(&["worktree", "remove", &path_str, "--force"], None)
+        // Run git operations; if any fail, return without mutating self.active.
+        self.run_git(&["worktree", "remove", &path_str, "--force", "--force"], None)
             .await
             .with_context(|| format!("failed to remove worktree at {path_str}"))?;
-
-        self.run_git(&["branch", "-D", &info.branch], None)
+        self.run_git(&["branch", "-D", &branch], None)
             .await
-            .with_context(|| format!("failed to delete branch '{}'", info.branch))?;
+            .with_context(|| format!("failed to delete branch '{branch}'"))?;
 
+        // ONLY now: remove from self.active.
+        self.active.remove(&session_str);
         Ok(())
     }
 
@@ -677,6 +680,32 @@ mod tests_option_e {
         git(tmp, &["add", "a.txt"]).await;
         git(tmp, &["commit", "-q", "-m", "base"]).await;
         git(tmp, &["rev-parse", "HEAD"]).await
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_keeps_in_memory_entry_when_git_fails() {
+        use spur_acp::SessionId;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+
+        let sid = SessionId("s1".into());
+        let mut manager = WorktreeManager::new_for_test(tmp.path().to_path_buf());
+        manager.register_for_test(
+            sid.clone(),
+            tmp.path().join("nonexistent"), // path doesn't exist; git remove will fail
+            "spur/worker/v2/x/x/x".to_string(),
+            "deadbeef".to_string(),
+            "test".to_string(),
+        );
+        assert_eq!(manager.active_count(), 1);
+
+        let res = manager.remove_worktree(&sid).await;
+        assert!(res.is_err(), "git should have failed; {res:?}");
+        assert_eq!(
+            manager.active_count(),
+            1,
+            "in-memory entry must NOT be removed when git remove fails"
+        );
     }
 
     #[tokio::test]
