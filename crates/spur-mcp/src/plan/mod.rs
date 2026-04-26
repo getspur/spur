@@ -994,7 +994,7 @@ pub async fn emit_completion_audit(
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
     superseded: bool,
-    fields: &crate::plan::audit_sentinel::CompletionAuditFields,
+    fields: crate::plan::audit_sentinel::CompletionAuditFields,
 ) {
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
@@ -1004,9 +1004,9 @@ pub async fn emit_completion_audit(
         delegation_id: delegation_id.to_string(),
         completion_state,
         superseded,
-        worker_branch: fields.worker_branch.clone(),
-        result_summary: fields.result_summary.clone(),
-        artifact_uri: fields.artifact_uri.clone(),
+        worker_branch: fields.worker_branch,
+        result_summary: fields.result_summary,
+        artifact_uri: fields.artifact_uri,
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
@@ -1289,7 +1289,7 @@ pub async fn persist_completion_result(
         delegation_id,
         completion_state,
         completion_state == crate::plan::audit_sentinel::CompletionState::Superseded,
-        &fields,
+        fields,
     )
     .await;
 
