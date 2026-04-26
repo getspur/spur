@@ -227,6 +227,10 @@ impl FeatureKey {
     pub const BOT_PRO_THREAD_REGISTRY: Self = Self("bot_pro_thread_registry");
     pub const BOT_PRO_INLINE_REVIEW: Self = Self("bot_pro_inline_review");
 
+    // --- spur-license meta (2) ---
+    pub const LICENSE_PRO_REVOCATION_POLLING: Self = Self("license_pro_revocation_polling");
+    pub const LICENSE_PRO_OFFLINE_GRACE: Self = Self("license_pro_offline_grace");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -519,6 +523,11 @@ impl FeatureKey {
             Some(Self::BOT_PRO_THREAD_REGISTRY)
         } else if bytes_eq(b, b"bot_pro_inline_review") {
             Some(Self::BOT_PRO_INLINE_REVIEW)
+        // spur-license meta
+        } else if bytes_eq(b, b"license_pro_revocation_polling") {
+            Some(Self::LICENSE_PRO_REVOCATION_POLLING)
+        } else if bytes_eq(b, b"license_pro_offline_grace") {
+            Some(Self::LICENSE_PRO_OFFLINE_GRACE)
         } else {
             None
         }
@@ -1028,6 +1037,16 @@ mod tests {
             "bot_pro_telegram_solo",
             "bot_pro_thread_registry",
             "bot_pro_inline_review",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_license_keys_registered() {
+        for s in &[
+            "license_pro_revocation_polling",
+            "license_pro_offline_grace",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
