@@ -206,8 +206,12 @@ mod tests {
             next: LedgerState,
         ) -> Result<TransitionOutcome, LedgerError> {
             if self.fail_for.lock().await.contains(message_id) {
+                // `DeliveredInflight` is non-terminal, so this routes to
+                // `AuditFailed` (not `TerminalSkip`) and matches the entry's
+                // actual state at reconcile time — slightly more realistic
+                // than asserting a stale `Queued` value.
                 return Err(LedgerError::InvalidTransition {
-                    from: LedgerState::Queued,
+                    from: LedgerState::DeliveredInflight,
                     to: next,
                 });
             }
