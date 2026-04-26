@@ -219,6 +219,31 @@ fn n_key_on_picker_emits_new_session_requested() {
 }
 
 #[test]
+fn n_key_with_current_draft_shows_confirm_switch() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_current_session_id(Some("a1".to_string()));
+    picker.set_current_session_has_draft(Some("a1".to_string()));
+
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert_eq!(picker.cursor(), 1);
+
+    let action = picker.handle_key(
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert!(action.is_none());
+    assert!(picker.is_confirm_switch_visible());
+
+    let action = picker.handle_key(key('y'), &test_ctx());
+    assert!(matches!(action, Some(Action::NewSessionRequested)));
+}
+
+#[test]
 fn enter_on_new_session_row_emits_new_session_requested() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("test-agent".into(), vec![]);
