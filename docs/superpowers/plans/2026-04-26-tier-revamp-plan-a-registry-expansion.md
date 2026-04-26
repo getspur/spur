@@ -563,14 +563,11 @@ git commit -m "feat(spur-license): registry add spur-core event pipeline keys (5
 
 ## Task 7: Add spur-core review subsystem keys (6)
 
-**REVISED 2026-04-26 per gemini gate-review.** Original draft had 3 design smells:
-- `review_policy_manual` gated baseline behavior (anti-pattern; folded into `review_sink`)
-- `review_policy_timeout_fallback` gated safety/liveness baseline (split into Free `_basic` + Pro `_custom`)
-- `review_policy_retry` gated fundamental UX (press 'R'; split into Free `_basic` + Pro `_backoff`)
+**REVISED 2026-04-26 (2nd pass) via 3-reviewer triangulation (gemini → kimi → codex).** First revision used `_basic`/`_custom`/`_backoff` suffixes (impl leaks). Codex's code reading (`review_sink.rs:34`, `orchestrator.rs:4517` timeout arm, `:4654` Retry arm, `spur-acp/src/config/mod.rs:246` config separation) confirmed the sink is router-only and timeout/retry are separable orchestrator branches with distinct config fields. Adopted kimi's 6-key naming (capability nouns).
 
-**Net 6 keys, 3 Free + 3 Pro:**
-- Free: `review_sink` (now includes built-in manual resolution), `review_policy_timeout_fallback_basic` (auto-cancel), `review_policy_retry_basic` (press 'R')
-- Pro: `review_policy_auto_approve`, `review_policy_timeout_fallback_custom` (FallbackAction routing), `review_policy_retry_backoff` (configurable backoff/max-attempts)
+**6 keys, 3 Free + 3 Pro:**
+- Free: `review_sink` (router + manual resolution), `review_timeout` (auto-cancel), `review_retry` (press 'R' with system-default backoff)
+- Pro: `review_auto_approve` (rule-based bypass), `review_timeout_routing` (custom FallbackAction → Slack/alt-agent), `review_retry_config` (configurable backoff + max-attempts)
 
 - [ ] **Step 1: Write failing test**
 
@@ -579,11 +576,11 @@ git commit -m "feat(spur-license): registry add spur-core event pipeline keys (5
     fn spur_core_review_keys_registered() {
         for s in &[
             "core_core_review_sink",
-            "core_core_review_policy_timeout_fallback_basic",
-            "core_core_review_policy_retry_basic",
-            "core_pro_review_policy_auto_approve",
-            "core_pro_review_policy_timeout_fallback_custom",
-            "core_pro_review_policy_retry_backoff",
+            "core_core_review_timeout",
+            "core_core_review_retry",
+            "core_pro_review_auto_approve",
+            "core_pro_review_timeout_routing",
+            "core_pro_review_retry_config",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -597,16 +594,11 @@ git commit -m "feat(spur-license): registry add spur-core event pipeline keys (5
 ```rust
     // --- spur-core: review subsystem (6) ---
     pub const CORE_CORE_REVIEW_SINK: Self = Self("core_core_review_sink");
-    pub const CORE_CORE_REVIEW_POLICY_TIMEOUT_FALLBACK_BASIC: Self =
-        Self("core_core_review_policy_timeout_fallback_basic");
-    pub const CORE_CORE_REVIEW_POLICY_RETRY_BASIC: Self =
-        Self("core_core_review_policy_retry_basic");
-    pub const CORE_PRO_REVIEW_POLICY_AUTO_APPROVE: Self =
-        Self("core_pro_review_policy_auto_approve");
-    pub const CORE_PRO_REVIEW_POLICY_TIMEOUT_FALLBACK_CUSTOM: Self =
-        Self("core_pro_review_policy_timeout_fallback_custom");
-    pub const CORE_PRO_REVIEW_POLICY_RETRY_BACKOFF: Self =
-        Self("core_pro_review_policy_retry_backoff");
+    pub const CORE_CORE_REVIEW_TIMEOUT: Self = Self("core_core_review_timeout");
+    pub const CORE_CORE_REVIEW_RETRY: Self = Self("core_core_review_retry");
+    pub const CORE_PRO_REVIEW_AUTO_APPROVE: Self = Self("core_pro_review_auto_approve");
+    pub const CORE_PRO_REVIEW_TIMEOUT_ROUTING: Self = Self("core_pro_review_timeout_routing");
+    pub const CORE_PRO_REVIEW_RETRY_CONFIG: Self = Self("core_pro_review_retry_config");
 ```
 
 Parser arms:
@@ -615,16 +607,16 @@ Parser arms:
         // spur-core: review subsystem
         } else if bytes_eq(b, b"core_core_review_sink") {
             Some(Self::CORE_CORE_REVIEW_SINK)
-        } else if bytes_eq(b, b"core_core_review_policy_timeout_fallback_basic") {
-            Some(Self::CORE_CORE_REVIEW_POLICY_TIMEOUT_FALLBACK_BASIC)
-        } else if bytes_eq(b, b"core_core_review_policy_retry_basic") {
-            Some(Self::CORE_CORE_REVIEW_POLICY_RETRY_BASIC)
-        } else if bytes_eq(b, b"core_pro_review_policy_auto_approve") {
-            Some(Self::CORE_PRO_REVIEW_POLICY_AUTO_APPROVE)
-        } else if bytes_eq(b, b"core_pro_review_policy_timeout_fallback_custom") {
-            Some(Self::CORE_PRO_REVIEW_POLICY_TIMEOUT_FALLBACK_CUSTOM)
-        } else if bytes_eq(b, b"core_pro_review_policy_retry_backoff") {
-            Some(Self::CORE_PRO_REVIEW_POLICY_RETRY_BACKOFF)
+        } else if bytes_eq(b, b"core_core_review_timeout") {
+            Some(Self::CORE_CORE_REVIEW_TIMEOUT)
+        } else if bytes_eq(b, b"core_core_review_retry") {
+            Some(Self::CORE_CORE_REVIEW_RETRY)
+        } else if bytes_eq(b, b"core_pro_review_auto_approve") {
+            Some(Self::CORE_PRO_REVIEW_AUTO_APPROVE)
+        } else if bytes_eq(b, b"core_pro_review_timeout_routing") {
+            Some(Self::CORE_PRO_REVIEW_TIMEOUT_ROUTING)
+        } else if bytes_eq(b, b"core_pro_review_retry_config") {
+            Some(Self::CORE_PRO_REVIEW_RETRY_CONFIG)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
@@ -634,18 +626,20 @@ Parser arms:
 
 ## Task 8: Add skills system keys (5)
 
-Adds: skill_registry, skill_atomic_installation, skills_core_render_per_vendor, skills_pro_custom, skills_pro_role_gating.
+**REVISED 2026-04-26 (gate-review pass).** Original draft mixed `core_core_skill_*` (2) + `skills_*` (3), violating block-label/key-prefix consistency and breaking grep-discoverability of the skills boundary. All 5 keys now share the `skills_*` prefix per gemini + claude-code review findings.
 
-Note: skills_* prefix is intentional per spec §4.15 (subsystem grouping for grep-discoverability).
+Adds: skills_core_registry, skills_core_atomic_installation, skills_core_render_per_vendor, skills_pro_custom, skills_pro_role_gating.
+
+Place these in a dedicated `// --- skills (5) ---` block (NOT inside spur-core block) — this is a cross-cutting subsystem.
 
 - [ ] **Step 1: Write failing test**
 
 ```rust
     #[test]
-    fn spur_core_skills_keys_registered() {
+    fn skills_keys_registered() {
         for s in &[
-            "core_core_skill_registry",
-            "core_core_skill_atomic_installation",
+            "skills_core_registry",
+            "skills_core_atomic_installation",
             "skills_core_render_per_vendor",
             "skills_pro_custom",
             "skills_pro_role_gating",
@@ -656,12 +650,12 @@ Note: skills_* prefix is intentional per spec §4.15 (subsystem grouping for gre
 ```
 
 - [ ] **Step 2: Run test, expect FAIL.**
-- [ ] **Step 3: Add consts**
+- [ ] **Step 3: Add consts** in a new dedicated block (NOT inside the spur-core block):
 
 ```rust
-    // --- spur-core: skills system (5) ---
-    pub const CORE_CORE_SKILL_REGISTRY: Self = Self("core_core_skill_registry");
-    pub const CORE_CORE_SKILL_ATOMIC_INSTALLATION: Self = Self("core_core_skill_atomic_installation");
+    // --- skills (5) ---
+    pub const SKILLS_CORE_REGISTRY: Self = Self("skills_core_registry");
+    pub const SKILLS_CORE_ATOMIC_INSTALLATION: Self = Self("skills_core_atomic_installation");
     pub const SKILLS_CORE_RENDER_PER_VENDOR: Self = Self("skills_core_render_per_vendor");
     pub const SKILLS_PRO_CUSTOM: Self = Self("skills_pro_custom");
     pub const SKILLS_PRO_ROLE_GATING: Self = Self("skills_pro_role_gating");
@@ -670,11 +664,11 @@ Note: skills_* prefix is intentional per spec §4.15 (subsystem grouping for gre
 Parser arms:
 
 ```rust
-        // spur-core: skills system
-        } else if bytes_eq(b, b"core_core_skill_registry") {
-            Some(Self::CORE_CORE_SKILL_REGISTRY)
-        } else if bytes_eq(b, b"core_core_skill_atomic_installation") {
-            Some(Self::CORE_CORE_SKILL_ATOMIC_INSTALLATION)
+        // skills
+        } else if bytes_eq(b, b"skills_core_registry") {
+            Some(Self::SKILLS_CORE_REGISTRY)
+        } else if bytes_eq(b, b"skills_core_atomic_installation") {
+            Some(Self::SKILLS_CORE_ATOMIC_INSTALLATION)
         } else if bytes_eq(b, b"skills_core_render_per_vendor") {
             Some(Self::SKILLS_CORE_RENDER_PER_VENDOR)
         } else if bytes_eq(b, b"skills_pro_custom") {

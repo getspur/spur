@@ -115,22 +115,24 @@ Risk-blocked features cite the relevant Risk # from `architecture.md` §8.
 | `core_pro_broadcast_lagged_recovery` | P | **v1.1-Q3** | `Lagged(n)` → NDJSON replay reconstruction (Risk #2/#9 fix) |
 
 #### Review subsystem
-**Revised 2026-04-26 per gemini gate-review findings.** Original draft over-gated baseline safety/UX behaviors. Manual review is intrinsic to `review_sink`; basic timeout fallback (auto-cancel) and basic retry (press 'R') are universal liveness features. Only configurable customization (rule-based auto-approve, custom fallback routing, custom retry policy with backoff) is Pro.
+**Revised 2026-04-26 (2nd pass) via 3-reviewer triangulation (gemini → kimi → codex).** First revision used `_basic`/`_custom`/`_backoff` suffixes (impl leaks) and folded timeout/retry into `review_sink`. Codex's code reading (`review_sink.rs:34`, `orchestrator.rs:4517`/`4654`, `spur-acp/src/config/mod.rs:246`) showed the sink is router-only; timeout + retry are separable orchestrator branches with distinct config fields. Adopted kimi's 6-key naming (capability nouns, no impl leaks).
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
 | `core_core_review_sink` | F | v1 | Pipeline routing review cards to frontends; includes built-in manual Approve/Reject/Modify resolution (formerly separate `review_policy_manual` — folded in) |
-| `core_core_review_policy_timeout_fallback_basic` | F | v1 | Auto-cancel on review timeout (liveness baseline; prevents indefinite hangs) |
-| `core_core_review_policy_retry_basic` | F | v1 | Press 'R' to retry a failed review (UX baseline; non-deterministic agent behavior) |
-| `core_pro_review_policy_auto_approve` | P | v1 | Configurable auto-approve rules (path globs, change-size limits) |
-| `core_pro_review_policy_timeout_fallback_custom` | P | v1 | Configurable `FallbackAction` routing on timeout (Slack hand-off, alt agent, etc.) |
-| `core_pro_review_policy_retry_backoff` | P | v1 | `RetryRequested` resolution with configurable exponential backoff + max-attempts policy (Risk #5 closure) |
+| `core_core_review_timeout` | F | v1 | Auto-cancel on review timeout (liveness baseline; prevents indefinite hangs) |
+| `core_core_review_retry` | F | v1 | Press 'R' to retry a failed review with system-default backoff (UX baseline; non-deterministic agent behavior) |
+| `core_pro_review_auto_approve` | P | v1 | Rule-based auto-approve (path globs, change-size limits) — gates the review-bypass branch |
+| `core_pro_review_timeout_routing` | P | v1 | Configurable `FallbackAction` routing on timeout (Slack hand-off, alt agent, etc.) — beyond default auto-cancel |
+| `core_pro_review_retry_config` | P | v1 | `RetryRequested` resolution with configurable exponential backoff + max-attempts policy (Risk #5 closure) — beyond fixed default backoff |
 
 #### Skills system
+**Revised 2026-04-26 (gate-review pass).** Original draft mixed `core_core_skill_*` (2 keys) with `skills_*` (3 keys), violating the "block label matches all contained keys' prefix" invariant and breaking grep-discoverability of the skills boundary. Renamed all 5 keys to share the `skills_*` prefix.
+
 | Key | Tier | Status | Description |
 |---|---|---|---|
-| `core_core_skill_registry` | F | v1 | Context-aware loading of bundled skills |
-| `core_core_skill_atomic_installation` | F | v1 | SPUR-MANAGED marker + SHA-256 integrity (Risk #16 mitigation) |
+| `skills_core_registry` | F | v1 | Context-aware loading of bundled skills |
+| `skills_core_atomic_installation` | F | v1 | SPUR-MANAGED marker + SHA-256 integrity (Risk #16 mitigation) |
 | `skills_core_render_per_vendor` | F | v1 | All 17 bundled skills × 7 render targets (claude/codex/gemini/kiro/cursor/opencode/kimi) |
 | `skills_pro_custom` | P | v1 | Register org-internal MCP/agent skills |
 | `skills_pro_role_gating` | P | v1 | Per-role skill bundle access control |
@@ -373,9 +375,9 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "core_core_executor_lineage_projection",
         "core_core_notification_pump",
         "core_core_review_sink",
-        "core_core_review_policy_timeout_fallback_basic",
-        "core_core_review_policy_retry_basic",
-        "core_core_skill_registry", "core_core_skill_atomic_installation",
+        "core_core_review_timeout",
+        "core_core_review_retry",
+        "skills_core_registry", "skills_core_atomic_installation",
         "skills_core_render_per_vendor",
         "core_core_conflict_detection", "core_core_rate_limit_detection",
         "core_core_license_event_broadcast",
@@ -438,9 +440,9 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "@inherit:community",
 
         "core_pro_worker_heartbeat_watchdog",
-        "core_pro_review_policy_auto_approve",
-        "core_pro_review_policy_timeout_fallback_custom",
-        "core_pro_review_policy_retry_backoff",
+        "core_pro_review_auto_approve",
+        "core_pro_review_timeout_routing",
+        "core_pro_review_retry_config",
         "core_pro_peer_mailbox_router",
         "core_pro_plan_orphan_recovery",
         "core_pro_background_task_tracker",
@@ -555,7 +557,9 @@ Each tier-gated feature must be enforced at its first use-site. Per `2026-04-21-
 | `pm_pro_linear_sync` | `spur-pm/src/service.rs` | bidirectional sync entry point | Capability check |
 | `pm_pro_plane_sync` | `spur-pm/src/service.rs` | bidirectional sync entry point | Capability check |
 | `tui_pro_telegram_bot_solo` | `spur-cli/src/main.rs` | `bot telegram` command dispatch | Capability check |
-| `core_pro_review_policy_auto_approve` | `spur-core/src/review_sink.rs` | auto-approve resolution | Capability check |
+| `core_pro_review_auto_approve` | `spur-core/src/orchestrator.rs` | review-bypass / rule-based auto-approve path near `review_required` handling | Capability check |
+| `core_pro_review_timeout_routing` | `spur-core/src/orchestrator.rs` | timeout `tokio::select!` arm (~line 4517) | Capability check on non-default timeout fallback/routing |
+| `core_pro_review_retry_config` | `spur-core/src/orchestrator.rs` | `ReviewDecision::Retry` arm (~line 4654) — max attempts, backoff policy | Capability check on custom retry config |
 | `mcp_pro_plan_durable` | `spur-mcp/src/server.rs:323` (active_plans insert) | `submit_plan(persist_as_epic=true)` | Capability check |
 | `mcp_pro_signal_watcher_scope_drift` | `spur-mcp/src/signal_watcher.rs` | mutation proposal emit | Capability check |
 | `mcp_pro_graph_tools` | `spur-mcp/src/server.rs` | each `graph_*` tool dispatch | Capability check |
