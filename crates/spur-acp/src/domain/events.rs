@@ -475,6 +475,11 @@ pub enum SpurEventBody {
     /// `inflight_stranded`.
     WorkerPeerMailboxReconciled {
         brain_session_id: String,
+        /// Count of `WorkerPeerMessageAuditFailed` events emitted during
+        /// reconciliation. Always 0 prior to bd-cpf.5b. Use the
+        /// `WorkerPeerMessageAuditFailed` event type (filtered by
+        /// `transition_kind == "reconcile_to_delivered"`) for direct alerting
+        /// rather than this counter.
         audit_failed_emitted: u32,
         inflight_forced_to_delivered: u32,
         #[serde(default)]

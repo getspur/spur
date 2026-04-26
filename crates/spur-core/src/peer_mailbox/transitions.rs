@@ -8,6 +8,11 @@ use spur_acp::{BrainSessionId, SpurEventBody};
 pub enum PeerTransitionKind {
     DeliveredInflight,
     Delivered,
+    /// Startup reconciliation forcing a `DeliveredInflight` entry to
+    /// `Delivered`. Distinct from `Delivered` (post-prompt) so audit
+    /// failures route to a different alert tier - reconcile audit
+    /// failures indicate boot-time ledger inconsistency.
+    ReconcileToDelivered,
 }
 
 impl PeerTransitionKind {
@@ -15,6 +20,7 @@ impl PeerTransitionKind {
         match self {
             Self::DeliveredInflight => "delivered_inflight",
             Self::Delivered => "delivered",
+            Self::ReconcileToDelivered => "reconcile_to_delivered",
         }
     }
 }
