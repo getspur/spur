@@ -147,7 +147,7 @@ impl DashboardView {
             detail_pane: DetailPane::new(),
             input_bar: InputBar::new(),
             completion: crate::components::input_completion::InputCompletionPort::new(),
-            command_registry: crate::commands::CommandRegistry::new(),
+            command_registry: crate::commands::CommandRegistry::from_configs(&[]),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(
                 crate::mentions::MentionRegistry::new(),
             )),
@@ -2134,5 +2134,11 @@ impl DashboardView {
     #[doc(hidden)]
     pub fn input_bar_mut_for_test(&mut self) -> &mut crate::components::input_bar::InputBar {
         &mut self.input_bar
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn command_registry_for_test(&self) -> &crate::commands::CommandRegistry {
+        &self.command_registry
     }
 }
