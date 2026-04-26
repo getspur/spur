@@ -37,3 +37,25 @@ async fn native_worker_dies_on_drop() {
     }
     panic!("child PID {pid} still alive 500ms after Drop; kill_on_drop missing");
 }
+
+#[tokio::test]
+async fn stdio_adapter_dies_on_drop() {
+    use spur_acp::connection::stdio_adapter::spawn_stdio_for_test;
+
+    let mut child = spawn_stdio_for_test("/bin/sh", &["-c", "sleep 60"])
+        .await
+        .expect("spawn child");
+    let pid = child.id().expect("pid present");
+    assert!(pid_alive(pid).await);
+
+    drop(child);
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        if !pid_alive(pid).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("stdio child {pid} still alive 500ms after Drop");
+}
