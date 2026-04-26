@@ -406,3 +406,84 @@ fn kiro_execute_response_renders_as_system_note() {
         "expected a kiro-tagged response system note; got {last_trace:?}"
     );
 }
+
+#[test]
+fn vendor_exec_on_cleared_view_returns_none() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+    use spur_tui::views::View;
+
+    let sid = SessionId("kiro-cleared-vendor".to_string());
+
+    let kiro_cfg = std::sync::Arc::new(spur_acp::AgentConfig {
+        name: "kiro".into(),
+        command: "kiro-cli".into(),
+        args: vec!["acp".into()],
+        transport: spur_acp::types::TransportKind::Acp,
+        kind: spur_acp::types::AgentKind::Generic,
+        role: spur_acp::types::AgentRole::Both,
+        capabilities: vec![],
+        cost_tier: spur_acp::types::CostTier::Medium,
+        rate_limit_window: None,
+        review: Default::default(),
+        display: Default::default(),
+        commands: spur_acp::CommandsConfig {
+            dispatch: spur_acp::DispatchKind::VendorExec,
+            exec_method: Some("_kiro.dev/commands/execute".to_string()),
+            args_template: spur_acp::ArgsTemplateKind::RawRest,
+            ingest: vec![spur_acp::IngestBinding {
+                method: spur_acp::ext::KIRO_COMMANDS_AVAILABLE.to_string(),
+                parser: spur_acp::IngestParserKind::JsonPathList,
+                path: "availableCommands".to_string(),
+                item_schema: spur_acp::ItemSchemaKind::AcpAvailableCommand,
+            }],
+            response: vec![],
+            static_commands: vec![],
+        },
+        permissions: Default::default(),
+        skip_permissions: false,
+        skip_permissions_args: vec![],
+        skip_permissions_session_mode: None,
+        delegation: Default::default(),
+    });
+
+    let mut view = spur_tui::views::session_detail::SessionDetailView::new(
+        sid.clone(),
+        "kiro".to_string(),
+        "brain".to_string(),
+        std::path::PathBuf::from("."),
+        kiro_cfg,
+        Vec::new(),
+    );
+
+    let params = serde_json::json!({
+        "sessionId": sid.0,
+        "availableCommands": [
+            { "name": "context", "description": "manage context" }
+        ]
+    });
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::AgentExtNotification {
+            session: sid,
+            method: spur_acp::ext::KIRO_COMMANDS_AVAILABLE.to_string(),
+            params,
+        }),
+        &test_ctx(),
+    );
+
+    view.reset_for_clear();
+    assert!(view.is_cleared());
+
+    view.input_bar_mut_for_test()
+        .set_text("/context".to_string(), 8);
+
+    let action = view.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+
+    assert!(
+        action.is_none(),
+        "vendor-exec on a cleared SessionDetailView must be suppressed; got {action:?}"
+    );
+}
