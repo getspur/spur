@@ -90,105 +90,69 @@ impl FeatureKey {
 
     // === Tier revamp v1 keys (post-2026-04-26) ===
 
-    // --- spur-acp (11) ---
+    // --- spur-acp (7) — Wave 8: dropped 3 ghost adapters + merged degraded_nolock into advisory_lock ---
     pub const ACP_CORE_TRANSPORT_STDIO: Self = Self("acp_core_transport_stdio");
     pub const ACP_CORE_TRANSPORT_SOCKET: Self = Self("acp_core_transport_socket");
     pub const ACP_CORE_ADAPTER_CLAUDE_CODE: Self = Self("acp_core_adapter_claude_code");
     pub const ACP_CORE_ADAPTER_CODEX: Self = Self("acp_core_adapter_codex");
     pub const ACP_CORE_ADAPTER_GEMINI: Self = Self("acp_core_adapter_gemini");
     pub const ACP_CORE_ADAPTER_KIRO: Self = Self("acp_core_adapter_kiro");
-    pub const ACP_CORE_ADAPTER_CURSOR: Self = Self("acp_core_adapter_cursor");
-    pub const ACP_CORE_ADAPTER_OPENCODE: Self = Self("acp_core_adapter_opencode");
-    pub const ACP_CORE_ADAPTER_KIMI: Self = Self("acp_core_adapter_kimi");
     pub const ACP_CORE_SESSION_ATTACH_ADVISORY_LOCK: Self =
         Self("acp_core_session_attach_advisory_lock");
-    pub const ACP_CORE_SESSION_ATTACH_DEGRADED_NOLOCK: Self =
-        Self("acp_core_session_attach_degraded_nolock");
 
-    // --- spur-core: brain & scheduling (5) ---
+    // --- spur-core: brain (2) — Wave 8: consolidated trio → brain_session; deferred auto_pool to v1.1 ---
     pub const CORE_CORE_BRAIN_SESSION: Self = Self("core_core_brain_session");
-    pub const CORE_CORE_BRAIN_SCHEDULER: Self = Self("core_core_brain_scheduler");
     pub const CORE_CORE_BRAIN_FAILOVER_MANUAL_KEYSTROKE: Self = Self("core_core_brain_failover_manual_keystroke");
-    pub const CORE_PRO_BRAIN_FAILOVER_AUTO_POOL: Self = Self("core_pro_brain_failover_auto_pool");
-    pub const CORE_CORE_CONTINUATION_BRIDGE: Self = Self("core_core_continuation_bridge");
 
-    // --- spur-core: workers & semaphore (3) ---
+    // --- spur-core: workers (2) — Wave 8: merged cancellable_semaphore into parallel_workers ---
     pub const CORE_CORE_PARALLEL_WORKERS: Self = Self("core_core_parallel_workers");
-    pub const CORE_CORE_CANCELLABLE_SEMAPHORE: Self = Self("core_core_cancellable_semaphore");
     pub const CORE_PRO_WORKER_HEARTBEAT_WATCHDOG: Self = Self("core_pro_worker_heartbeat_watchdog");
 
-    // --- spur-core: event pipeline (5) ---
-    pub const CORE_CORE_EVENT_FUNNEL_BROADCAST: Self = Self("core_core_event_funnel_broadcast");
-    pub const CORE_CORE_EVENT_SINK_NDJSON_128MB: Self = Self("core_core_event_sink_ndjson_128mb");
-    pub const CORE_CORE_EXECUTOR_LINEAGE_PROJECTION: Self =
-        Self("core_core_executor_lineage_projection");
-    pub const CORE_CORE_NOTIFICATION_PUMP: Self = Self("core_core_notification_pump");
-    pub const CORE_PRO_BROADCAST_LAGGED_RECOVERY: Self = Self("core_pro_broadcast_lagged_recovery");
+    // --- spur-core: event pipeline (1) — Wave 8 NEW umbrella: collapsed funnel+sink+lineage+pump+agent_notification+tui_drain → event_pipeline; deferred broadcast_lagged_recovery to v1.1 ---
+    pub const CORE_CORE_EVENT_PIPELINE: Self = Self("core_core_event_pipeline");
 
-    // --- spur-core: peer mailbox (3) ---
+    // --- spur-core: peer mailbox (1) — Wave 8: collapsed router+ledger+stranded_recon → router (constructor compile-coupled) ---
     pub const CORE_PRO_PEER_MAILBOX_ROUTER: Self = Self("core_pro_peer_mailbox_router");
-    pub const CORE_PRO_PEER_MAILBOX_LEDGER: Self = Self("core_pro_peer_mailbox_ledger");
-    pub const CORE_PRO_PEER_MAILBOX_STRANDED_RECON: Self =
-        Self("core_pro_peer_mailbox_stranded_recon");
 
-    // --- spur-core: review subsystem (6) ---
-    pub const CORE_CORE_REVIEW_SINK: Self = Self("core_core_review_sink");
-    pub const CORE_CORE_REVIEW_TIMEOUT: Self = Self("core_core_review_timeout");
-    pub const CORE_CORE_REVIEW_RETRY: Self = Self("core_core_review_retry");
+    // --- spur-core: review (3) — Wave 8 NEW umbrella: collapsed sink+timeout+retry → review; merged timeout_routing into auto_approve ---
+    pub const CORE_CORE_REVIEW: Self = Self("core_core_review");
     pub const CORE_PRO_REVIEW_AUTO_APPROVE: Self = Self("core_pro_review_auto_approve");
-    pub const CORE_PRO_REVIEW_TIMEOUT_ROUTING: Self = Self("core_pro_review_timeout_routing");
     pub const CORE_PRO_REVIEW_RETRY_CONFIG: Self = Self("core_pro_review_retry_config");
 
-    // --- spur-core: system events (4) ---
-    pub const CORE_CORE_CONFLICT_DETECTION: Self = Self("core_core_conflict_detection");
-    pub const CORE_CORE_RATE_LIMIT_DETECTION: Self = Self("core_core_rate_limit_detection");
+    // --- spur-core: system events (1) — Wave 8: deferred conflict + rate_limit (no production emitters); agent_notification absorbed by event_pipeline ---
     pub const CORE_CORE_PERMISSION_REQUEST_DETECTION: Self =
         Self("core_core_permission_request_detection");
-    pub const CORE_CORE_AGENT_NOTIFICATION: Self = Self("core_core_agent_notification");
 
-    // --- spur-core: reliability & lifecycle (5) ---
+    // --- spur-core: reliability & lifecycle (3) — Wave 8: merged plan_orphan_recovery into plan_persistence; dropped background_task_tracker (mechanism plumbing) ---
     pub const CORE_CORE_SESSION_RESUME: Self = Self("core_core_session_resume");
     pub const CORE_PRO_SESSION_RESUME_EVENT_REPLAY: Self =
         Self("core_pro_session_resume_event_replay");
     pub const CORE_CORE_PLAN_PERSISTENCE: Self = Self("core_core_plan_persistence");
-    pub const CORE_CORE_PLAN_ORPHAN_RECOVERY: Self = Self("core_core_plan_orphan_recovery");
-    pub const CORE_CORE_BACKGROUND_TASK_TRACKER: Self =
-        Self("core_core_background_task_tracker");
 
-    // --- skills (5) ---
+    // --- skills (2) — Wave 8: consolidated registry+atomic_installation+render+role_gating → registry ---
     pub const SKILLS_CORE_REGISTRY: Self = Self("skills_core_registry");
-    pub const SKILLS_CORE_ATOMIC_INSTALLATION: Self = Self("skills_core_atomic_installation");
-    pub const SKILLS_CORE_RENDER_PER_VENDOR: Self = Self("skills_core_render_per_vendor");
     pub const SKILLS_PRO_CUSTOM: Self = Self("skills_pro_custom");
-    pub const SKILLS_PRO_ROLE_GATING: Self = Self("skills_pro_role_gating");
 
-    // --- spur-mcp (14) ---
+    // --- spur-mcp (10) — Wave 8: merged outcome_materializer into delegate, reconciler_journal_notify into plan_durable, mutation_executor into signal_watcher; deferred custom_tools to v1.1 ---
     pub const MCP_CORE_SERVER_DISPATCH: Self = Self("mcp_core_server_dispatch");
     pub const MCP_CORE_DELEGATE: Self = Self("mcp_core_delegate");
     pub const MCP_CORE_OUTCOME_FETCH: Self = Self("mcp_core_outcome_fetch");
     pub const MCP_CORE_PM: Self = Self("mcp_core_pm");
     pub const MCP_CORE_PR: Self = Self("mcp_core_pr");
     pub const MCP_CORE_PLAN_EPHEMERAL: Self = Self("mcp_core_plan_ephemeral");
-    pub const MCP_CORE_OUTCOME_MATERIALIZER: Self = Self("mcp_core_outcome_materializer");
     pub const MCP_PRO_PLAN_DURABLE: Self = Self("mcp_pro_plan_durable");
-    pub const MCP_PRO_RECONCILER_JOURNAL_NOTIFY: Self = Self("mcp_pro_reconciler_journal_notify");
     pub const MCP_PRO_SIGNAL_WATCHER_SCOPE_DRIFT: Self = Self("mcp_pro_signal_watcher_scope_drift");
-    pub const MCP_PRO_MUTATION_EXECUTOR: Self = Self("mcp_pro_mutation_executor");
     pub const MCP_PRO_GRAPH_TOOLS: Self = Self("mcp_pro_graph_tools");
     pub const MCP_PRO_REVIEW: Self = Self("mcp_pro_review");
-    pub const MCP_PRO_CUSTOM_TOOLS: Self = Self("mcp_pro_custom_tools");
 
-    // --- spur-tui (10) ---
+    // --- spur-tui (7) — Wave 8: collapsed dashboard+landing+composer → dashboard; notification_drain absorbed by event_pipeline ---
     pub const TUI_CORE_VIEW_DASHBOARD: Self = Self("tui_core_view_dashboard");
     pub const TUI_CORE_VIEW_SESSION_DETAIL: Self = Self("tui_core_view_session_detail");
     pub const TUI_CORE_VIEW_PLAN_INSPECTOR: Self = Self("tui_core_view_plan_inspector");
     pub const TUI_CORE_VIEW_PALETTE_OVERLAY: Self = Self("tui_core_view_palette_overlay");
     pub const TUI_CORE_VIEW_ISSUE_BROWSER: Self = Self("tui_core_view_issue_browser");
-    pub const TUI_CORE_VIEW_LANDING_DECISION: Self = Self("tui_core_view_landing_decision");
-    pub const TUI_CORE_VIEW_COMPOSER: Self = Self("tui_core_view_composer");
     pub const TUI_CORE_MODAL_COLLISION_ESCAPE: Self = Self("tui_core_modal_collision_escape");
     pub const TUI_CORE_INPUT_PASTE_AS_ATOM: Self = Self("tui_core_input_paste_as_atom");
-    pub const TUI_CORE_NOTIFICATION_DRAIN: Self = Self("tui_core_notification_drain");
 
     // --- spur-cli (9) ---
     pub const CLI_CORE_INIT: Self = Self("cli_core_init");
@@ -213,18 +177,15 @@ impl FeatureKey {
     pub const COST_CORE_PRICING_REGISTRY: Self = Self("cost_core_pricing_registry");
     pub const COST_PRO_PER_PROJECT_TRACKING: Self = Self("cost_pro_per_project_tracking");
 
-    // --- spur-context (3) ---
+    // --- spur-context (1) — Wave 8: consolidated duckdb_engine + daily_report + weekly_report → duckdb_engine ---
     pub const CTX_PRO_DUCKDB_ENGINE: Self = Self("ctx_pro_duckdb_engine");
-    pub const CTX_PRO_DAILY_REPORT: Self = Self("ctx_pro_daily_report");
-    pub const CTX_PRO_WEEKLY_REPORT: Self = Self("ctx_pro_weekly_report");
 
     // --- spur-worktree (2) ---
     pub const WORKTREE_CORE_ISOLATION: Self = Self("worktree_core_isolation");
     pub const WORKTREE_CORE_ORPHAN_CLEANUP: Self = Self("worktree_core_orphan_cleanup");
 
-    // --- spur-bot (3) ---
+    // --- spur-bot (2) — Wave 8: merged thread_registry into telegram_solo ---
     pub const BOT_PRO_TELEGRAM_SOLO: Self = Self("bot_pro_telegram_solo");
-    pub const BOT_PRO_THREAD_REGISTRY: Self = Self("bot_pro_thread_registry");
     pub const BOT_PRO_INLINE_REVIEW: Self = Self("bot_pro_inline_review");
 
     // --- spur-license meta (2) ---
@@ -316,7 +277,7 @@ impl FeatureKey {
             Some(Self::ENABLE_COMPACTION_V2)
         } else if bytes_eq(b, b"enable_telemetry") {
             Some(Self::ENABLE_TELEMETRY)
-        // ===== Tier revamp v1 keys =====
+        // ===== Tier revamp v1 keys (Wave 8 final) =====
         // spur-acp
         } else if bytes_eq(b, b"acp_core_transport_stdio") {
             Some(Self::ACP_CORE_TRANSPORT_STDIO)
@@ -330,74 +291,34 @@ impl FeatureKey {
             Some(Self::ACP_CORE_ADAPTER_GEMINI)
         } else if bytes_eq(b, b"acp_core_adapter_kiro") {
             Some(Self::ACP_CORE_ADAPTER_KIRO)
-        } else if bytes_eq(b, b"acp_core_adapter_cursor") {
-            Some(Self::ACP_CORE_ADAPTER_CURSOR)
-        } else if bytes_eq(b, b"acp_core_adapter_opencode") {
-            Some(Self::ACP_CORE_ADAPTER_OPENCODE)
-        } else if bytes_eq(b, b"acp_core_adapter_kimi") {
-            Some(Self::ACP_CORE_ADAPTER_KIMI)
         } else if bytes_eq(b, b"acp_core_session_attach_advisory_lock") {
             Some(Self::ACP_CORE_SESSION_ATTACH_ADVISORY_LOCK)
-        } else if bytes_eq(b, b"acp_core_session_attach_degraded_nolock") {
-            Some(Self::ACP_CORE_SESSION_ATTACH_DEGRADED_NOLOCK)
-        // spur-core: brain & scheduling
+        // spur-core: brain
         } else if bytes_eq(b, b"core_core_brain_session") {
             Some(Self::CORE_CORE_BRAIN_SESSION)
-        } else if bytes_eq(b, b"core_core_brain_scheduler") {
-            Some(Self::CORE_CORE_BRAIN_SCHEDULER)
         } else if bytes_eq(b, b"core_core_brain_failover_manual_keystroke") {
             Some(Self::CORE_CORE_BRAIN_FAILOVER_MANUAL_KEYSTROKE)
-        } else if bytes_eq(b, b"core_pro_brain_failover_auto_pool") {
-            Some(Self::CORE_PRO_BRAIN_FAILOVER_AUTO_POOL)
-        } else if bytes_eq(b, b"core_core_continuation_bridge") {
-            Some(Self::CORE_CORE_CONTINUATION_BRIDGE)
-        // spur-core: workers & semaphore
+        // spur-core: workers
         } else if bytes_eq(b, b"core_core_parallel_workers") {
             Some(Self::CORE_CORE_PARALLEL_WORKERS)
-        } else if bytes_eq(b, b"core_core_cancellable_semaphore") {
-            Some(Self::CORE_CORE_CANCELLABLE_SEMAPHORE)
         } else if bytes_eq(b, b"core_pro_worker_heartbeat_watchdog") {
             Some(Self::CORE_PRO_WORKER_HEARTBEAT_WATCHDOG)
-        // spur-core: event pipeline
-        } else if bytes_eq(b, b"core_core_event_funnel_broadcast") {
-            Some(Self::CORE_CORE_EVENT_FUNNEL_BROADCAST)
-        } else if bytes_eq(b, b"core_core_event_sink_ndjson_128mb") {
-            Some(Self::CORE_CORE_EVENT_SINK_NDJSON_128MB)
-        } else if bytes_eq(b, b"core_core_executor_lineage_projection") {
-            Some(Self::CORE_CORE_EXECUTOR_LINEAGE_PROJECTION)
-        } else if bytes_eq(b, b"core_core_notification_pump") {
-            Some(Self::CORE_CORE_NOTIFICATION_PUMP)
-        } else if bytes_eq(b, b"core_pro_broadcast_lagged_recovery") {
-            Some(Self::CORE_PRO_BROADCAST_LAGGED_RECOVERY)
+        // spur-core: event pipeline (Wave 8 NEW umbrella)
+        } else if bytes_eq(b, b"core_core_event_pipeline") {
+            Some(Self::CORE_CORE_EVENT_PIPELINE)
         // spur-core: peer mailbox
         } else if bytes_eq(b, b"core_pro_peer_mailbox_router") {
             Some(Self::CORE_PRO_PEER_MAILBOX_ROUTER)
-        } else if bytes_eq(b, b"core_pro_peer_mailbox_ledger") {
-            Some(Self::CORE_PRO_PEER_MAILBOX_LEDGER)
-        } else if bytes_eq(b, b"core_pro_peer_mailbox_stranded_recon") {
-            Some(Self::CORE_PRO_PEER_MAILBOX_STRANDED_RECON)
-        // spur-core: review subsystem
-        } else if bytes_eq(b, b"core_core_review_sink") {
-            Some(Self::CORE_CORE_REVIEW_SINK)
-        } else if bytes_eq(b, b"core_core_review_timeout") {
-            Some(Self::CORE_CORE_REVIEW_TIMEOUT)
-        } else if bytes_eq(b, b"core_core_review_retry") {
-            Some(Self::CORE_CORE_REVIEW_RETRY)
+        // spur-core: review (Wave 8 NEW umbrella)
+        } else if bytes_eq(b, b"core_core_review") {
+            Some(Self::CORE_CORE_REVIEW)
         } else if bytes_eq(b, b"core_pro_review_auto_approve") {
             Some(Self::CORE_PRO_REVIEW_AUTO_APPROVE)
-        } else if bytes_eq(b, b"core_pro_review_timeout_routing") {
-            Some(Self::CORE_PRO_REVIEW_TIMEOUT_ROUTING)
         } else if bytes_eq(b, b"core_pro_review_retry_config") {
             Some(Self::CORE_PRO_REVIEW_RETRY_CONFIG)
         // spur-core: system events
-        } else if bytes_eq(b, b"core_core_conflict_detection") {
-            Some(Self::CORE_CORE_CONFLICT_DETECTION)
-        } else if bytes_eq(b, b"core_core_rate_limit_detection") {
-            Some(Self::CORE_CORE_RATE_LIMIT_DETECTION)
         } else if bytes_eq(b, b"core_core_permission_request_detection") {
             Some(Self::CORE_CORE_PERMISSION_REQUEST_DETECTION)
-        } else if bytes_eq(b, b"core_core_agent_notification") {
-            Some(Self::CORE_CORE_AGENT_NOTIFICATION)
         // spur-core: reliability & lifecycle
         } else if bytes_eq(b, b"core_core_session_resume") {
             Some(Self::CORE_CORE_SESSION_RESUME)
@@ -405,21 +326,11 @@ impl FeatureKey {
             Some(Self::CORE_PRO_SESSION_RESUME_EVENT_REPLAY)
         } else if bytes_eq(b, b"core_core_plan_persistence") {
             Some(Self::CORE_CORE_PLAN_PERSISTENCE)
-        } else if bytes_eq(b, b"core_core_plan_orphan_recovery") {
-            Some(Self::CORE_CORE_PLAN_ORPHAN_RECOVERY)
-        } else if bytes_eq(b, b"core_core_background_task_tracker") {
-            Some(Self::CORE_CORE_BACKGROUND_TASK_TRACKER)
         // skills
         } else if bytes_eq(b, b"skills_core_registry") {
             Some(Self::SKILLS_CORE_REGISTRY)
-        } else if bytes_eq(b, b"skills_core_atomic_installation") {
-            Some(Self::SKILLS_CORE_ATOMIC_INSTALLATION)
-        } else if bytes_eq(b, b"skills_core_render_per_vendor") {
-            Some(Self::SKILLS_CORE_RENDER_PER_VENDOR)
         } else if bytes_eq(b, b"skills_pro_custom") {
             Some(Self::SKILLS_PRO_CUSTOM)
-        } else if bytes_eq(b, b"skills_pro_role_gating") {
-            Some(Self::SKILLS_PRO_ROLE_GATING)
         // spur-mcp
         } else if bytes_eq(b, b"mcp_core_server_dispatch") {
             Some(Self::MCP_CORE_SERVER_DISPATCH)
@@ -433,22 +344,14 @@ impl FeatureKey {
             Some(Self::MCP_CORE_PR)
         } else if bytes_eq(b, b"mcp_core_plan_ephemeral") {
             Some(Self::MCP_CORE_PLAN_EPHEMERAL)
-        } else if bytes_eq(b, b"mcp_core_outcome_materializer") {
-            Some(Self::MCP_CORE_OUTCOME_MATERIALIZER)
         } else if bytes_eq(b, b"mcp_pro_plan_durable") {
             Some(Self::MCP_PRO_PLAN_DURABLE)
-        } else if bytes_eq(b, b"mcp_pro_reconciler_journal_notify") {
-            Some(Self::MCP_PRO_RECONCILER_JOURNAL_NOTIFY)
         } else if bytes_eq(b, b"mcp_pro_signal_watcher_scope_drift") {
             Some(Self::MCP_PRO_SIGNAL_WATCHER_SCOPE_DRIFT)
-        } else if bytes_eq(b, b"mcp_pro_mutation_executor") {
-            Some(Self::MCP_PRO_MUTATION_EXECUTOR)
         } else if bytes_eq(b, b"mcp_pro_graph_tools") {
             Some(Self::MCP_PRO_GRAPH_TOOLS)
         } else if bytes_eq(b, b"mcp_pro_review") {
             Some(Self::MCP_PRO_REVIEW)
-        } else if bytes_eq(b, b"mcp_pro_custom_tools") {
-            Some(Self::MCP_PRO_CUSTOM_TOOLS)
         // spur-tui
         } else if bytes_eq(b, b"tui_core_view_dashboard") {
             Some(Self::TUI_CORE_VIEW_DASHBOARD)
@@ -460,16 +363,10 @@ impl FeatureKey {
             Some(Self::TUI_CORE_VIEW_PALETTE_OVERLAY)
         } else if bytes_eq(b, b"tui_core_view_issue_browser") {
             Some(Self::TUI_CORE_VIEW_ISSUE_BROWSER)
-        } else if bytes_eq(b, b"tui_core_view_landing_decision") {
-            Some(Self::TUI_CORE_VIEW_LANDING_DECISION)
-        } else if bytes_eq(b, b"tui_core_view_composer") {
-            Some(Self::TUI_CORE_VIEW_COMPOSER)
         } else if bytes_eq(b, b"tui_core_modal_collision_escape") {
             Some(Self::TUI_CORE_MODAL_COLLISION_ESCAPE)
         } else if bytes_eq(b, b"tui_core_input_paste_as_atom") {
             Some(Self::TUI_CORE_INPUT_PASTE_AS_ATOM)
-        } else if bytes_eq(b, b"tui_core_notification_drain") {
-            Some(Self::TUI_CORE_NOTIFICATION_DRAIN)
         // spur-cli
         } else if bytes_eq(b, b"cli_core_init") {
             Some(Self::CLI_CORE_INIT)
@@ -510,10 +407,6 @@ impl FeatureKey {
         // spur-context
         } else if bytes_eq(b, b"ctx_pro_duckdb_engine") {
             Some(Self::CTX_PRO_DUCKDB_ENGINE)
-        } else if bytes_eq(b, b"ctx_pro_daily_report") {
-            Some(Self::CTX_PRO_DAILY_REPORT)
-        } else if bytes_eq(b, b"ctx_pro_weekly_report") {
-            Some(Self::CTX_PRO_WEEKLY_REPORT)
         // spur-worktree
         } else if bytes_eq(b, b"worktree_core_isolation") {
             Some(Self::WORKTREE_CORE_ISOLATION)
@@ -522,8 +415,6 @@ impl FeatureKey {
         // spur-bot
         } else if bytes_eq(b, b"bot_pro_telegram_solo") {
             Some(Self::BOT_PRO_TELEGRAM_SOLO)
-        } else if bytes_eq(b, b"bot_pro_thread_registry") {
-            Some(Self::BOT_PRO_THREAD_REGISTRY)
         } else if bytes_eq(b, b"bot_pro_inline_review") {
             Some(Self::BOT_PRO_INLINE_REVIEW)
         // spur-license meta
@@ -818,6 +709,7 @@ mod tests {
 
     #[test]
     fn spur_acp_keys_registered() {
+        // Wave 8: dropped 3 ghost adapters (cursor/opencode/kimi); merged degraded_nolock into advisory_lock.
         for s in &[
             "acp_core_transport_stdio",
             "acp_core_transport_socket",
@@ -825,118 +717,179 @@ mod tests {
             "acp_core_adapter_codex",
             "acp_core_adapter_gemini",
             "acp_core_adapter_kiro",
+            "acp_core_session_attach_advisory_lock",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+        // Wave-8 dropped/absorbed keys must NOT parse anymore.
+        for dropped in &[
             "acp_core_adapter_cursor",
             "acp_core_adapter_opencode",
             "acp_core_adapter_kimi",
-            "acp_core_session_attach_advisory_lock",
             "acp_core_session_attach_degraded_nolock",
         ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 dropped key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn spur_core_brain_keys_registered() {
+        // Wave 8: consolidated brain_session+brain_scheduler+continuation_bridge → brain_session.
+        // Deferred core_pro_brain_failover_auto_pool to v1.1 backlog (no alternate pool).
         for s in &[
             "core_core_brain_session",
-            "core_core_brain_scheduler",
             "core_core_brain_failover_manual_keystroke",
-            "core_pro_brain_failover_auto_pool",
-            "core_core_continuation_bridge",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+        for dropped in &[
+            "core_core_brain_scheduler",
+            "core_core_continuation_bridge",
+            "core_pro_brain_failover_auto_pool",
+        ] {
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed/deferred key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn spur_core_workers_keys_registered() {
+        // Wave 8: merged cancellable_semaphore into parallel_workers.
         for s in &[
             "core_core_parallel_workers",
-            "core_core_cancellable_semaphore",
             "core_pro_worker_heartbeat_watchdog",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
+        assert!(
+            FeatureKey::from_known("core_core_cancellable_semaphore").is_none(),
+            "Wave-8 absorbed key should not parse"
+        );
     }
 
     #[test]
     fn spur_core_event_pipeline_keys_registered() {
-        for s in &[
+        // Wave 8 NEW umbrella: collapsed funnel+sink+lineage+pump+agent_notification+tui_drain → event_pipeline.
+        // Deferred core_pro_broadcast_lagged_recovery to v1.1 (no recovery logic).
+        assert!(FeatureKey::from_known("core_core_event_pipeline").is_some());
+        for dropped in &[
             "core_core_event_funnel_broadcast",
             "core_core_event_sink_ndjson_128mb",
             "core_core_executor_lineage_projection",
             "core_core_notification_pump",
+            "core_core_agent_notification",
+            "tui_core_notification_drain",
             "core_pro_broadcast_lagged_recovery",
         ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed/deferred key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn spur_core_peer_mailbox_keys_registered() {
-        for s in &[
-            "core_pro_peer_mailbox_router",
+        // Wave 8: consolidated router+ledger+stranded_recon → router (compile-coupled constructor).
+        assert!(FeatureKey::from_known("core_pro_peer_mailbox_router").is_some());
+        for dropped in &[
             "core_pro_peer_mailbox_ledger",
             "core_pro_peer_mailbox_stranded_recon",
         ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn spur_core_review_keys_registered() {
+        // Wave 8 NEW umbrella: collapsed sink+timeout+retry → review.
+        // Merged core_pro_review_timeout_routing into core_pro_review_auto_approve.
         for s in &[
-            "core_core_review_sink",
-            "core_core_review_timeout",
-            "core_core_review_retry",
+            "core_core_review",
             "core_pro_review_auto_approve",
-            "core_pro_review_timeout_routing",
             "core_pro_review_retry_config",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+        for dropped in &[
+            "core_core_review_sink",
+            "core_core_review_timeout",
+            "core_core_review_retry",
+            "core_pro_review_timeout_routing",
+        ] {
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn spur_core_system_events_keys_registered() {
-        for s in &[
+        // Wave 8: deferred conflict + rate_limit (no production emitters); agent_notification absorbed by event_pipeline.
+        assert!(FeatureKey::from_known("core_core_permission_request_detection").is_some());
+        for dropped in &[
             "core_core_conflict_detection",
             "core_core_rate_limit_detection",
-            "core_core_permission_request_detection",
-            "core_core_agent_notification",
         ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 deferred key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn spur_core_reliability_keys_registered() {
+        // Wave 8: merged plan_orphan_recovery into plan_persistence; dropped background_task_tracker (mechanism plumbing).
         for s in &[
             "core_core_session_resume",
             "core_pro_session_resume_event_replay",
             "core_core_plan_persistence",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+        for dropped in &[
             "core_core_plan_orphan_recovery",
             "core_core_background_task_tracker",
         ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed/dropped key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn skills_keys_registered() {
-        for s in &[
-            "skills_core_registry",
+        // Wave 8: consolidated registry+atomic_installation+render+role_gating → registry.
+        for s in &["skills_core_registry", "skills_pro_custom"] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+        for dropped in &[
             "skills_core_atomic_installation",
             "skills_core_render_per_vendor",
-            "skills_pro_custom",
             "skills_pro_role_gating",
         ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn spur_mcp_keys_registered() {
+        // Wave 8: merged outcome_materializer→delegate, reconciler_journal_notify→plan_durable,
+        // mutation_executor→signal_watcher; deferred custom_tools to v1.1.
         for s in &[
             "mcp_core_server_dispatch",
             "mcp_core_delegate",
@@ -944,34 +897,49 @@ mod tests {
             "mcp_core_pm",
             "mcp_core_pr",
             "mcp_core_plan_ephemeral",
-            "mcp_core_outcome_materializer",
             "mcp_pro_plan_durable",
-            "mcp_pro_reconciler_journal_notify",
             "mcp_pro_signal_watcher_scope_drift",
-            "mcp_pro_mutation_executor",
             "mcp_pro_graph_tools",
             "mcp_pro_review",
-            "mcp_pro_custom_tools",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+        for dropped in &[
+            "mcp_core_outcome_materializer",
+            "mcp_pro_reconciler_journal_notify",
+            "mcp_pro_mutation_executor",
+            "mcp_pro_custom_tools",
+        ] {
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed/deferred key {dropped} should not parse"
+            );
         }
     }
 
     #[test]
     fn spur_tui_keys_registered() {
+        // Wave 8: collapsed dashboard+landing+composer → dashboard; notification_drain absorbed by event_pipeline.
         for s in &[
             "tui_core_view_dashboard",
             "tui_core_view_session_detail",
             "tui_core_view_plan_inspector",
             "tui_core_view_palette_overlay",
             "tui_core_view_issue_browser",
-            "tui_core_view_landing_decision",
-            "tui_core_view_composer",
             "tui_core_modal_collision_escape",
             "tui_core_input_paste_as_atom",
-            "tui_core_notification_drain",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+        for dropped in &[
+            "tui_core_view_landing_decision",
+            "tui_core_view_composer",
+            "tui_core_notification_drain",
+        ] {
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed key {dropped} should not parse"
+            );
         }
     }
 
@@ -1018,12 +986,13 @@ mod tests {
 
     #[test]
     fn spur_context_keys_registered() {
-        for s in &[
-            "ctx_pro_duckdb_engine",
-            "ctx_pro_daily_report",
-            "ctx_pro_weekly_report",
-        ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        // Wave 8: consolidated duckdb_engine + daily_report + weekly_report → duckdb_engine.
+        assert!(FeatureKey::from_known("ctx_pro_duckdb_engine").is_some());
+        for dropped in &["ctx_pro_daily_report", "ctx_pro_weekly_report"] {
+            assert!(
+                FeatureKey::from_known(dropped).is_none(),
+                "Wave-8 absorbed key {dropped} should not parse"
+            );
         }
     }
 
@@ -1039,13 +1008,14 @@ mod tests {
 
     #[test]
     fn spur_bot_keys_registered() {
-        for s in &[
-            "bot_pro_telegram_solo",
-            "bot_pro_thread_registry",
-            "bot_pro_inline_review",
-        ] {
+        // Wave 8: merged thread_registry into telegram_solo.
+        for s in &["bot_pro_telegram_solo", "bot_pro_inline_review"] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
+        assert!(
+            FeatureKey::from_known("bot_pro_thread_registry").is_none(),
+            "Wave-8 absorbed key should not parse"
+        );
     }
 
     #[test]
