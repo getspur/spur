@@ -64,6 +64,27 @@
   See `docs/superpowers/specs/2026-04-22-multi-agent-skill-embedding-research.md`.
 
 ### Fixed
+- **Risk #4 (worktree orphaning under unclean shutdown).** New
+  `WorktreeAuthority` actor sweeps dead-session worktrees safely under
+  multi-process operation. Branch namespace migrated to
+  `spur/worker/v2/{agent}/{brain_session_id}/{worker_session_id}` so
+  sweep enumeration can be precisely scoped to v2 worktrees. Pre-v2
+  branches are NOT auto-cleaned; operators reclaim legacy debt via the
+  separate `spur-worktree-gc-legacy.sh` script (deferred). The actor
+  uses a `SessionLivenessProbe` over advisory `flock(2)` and a
+  `SelfHeldSet` to skip self-owned sessions. See
+  `docs/superpowers/specs/2026-04-26-worktree-authority-design.md` for
+  the full invariants I-1..I-7.
+- **Worker child processes now die with their orchestrator** via
+  `kill_on_drop(true)` on the `tokio::process::Command` spawn paths in
+  `crates/spur-acp/src/connection/{native,stdio_adapter,cli_wrap_adapter,stream_json_adapter}.rs`.
+  Closes Risk #4's hard prerequisite.
+- **`spur-bot/tests/runtime_flow.rs` compile errors absorbed.** 12
+  inline `AgentSessionReady` event initializers were missing the
+  `fs_unsafe: bool` field added in the single-attach invariant work
+  (commit `84e91895`). Fixed inline so the workspace smoke test gate
+  passes. This is cross-stream cleanup — not part of the
+  WorktreeAuthority design but required for plan closure.
 - **Architecture Risk #23 (semaphore indefinite wait).** Permit acquire is now
   cancellable: `cancel_delegation` arriving while a task is queued for a
   permit short-circuits immediately without acquiring. A heartbeat-based
