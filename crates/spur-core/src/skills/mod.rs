@@ -75,6 +75,7 @@ fn bundled_raw() -> &'static HashMap<&'static str, &'static str> {
         );
         m.insert("brainstorming", include_str!("brainstorming/SKILL.md"));
         m.insert("writing-plans", include_str!("writing-plans/SKILL.md"));
+        m.insert("writing-skills", include_str!("writing-skills/SKILL.md"));
         m
     })
 }
@@ -316,6 +317,7 @@ mod tests {
             "brain-review-gate",
             "plan-task-discipline",
             "worker-mention-routing",
+            "writing-skills",
         ] {
             let body = map
                 .get(name)
