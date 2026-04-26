@@ -287,31 +287,37 @@ pub fn run(repo_root: &Path) -> Result<Summary, InstallError> {
 }
 
 fn remove_stale_managed_file(rf: &RenderedFile, summary: &mut Summary) -> Result<(), InstallError> {
-    if !rf.path.exists() {
-        return Ok(());
+    if rf.path.exists() {
+        let expected_marker = match body_after_marker(&rf.bytes) {
+            Some((marker, _)) => marker,
+            None => return Ok(()),
+        };
+        let disk = std::fs::read(&rf.path).map_err(|source| InstallError::Io {
+            path: rf.path.clone(),
+            source,
+        })?;
+        let Some((marker, body)) = body_after_marker(&disk) else {
+            return Ok(());
+        };
+        if marker.skill_id != expected_marker.skill_id {
+            return Ok(());
+        }
+        if sha256_hex(body) != marker.sha256 {
+            return Ok(());
+        }
+        std::fs::remove_file(&rf.path).map_err(|source| InstallError::Io {
+            path: rf.path.clone(),
+            source,
+        })?;
+        summary.removed.push(rf.path.clone());
     }
-    let expected_marker = match body_after_marker(&rf.bytes) {
-        Some((marker, _)) => marker,
-        None => return Ok(()),
-    };
-    let disk = std::fs::read(&rf.path).map_err(|source| InstallError::Io {
-        path: rf.path.clone(),
-        source,
-    })?;
-    let Some((marker, body)) = body_after_marker(&disk) else {
-        return Ok(());
-    };
-    if marker.skill_id != expected_marker.skill_id {
-        return Ok(());
+    // Best-effort: clean up the adapter dir if it is now empty (or was
+    // already an orphan from an older install). Single-level only — never
+    // recurses up to `.claude/skills/` etc. Non-empty dirs (user-placed
+    // files) cause `remove_dir` to fail and we silently ignore.
+    if let Some(parent) = rf.path.parent() {
+        let _ = std::fs::remove_dir(parent);
     }
-    if sha256_hex(body) != marker.sha256 {
-        return Ok(());
-    }
-    std::fs::remove_file(&rf.path).map_err(|source| InstallError::Io {
-        path: rf.path.clone(),
-        source,
-    })?;
-    summary.removed.push(rf.path.clone());
     Ok(())
 }
 
@@ -547,6 +553,67 @@ mod tests {
                 "not in summary.written: {expected}"
             );
         }
+    }
+
+    #[test]
+    fn run_cleans_up_empty_dir_left_by_brain_role_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate orphan empty dir left behind by an older install where
+        // a now-brain-only skill was previously rendered to a worker adapter
+        // but the SKILL.md was later removed manually (e.g. git clean).
+        let orphan = dir.path().join(".claude/skills/spurpower-brainstorming");
+        std::fs::create_dir_all(&orphan).unwrap();
+
+        run(dir.path()).unwrap();
+
+        assert!(
+            !orphan.exists(),
+            "empty adapter dir should be removed when skill is brain-only"
+        );
+    }
+
+    #[test]
+    fn run_cleans_up_dir_after_removing_stale_managed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Use a real bundled brain-only skill (brainstorming).
+        // Its body comes from list_active_skills + adapter rendering.
+        // Pre-seed a stale managed file at the worker adapter location.
+        use crate::skills::list_active_skills;
+        let payload = list_active_skills(dir.path())
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == "brainstorming")
+            .expect("brainstorming bundled");
+        let rf = crate::skills::adapters::Adapter::ClaudeCode.render(&payload, dir.path());
+        std::fs::create_dir_all(rf.path.parent().unwrap()).unwrap();
+        std::fs::write(&rf.path, &rf.bytes).unwrap();
+        let dir_path = rf.path.parent().unwrap().to_path_buf();
+
+        run(dir.path()).unwrap();
+
+        assert!(!rf.path.exists(), "stale managed file should be removed");
+        assert!(
+            !dir_path.exists(),
+            "parent dir should be cleaned up after removal"
+        );
+    }
+
+    #[test]
+    fn run_preserves_non_empty_user_dir_for_brain_only_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_dir = dir.path().join(".claude/skills/spurpower-brainstorming");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        // User placed an unrelated file in the dir.
+        let user_file = user_dir.join("user-notes.md");
+        std::fs::write(&user_file, "personal notes").unwrap();
+
+        run(dir.path()).unwrap();
+
+        assert!(
+            user_dir.exists(),
+            "non-empty dir must not be removed (user content present)"
+        );
+        assert!(user_file.exists(), "user file must be preserved");
     }
 
     #[test]
