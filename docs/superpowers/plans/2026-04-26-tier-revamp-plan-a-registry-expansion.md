@@ -1618,10 +1618,10 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
             "core_pro_worker_heartbeat_watchdog",
             // spur-core: event pipeline (1) — Wave 8: collapsed funnel+sink+lineage+notification_pump+agent_notification+tui_notification_drain → event_pipeline (compile-coupled producer/consumer chain; sink subscribes to broadcast, lineage applied inside funnel, drain consumes from event bus); deferred broadcast_lagged_recovery (no recovery logic)
             "core_core_event_pipeline",
-            // spur-core: review (3) — Wave 8: consolidated sink+timeout+retry → review (timeout/retry without sink = no receiver); merged auto_approve+timeout_routing → auto_approve (auto IS timeout fallback)
+            // spur-core: review (3) — Wave 8: consolidated sink+timeout+retry → review (timeout/retry without sink = no receiver); merged auto_approve+timeout_routing → auto_approve (auto IS timeout fallback). Wave 9: tier-shifted retry_config Pro→Free (renamed core_pro→core_core).
             "core_core_review",
+            "core_core_review_retry_config",
             "core_pro_review_auto_approve",
-            "core_pro_review_retry_config",
             // skills (2) — Wave 8: consolidated registry+atomic_installation+render_per_vendor+role_gating → registry (single installer code path)
             "skills_core_registry",
             "skills_pro_custom",
