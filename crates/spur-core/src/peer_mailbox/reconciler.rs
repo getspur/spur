@@ -62,6 +62,14 @@ pub async fn run_startup_reconcile(
                             .min()
                             .cloned()
                             .unwrap_or_default();
+                        // `injected_chars: 0` is a known distortion: the
+                        // ledger entry carries `injected_into_prompts` (prompt
+                        // IDs) but not the byte count recorded by the normal
+                        // post-prompt path in `orchestrator.rs`. Lineage and
+                        // budget consumers should treat reconciler-emitted
+                        // `Delivered` events as "char count unknown, not zero."
+                        // Stage-2 fix: persist `injected_bytes` on the ledger
+                        // entry at `record_injection` time.
                         funnel.emit(SpurEventBody::WorkerPeerMessageDelivered {
                             brain_session_id: brain_session_id.clone(),
                             message_id: entry.envelope.message_id,
