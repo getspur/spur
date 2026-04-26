@@ -434,10 +434,24 @@ pub enum SpurEventBody {
         transition_kind: String,
         error: String,
     },
+    /// Startup reconciliation found a peer message in an unexpected
+    /// non-terminal state and intentionally left it untouched.
+    ///
+    /// "Stranded" means the reconciler refused to infer a safe lifecycle
+    /// transition; operators should inspect the ledger state and reason.
+    WorkerPeerMessageReconciledStranded {
+        brain_session_id: String,
+        message_id: crate::domain::peer_message::PeerMessageId,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+        state: crate::domain::peer_message::LedgerState,
+        reason: String,
+    },
     WorkerPeerMailboxReconciled {
         brain_session_id: String,
         audit_failed_emitted: u32,
         inflight_forced_to_delivered: u32,
+        #[serde(default)]
+        inflight_stranded: u32,
         inflight_reverted_to_queued: u32,
         guards_re_wrapped: u32,
     },
@@ -1152,6 +1166,7 @@ mod worker_peer_event_tests {
             brain_session_id: "bs-1".into(),
             audit_failed_emitted: 2,
             inflight_forced_to_delivered: 1,
+            inflight_stranded: 4,
             inflight_reverted_to_queued: 0,
             guards_re_wrapped: 3,
         };
@@ -1160,6 +1175,29 @@ mod worker_peer_event_tests {
         assert!(matches!(
             back,
             SpurEventBody::WorkerPeerMailboxReconciled { .. }
+        ));
+    }
+
+    #[test]
+    fn worker_peer_message_reconciled_stranded_round_trips() {
+        use crate::domain::peer_message::{LedgerState, PeerMessageId};
+        use uuid::Uuid;
+
+        let body = SpurEventBody::WorkerPeerMessageReconciledStranded {
+            brain_session_id: "bs-1".into(),
+            message_id: PeerMessageId(Uuid::new_v4()),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            state: LedgerState::DeliveredInflight,
+            reason: "delivered_inflight_without_injection_records".into(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SpurEventBody::WorkerPeerMessageReconciledStranded {
+                state: LedgerState::DeliveredInflight,
+                ..
+            }
         ));
     }
 
