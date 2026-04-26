@@ -1,3 +1,8 @@
+#![cfg(feature = "duckdb")]
+//! These fixtures exercise real DuckDB query paths via `AnalyticsEngine::conn()`,
+//! which only exists when the `duckdb` feature is enabled. Skip the whole
+//! compilation unit otherwise — the test is meaningless against the no-op stub.
+
 use anyhow::Result;
 use spur_context::AnalyticsEngine;
 use std::env;
