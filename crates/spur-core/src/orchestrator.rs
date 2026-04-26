@@ -2666,6 +2666,11 @@ impl Orchestrator {
             return;
         };
 
+        // Remove from self_held before teardown. The Live probe catches the
+        // gap if the lockfile persists in ActiveConnection beyond this point.
+        self.self_held
+            .remove(&spur_acp::BrainSessionId::from(b.spur_session_id.clone()));
+
         // 1. Emit BrainRetired BEFORE aborting handles. Broadcast emit is
         //    synchronous into the channel, so any post-abort stragglers
         //    that slip through land on an already-closed projection state.
@@ -3044,6 +3049,8 @@ impl Orchestrator {
             fs_unsafe,
         }));
 
+        self.self_held.insert(brain_session_id.clone());
+
         Ok(BrainSession {
             connection,
             acp_session_id: session_response.session_id.to_string(),
@@ -3360,6 +3367,8 @@ impl Orchestrator {
             Some(s) => s,
             None => Box::pin(futures::stream::empty()),
         };
+
+        self.self_held.insert(brain_session_id.clone());
 
         Ok((brain_session, stream, load_outcome))
     }
