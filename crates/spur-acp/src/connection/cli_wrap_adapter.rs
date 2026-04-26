@@ -29,6 +29,20 @@ use agent_client_protocol::{
 use crate::connection::AgentConnection;
 use crate::types::AgentHealth;
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn spawn_cli_wrap_for_test(
+    command: &str,
+    args: &[&str],
+) -> std::io::Result<tokio::process::Child> {
+    tokio::process::Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+}
+
 /// Wraps a one-shot CLI tool as an `AgentConnection`.
 ///
 /// On every `prompt()` call the adapter spawns a fresh subprocess, writes
@@ -171,6 +185,7 @@ impl AgentConnection for CliWrapAdapter {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 self.health_status = AgentHealth::Error(format!("Failed to spawn process: {e}"));
