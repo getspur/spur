@@ -201,6 +201,13 @@ impl FeatureKey {
     pub const CLI_CORE_CONNECT: Self = Self("cli_core_connect");
     pub const CLI_CORE_LICENSE_ACTIVATE: Self = Self("cli_core_license_activate");
 
+    // --- spur-pm (5) ---
+    pub const PM_CORE_BEADS_BASIC: Self = Self("pm_core_beads_basic");
+    pub const PM_CORE_BROWSE: Self = Self("pm_core_browse");
+    pub const PM_CORE_PR: Self = Self("pm_core_pr");
+    pub const PM_CORE_BEADS_GRAPH_ADAPTER: Self = Self("pm_core_beads_graph_adapter");
+    pub const PM_PRO_BEADS_ADVANCED: Self = Self("pm_pro_beads_advanced");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -456,6 +463,17 @@ impl FeatureKey {
             Some(Self::CLI_CORE_CONNECT)
         } else if bytes_eq(b, b"cli_core_license_activate") {
             Some(Self::CLI_CORE_LICENSE_ACTIVATE)
+        // spur-pm
+        } else if bytes_eq(b, b"pm_core_beads_basic") {
+            Some(Self::PM_CORE_BEADS_BASIC)
+        } else if bytes_eq(b, b"pm_core_browse") {
+            Some(Self::PM_CORE_BROWSE)
+        } else if bytes_eq(b, b"pm_core_pr") {
+            Some(Self::PM_CORE_PR)
+        } else if bytes_eq(b, b"pm_core_beads_graph_adapter") {
+            Some(Self::PM_CORE_BEADS_GRAPH_ADAPTER)
+        } else if bytes_eq(b, b"pm_pro_beads_advanced") {
+            Some(Self::PM_PRO_BEADS_ADVANCED)
         } else {
             None
         }
@@ -909,6 +927,19 @@ mod tests {
             "cli_core_cost",
             "cli_core_connect",
             "cli_core_license_activate",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_pm_keys_registered() {
+        for s in &[
+            "pm_core_beads_basic",
+            "pm_core_browse",
+            "pm_core_pr",
+            "pm_core_beads_graph_adapter",
+            "pm_pro_beads_advanced",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
