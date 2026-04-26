@@ -213,6 +213,11 @@ impl FeatureKey {
     pub const COST_CORE_PRICING_REGISTRY: Self = Self("cost_core_pricing_registry");
     pub const COST_PRO_PER_PROJECT_TRACKING: Self = Self("cost_pro_per_project_tracking");
 
+    // --- spur-context (3) ---
+    pub const CTX_PRO_DUCKDB_ENGINE: Self = Self("ctx_pro_duckdb_engine");
+    pub const CTX_PRO_DAILY_REPORT: Self = Self("ctx_pro_daily_report");
+    pub const CTX_PRO_WEEKLY_REPORT: Self = Self("ctx_pro_weekly_report");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -486,6 +491,13 @@ impl FeatureKey {
             Some(Self::COST_CORE_PRICING_REGISTRY)
         } else if bytes_eq(b, b"cost_pro_per_project_tracking") {
             Some(Self::COST_PRO_PER_PROJECT_TRACKING)
+        // spur-context
+        } else if bytes_eq(b, b"ctx_pro_duckdb_engine") {
+            Some(Self::CTX_PRO_DUCKDB_ENGINE)
+        } else if bytes_eq(b, b"ctx_pro_daily_report") {
+            Some(Self::CTX_PRO_DAILY_REPORT)
+        } else if bytes_eq(b, b"ctx_pro_weekly_report") {
+            Some(Self::CTX_PRO_WEEKLY_REPORT)
         } else {
             None
         }
@@ -963,6 +975,17 @@ mod tests {
             "cost_core_session_display",
             "cost_core_pricing_registry",
             "cost_pro_per_project_tracking",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_context_keys_registered() {
+        for s in &[
+            "ctx_pro_duckdb_engine",
+            "ctx_pro_daily_report",
+            "ctx_pro_weekly_report",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
