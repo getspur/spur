@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use crate::domain::continuation::{DeferReason, DropReason};
 use crate::domain::delegation::{DelegationId, DelegationStatus};
 use crate::types::{CancelMode, SessionId};
-use agent_client_protocol::{SessionInfo, SessionNotification};
+use agent_client_protocol::schema::{SessionInfo, SessionNotification};
 
 /// Review kind for `ExecutorReviewRequested`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

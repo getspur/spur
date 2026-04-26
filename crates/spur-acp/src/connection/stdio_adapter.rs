@@ -21,7 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use uuid::Uuid;
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     ContentBlock, ContentChunk, InitializeRequest, InitializeResponse, McpServer,
     NewSessionResponse, PromptRequest, ProtocolVersion, SessionId, SessionNotification,
     SessionUpdate, TextContent,

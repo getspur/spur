@@ -29,7 +29,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     AuthenticateRequest, AuthenticateResponse, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionResponse,
     PromptRequest, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
@@ -239,7 +239,9 @@ pub struct ExtNotificationPayload {
 #[cfg(test)]
 mod agent_connection_defaults {
     use super::*;
-    use agent_client_protocol::{AuthMethodId, AuthenticateRequest, SetSessionModeRequest};
+    use agent_client_protocol::schema::{
+        AuthMethodId, AuthenticateRequest, SessionId, SetSessionModeRequest,
+    };
 
     struct NullConn;
 
@@ -279,10 +281,7 @@ mod agent_connection_defaults {
     #[tokio::test]
     async fn set_session_mode_default_is_unsupported() {
         let mut c = NullConn;
-        let req = SetSessionModeRequest::new(
-            agent_client_protocol::SessionId::new("s".to_string()),
-            "plan",
-        );
+        let req = SetSessionModeRequest::new(SessionId::new("s".to_string()), "plan");
         let err = c.set_session_mode(req).await.unwrap_err().to_string();
         assert!(err.contains("not supported"), "got: {err}");
     }

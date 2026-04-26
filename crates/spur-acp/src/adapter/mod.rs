@@ -5,7 +5,7 @@ pub mod kiro;
 pub mod mcp;
 
 use crate::types::AgentKind;
-use agent_client_protocol::{ToolCall, ToolKind};
+use agent_client_protocol::schema::{ToolCall, ToolKind};
 use serde_json::Value;
 
 /// Mirrors ACP `ToolKind` 1:1 with TUI-specific refinements.
