@@ -208,6 +208,11 @@ impl FeatureKey {
     pub const PM_CORE_BEADS_GRAPH_ADAPTER: Self = Self("pm_core_beads_graph_adapter");
     pub const PM_PRO_BEADS_ADVANCED: Self = Self("pm_pro_beads_advanced");
 
+    // --- spur-bot (3) ---
+    pub const BOT_PRO_TELEGRAM_SOLO: Self = Self("bot_pro_telegram_solo");
+    pub const BOT_PRO_THREAD_REGISTRY: Self = Self("bot_pro_thread_registry");
+    pub const BOT_PRO_INLINE_REVIEW: Self = Self("bot_pro_inline_review");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -474,6 +479,13 @@ impl FeatureKey {
             Some(Self::PM_CORE_BEADS_GRAPH_ADAPTER)
         } else if bytes_eq(b, b"pm_pro_beads_advanced") {
             Some(Self::PM_PRO_BEADS_ADVANCED)
+        // spur-bot
+        } else if bytes_eq(b, b"bot_pro_telegram_solo") {
+            Some(Self::BOT_PRO_TELEGRAM_SOLO)
+        } else if bytes_eq(b, b"bot_pro_thread_registry") {
+            Some(Self::BOT_PRO_THREAD_REGISTRY)
+        } else if bytes_eq(b, b"bot_pro_inline_review") {
+            Some(Self::BOT_PRO_INLINE_REVIEW)
         } else {
             None
         }
@@ -940,6 +952,17 @@ mod tests {
             "pm_core_pr",
             "pm_core_beads_graph_adapter",
             "pm_pro_beads_advanced",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_bot_keys_registered() {
+        for s in &[
+            "bot_pro_telegram_solo",
+            "bot_pro_thread_registry",
+            "bot_pro_inline_review",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
