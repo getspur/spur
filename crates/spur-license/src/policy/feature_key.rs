@@ -208,6 +208,10 @@ impl FeatureKey {
     pub const PM_CORE_BEADS_GRAPH_ADAPTER: Self = Self("pm_core_beads_graph_adapter");
     pub const PM_PRO_BEADS_ADVANCED: Self = Self("pm_pro_beads_advanced");
 
+    // --- spur-worktree (2) ---
+    pub const WORKTREE_CORE_ISOLATION: Self = Self("worktree_core_isolation");
+    pub const WORKTREE_CORE_ORPHAN_CLEANUP: Self = Self("worktree_core_orphan_cleanup");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -474,6 +478,11 @@ impl FeatureKey {
             Some(Self::PM_CORE_BEADS_GRAPH_ADAPTER)
         } else if bytes_eq(b, b"pm_pro_beads_advanced") {
             Some(Self::PM_PRO_BEADS_ADVANCED)
+        // spur-worktree
+        } else if bytes_eq(b, b"worktree_core_isolation") {
+            Some(Self::WORKTREE_CORE_ISOLATION)
+        } else if bytes_eq(b, b"worktree_core_orphan_cleanup") {
+            Some(Self::WORKTREE_CORE_ORPHAN_CLEANUP)
         } else {
             None
         }
@@ -940,6 +949,16 @@ mod tests {
             "pm_core_pr",
             "pm_core_beads_graph_adapter",
             "pm_pro_beads_advanced",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_worktree_keys_registered() {
+        for s in &[
+            "worktree_core_isolation",
+            "worktree_core_orphan_cleanup",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
