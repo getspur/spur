@@ -221,7 +221,11 @@ Before promoting to a plan, run a local prototype: edit `input_bar.rs` only, the
 
 ## 9. Out of scope (filed as follow-ups)
 
-- `crates/spur-tui/src/components/react_trace/render.rs` (lines 288, 403). Primary copy source for trace bodies. Same `TOP | BOTTOM` rules + reversed-badge + glyph-prefix treatment will apply. **When this lands, it is the natural moment to extract a crate-wide `panel_block(focused, title, glyph) -> Block` helper and a parallel `alert_block(bg_color, title) -> Block` helper.** Two data points are sufficient to settle the helper signatures; doing it speculatively from one site is premature.
+- ~~`crates/spur-tui/src/components/react_trace/render.rs` (lines 288, 403).~~ **Landed (Task 6):** `Borders::TOP | Borders::BOTTOM` via `Self::build_trace_block` shared by both `render` and `render_with_ctx`; tests cover default and `markdown` feature flags. Cycle 2 dropped unused `&self`. Three deferred polish items remain (below).
+- **Trace pane reversed-color "lamp" badge.** Spec originally prescribed reversed-color title badges everywhere, but the trace pane's `pane_title_and_color` is a static label, not a live mode indicator. Defer until/unless the trace pane gains true distinct modes that need salience.
+- **`BORDER_OVERHEAD_ROWS/COLS` constants for `react_trace`.** Trace pane uses `block.inner(area)` directly (no manual arithmetic), so the input-bar invariant pattern isn't load-bearing yet. Add when geometry math first appears.
+- **Soft-wrap regression test for trace pane.** Existing test covers explicit newlines but not soft-wrap (message fits within width=40). Add a long-line case if a wrap-related regression ever surfaces.
+- **Crate-wide `panel_block(focused, title, glyph) -> Block` helper.** Two builders now exist (`input_bar.rs::build_block`, `react_trace::build_trace_block`). Extracting only makes sense when a third site lands or when divergence becomes painful — premature otherwise.
 - Other dashboard panels: `activity_log.rs`, `detail_pane.rs`, `agents_tree.rs`, `plan_*.rs`. Track in a single follow-up issue.
 - Runtime `copy_mode` toggle (the rejected Option B from brainstorming): no ambient need once the design language above is in place; revisit only if user feedback demands a global "stripped chrome" mode.
 - Subtle background tint on composer interior. Adds nice containment but interacts with non-truecolor terminals; revisit if the bottom rule alone proves insufficient.
