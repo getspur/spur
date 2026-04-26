@@ -360,6 +360,14 @@ pub enum SpurEventBody {
         /// How `session/cancel` is implemented for this session's transport.
         /// The TUI uses this to render transport-aware cancel feedback.
         cancel_mode: CancelMode,
+        /// True when this session was attached without an enforceable
+        /// lockfile (NFS/sshfs/SMB). Multi-instance protection is OFF.
+        fs_unsafe: bool,
+    },
+    SessionAttachRejected {
+        acp_session_id: String,
+        holder: crate::session_lock::HolderInfo,
+        fs_unsafe: bool,
     },
     WorkerPeerMessageAccepted {
         brain_session_id: String,
@@ -1015,10 +1023,44 @@ mod cancel_mode_field_tests {
             brain: "kiro".to_string(),
             resumed: false,
             cancel_mode: CancelMode::AcpSoft,
+            fs_unsafe: false,
         });
         match ev.body {
             SpurEventBody::AgentSessionReady { cancel_mode, .. } => {
                 assert_eq!(cancel_mode, CancelMode::AcpSoft);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_attach_event_tests {
+    use super::SpurEventBody;
+    use crate::session_lock::HolderInfo;
+
+    #[test]
+    fn session_attach_rejected_round_trips() {
+        let body = SpurEventBody::SessionAttachRejected {
+            acp_session_id: "acp-1".to_string(),
+            holder: HolderInfo {
+                pid: Some(42),
+                ..Default::default()
+            },
+            fs_unsafe: false,
+        };
+
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        match back {
+            SpurEventBody::SessionAttachRejected {
+                acp_session_id,
+                holder,
+                fs_unsafe,
+            } => {
+                assert_eq!(acp_session_id, "acp-1");
+                assert_eq!(holder.pid, Some(42));
+                assert!(!fs_unsafe);
             }
             _ => panic!("wrong variant"),
         }
