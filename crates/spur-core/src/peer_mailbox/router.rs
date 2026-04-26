@@ -58,6 +58,17 @@ impl PeerMailboxRouter {
         limits: Limits,
         brain_session_id: String,
     ) -> Self {
+        assert!(
+            limits.drain_max_total_ms > 0,
+            "peer mailbox drain_max_total_ms must be > 0"
+        );
+        if limits.drain_max_total_ms < limits.drain_quiet_window_ms {
+            tracing::warn!(
+                drain_max_total_ms = limits.drain_max_total_ms,
+                drain_quiet_window_ms = limits.drain_quiet_window_ms,
+                "peer mailbox drain absolute cap is below quiet window; cap wins"
+            );
+        }
         Self {
             ledger,
             funnel,
