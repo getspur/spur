@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add 135 new `FeatureKey` constants and 1 new `QuotaKey` variant to `spur-license` (additive — old keys remain alongside new keys). No behavior change yet; this is the typed registry foundation that Plans B–E build on.
+**Goal:** Add 99 new `FeatureKey` constants (Wave 7 final, down from 135 across Waves 5+6+7 4-reviewer + L9-MCTS rationalization) and 1 new `QuotaKey` variant to `spur-license` (additive — old keys remain alongside new keys). No behavior change yet; this is the typed registry foundation that Plans B–E build on.
 
 **Architecture:** Pure additive changes to `crates/spur-license/src/policy/feature_key.rs` and `crates/spur-license/src/quota.rs`. New keys follow the `<crate>_<tier>_<capability>` naming convention from the spec. The existing `from_known()` parser is extended; the existing `FeatureKey` newtype + `bytes_eq()` const helper are reused unchanged. After this plan ships, the codebase has a dual registry (old + new keys); Plan B will rewrite the policy doc and migrate all existing call sites; Plan B's final task will remove the old keys.
 
 **Tech Stack:** Rust 2021, `spur-license` crate, `cargo test --package spur-license`, no new dependencies.
 
-**Spec reference:** `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md` §4 (full feature key registry, 135 keys total).
+**Spec reference:** `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md` §4 (full feature key registry, 99 keys total post-Wave-7).
 
 ---
 
@@ -17,7 +17,7 @@
 | File | Change | Responsibility |
 |---|---|---|
 | `crates/spur-license/src/quota.rs` | Modify | Add `BrainFailoverChainDepth` variant to `QuotaKey` enum |
-| `crates/spur-license/src/policy/feature_key.rs` | Modify | Add 135 new `pub const` declarations grouped by crate prefix; extend `from_known()` parser; add new tests |
+| `crates/spur-license/src/policy/feature_key.rs` | Modify | Add 99 new `pub const` declarations (Wave 7 final) grouped by crate prefix; extend `from_known()` parser; add new tests |
 
 No new files. No changes to `gate.rs`, `licenseseat.rs`, `community.rs`, or `default_policy.json` (those are Plan B).
 
@@ -214,7 +214,7 @@ Replace the existing banner at the top of `crates/spur-license/src/policy/featur
 //! callers migrate.
 //!
 //! See `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md`
-//! §4 for the full 135-key registry.
+//! §4 for the full 99-key registry (Wave 7 final).
 ```
 
 - [ ] **Step 4: Build workspace**
@@ -1436,9 +1436,11 @@ Parser arms:
 
 ---
 
-## Task 21: Add spur-blob-store keys (4)
+## Task 21: Add spur-blob-store keys (1) — Wave 7 revised
 
-Per spec §4.12: 2 Free + 2 Pro.
+**Wave 7 4-reviewer + L9-MCTS synthesis:** original 4-key proposal reduced to 1 keep + 3 drops. Per spec §4.12 (revised) and §4.16 (Wave 7 entries):
+- DROP `blob_core_memory_backend`, `blob_core_fs_backend`, `blob_pro_measured_backend` — trait-impl variants chosen at construction time / always-on telemetry hardwired in `Orchestrator::new` at `crates/spur-core/src/orchestrator.rs:963`. Not user-toggleable.
+- KEEP `blob_pro_namespace_deletion` (renamed from `blob_pro_delete_namespace` per claude-code noun-pattern consistency review). Real CLI dispatch site: `spur gc outcomes --namespace`.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1446,10 +1448,7 @@ Per spec §4.12: 2 Free + 2 Pro.
     #[test]
     fn spur_blob_store_keys_registered() {
         for s in &[
-            "blob_core_memory_backend",
-            "blob_core_fs_backend",
-            "blob_pro_measured_backend",
-            "blob_pro_delete_namespace",
+            "blob_pro_namespace_deletion",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -1457,126 +1456,50 @@ Per spec §4.12: 2 Free + 2 Pro.
 ```
 
 - [ ] **Step 2: Run test, expect FAIL.**
-- [ ] **Step 3: Add consts**
+- [ ] **Step 3: Add const**
 
 ```rust
-    // --- spur-blob-store (4: 2 Free + 2 Pro) ---
-    pub const BLOB_CORE_MEMORY_BACKEND: Self = Self("blob_core_memory_backend");
-    pub const BLOB_CORE_FS_BACKEND: Self = Self("blob_core_fs_backend");
-    pub const BLOB_PRO_MEASURED_BACKEND: Self = Self("blob_pro_measured_backend");
-    pub const BLOB_PRO_DELETE_NAMESPACE: Self = Self("blob_pro_delete_namespace");
+    // --- spur-blob-store (1: 0 Free + 1 Pro) ---
+    pub const BLOB_PRO_NAMESPACE_DELETION: Self = Self("blob_pro_namespace_deletion");
 ```
 
-Parser arms:
+Parser arm:
 
 ```rust
         // spur-blob-store
-        } else if bytes_eq(b, b"blob_core_memory_backend") {
-            Some(Self::BLOB_CORE_MEMORY_BACKEND)
-        } else if bytes_eq(b, b"blob_core_fs_backend") {
-            Some(Self::BLOB_CORE_FS_BACKEND)
-        } else if bytes_eq(b, b"blob_pro_measured_backend") {
-            Some(Self::BLOB_PRO_MEASURED_BACKEND)
-        } else if bytes_eq(b, b"blob_pro_delete_namespace") {
-            Some(Self::BLOB_PRO_DELETE_NAMESPACE)
+        } else if bytes_eq(b, b"blob_pro_namespace_deletion") {
+            Some(Self::BLOB_PRO_NAMESPACE_DELETION)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-blob-store keys (4) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add blob_pro_namespace_deletion (Wave 7) for tier revamp Plan A`
 
 ---
 
-## Task 22: Add spur-interactive keys (3)
+## Task 22: ~~Add spur-interactive keys (3)~~ — DROPPED ENTIRELY (Wave 7)
 
-Per spec §4.13: all Free.
+**Wave 7 4-reviewer + L9-MCTS synthesis: all 3 keys dropped.** Per spec §4.13 (revised) and §4.16 (Wave 7 entries):
+- `interactive_core_frontend_host` — shared infrastructure used by both TUI (`crates/spur-cli/src/main.rs:710`) and Telegram bot (`crates/spur-bot/src/telegram/mod.rs:9`); not tier-gated.
+- `interactive_core_review_lane_mpsc` — production correctness invariant (`SubmitReview` rejected on command lane at `crates/spur-interactive/src/host.rs:21`); architecture, not feature toggle.
+- `interactive_core_shutdown_orchestrator` — always-on lifecycle hygiene tightly coupled to frontend_host.
 
-- [ ] **Step 1: Write failing test**
-
-```rust
-    #[test]
-    fn spur_interactive_keys_registered() {
-        for s in &[
-            "interactive_core_frontend_host",
-            "interactive_core_review_lane_mpsc",
-            "interactive_core_shutdown_orchestrator",
-        ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
-        }
-    }
-```
-
-- [ ] **Step 2: Run test, expect FAIL.**
-- [ ] **Step 3: Add consts**
-
-```rust
-    // --- spur-interactive (3: all Free) ---
-    pub const INTERACTIVE_CORE_FRONTEND_HOST: Self = Self("interactive_core_frontend_host");
-    pub const INTERACTIVE_CORE_REVIEW_LANE_MPSC: Self = Self("interactive_core_review_lane_mpsc");
-    pub const INTERACTIVE_CORE_SHUTDOWN_ORCHESTRATOR: Self = Self("interactive_core_shutdown_orchestrator");
-```
-
-Parser arms:
-
-```rust
-        // spur-interactive
-        } else if bytes_eq(b, b"interactive_core_frontend_host") {
-            Some(Self::INTERACTIVE_CORE_FRONTEND_HOST)
-        } else if bytes_eq(b, b"interactive_core_review_lane_mpsc") {
-            Some(Self::INTERACTIVE_CORE_REVIEW_LANE_MPSC)
-        } else if bytes_eq(b, b"interactive_core_shutdown_orchestrator") {
-            Some(Self::INTERACTIVE_CORE_SHUTDOWN_ORCHESTRATOR)
-```
-
-- [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-interactive keys (3) for tier revamp Plan A`
+**Skip this task entirely.** No code changes. No commit.
 
 ---
 
-## Task 23: Add cross-crate notification keys (2)
+## Task 23: ~~Add cross-crate notification keys (2)~~ — DROPPED ENTIRELY (Wave 7)
 
-Per spec §4.14: 1 Free + 1 Pro (v1.1).
+**Wave 7 4-reviewer + L9-MCTS synthesis: both keys dropped/deferred. Entire `notif_*` namespace evaporates from v1.** Per spec §4.14 (revised) and §4.16 (Wave 7 entries):
+- `notif_core_in_tui` — DROP. Redundant with already-merged `core_core_notification_pump` (producer at `crates/spur-core/src/notification_pump.rs:30`) + `tui_core_notification_drain` (consumer at `crates/spur-tui/src/app.rs:2552`); triple-naming the same path.
+- `notif_pro_external_channels` — DEFER to §4.16 v1.1 backlog. Greenfield vaporware; no Slack/Discord/email/webhook subsystem exists. Telegram already has its own `bot_pro_*` keys.
 
-- [ ] **Step 1: Write failing test**
-
-```rust
-    #[test]
-    fn notification_keys_registered() {
-        for s in &[
-            "notif_core_in_tui",
-            "notif_pro_external_channels",
-        ] {
-            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
-        }
-    }
-```
-
-- [ ] **Step 2: Run test, expect FAIL.**
-- [ ] **Step 3: Add consts**
-
-```rust
-    // --- Notifications (cross-crate, 2: 1 Free + 1 Pro v1.1) ---
-    pub const NOTIF_CORE_IN_TUI: Self = Self("notif_core_in_tui");
-    pub const NOTIF_PRO_EXTERNAL_CHANNELS: Self = Self("notif_pro_external_channels");
-```
-
-Parser arms:
-
-```rust
-        // Notifications
-        } else if bytes_eq(b, b"notif_core_in_tui") {
-            Some(Self::NOTIF_CORE_IN_TUI)
-        } else if bytes_eq(b, b"notif_pro_external_channels") {
-            Some(Self::NOTIF_PRO_EXTERNAL_CHANNELS)
-```
-
-- [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add notification keys (2) for tier revamp Plan A`
+**Skip this task entirely.** No code changes. No commit.
 
 ---
 
 ## Task 24: Final integration test — total count + comprehensive roundtrip
 
-This task verifies the full 135-new-key registry and updates the count guard test from Task 2.
+This task verifies the full 99-new-key registry (Wave 7 final count) and updates the count guard test from Task 2.
 
 **Files:**
 - Modify: `crates/spur-license/src/policy/feature_key.rs` (extend count test, add comprehensive roundtrip)
@@ -1587,7 +1510,7 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
 
 ```rust
     /// Asserts every new key from the tier revamp roundtrips correctly.
-    /// Total: 135 new keys (78 Free + 41 Pro v1 + 10 Pro v1.1 + 3 Team + 3 trial CLI).
+    /// Total: 99 new v1 keys (67 Free + 27 Pro v1 + 5 Pro v1.1 + 0 Team) — Wave 7 final.
     #[test]
     fn tier_revamp_v1_keys_roundtrip() {
         const NEW_KEYS: &[&str] = &[
@@ -1674,22 +1597,19 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
             "bot_pro_inline_review",
             // spur-license meta (2) — revised Wave 6: dropped facade_entitlement + policy_resolver + ed25519_verify (bootstrap paradox); renamed provider_heartbeat→revocation_polling AND moved Free→Pro; deferred quota_runtime_downgrade
             "license_pro_revocation_polling", "license_pro_offline_grace",
-            // spur-blob-store (4)
-            "blob_core_memory_backend", "blob_core_fs_backend",
-            "blob_pro_measured_backend", "blob_pro_delete_namespace",
-            // spur-interactive (3)
-            "interactive_core_frontend_host", "interactive_core_review_lane_mpsc",
-            "interactive_core_shutdown_orchestrator",
-            // Notifications (2)
-            "notif_core_in_tui", "notif_pro_external_channels",
+            // spur-blob-store (1) — revised Wave 7: dropped 3 backend keys (trait-impl variants / always-on telemetry); renamed delete_namespace→namespace_deletion (claude-code noun pattern)
+            "blob_pro_namespace_deletion",
+            // spur-interactive (0) — revised Wave 7: dropped all 3 (shared infra / production invariant / lifecycle hygiene)
+            // Notifications (0) — revised Wave 7: dropped notif_core_in_tui (redundant with core_core_notification_pump + tui_core_notification_drain); deferred notif_pro_external_channels to §4.16 (greenfield vaporware)
         ];
 
         assert_eq!(
             NEW_KEYS.len(),
-            107,
-            "Expected exactly 107 new tier-revamp v1 keys (was 135 pre-Wave-5, \
-             123 post-Wave-5; Wave 6 net -16 keys: 9 dropped as always-on/coupled \
-             infrastructure + 4 deferred v1.1 + 3 deferred v2 per spec §4.16), got {}",
+            99,
+            "Expected exactly 99 new tier-revamp v1 keys (was 135 pre-Wave-5, \
+             123 post-Wave-5, 107 post-Wave-6; Wave 7 net -8 keys: 6 dropped as \
+             trait-impl variants/production invariants + 1 dropped as redundant \
+             with already-merged keys + 1 deferred v1.1 per spec §4.16), got {}",
             NEW_KEYS.len()
         );
 
@@ -1708,13 +1628,13 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
 
 Run: `cargo test --package spur-license --lib policy::feature_key::tests::tier_revamp_v1_keys_roundtrip`
 
-Expected: PASS — all 107 v1 keys roundtrip correctly.
+Expected: PASS — all 99 v1 keys roundtrip correctly.
 
 - [ ] **Step 3: Run the full feature_key test suite**
 
 Run: `cargo test --package spur-license --lib policy::feature_key`
 
-Expected: ALL PASS — original 36-key tests + 21 new per-crate tests + comprehensive 107-key test + count guard.
+Expected: ALL PASS — original 36-key tests + 19 new per-crate tests (Wave 7 dropped Tasks 22, 23 entirely; Task 21 reduced to 1 key) + comprehensive 99-key test + count guard.
 
 - [ ] **Step 4: Run the full spur-license test suite**
 
@@ -1732,16 +1652,16 @@ Expected: Both PASS — no compile errors, no clippy warnings introduced.
 
 ```bash
 git add crates/spur-license/src/policy/feature_key.rs
-git commit -m "test(spur-license): comprehensive 135-key registry roundtrip for tier revamp Plan A"
+git commit -m "test(spur-license): comprehensive 99-key registry roundtrip for tier revamp Plan A (Wave 7 final)"
 ```
 
 ---
 
 ## Task 25: Document the registry-vs-policy mismatch (advance notice for Plan B)
 
-After this plan ships, the `FeatureKey` registry has 36 OLD keys + 135 NEW keys = 171 total typed constants. The embedded `default_policy.json` STILL references only the OLD keys, so:
+After this plan ships, the `FeatureKey` registry has 36 OLD keys + 99 NEW keys = 135 total typed constants (Wave 7 final). The embedded `default_policy.json` STILL references only the OLD keys, so:
 - Free users still get 11 Community features (per old policy)
-- The 135 new keys are typed-known but not in any tier yet
+- The 99 new keys are typed-known but not in any tier yet
 - Plan B will rewrite the policy and migrate callers
 
 This task adds an inline doc comment marking the boundary so the next contributor understands the staged migration.
@@ -1777,9 +1697,9 @@ Create `docs/superpowers/plans/2026-04-26-tier-revamp-plan-a-status.md`:
 
 ## What Plan A delivered
 
-- 135 new typed `FeatureKey` constants in `crates/spur-license/src/policy/feature_key.rs`
+- 99 new typed `FeatureKey` constants in `crates/spur-license/src/policy/feature_key.rs` (Wave 7 final, down from 135 across Waves 5+6+7)
 - 1 new `QuotaKey` variant: `BrainFailoverChainDepth`
-- Roundtrip test coverage for every new key (per-crate tests + comprehensive 135-key test)
+- Roundtrip test coverage for every new key (per-crate tests + comprehensive 99-key test)
 - Count guard test for original 36-key registry (locks against accidental removal)
 - Inline boundary comment marking legacy keys vs new keys
 
@@ -1796,7 +1716,7 @@ Create `docs/superpowers/plans/2026-04-26-tier-revamp-plan-a-status.md`:
 
 - Free users: identical experience to pre-Plan A (legacy 11-key Community policy still active)
 - Pro users (if any exist): identical experience (legacy 8 Pro keys still active)
-- New 135 keys: typed-known but unreachable through `FeatureGate::has()` because no policy declares them in any tier
+- New 99 keys: typed-known but unreachable through `FeatureGate::has()` because no policy declares them in any tier
 - Workspace builds clean; clippy passes; all tests green
 
 ## Plan B prerequisites (verify before starting Plan B)
@@ -1818,7 +1738,7 @@ Create `docs/superpowers/plans/2026-04-26-tier-revamp-plan-a-status.md`:
 7. Remove legacy 36 keys from `feature_key.rs` after migration completes
 8. Update `from_known()` to no longer parse legacy keys
 
-After Plan B ships, the registry has only the 135 new keys and the policy reflects the new tier structure.
+After Plan B ships, the registry has only the 99 new keys and the policy reflects the new tier structure.
 ```
 
 - [ ] **Step 3: Commit the status hand-off**
@@ -1844,9 +1764,9 @@ Run: `git status` to confirm clean working tree. If anything is unstaged, invest
 
 After running all 25 tasks, verify the final state:
 
-- [ ] `cargo test --package spur-license --lib feature_key 2>&1 | grep "test result"` shows ~22 passing tests (count_guard + 21 per-crate tests + comprehensive)
-- [ ] `grep -c "pub const" crates/spur-license/src/policy/feature_key.rs` returns at least 171 (36 legacy + 135 new)
-- [ ] `grep -c "Some(Self::" crates/spur-license/src/policy/feature_key.rs` returns at least 171 in the `from_known` chain
+- [ ] `cargo test --package spur-license --lib feature_key 2>&1 | grep "test result"` shows ~22 passing tests (count_guard + 19 per-crate tests + comprehensive; Wave 7 dropped Tasks 22 + 23 entirely so per-crate test count fell from 21 to 19)
+- [ ] `grep -c "pub const" crates/spur-license/src/policy/feature_key.rs` returns at least 135 (36 legacy + 99 new post-Wave-7)
+- [ ] `grep -c "Some(Self::" crates/spur-license/src/policy/feature_key.rs` returns at least 135 in the `from_known` chain
 - [ ] No call site in any other crate references the new keys yet (verify with `grep -r "FeatureKey::ACP_CORE_" crates/` returns ONLY hits in `feature_key.rs`)
 - [ ] Workspace builds with no warnings
 - [ ] All ~25 commits are atomic and follow the `tier revamp Plan A` naming pattern
