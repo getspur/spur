@@ -140,8 +140,8 @@ fn populated_empty_no_filter() {
         "",
         "",
         "",
-        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
-        "j/k nav · Enter resume · / search · n new · R rename · p pin · d archive · y yan",
+        "j/k nav · ↵ new · / search · Esc                         ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav · Enter new session · / search · P preview · Esc back",
     ];
     assert_render(&mut picker, expected);
 }
@@ -466,8 +466,8 @@ fn populated_with_archived_shown() {
         "",
         "",
         "",
-        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
-        "j/k nav · Enter resume · / search · n new · R rename · p pin · d archive · y yan",
+        "j/k nav · ↵ new · / search · Esc                         ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav · Enter new session · / search · P preview · Esc back",
     ];
     assert_render(&mut picker, expected);
 }

@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 use spur_acp::SessionInfo;
 use spur_tui::action::Action;
 use spur_tui::views::session_picker::SessionPickerView;
@@ -703,4 +704,49 @@ fn populated_list_footer_hint_advertises_p_pin() {
         Some(Action::ToggleSessionPin { session_id }) => assert_eq!(session_id, "a1"),
         other => panic!("expected ToggleSessionPin(a1), got {other:?}"),
     }
+}
+
+#[test]
+fn populated_footer_hint_changes_on_new_row_cursor() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
+    picker.set_sessions("test".into(), vec![session("a1", "alpha")]);
+    assert_eq!(picker.cursor(), 1);
+
+    let backend = TestBackend::new(200, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| {
+        let area = Rect::new(0, 0, 200, 24);
+        picker.render(f, area, &test_ctx());
+    })
+    .unwrap();
+    let before = {
+        let buf = term.backend().buffer();
+        let mut row = String::new();
+        for x in 0..buf.area.width {
+            row.push_str(buf[(x, 23)].symbol());
+        }
+        row.trim_end().to_string()
+    };
+
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
+    assert_eq!(picker.cursor(), 0);
+
+    let backend = TestBackend::new(200, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| {
+        let area = Rect::new(0, 0, 200, 24);
+        picker.render(f, area, &test_ctx());
+    })
+    .unwrap();
+    let after = {
+        let buf = term.backend().buffer();
+        let mut row = String::new();
+        for x in 0..buf.area.width {
+            row.push_str(buf[(x, 23)].symbol());
+        }
+        row.trim_end().to_string()
+    };
+
+    assert_ne!(before, after);
 }
