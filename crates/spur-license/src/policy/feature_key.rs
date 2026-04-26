@@ -139,6 +139,13 @@ impl FeatureKey {
     pub const CORE_PRO_REVIEW_TIMEOUT_ROUTING: Self = Self("core_pro_review_timeout_routing");
     pub const CORE_PRO_REVIEW_RETRY_CONFIG: Self = Self("core_pro_review_retry_config");
 
+    // --- spur-core: system events (4) ---
+    pub const CORE_CORE_CONFLICT_DETECTION: Self = Self("core_core_conflict_detection");
+    pub const CORE_CORE_RATE_LIMIT_DETECTION: Self = Self("core_core_rate_limit_detection");
+    pub const CORE_CORE_PERMISSION_REQUEST_DETECTION: Self =
+        Self("core_core_permission_request_detection");
+    pub const CORE_CORE_AGENT_NOTIFICATION: Self = Self("core_core_agent_notification");
+
     // --- spur-core: reliability & lifecycle (5) ---
     pub const CORE_CORE_SESSION_RESUME: Self = Self("core_core_session_resume");
     pub const CORE_PRO_SESSION_RESUME_EVENT_REPLAY: Self =
@@ -310,6 +317,15 @@ impl FeatureKey {
             Some(Self::CORE_PRO_REVIEW_TIMEOUT_ROUTING)
         } else if bytes_eq(b, b"core_pro_review_retry_config") {
             Some(Self::CORE_PRO_REVIEW_RETRY_CONFIG)
+        // spur-core: system events
+        } else if bytes_eq(b, b"core_core_conflict_detection") {
+            Some(Self::CORE_CORE_CONFLICT_DETECTION)
+        } else if bytes_eq(b, b"core_core_rate_limit_detection") {
+            Some(Self::CORE_CORE_RATE_LIMIT_DETECTION)
+        } else if bytes_eq(b, b"core_core_permission_request_detection") {
+            Some(Self::CORE_CORE_PERMISSION_REQUEST_DETECTION)
+        } else if bytes_eq(b, b"core_core_agent_notification") {
+            Some(Self::CORE_CORE_AGENT_NOTIFICATION)
         // spur-core: reliability & lifecycle
         } else if bytes_eq(b, b"core_core_session_resume") {
             Some(Self::CORE_CORE_SESSION_RESUME)
@@ -690,6 +706,18 @@ mod tests {
             "core_pro_review_auto_approve",
             "core_pro_review_timeout_routing",
             "core_pro_review_retry_config",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_core_system_events_keys_registered() {
+        for s in &[
+            "core_core_conflict_detection",
+            "core_core_rate_limit_detection",
+            "core_core_permission_request_detection",
+            "core_core_agent_notification",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }

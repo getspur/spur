@@ -581,6 +581,7 @@ flowchart TB
 - **Session single-attach lock** — `fs4` advisory lockfile prevents split-brain multi-window attachment to the same ACP session. Kernel-auto-released on process exit; no stale-lock recovery needed. NFS/sshfs degrades gracefully to `fs_unsafe` with persistent banner.
 - **Paste-as-atom** — multi-line pastes in the TUI input bar become atomic placeholder tokens (`[Paste #N · M lines]`) stored in a side table (LRU-capped at 50). Placeholders expand back to full text on submit via the existing `ProtectedRange` mechanism, preserving interrupt prefixes (`!`) and draft history.
 - **Outcome materializer** — store-then-clip pattern guarantees `MERGE_BUDGET` is never exceeded, even when the full delegation result is megabytes
+- **WorktreeAuthority lease-aware GC** — `SessionLivenessProbe` via `fs4` advisory locks provides cross-process safety for orphan reclamation. Startup sweep + periodic background sweep (15 min + jitter) with quarantine grace. Replaces the unsafe per-delegation `cleanup_orphans` (bd-arch.26).
 - **Content-addressed blob storage** — `OutcomeStore` trait with pluggable backends (memory, FS, git) and measured instrumentation
 - **DuckDB analytics** — `spur-context` reads agent JSONL in place via SQL convert views, producing daily/weekly cost reports without ETL pipelines
 
@@ -591,7 +592,7 @@ flowchart TB
 | 1 | Stranded executors — early-exit paths bypass `finalize()` | ~~Critical~~ | **Fixed** | `orchestrator.rs:4385` | `DelegationGuard` Drop emits `DelegationCompleted(Failed)`. Only spawn site at `:3456` is guarded. |
 | 2 | `broadcast::channel` drops events when subscribers are slow | High | **Open** | `app.rs:2437` | Capacity is 4096, but TUI drain cap is **still 8** (not 64 as previously claimed). Bot has **no drain cap**. On `Lagged`, all subscribers log a warning and **permanently drop** events. No replay-from-NDJSON exists. |
 | 3 | Silent `_ => {}` catch-alls on `SpurEventBody` matches | High | **Open** | `app.rs:959,1035` | Two catch-all arms remain. 37 of 74 variants fall through silently in brain-status tracking. First catch-all (`:1031`) is completely silent — no log. |
-| 4 | Worktree orphaning on unclean shutdown | High | **Open** | `manager.rs:437` | `cleanup_orphans()` exists but has **zero call sites** in the entire workspace. It is also unsafe to call because `WorktreeManager` is created per-delegation, so `self.active` would not see other in-flight worktrees. |
+| 4 | Worktree orphaning on unclean shutdown | ~~High~~ | **Partially addressed** | `worktree_authority.rs:99`, `orchestrator.rs:1106` | `WorktreeAuthority` deployed with `SessionLivenessProbe` + startup/periodic sweep. Original `cleanup_orphans` dead-code issue superseded. Residual: snapshot branches leak (no sweep), `fs_unsafe` skips all cleanup (see Risk #41), legacy pre-v2 namespaces skipped. See `docs/rca/2026-04-26-risk4-mcts-first-principles-evaluation.md`. |
 | 5 | No backoff on delegation retry loops | ~~High~~ | **Fixed** | `orchestrator.rs:4202` | Exponential backoff `2^n` with 30 s cap. First retry delay is **2 s** (not 1 s). **No jitter.** |
 | 6 | Worker JoinHandles not tracked for shutdown abort | Medium | **Open** | `orchestrator.rs:3456` | `TaskTracker` is used in `spur-mcp` but **not in `spur-core`**. The per-delegation worker task (`:3456`) and three ext-notification pumps (`:2566,2830,4789`) are fire-and-forget `tokio::spawn` with stored `JoinHandle`. |
 | 7 | Orchestrator is a God Object | High | **Worsening** | `orchestrator.rs` | File is **8,646 lines** (was ~4,400). Delegation dispatch (`handle_delegations` 243 lines + `execute_delegation` 595 lines = **838 lines inline**) and review coordination remain inside `orchestrator.rs`. `run_interactive` is 892 lines. Session attach logic added ~140 lines. |
@@ -634,14 +635,16 @@ flowchart TB
 | 39 | **FsOutcomeStore temp file leaks** — `put()` writes to `{attempt}.bin.tmp.{pid}.{nonce}`, then renames. Crash between write and rename leaves temp files forever. | **Low** | **Open** | `fs_store.rs:147` | Crash loop could fill disk with orphaned temp files. No startup cleanup. |
 | 40 | **OutcomeMaterializer unbounded map** — `latest_attempt_by_delegation` is documented as "not pruned". A misbehaving brain creating millions of delegations exhausts memory. | **Low** | **Open** | `outcome_materializer.rs:45` | ~40 B per entry × millions = unbounded growth. |
 | 41 | **`fs_unsafe` multi-instance gap on NFS/sshfs** — When the repository lives on a network filesystem that lacks advisory-lock support (`ENOTSUP`/`ENOLCK`), SPUR attaches with `fs_unsafe=true` and proceeds without any cross-process exclusion. Two TUI windows on different hosts mounting the same NFS export can silently attach to the same session. | **Medium** | **Open** | `session_lock.rs:33`, `orchestrator.rs` | The `DegradedNoLock` path is intentional (attach is better than failing), but there is no secondary coordination mechanism (e.g., beads issue label, TCP consensus) to backfill the missing filesystem guarantee. |
+| 42 | **Snapshot branch leaks** — `snapshot_brain_state` creates `spur/brain-snapshot-*` branches. `delete_snapshot_branch` is best-effort with dropped errors; `WorktreeAuthority` never cleans snapshot branches. | Low–Medium | **Open** | `manager.rs:117`, `orchestrator.rs:5318`, `worktree_authority.rs:113` | Accumulation is monotonic at ~40 B per ref. Long sessions can create hundreds. No automated reclamation exists. |
+| 43 | **Legacy pre-v2 worktree namespace orphaned** — `WorktreeAuthority::sweep_once` skips any branch not matching `refs/heads/spur/worker/v2/...`. Pre-v2 `spur/worker-{agent}-{uuid}` worktrees are permanently orphaned. | Low | **Open** | `worktree_authority.rs:113` | Volume declines as v2 becomes dominant, but any existing legacy worktree will never be reclaimed automatically. |
 
 ### Risk Trend Summary
 
 | Category | Count | Fixed | Mitigated | Open |
 |---|---|---|---|---|
-| Previously documented | 20 | 9 | 2 | 9 |
-| New (this review) | 21 | 2 | 0 | 19 |
-| **Total** | **41** | **11** | **2** | **28** |
+| Previously documented | 20 | 9 | 3 | 8 |
+| New (this review) | 23 | 2 | 0 | 21 |
+| **Total** | **43** | **11** | **3** | **29** |
 
 Risk #21 (peer mailbox reconciler / production wire-up) closed in bd-arch.21. Risk #23 (semaphore indefinite wait + cancel-during-acquire) closed in bd-arch.23 — cancellable acquire is always-on; the heartbeat watchdog is default-off until a `WorkerHeartbeat` emitter ships. Risk #22 (unbounded ledger) remains open and gates wider production rollout.
 
@@ -655,7 +658,7 @@ Risk #21 (peer mailbox reconciler / production wire-up) closed in bd-arch.21. Ri
 
 4. **Broadcast event loss** — Either raise per-frame drain caps across ALL subscribers (TUI, bot, sink), implement `Lagged` → NDJSON replay, or add backpressure.
 
-5. **Worktree cleanup** — Decide whether `cleanup_orphans` should be global (one `WorktreeManager` per orchestrator, not per-delegation) and wire it into startup. Current implementation is dead code.
+5. **Worktree cleanup residuals** — `WorktreeAuthority` (bd-arch.26) handles v2 worker worktree orphaning via `SessionLivenessProbe` with startup + periodic sweep. Remaining: snapshot branch leak cleanup, legacy pre-v2 namespace recognition, and `fs_unsafe` fallback coordination (see Risk #41). Delete `cleanup_orphans` dead code to prevent future misuse.
 
 6. **Cost governance** — Convert `spur-cost` from passive logging to an active budget gate: per-session caps, per-plan ceilings, circuit breakers for anomalous spend.
 
