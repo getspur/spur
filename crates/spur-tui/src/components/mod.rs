@@ -1,5 +1,6 @@
 pub mod activity_log;
 pub mod agents_tree;
+pub mod collision_modal;
 pub mod completion_popup;
 pub mod completion_trigger;
 pub mod detail_pane;

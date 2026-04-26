@@ -114,6 +114,8 @@ pub struct SessionDetailView {
     /// `AgentSessionReady` arrives; in that window, a generic fallback is
     /// rendered.
     pub(crate) cancel_mode: Option<spur_acp::CancelMode>,
+    /// True when the session attached without an enforceable filesystem lock.
+    fs_unsafe: bool,
 
     /// Active picker-shell (history / mention / slash). `None` = no popup.
     picker_shell: Option<crate::components::picker_shell::PickerShell>,
@@ -196,6 +198,7 @@ impl SessionDetailView {
             stream_in_flight: false,
             cancelling_in_flight: false,
             cancel_mode: None,
+            fs_unsafe: false,
             picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
@@ -255,6 +258,7 @@ impl SessionDetailView {
             stream_in_flight: false,
             cancelling_in_flight: false,
             cancel_mode: None,
+            fs_unsafe: false,
             picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
@@ -305,6 +309,7 @@ impl SessionDetailView {
             stream_in_flight: false,
             cancelling_in_flight: false,
             cancel_mode: None,
+            fs_unsafe: false,
             picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
@@ -1832,12 +1837,14 @@ impl View for SessionDetailView {
                 session,
                 resumed,
                 cancel_mode,
+                fs_unsafe,
                 ..
             } => {
                 if session.0 != self.session_id.0 {
                     return;
                 }
                 self.cancel_mode = Some(*cancel_mode);
+                self.fs_unsafe = *fs_unsafe;
                 if *resumed {
                     self.push_system_note("Resumed from prior conversation".to_string());
                 }
@@ -2001,6 +2008,7 @@ impl SessionDetailView {
         }
 
         let input_height = self.input_bar.required_height(content_area.width);
+        let unsafe_banner_height = u16::from(self.fs_unsafe);
 
         // Compute workers panel height (dynamic: 0 when no active workers).
         // Suppress on very small terminals to avoid squeezing the trace.
@@ -2020,11 +2028,12 @@ impl SessionDetailView {
         };
 
         let chunks = Layout::vertical([
-            Constraint::Length(1),            // header
-            Constraint::Min(4),               // react trace (fills)
-            Constraint::Length(workers_h),    // workers panel
-            Constraint::Length(input_height), // input bar
-            Constraint::Length(1),            // status bar
+            Constraint::Length(1),                    // header
+            Constraint::Min(4),                       // react trace (fills)
+            Constraint::Length(workers_h),            // workers panel
+            Constraint::Length(unsafe_banner_height), // unsafe-fs banner
+            Constraint::Length(input_height),         // input bar
+            Constraint::Length(1),                    // status bar
         ])
         .split(content_area);
 
@@ -2050,6 +2059,17 @@ impl SessionDetailView {
                 format!("${:.2}", self.cost),
                 Style::default().fg(Color::Yellow),
             ),
+            if self.fs_unsafe {
+                Span::styled(
+                    "  unsafe-fs",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("")
+            },
         ]);
         frame.render_widget(Paragraph::new(header), header_left);
         if let Some(plan) = tracked_plan {
@@ -2083,17 +2103,25 @@ impl SessionDetailView {
         }
 
         // ── Input bar ───────────────────────────────────────────────────
+        if self.fs_unsafe {
+            let banner = Line::from(Span::styled(
+                " unsafe-fs: flock unsupported on this volume - multi-window protection OFF ",
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ));
+            frame.render_widget(Paragraph::new(banner), chunks[3]);
+        }
+
         // Render in "inert" style (dimmed border, no terminal cursor) when
         // a PickerShell has the focus — the shell owns the cursor.
         if self.picker_shell.is_some() {
-            self.input_bar.render_inert(frame, chunks[3]);
+            self.input_bar.render_inert(frame, chunks[4]);
         } else {
-            self.input_bar.render(frame, chunks[3]);
+            self.input_bar.render(frame, chunks[4]);
         }
 
         // ── PickerShell overlay ─────────────────────────────────────────
         if let Some(ref mut shell) = self.picker_shell {
-            shell.render(frame, chunks[3], area);
+            shell.render(frame, chunks[4], area);
         }
 
         // ── Status bar (with live worker counts) ────────────────────────
@@ -2118,7 +2146,7 @@ impl SessionDetailView {
 
         StatusBar::render(
             frame,
-            chunks[4],
+            chunks[5],
             StatusBarProps {
                 view: &ViewId::SessionDetail(self.session_id.clone()),
                 running,
@@ -2654,6 +2682,7 @@ mod cancel_state_tests {
             brain: "claude".into(),
             resumed: false,
             cancel_mode: mode,
+            fs_unsafe: false,
         })
     }
 

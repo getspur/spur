@@ -17,6 +17,7 @@ use spur_core::{ExecutorLineage, PlanProjectionStore};
 use ratatui_image::picker::Picker;
 
 use crate::action::{Action, ViewId};
+use crate::components::collision_modal::CollisionModal;
 use crate::components::help_overlay::HelpOverlay;
 use crate::components::input_bar::EditMode;
 use crate::components::palette::PaletteIntent;
@@ -178,6 +179,8 @@ pub struct App {
     /// Shown when the user requests quit while a brain is attached. While
     /// visible, all input is captured by the dialog.
     quit_confirm_visible: bool,
+    /// Visible when a resume attempt collides with another attached TUI.
+    collision_modal: Option<CollisionModalState>,
     should_quit: bool,
     dirty: bool,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
@@ -216,6 +219,12 @@ pub struct App {
     /// Last dispatched Action, for integration tests only.
     #[cfg(any(test, debug_assertions))]
     last_action: Option<crate::action::Action>,
+}
+
+#[derive(Debug, Clone)]
+struct CollisionModalState {
+    acp_id: String,
+    holder: spur_acp::session_lock::HolderInfo,
 }
 
 impl App {
@@ -304,6 +313,7 @@ impl App {
             issue_browser: None,
             help_visible: false,
             quit_confirm_visible: false,
+            collision_modal: None,
             should_quit: false,
             dirty: true, // initial render
             user_input_tx,
@@ -403,7 +413,7 @@ impl App {
     }
 
     fn open_palette(&mut self) {
-        if self.help_visible || self.quit_confirm_visible {
+        if self.help_visible || self.quit_confirm_visible || self.collision_modal.is_some() {
             return; // palette won't open while a higher-priority overlay is up
         }
         tracing::debug!(target: "palette", "open_palette: start");
@@ -671,6 +681,36 @@ impl App {
                             }
                             _ => {}
                         }
+                    }
+                    self.dirty = true;
+                    return;
+                }
+
+                if self.collision_modal.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.collision_modal = None;
+                        }
+                        KeyCode::Char('N') | KeyCode::Char('n') => {
+                            self.collision_modal = None;
+                            self.process_action(Action::NewSessionRequested);
+                        }
+                        KeyCode::Char('P') | KeyCode::Char('p') => {
+                            self.collision_modal = None;
+                            self.process_action(Action::RequestSessions);
+                        }
+                        KeyCode::Enter => {
+                            let acp = self
+                                .collision_modal
+                                .as_ref()
+                                .map(|state| state.acp_id.clone());
+                            self.collision_modal = None;
+                            if let (Some(session_id), Some(tx)) = (acp, self.user_input_tx.as_ref())
+                            {
+                                let _ = tx.try_send(UserInput::ResumeSession { session_id });
+                            }
+                        }
+                        _ => {}
                     }
                     self.dirty = true;
                     return;
@@ -1136,6 +1176,7 @@ impl App {
                 brain,
                 resumed: _,
                 cancel_mode: _,
+                fs_unsafe: _,
             } => {
                 self.metadata_store
                     .set_acp_mapping(&session.0, acp_session_id, brain);
@@ -1146,6 +1187,17 @@ impl App {
                         "failed to persist AgentSessionReady metadata"
                     );
                 }
+            }
+            SpurEventBody::SessionAttachRejected {
+                acp_session_id,
+                holder,
+                fs_unsafe: _,
+            } => {
+                self.collision_modal = Some(CollisionModalState {
+                    acp_id: acp_session_id.clone(),
+                    holder: holder.clone(),
+                });
+                self.dirty = true;
             }
             SpurEventBody::AgentNotification { session: _, .. } => {
                 // Transition Thinking → Streaming on first output
@@ -2320,6 +2372,10 @@ impl App {
             QuitConfirmDialog::render(frame, area, self.brain_name.as_deref());
         }
 
+        if let Some(state) = &self.collision_modal {
+            CollisionModal::render(frame, area, &state.acp_id, &state.holder);
+        }
+
         if self.palette_visible {
             let overlay =
                 crate::components::palette_overlay::PaletteOverlay::new(&self.palette_state)
@@ -2916,6 +2972,7 @@ mod brain_retired_tests {
             brain: "kiro".into(),
             resumed: false,
             cancel_mode: spur_acp::CancelMode::AcpSoft,
+            fs_unsafe: false,
         }));
         assert!(
             app.metadata_store.last_active_acp().is_some(),
