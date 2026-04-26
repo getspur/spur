@@ -19,6 +19,7 @@ use crate::event_funnel::FunnelHandle;
 pub(crate) const REASON_ALLOWLIST: &[&str] = &[
     "worker_ignored",
     "drain_timeout",
+    "drain_capped",
     "out_of_scope",
     "duplicate",
     "stale_plan_version",
