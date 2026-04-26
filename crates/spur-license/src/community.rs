@@ -84,17 +84,20 @@ impl LicenseProvider for CommunityProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
 
     use super::*;
     use crate::policy::PolicyResolver;
 
     // Guard env-var mutations because rust test runner is multi-threaded.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Use `tokio::sync::Mutex` (not `std::sync::Mutex`) so the guard can be
+    // held across `.await` points without tripping clippy::await_holding_lock
+    // (and without risking executor blocking).
+    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
     #[tokio::test]
     async fn community_provider_reports_community_features() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         // Ensure no dev override is present.
         std::env::remove_var(DEV_PLAN_ENV);
         let p = CommunityProvider::new(PolicyResolver::embedded());
@@ -107,7 +110,7 @@ mod tests {
 
     #[tokio::test]
     async fn community_provider_rejects_activate() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::remove_var(DEV_PLAN_ENV);
         let p = CommunityProvider::new(PolicyResolver::embedded());
         let err = p.activate("any-key").await.unwrap_err();
@@ -116,7 +119,7 @@ mod tests {
 
     #[tokio::test]
     async fn community_provider_validate_is_idempotent() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::remove_var(DEV_PLAN_ENV);
         let p = CommunityProvider::new(PolicyResolver::embedded());
         let s1 = p.validate().await.unwrap();
@@ -127,7 +130,7 @@ mod tests {
     #[tokio::test]
     #[cfg(debug_assertions)]
     async fn dev_plan_override_reports_pro_features() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var(DEV_PLAN_ENV, "pro");
         let p = CommunityProvider::new(PolicyResolver::embedded());
         let state = p.current_state();
@@ -140,7 +143,7 @@ mod tests {
     #[tokio::test]
     #[cfg(debug_assertions)]
     async fn dev_plan_override_unrecognized_defaults_to_community() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var(DEV_PLAN_ENV, "mystery");
         let p = CommunityProvider::new(PolicyResolver::embedded());
         let state = p.current_state();
