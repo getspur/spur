@@ -33,6 +33,20 @@ use crate::connection::AgentConnection;
 use crate::protocol::claude_events::{map_to_notifications, parse_event, ClaudeEvent};
 use crate::types::AgentHealth;
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn spawn_stream_json_for_test(
+    command: &str,
+    args: &[&str],
+) -> std::io::Result<tokio::process::Child> {
+    tokio::process::Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+}
+
 /// Connects to Claude Code via one-shot stream-json invocations.
 ///
 /// Each `prompt()` spawns a new process: `claude -p --output-format stream-json <prompt>`.
@@ -166,6 +180,7 @@ impl AgentConnection for StreamJsonAdapter {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 self.health_status = AgentHealth::Error(format!("Failed to spawn: {e}"));
