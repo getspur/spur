@@ -139,6 +139,15 @@ impl FeatureKey {
     pub const CORE_PRO_REVIEW_TIMEOUT_ROUTING: Self = Self("core_pro_review_timeout_routing");
     pub const CORE_PRO_REVIEW_RETRY_CONFIG: Self = Self("core_pro_review_retry_config");
 
+    // --- spur-core: reliability & lifecycle (5) ---
+    pub const CORE_CORE_SESSION_RESUME: Self = Self("core_core_session_resume");
+    pub const CORE_PRO_SESSION_RESUME_EVENT_REPLAY: Self =
+        Self("core_pro_session_resume_event_replay");
+    pub const CORE_CORE_PLAN_PERSISTENCE: Self = Self("core_core_plan_persistence");
+    pub const CORE_CORE_PLAN_ORPHAN_RECOVERY: Self = Self("core_core_plan_orphan_recovery");
+    pub const CORE_CORE_BACKGROUND_TASK_TRACKER: Self =
+        Self("core_core_background_task_tracker");
+
     // --- skills (5) ---
     pub const SKILLS_CORE_REGISTRY: Self = Self("skills_core_registry");
     pub const SKILLS_CORE_ATOMIC_INSTALLATION: Self = Self("skills_core_atomic_installation");
@@ -301,6 +310,17 @@ impl FeatureKey {
             Some(Self::CORE_PRO_REVIEW_TIMEOUT_ROUTING)
         } else if bytes_eq(b, b"core_pro_review_retry_config") {
             Some(Self::CORE_PRO_REVIEW_RETRY_CONFIG)
+        // spur-core: reliability & lifecycle
+        } else if bytes_eq(b, b"core_core_session_resume") {
+            Some(Self::CORE_CORE_SESSION_RESUME)
+        } else if bytes_eq(b, b"core_pro_session_resume_event_replay") {
+            Some(Self::CORE_PRO_SESSION_RESUME_EVENT_REPLAY)
+        } else if bytes_eq(b, b"core_core_plan_persistence") {
+            Some(Self::CORE_CORE_PLAN_PERSISTENCE)
+        } else if bytes_eq(b, b"core_core_plan_orphan_recovery") {
+            Some(Self::CORE_CORE_PLAN_ORPHAN_RECOVERY)
+        } else if bytes_eq(b, b"core_core_background_task_tracker") {
+            Some(Self::CORE_CORE_BACKGROUND_TASK_TRACKER)
         // skills
         } else if bytes_eq(b, b"skills_core_registry") {
             Some(Self::SKILLS_CORE_REGISTRY)
@@ -670,6 +690,19 @@ mod tests {
             "core_pro_review_auto_approve",
             "core_pro_review_timeout_routing",
             "core_pro_review_retry_config",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_core_reliability_keys_registered() {
+        for s in &[
+            "core_core_session_resume",
+            "core_pro_session_resume_event_replay",
+            "core_core_plan_persistence",
+            "core_core_plan_orphan_recovery",
+            "core_core_background_task_tracker",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
