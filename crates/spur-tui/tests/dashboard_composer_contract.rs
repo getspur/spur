@@ -111,6 +111,37 @@ fn dashboard_pre_session_slash_help_dispatches_locally() {
 }
 
 #[test]
+fn dashboard_pre_session_slash_clear_dispatches_locally() {
+    let mut dashboard = DashboardView::new();
+
+    type_str(&mut dashboard, "/clear");
+    let _ = press(&mut dashboard, KeyCode::Esc);
+    let action = press(&mut dashboard, KeyCode::Enter);
+
+    assert!(
+        !matches!(
+            &action,
+            Some(Action::NewSessionWithMessage { blocks, .. })
+                if blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text(text) if text.text.contains("/clear")
+                ))
+        ),
+        "raw /clear must not be submitted as NewSessionWithMessage, got {action:?}"
+    );
+    if let Some(Action::NewSessionWithMessage { blocks, .. }) = &action {
+        assert!(
+            blocks.is_empty(),
+            "pre-session /clear must not submit content blocks, got {blocks:?}"
+        );
+    }
+    assert!(
+        matches!(action, Some(Action::ClearSession)),
+        "expected local ClearSession action, got {action:?}"
+    );
+}
+
+#[test]
 fn dashboard_pre_session_worker_mention_prepends_hint_and_resource_link() {
     let mut dashboard = DashboardView::new();
     dashboard.set_worker_snapshot(vec![WorkerMentionDescriptor {
