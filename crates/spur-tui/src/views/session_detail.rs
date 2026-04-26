@@ -1047,9 +1047,8 @@ impl SessionDetailView {
                 && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'))
             {
                 KeyOwner::View
-            } else if let Some(query_mode) = self.completion.query_mode() {
-                use crate::components::query_source::QueryMode;
-                let is_trigger_driven = query_mode == QueryMode::ReadFromInputBar;
+            } else if self.completion.is_active() {
+                let is_trigger_driven = self.completion.is_trigger_driven();
                 let shell_consumes = if is_trigger_driven {
                     matches!(
                         key.code,
