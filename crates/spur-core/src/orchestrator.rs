@@ -789,7 +789,8 @@ fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDetailEvent {
 pub struct Orchestrator {
     pub registry: AgentRegistry,
     pub config: SpurConfig,
-    pub worktrees: WorktreeManager,
+    pub worktree_authority: Arc<crate::WorktreeAuthority>,
+    pub self_held: spur_acp::session_liveness::SelfHeldSet,
     pub cost_tracker: Option<CostTracker>,
     pub event_tx: broadcast::Sender<SpurEvent>,
     /// Monotonic sequence counter for the S2 funnel. The funnel task
@@ -959,10 +960,10 @@ impl Orchestrator {
         feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
     ) -> Result<Self> {
         let registry = AgentRegistry::load(config.agents.entries.clone());
-        let worktrees = WorktreeManager::new(repo_root.clone());
         let outcome_store: Arc<dyn OutcomeStore> = Arc::new(MeasuredOutcomeStore::new(
-            GitBlobOutcomeStore::new(worktrees.repo_root.clone()),
+            GitBlobOutcomeStore::new(repo_root.clone()),
         ));
+        let self_held = spur_acp::session_liveness::SelfHeldSet::new();
 
         // Try to open cost tracker (non-fatal if it fails).
         let cost_tracker = {
@@ -994,6 +995,12 @@ impl Orchestrator {
             event_seq.clone(),
             lineage,
         );
+        let worktree_authority = Arc::new(crate::WorktreeAuthority::new(
+            repo_root.clone(),
+            self_held.clone(),
+            funnel.clone(),
+            crate::AuthorityConfig::default(),
+        ));
         // S3 — durable JSONL sink subscribes to the same broadcast.
         let max_bytes = feature_gate
             .as_ref()
@@ -1006,7 +1013,8 @@ impl Orchestrator {
         let mut orchestrator = Self {
             registry,
             config,
-            worktrees,
+            worktree_authority: worktree_authority.clone(),
+            self_held,
             cost_tracker,
             event_tx,
             event_seq,
@@ -1091,6 +1099,33 @@ impl Orchestrator {
             orchestrator.peer_mailbox_reconciler_abort = Some(reconciler_handle.abort_handle());
             orchestrator.background_tasks.push(reconciler_handle);
         }
+
+        // Startup sweep: spawn into background. self_held is empty at boot;
+        // the periodic sweeps + Live-probe semantics carry the safety
+        // guarantee. See spec §6 risk table.
+        let startup_auth = worktree_authority.clone();
+        let startup_handle = tokio::spawn(async move {
+            match startup_auth.sweep_once().await {
+                Ok(report) => tracing::info!(
+                    target: "spur.metrics.worktree_authority.startup",
+                    probed = report.probed,
+                    swept = report.swept,
+                    skipped_unknown_owner = report.skipped_unknown_owner,
+                    skipped_live = report.skipped_live,
+                    "startup worktree authority sweep complete"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "startup worktree authority sweep failed"
+                ),
+            }
+        });
+        orchestrator.background_tasks.push(startup_handle);
+
+        // Periodic sweep — Drop impl on Orchestrator aborts every JoinHandle
+        // in background_tasks (orchestrator.rs:918-923).
+        let periodic = worktree_authority.spawn_periodic();
+        orchestrator.background_tasks.push(periodic);
 
         Ok(orchestrator)
     }
