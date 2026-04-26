@@ -13,15 +13,15 @@ use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, warn};
 
-use spur_acp::config::SpurConfig;
+use spur_acp::config::{SpurConfig, WorktreeConfig};
 use spur_acp::connection::{
     AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter,
 };
 use spur_acp::registry::AgentRegistry;
 use spur_acp::types::*;
 use spur_acp::{
-    CancellationControl, DelegationResult, DelegationStatus, LifecycleState, ReviewKind,
-    ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
+    CancellationControl, DelegationAbortReason, DelegationResult, DelegationStatus, LifecycleState,
+    ReviewKind, ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
 };
 use spur_pm::Issue;
 
@@ -1233,6 +1233,8 @@ impl Orchestrator {
                 self.repo_root.clone(),
                 self.config.agents.entries.clone(),
                 max_concurrent,
+                self.config.worktree.clone(),
+                self.event_tx.clone(),
                 self.funnel.clone(),
                 self.review_sink.clone(),
                 self.pm_service.clone(),
@@ -2633,6 +2635,8 @@ impl Orchestrator {
             self.repo_root.clone(),
             self.config.agents.entries.clone(),
             max_concurrent,
+            self.config.worktree.clone(),
+            self.event_tx.clone(),
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
@@ -2903,6 +2907,8 @@ impl Orchestrator {
             self.repo_root.clone(),
             self.config.agents.entries.clone(),
             max_concurrent,
+            self.config.worktree.clone(),
+            self.event_tx.clone(),
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
@@ -3483,6 +3489,8 @@ impl Orchestrator {
         repo_root: PathBuf,
         agent_configs: Vec<spur_acp::config::AgentConfig>,
         max_concurrent: usize,
+        worktree_config: WorktreeConfig,
+        event_tx: broadcast::Sender<SpurEvent>,
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
         pm_service: Option<Arc<PmService>>,
@@ -3526,6 +3534,8 @@ impl Orchestrator {
             let repo_root = repo_root.clone();
             let agent_configs = agent_configs.clone();
             let semaphore = Arc::clone(&semaphore);
+            let worktree_config = worktree_config.clone();
+            let event_tx = event_tx.clone();
             let funnel = funnel.clone();
             let review_sink = review_sink.clone();
             let pm_service = pm_service.clone();
@@ -3536,8 +3546,10 @@ impl Orchestrator {
             // cancel() arriving between dispatch and spawn still works.
             let cancel_token = {
                 let cc = cancellation_control.clone();
-                cc.register(request_id.clone()).await
+                let (token, handle) = cc.register_with_abort_handle(request_id.clone()).await;
+                (token, handle)
             };
+            let (cancel_token, abort_handle) = cancel_token;
             let cancellation_control_for_task = cancellation_control.clone();
 
             tokio::spawn(async move {
@@ -3549,15 +3561,47 @@ impl Orchestrator {
                 };
 
                 // Acquire a permit before starting the delegation.
-                let _permit = match semaphore.acquire().await {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        error!("Semaphore closed — aborting delegation");
-                        // Clean up the token if we abort early.
+                let _permit = tokio::select! {
+                    biased;
+                    _ = abort_handle.cancelled() => {
+                        let status = crate::delegation_watchdog::status_from_abort_reason(&abort_handle).await;
+                        funnel.emit(SpurEventBody::DelegationCompleted {
+                            worker_session: spur_acp::types::SessionId(request_id.clone()),
+                            status: status.clone(),
+                        });
+                        if let Some(respond_to) = guard.respond_to.take() {
+                            let _ = respond_to.send(DelegationResult {
+                                status,
+                                diff: None,
+                                diff_summary: None,
+                                summary: None,
+                                estimated_cost_usd: 0.0,
+                                worker_branch: None,
+                                artifact: None,
+                            });
+                        }
                         cancellation_control_for_task.remove(&request_id).await;
-                        return; // guard fires DelegationCompleted(Failed)
+                        guard.disarmed = true;
+                        return;
                     }
+                    permit = semaphore.acquire() => match permit {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            error!("Semaphore closed — aborting delegation");
+                            // Clean up the token if we abort early.
+                            cancellation_control_for_task.remove(&request_id).await;
+                            return; // guard fires DelegationCompleted(Failed)
+                        }
+                    },
                 };
+
+                let heartbeat_watchdog_stop =
+                    crate::delegation_watchdog::maybe_spawn_heartbeat_watchdog(
+                        &worktree_config,
+                        request_id.clone(),
+                        abort_handle.clone(),
+                        &event_tx,
+                    );
 
                 // Claim issue on delegation start (10f).
                 if let (Some(ref issue_id), Some(ref pm)) = (&issue_id, &pm_service) {
@@ -3604,9 +3648,21 @@ impl Orchestrator {
                 let (result, executor_id_opt) = tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
-                        let status = DelegationStatus::Cancelled {
-                            reason: "brain requested cancel".into(),
+                        let executor_id_opt = match abort_handle.observed_reason().await {
+                            Some(DelegationAbortReason::WorkerHeartbeatTimeout {
+                                executor_id,
+                                idle_for_secs: _,
+                            }) if executor_id != "<not-dispatched>" => {
+                                Some(ExecutorId(executor_id))
+                            }
+                            Some(DelegationAbortReason::BrainRequested { reason: _ })
+                            | Some(DelegationAbortReason::WorkerHeartbeatTimeout {
+                                executor_id: _,
+                                idle_for_secs: _,
+                            })
+                            | None => None,
                         };
+                        let status = crate::delegation_watchdog::status_from_abort_reason(&abort_handle).await;
                         // Emit DelegationCompleted so TUI, lineage, and
                         // other funnel subscribers don't see a stale
                         // "active" entry for this delegation.
@@ -3624,7 +3680,7 @@ impl Orchestrator {
                                 worker_branch: None,
                                 artifact: None,
                             },
-                            None,
+                            executor_id_opt,
                         )
                     }
                     r = Self::execute_delegation(
@@ -3643,6 +3699,7 @@ impl Orchestrator {
                         peer_mailbox,
                     ) => r,
                 };
+                drop(heartbeat_watchdog_stop);
                 // Always clean up the token entry (avoids stale entries
                 // when the delegation completes normally before cancel fires).
                 cancellation_control_for_task.remove(&request_id).await;

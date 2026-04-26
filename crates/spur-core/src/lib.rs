@@ -3,6 +3,7 @@ pub use continuation_bridge::{
     new_overflow_buf, report_detached_completion, ContinuationEventSink, OverflowBuf,
 };
 
+pub mod delegation_watchdog;
 pub mod scheduler;
 pub use scheduler::{BrainScheduler, ScheduledAction};
 

@@ -487,6 +487,16 @@ pub struct WorktreeConfig {
     /// Hours after which stale worktrees are cleaned up.
     #[serde(default = "default_stale_hours")]
     pub stale_cleanup_hours: u64,
+    /// Enable per-worker heartbeat watchdog. Default-off until the v1
+    /// `_spur/heartbeat` emitter is available in production workers.
+    #[serde(default = "default_worker_heartbeat_watchdog_enabled")]
+    pub worker_heartbeat_watchdog_enabled: bool,
+    /// Steady-state heartbeat timeout after dispatch.
+    #[serde(default = "default_worker_heartbeat_timeout_secs")]
+    pub worker_heartbeat_timeout_secs: u64,
+    /// Startup grace before the first dispatch/heartbeat is observed.
+    #[serde(default = "default_worker_heartbeat_initial_grace_secs")]
+    pub worker_heartbeat_initial_grace_secs: u64,
 }
 
 impl Default for WorktreeConfig {
@@ -494,6 +504,9 @@ impl Default for WorktreeConfig {
         Self {
             max_concurrent: default_max_concurrent(),
             stale_cleanup_hours: default_stale_hours(),
+            worker_heartbeat_watchdog_enabled: default_worker_heartbeat_watchdog_enabled(),
+            worker_heartbeat_timeout_secs: default_worker_heartbeat_timeout_secs(),
+            worker_heartbeat_initial_grace_secs: default_worker_heartbeat_initial_grace_secs(),
         }
     }
 }
@@ -504,6 +517,18 @@ fn default_max_concurrent() -> usize {
 
 fn default_stale_hours() -> u64 {
     24
+}
+
+fn default_worker_heartbeat_watchdog_enabled() -> bool {
+    false
+}
+
+fn default_worker_heartbeat_timeout_secs() -> u64 {
+    90
+}
+
+fn default_worker_heartbeat_initial_grace_secs() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -812,6 +837,19 @@ mod tests {
 
         let parsed: SpurConfig = toml::from_str("").unwrap();
         assert!(!parsed.peer_mailbox_enabled);
+    }
+
+    #[test]
+    fn worktree_defaults_have_heartbeat_watchdog_disabled() {
+        let cfg = SpurConfig::default();
+        assert!(!cfg.worktree.worker_heartbeat_watchdog_enabled);
+        assert_eq!(cfg.worktree.worker_heartbeat_timeout_secs, 90);
+        assert_eq!(cfg.worktree.worker_heartbeat_initial_grace_secs, 60);
+
+        let parsed: SpurConfig = toml::from_str("").unwrap();
+        assert!(!parsed.worktree.worker_heartbeat_watchdog_enabled);
+        assert_eq!(parsed.worktree.worker_heartbeat_timeout_secs, 90);
+        assert_eq!(parsed.worktree.worker_heartbeat_initial_grace_secs, 60);
     }
 
     #[test]

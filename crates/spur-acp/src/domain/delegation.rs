@@ -222,6 +222,48 @@ pub enum CancelOutcome {
     NotFound,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegationAbortReason {
+    BrainRequested {
+        reason: String,
+    },
+    WorkerHeartbeatTimeout {
+        executor_id: String,
+        idle_for_secs: u64,
+    },
+}
+
+#[derive(Clone)]
+pub struct DelegationAbortHandle {
+    token: CancellationToken,
+    reason: Arc<tokio::sync::Mutex<Option<DelegationAbortReason>>>,
+}
+
+impl DelegationAbortHandle {
+    pub fn new(token: CancellationToken) -> Self {
+        Self {
+            token,
+            reason: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    pub fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
+        self.token.cancelled()
+    }
+
+    pub async fn request_abort(&self, reason: DelegationAbortReason) {
+        let mut guard = self.reason.lock().await;
+        if guard.is_none() {
+            *guard = Some(reason);
+            self.token.cancel();
+        }
+    }
+
+    pub async fn observed_reason(&self) -> Option<DelegationAbortReason> {
+        self.reason.lock().await.clone()
+    }
+}
+
 /// Clonable handle to the per-delegation cancellation token registry.
 ///
 /// Obtained from `Orchestrator::cancellation_control()`. Pass a clone to
@@ -229,7 +271,7 @@ pub enum CancelOutcome {
 /// routing through the normal `DelegationRequest` channel.
 #[derive(Clone, Default)]
 pub struct CancellationControl {
-    tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    tokens: Arc<Mutex<HashMap<String, DelegationAbortHandle>>>,
 }
 
 impl CancellationControl {
@@ -243,15 +285,35 @@ impl CancellationControl {
     /// `handle_delegations` before spawning the delegation task.
     pub async fn register(&self, request_id: String) -> CancellationToken {
         let token = CancellationToken::new();
-        self.tokens.lock().await.insert(request_id, token.clone());
+        let handle = DelegationAbortHandle::new(token.clone());
+        self.tokens.lock().await.insert(request_id, handle);
         token
+    }
+
+    /// Register a fresh token plus its paired typed abort handle.
+    pub async fn register_with_abort_handle(
+        &self,
+        request_id: String,
+    ) -> (CancellationToken, DelegationAbortHandle) {
+        let token = CancellationToken::new();
+        let handle = DelegationAbortHandle::new(token.clone());
+        self.tokens.lock().await.insert(request_id, handle.clone());
+        (token, handle)
     }
 
     /// Remove and cancel the token for `request_id`.
     /// Returns `Cancelled` if the token was found, `NotFound` otherwise.
     pub async fn cancel(&self, request_id: &str) -> CancelOutcome {
-        if let Some(token) = self.tokens.lock().await.remove(request_id) {
-            token.cancel();
+        self.cancel_with_reason(request_id, "brain requested cancel".into())
+            .await
+    }
+
+    /// Remove the token entry and cancel with a typed brain-requested reason.
+    pub async fn cancel_with_reason(&self, request_id: &str, reason: String) -> CancelOutcome {
+        if let Some(handle) = self.tokens.lock().await.remove(request_id) {
+            handle
+                .request_abort(DelegationAbortReason::BrainRequested { reason })
+                .await;
             CancelOutcome::Cancelled
         } else {
             CancelOutcome::NotFound

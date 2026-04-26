@@ -12,6 +12,15 @@
   event directly. (bd-cpf.5b)
 
 ### Added
+- **Worker heartbeat watchdog configuration.** New `[worktree]` config keys:
+  `worker_heartbeat_watchdog_enabled` (bool, default `false`),
+  `worker_heartbeat_timeout_secs` (u64, default `90`),
+  `worker_heartbeat_initial_grace_secs` (u64, default `60`). See
+  `docs/architecture.md` Risk #23 for operational guidance and the
+  no-runtime-toggle rollback constraint. (bd-arch.23)
+- **`DelegationAbortReason` enum** distinguishing `BrainRequested` from
+  `WorkerHeartbeatTimeout`. Stage-2 will extend with `ResourceLimitExceeded`
+  / `SandboxTerminated` for cgroup-based termination. (bd-arch.23)
 - **Peer mailbox production wire-up (Stage-1).** The peer mailbox subsystem
   (hardened in bd-cpf.1–7) is now constructed and attached when
   `peer_mailbox_enabled = true` is set in config. A long-lived reconciler
@@ -55,6 +64,17 @@
   See `docs/superpowers/specs/2026-04-22-multi-agent-skill-embedding-research.md`.
 
 ### Fixed
+- **Architecture Risk #23 (semaphore indefinite wait).** Permit acquire is now
+  cancellable: `cancel_delegation` arriving while a task is queued for a
+  permit short-circuits immediately without acquiring. A heartbeat-based
+  watchdog (default-off) detects silent worker hangs and releases the held
+  permit after `worker_heartbeat_timeout_secs` (default 90s, configurable).
+  Watchdog is gated behind `worker_heartbeat_watchdog_enabled` (default
+  `false`) until a v1 `_spur/heartbeat` emitter lands; operators may opt
+  in early if their workers emit heartbeats. Watchdog firings map to
+  `DelegationStatus::Timeout`, preserving the `Timeout` (worker-hang)
+  vs `TimedOut` (review-gate) semantic split. Brain-initiated cancellations
+  continue to map to `DelegationStatus::Cancelled`. (bd-arch.23)
 - **Architecture Risk #21.** The peer mailbox reconciler is now spawned
   at orchestrator boot and aborted on shutdown via `Orchestrator::drop`.
   Previously the receiver was dropped immediately after construction,
