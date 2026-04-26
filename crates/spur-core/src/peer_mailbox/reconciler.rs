@@ -1,5 +1,6 @@
 use crate::event_funnel::FunnelHandle;
 use crate::peer_mailbox::ledger::PeerMailboxLedger;
+use crate::peer_mailbox::{transition_with_audit, PeerTransitionKind, TransitionAuditOutcome};
 use spur_acp::domain::events::SpurEventBody;
 use spur_acp::domain::peer_message::LedgerState;
 use std::sync::Arc;
@@ -7,6 +8,15 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileCounts {
+    /// Count of `WorkerPeerMessageAuditFailed` events emitted during
+    /// reconciliation.
+    ///
+    /// Migration note: prior to bd-cpf.5b, this field was always 0
+    /// because the reconciler did not emit `WorkerPeerMessageAuditFailed`
+    /// on transition errors. After bd-cpf.5b it reflects the real count.
+    /// Dashboards filtering on `== 0` should switch to alerting on the
+    /// `WorkerPeerMessageAuditFailed` event type with
+    /// `transition_kind == "reconcile_to_delivered"` instead.
     pub audit_failed_emitted: u32,
     pub inflight_forced_to_delivered: u32,
     pub inflight_stranded: u32,
@@ -30,6 +40,8 @@ pub async fn run_startup_reconcile(
     let _ = drain_quiet_window;
     let entries = ledger.non_terminal_entries().await;
     let mut counts = ReconcileCounts::default();
+    let brain_session_id_typed =
+        spur_acp::BrainSessionId::new(spur_acp::types::SessionId(brain_session_id.clone()));
 
     for entry in entries {
         match entry.state {
@@ -50,11 +62,18 @@ pub async fn run_startup_reconcile(
                     continue;
                 }
 
-                match ledger
-                    .transition(&entry.envelope.message_id, LedgerState::Delivered)
-                    .await
+                match transition_with_audit(
+                    ledger.as_ref(),
+                    &funnel,
+                    &brain_session_id_typed,
+                    &entry.envelope.target_delegation_id,
+                    entry.envelope.message_id,
+                    LedgerState::Delivered,
+                    PeerTransitionKind::ReconcileToDelivered,
+                )
+                .await
                 {
-                    Ok(_) => {
+                    TransitionAuditOutcome::Changed | TransitionAuditOutcome::Unchanged(_) => {
                         counts.inflight_forced_to_delivered += 1;
                         let target_prompt_id = entry
                             .injected_into_prompts
@@ -78,14 +97,26 @@ pub async fn run_startup_reconcile(
                             injected_chars: 0,
                         });
                     }
-                    Err(err) => {
+                    TransitionAuditOutcome::TerminalSkip(state) => {
+                        // Benign race: another actor (worker ack, drain,
+                        // post-prompt) terminalized the message between
+                        // `non_terminal_entries()` and this transition.
+                        tracing::debug!(
+                            message_id = ?entry.envelope.message_id,
+                            from = ?entry.state,
+                            terminal_state = ?state,
+                            "reconciler: transition skipped because message reached terminal state via concurrent actor"
+                        );
+                    }
+                    TransitionAuditOutcome::AuditFailed(err) => {
                         tracing::warn!(
                             message_id = ?entry.envelope.message_id,
                             from = ?entry.state,
                             to = ?LedgerState::Delivered,
-                            ?err,
+                            %err,
                             "peer mailbox startup reconcile transition failed"
                         );
+                        counts.audit_failed_emitted += 1;
                     }
                 }
             }
@@ -111,12 +142,17 @@ pub async fn run_startup_reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer_mailbox::ledger::{InMemoryLedger, PeerMailboxLedger};
+    use crate::peer_mailbox::ledger::{
+        AcceptOutcome, InMemoryLedger, InjectionOutcome, LedgerEntry, LedgerError,
+        PeerMailboxLedger, TransitionOutcome,
+    };
     use spur_acp::domain::delegation::DelegationId;
     use spur_acp::domain::events::SpurEventBody;
     use spur_acp::domain::peer_message::{
         LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId,
     };
+    use std::collections::HashSet;
+    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     fn envelope() -> PeerMessageEnvelope {
@@ -134,6 +170,74 @@ mod tests {
             kind: MessageKind::Question,
             body: "hi".into(),
             sequence: 1,
+        }
+    }
+
+    struct FaultInjectionLedger {
+        inner: Arc<InMemoryLedger>,
+        fail_for: Mutex<HashSet<PeerMessageId>>,
+    }
+
+    impl FaultInjectionLedger {
+        fn new(inner: Arc<InMemoryLedger>) -> Self {
+            Self {
+                inner,
+                fail_for: Mutex::new(HashSet::new()),
+            }
+        }
+
+        async fn fail_transition_for(&self, message_id: PeerMessageId) {
+            self.fail_for.lock().await.insert(message_id);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PeerMailboxLedger for FaultInjectionLedger {
+        async fn accept(
+            &self,
+            envelope: PeerMessageEnvelope,
+        ) -> Result<AcceptOutcome, LedgerError> {
+            self.inner.accept(envelope).await
+        }
+
+        async fn transition(
+            &self,
+            message_id: &PeerMessageId,
+            next: LedgerState,
+        ) -> Result<TransitionOutcome, LedgerError> {
+            if self.fail_for.lock().await.contains(message_id) {
+                return Err(LedgerError::InvalidTransition {
+                    from: LedgerState::Queued,
+                    to: next,
+                });
+            }
+
+            self.inner.transition(message_id, next).await
+        }
+
+        async fn record_injection(
+            &self,
+            message_id: &PeerMessageId,
+            target_prompt_id: &str,
+        ) -> Result<InjectionOutcome, LedgerError> {
+            self.inner
+                .record_injection(message_id, target_prompt_id)
+                .await
+        }
+
+        async fn get(&self, message_id: &PeerMessageId) -> Option<LedgerEntry> {
+            self.inner.get(message_id).await
+        }
+
+        async fn pending_for_target(
+            &self,
+            target_delegation_id: &DelegationId,
+        ) -> Vec<LedgerEntry> {
+            self.inner.pending_for_target(target_delegation_id).await
+        }
+
+        async fn non_terminal_entries(&self) -> Vec<LedgerEntry> {
+            self.inner.non_terminal_entries().await
         }
     }
 
@@ -330,5 +434,71 @@ mod tests {
             } if brain_session_id == "brain-session"
         )));
         assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn reconcile_emits_audit_failed_when_transition_fails_non_terminally() {
+        let ledger = Arc::new(FaultInjectionLedger::new(Arc::new(InMemoryLedger::new())));
+        let env = envelope();
+
+        ledger.accept(env.clone()).await.unwrap();
+        ledger
+            .record_injection(&env.message_id, "target-prompt")
+            .await
+            .unwrap();
+        ledger
+            .transition(&env.message_id, LedgerState::Queued)
+            .await
+            .unwrap();
+        ledger
+            .transition(&env.message_id, LedgerState::DeliveredInflight)
+            .await
+            .unwrap();
+        ledger.fail_transition_for(env.message_id).await;
+
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        let counts = run_startup_reconcile(
+            ledger.clone(),
+            funnel,
+            "brain-session".into(),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert_eq!(counts.audit_failed_emitted, 1);
+        let entry = ledger.get(&env.message_id).await.unwrap();
+        assert_eq!(entry.state, LedgerState::DeliveredInflight);
+
+        let emitted = [
+            events.recv().await.expect("audit failed event"),
+            events.recv().await.expect("reconciled event"),
+        ];
+        let audit_failed: Vec<_> = emitted
+            .iter()
+            .filter_map(|event| match event {
+                SpurEventBody::WorkerPeerMessageAuditFailed {
+                    message_id,
+                    transition_kind,
+                    error,
+                    ..
+                } => Some((message_id, transition_kind, error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(audit_failed.len(), 1);
+        let (message_id, transition_kind, error) = audit_failed[0];
+        assert_eq!(*message_id, env.message_id);
+        assert_eq!(transition_kind, "reconcile_to_delivered");
+        assert!(!error.is_empty());
+
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            SpurEventBody::WorkerPeerMailboxReconciled {
+                brain_session_id,
+                audit_failed_emitted: 1,
+                ..
+            } if brain_session_id == "brain-session"
+        )));
     }
 }
