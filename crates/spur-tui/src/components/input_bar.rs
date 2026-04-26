@@ -123,6 +123,13 @@ pub struct InputBar {
     active: bool,
 }
 
+// Cells consumed by the composer's frame. Coupled to the `borders(...)` flag
+// in `build_block` below — change them together. A future swap to
+// `Borders::TOP` alone or `Borders::NONE` requires editing only these
+// constants and the borders flag; rendering and arithmetic auto-track.
+const BORDER_OVERHEAD_ROWS: u16 = 2; // Borders::TOP | Borders::BOTTOM
+const BORDER_OVERHEAD_COLS: u16 = 0; // no left/right side borders
+
 impl InputBar {
     pub fn new() -> Self {
         let mut textarea = TextArea::default();
@@ -1290,6 +1297,19 @@ impl InputBar {
         format!("{} {}", animated, mode_str)
     }
 
+    fn build_block(&self, mode_str: &str, border_color: Color) -> Block<'_> {
+        let title = self.build_title(mode_str);
+        Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(border_color))
+            .title(Span::styled(
+                title,
+                // Reversed-colour fill so the mode badge acts as a high-contrast
+                // "lamp" on the thin top rule (kimi UX rec).
+                Style::default().bg(border_color).fg(Color::Black),
+            ))
+    }
+
     /// Sorted, non-overlapping protected ranges.
     pub fn protected_ranges(&self) -> &[ProtectedRange] {
         &self.protected_ranges
@@ -1417,13 +1437,13 @@ impl InputBar {
 
     /// Required render height given the available `width`.
     ///
-    /// Includes 2 rows for top+bottom borders. The inner rows are the
+    /// Includes rows for top+bottom borders. The inner rows are the
     /// visual-row count produced by the soft-wrap layer, clamped to
     /// `[1, 5]` so the input bar never dominates the view.
     pub fn required_height(&self, width: u16) -> u16 {
-        let inner_w = width.saturating_sub(2);
+        let inner_w = width.saturating_sub(BORDER_OVERHEAD_COLS);
         if inner_w == 0 {
-            return 3;
+            return 1 + BORDER_OVERHEAD_ROWS;
         }
 
         let mut lines: Vec<String> = self.textarea.lines().to_vec();
@@ -1433,20 +1453,18 @@ impl InputBar {
 
         let layout = crate::components::input_bar_wrap::wrap(&lines, inner_w);
         let inner = layout.visual_height().clamp(1, 5);
-        inner + 2
+        inner + BORDER_OVERHEAD_ROWS
     }
 
     /// Render the input bar.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let mode_str = match self.mode {
-            EditMode::Emacs => " INSERT ",
-            EditMode::Vim(VimMode::Normal) => " VIM·NORMAL ",
-            EditMode::Vim(VimMode::Insert) => " VIM·INSERT ",
-            EditMode::Vim(VimMode::Visual) => " VIM·VISUAL ",
-            EditMode::Vim(VimMode::Operator(_)) => " VIM·OP ",
+            EditMode::Emacs => " ● INSERT ",
+            EditMode::Vim(VimMode::Normal) => " ▣ VIM·NORMAL ",
+            EditMode::Vim(VimMode::Insert) => " ● VIM·INSERT ",
+            EditMode::Vim(VimMode::Visual) => " ▦ VIM·VISUAL ",
+            EditMode::Vim(VimMode::Operator(_)) => " ▣ VIM·OP ",
         };
-
-        let title = self.build_title(mode_str);
 
         let border_color = if self.active {
             match self.mode {
@@ -1458,11 +1476,7 @@ impl InputBar {
             Color::DarkGray
         };
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .title(Span::styled(title, Style::default().fg(border_color)));
-
+        let block = self.build_block(mode_str, border_color);
         let inner = block.inner(area);
         // Record the inner width so visual-line nav keys (which can arrive
         // before the next render) compute against the actual rendered width.
@@ -1590,18 +1604,14 @@ impl InputBar {
     ///     the cursor.
     pub fn render_inert(&self, frame: &mut Frame, area: Rect) {
         let mode_str = match self.mode {
-            EditMode::Emacs => " INSERT ",
-            EditMode::Vim(VimMode::Normal) => " VIM·NORMAL ",
-            EditMode::Vim(VimMode::Insert) => " VIM·INSERT ",
-            EditMode::Vim(VimMode::Visual) => " VIM·VISUAL ",
-            EditMode::Vim(VimMode::Operator(_)) => " VIM·OP ",
+            EditMode::Emacs => " ● INSERT ",
+            EditMode::Vim(VimMode::Normal) => " ▣ VIM·NORMAL ",
+            EditMode::Vim(VimMode::Insert) => " ● VIM·INSERT ",
+            EditMode::Vim(VimMode::Visual) => " ▦ VIM·VISUAL ",
+            EditMode::Vim(VimMode::Operator(_)) => " ▣ VIM·OP ",
         };
-        let title = self.build_title(mode_str);
         let border_color = Color::DarkGray;
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .title(Span::styled(title, Style::default().fg(border_color)));
+        let block = self.build_block(mode_str, border_color);
         let inner = block.inner(area);
         self.last_inner_width.set(inner.width);
         frame.render_widget(block, area);
@@ -1699,31 +1709,31 @@ mod required_height_tests {
     fn required_height_empty_is_3() {
         // 1 visual row + 2 border rows.
         let bar = InputBar::new();
-        assert_eq!(bar.required_height(80), 3);
+        assert_eq!(bar.required_height(80), 1 + BORDER_OVERHEAD_ROWS);
     }
 
     #[test]
     fn required_height_wraps_long_ascii_line() {
         let mut bar = InputBar::new();
         bar.set_text("a".repeat(200), 200);
-        // 200 / 80 = 3 visual rows (200 = 2*80 + 40) = ceil → 3.
+        // 200 / 82 = 3 visual rows (200 = 2*82 + 36) = ceil → 3.
         // Plus 2 border rows = 5. Clamp max is 5.
-        assert_eq!(bar.required_height(82), 5); // inner width = 80
+        assert_eq!(bar.required_height(82), 3 + BORDER_OVERHEAD_ROWS); // inner width = 82
     }
 
     #[test]
     fn required_height_clamps_at_max_5_plus_borders() {
         let mut bar = InputBar::new();
         bar.set_text("a".repeat(10_000), 0);
-        assert_eq!(bar.required_height(82), 7); // clamp(inner, 1, 5) + 2
+        assert_eq!(bar.required_height(82), 5 + BORDER_OVERHEAD_ROWS); // clamp(inner, 1, 5) + borders
     }
 
     #[test]
     fn required_height_cjk_counts_cells() {
         let mut bar = InputBar::new();
-        // 10 CJK chars = 20 cells → fits in inner width 20 on one row.
+        // 10 CJK chars = 20 cells → fits in inner width 22 on one row.
         bar.set_text("你好世界你好世界你好".to_string(), 0);
-        assert_eq!(bar.required_height(22), 3); // inner width = 20 → 1 row
+        assert_eq!(bar.required_height(22), 1 + BORDER_OVERHEAD_ROWS); // inner width = 22 → 1 row
     }
 
     #[test]
@@ -1803,6 +1813,6 @@ mod required_height_tests {
         terminal
             .draw(|f| bar.render(f, Rect::new(0, 0, 20, 3)))
             .unwrap();
-        assert_eq!(bar.last_inner_width_for_test(), 18);
+        assert_eq!(bar.last_inner_width_for_test(), 20);
     }
 }
