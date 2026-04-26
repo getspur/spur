@@ -846,9 +846,23 @@ mod scroll_indicator_tests {
         assert_eq!(ReactTrace::position_indicator(20, 20, 0, 70), None);
         assert_eq!(ReactTrace::position_indicator(100, 10, 0, 19), None);
 
-        let s = ReactTrace::position_indicator(100, 10, 45, 25).unwrap();
-        assert!(s.contains('%'));
-        assert!(!s.contains('/'));
+        assert_eq!(ReactTrace::position_indicator(100, 10, 45, 19), None);
+        assert_eq!(
+            ReactTrace::position_indicator(100, 10, 45, 20).unwrap(),
+            " · 55% "
+        );
+        assert_eq!(
+            ReactTrace::position_indicator(100, 10, 45, 25).unwrap(),
+            " · 55% "
+        );
+        assert_eq!(
+            ReactTrace::position_indicator(100, 10, 45, 29).unwrap(),
+            " · 55% "
+        );
+        assert_eq!(
+            ReactTrace::position_indicator(100, 10, 45, 30).unwrap(),
+            " · 55/100 · 55% "
+        );
 
         assert_eq!(
             ReactTrace::position_indicator(27, 5, 0, 70).unwrap(),
