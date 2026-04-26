@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -1909,6 +1909,22 @@ fn build_auth_banner_widget<'a>(message: &'a str) -> Paragraph<'a> {
         )
 }
 
+fn build_session_error_widget<'a>(message: &'a str) -> Paragraph<'a> {
+    Paragraph::new(message)
+        .alignment(Alignment::Center)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::NONE)
+                .title("Session error"),
+        )
+}
+
 impl SessionDetailView {
     fn render_inner(
         &mut self,
@@ -2190,16 +2206,7 @@ fn render_load_label(frame: &mut Frame, area: Rect, label: &str) {
 
 /// Render a red error panel for `LoadState::Failed`.
 fn render_error_label(frame: &mut Frame, area: Rect, message: &str) {
-    use ratatui::layout::Alignment;
-    use ratatui::widgets::{Block, Borders};
-    let para = Paragraph::new(message)
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Red))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Session error"),
-        );
+    let para = build_session_error_widget(message);
     let [_, mid, _] = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Percentage(40),
         ratatui::layout::Constraint::Min(3),
@@ -2309,6 +2316,14 @@ mod banner_tests {
         terminal.backend().buffer().clone()
     }
 
+    fn render_session_error(message: &str, area: Rect) -> Buffer {
+        let banner = super::build_session_error_widget(message);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| f.render_widget(banner, area)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
     fn rendered_text(buf: &Buffer) -> String {
         (0..buf.area.height)
             .map(|y| {
@@ -2343,6 +2358,54 @@ mod banner_tests {
         for y in area.y..area.y + area.height {
             for x in area.x..area.x + area.width {
                 let cell = buf.cell((x, y)).expect("cell should exist in banner area");
+                assert_eq!(
+                    cell.bg,
+                    Color::Red,
+                    "cell ({x}, {y}) should have red background"
+                );
+                assert_eq!(
+                    cell.fg,
+                    Color::White,
+                    "cell ({x}, {y}) should have white foreground"
+                );
+                assert!(
+                    cell.modifier.contains(Modifier::BOLD),
+                    "cell ({x}, {y}) should be bold"
+                );
+                assert_ne!(
+                    cell.symbol(),
+                    "│",
+                    "cell ({x}, {y}) should not render a vertical border glyph"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_error_renders_title_body_and_full_red_bg_with_no_pipe_glyph() {
+        let area = Rect::new(0, 0, 64, 3);
+        let message = "executor exited before ready";
+        let buf = render_session_error(message, area);
+        let rendered = rendered_text(&buf);
+
+        assert!(
+            rendered.contains("Session error"),
+            "session error title must appear. Rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(message),
+            "session error body must appear. Rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains('│'),
+            "session error must not render vertical border glyphs. Rendered:\n{rendered}"
+        );
+
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buf
+                    .cell((x, y))
+                    .expect("cell should exist in session error area");
                 assert_eq!(
                     cell.bg,
                     Color::Red,
