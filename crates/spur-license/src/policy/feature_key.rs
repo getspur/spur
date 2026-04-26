@@ -139,6 +139,13 @@ impl FeatureKey {
     pub const CORE_PRO_REVIEW_TIMEOUT_ROUTING: Self = Self("core_pro_review_timeout_routing");
     pub const CORE_PRO_REVIEW_RETRY_CONFIG: Self = Self("core_pro_review_retry_config");
 
+    // --- skills (5) ---
+    pub const SKILLS_CORE_REGISTRY: Self = Self("skills_core_registry");
+    pub const SKILLS_CORE_ATOMIC_INSTALLATION: Self = Self("skills_core_atomic_installation");
+    pub const SKILLS_CORE_RENDER_PER_VENDOR: Self = Self("skills_core_render_per_vendor");
+    pub const SKILLS_PRO_CUSTOM: Self = Self("skills_pro_custom");
+    pub const SKILLS_PRO_ROLE_GATING: Self = Self("skills_pro_role_gating");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -294,6 +301,17 @@ impl FeatureKey {
             Some(Self::CORE_PRO_REVIEW_TIMEOUT_ROUTING)
         } else if bytes_eq(b, b"core_pro_review_retry_config") {
             Some(Self::CORE_PRO_REVIEW_RETRY_CONFIG)
+        // skills
+        } else if bytes_eq(b, b"skills_core_registry") {
+            Some(Self::SKILLS_CORE_REGISTRY)
+        } else if bytes_eq(b, b"skills_core_atomic_installation") {
+            Some(Self::SKILLS_CORE_ATOMIC_INSTALLATION)
+        } else if bytes_eq(b, b"skills_core_render_per_vendor") {
+            Some(Self::SKILLS_CORE_RENDER_PER_VENDOR)
+        } else if bytes_eq(b, b"skills_pro_custom") {
+            Some(Self::SKILLS_PRO_CUSTOM)
+        } else if bytes_eq(b, b"skills_pro_role_gating") {
+            Some(Self::SKILLS_PRO_ROLE_GATING)
         } else {
             None
         }
@@ -652,6 +670,19 @@ mod tests {
             "core_pro_review_auto_approve",
             "core_pro_review_timeout_routing",
             "core_pro_review_retry_config",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn skills_keys_registered() {
+        for s in &[
+            "skills_core_registry",
+            "skills_core_atomic_installation",
+            "skills_core_render_per_vendor",
+            "skills_pro_custom",
+            "skills_pro_role_gating",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
