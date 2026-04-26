@@ -370,6 +370,7 @@ impl ExecutorLineage {
             | SpurEventBody::WorkerPeerMessageUndeliverable { .. }
             | SpurEventBody::WorkerPeerMessageQueued { .. }
             | SpurEventBody::WorkerPeerMessageAuditFailed { .. }
+            | SpurEventBody::WorkerPeerMessageReconciledStranded { .. }
             | SpurEventBody::WorkerPeerMailboxReconciled { .. } => {
                 // Lifecycle events that don't currently mutate the edge graph.
             }

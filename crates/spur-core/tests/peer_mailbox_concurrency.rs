@@ -598,7 +598,7 @@ async fn reconciler_does_not_race_with_concurrent_workers() {
     set.join_all().await;
 
     assert!(
-        counts.inflight_forced_to_delivered + counts.inflight_reverted_to_queued <= N as u32,
+        counts.inflight_forced_to_delivered + counts.inflight_stranded <= N as u32,
         "reconcile counts should not exceed raced messages: {counts:?}"
     );
 
@@ -612,6 +612,10 @@ async fn reconciler_does_not_race_with_concurrent_workers() {
             LedgerState::Queued => assert!(
                 !injected,
                 "message {message_id:?} was reverted despite recorded injection"
+            ),
+            LedgerState::DeliveredInflight => assert!(
+                !injected,
+                "message {message_id:?} was stranded despite recorded injection"
             ),
             LedgerState::Ignored | LedgerState::Consumed => {}
             other => panic!(
