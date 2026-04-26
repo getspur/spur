@@ -178,6 +178,18 @@ impl FeatureKey {
     pub const MCP_PRO_REVIEW: Self = Self("mcp_pro_review");
     pub const MCP_PRO_CUSTOM_TOOLS: Self = Self("mcp_pro_custom_tools");
 
+    // --- spur-tui (10) ---
+    pub const TUI_CORE_VIEW_DASHBOARD: Self = Self("tui_core_view_dashboard");
+    pub const TUI_CORE_VIEW_SESSION_DETAIL: Self = Self("tui_core_view_session_detail");
+    pub const TUI_CORE_VIEW_PLAN_INSPECTOR: Self = Self("tui_core_view_plan_inspector");
+    pub const TUI_CORE_VIEW_PALETTE_OVERLAY: Self = Self("tui_core_view_palette_overlay");
+    pub const TUI_CORE_VIEW_ISSUE_BROWSER: Self = Self("tui_core_view_issue_browser");
+    pub const TUI_CORE_VIEW_LANDING_DECISION: Self = Self("tui_core_view_landing_decision");
+    pub const TUI_CORE_VIEW_COMPOSER: Self = Self("tui_core_view_composer");
+    pub const TUI_CORE_MODAL_COLLISION_ESCAPE: Self = Self("tui_core_modal_collision_escape");
+    pub const TUI_CORE_INPUT_PASTE_AS_ATOM: Self = Self("tui_core_input_paste_as_atom");
+    pub const TUI_CORE_NOTIFICATION_DRAIN: Self = Self("tui_core_notification_drain");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -393,6 +405,27 @@ impl FeatureKey {
             Some(Self::MCP_PRO_REVIEW)
         } else if bytes_eq(b, b"mcp_pro_custom_tools") {
             Some(Self::MCP_PRO_CUSTOM_TOOLS)
+        // spur-tui
+        } else if bytes_eq(b, b"tui_core_view_dashboard") {
+            Some(Self::TUI_CORE_VIEW_DASHBOARD)
+        } else if bytes_eq(b, b"tui_core_view_session_detail") {
+            Some(Self::TUI_CORE_VIEW_SESSION_DETAIL)
+        } else if bytes_eq(b, b"tui_core_view_plan_inspector") {
+            Some(Self::TUI_CORE_VIEW_PLAN_INSPECTOR)
+        } else if bytes_eq(b, b"tui_core_view_palette_overlay") {
+            Some(Self::TUI_CORE_VIEW_PALETTE_OVERLAY)
+        } else if bytes_eq(b, b"tui_core_view_issue_browser") {
+            Some(Self::TUI_CORE_VIEW_ISSUE_BROWSER)
+        } else if bytes_eq(b, b"tui_core_view_landing_decision") {
+            Some(Self::TUI_CORE_VIEW_LANDING_DECISION)
+        } else if bytes_eq(b, b"tui_core_view_composer") {
+            Some(Self::TUI_CORE_VIEW_COMPOSER)
+        } else if bytes_eq(b, b"tui_core_modal_collision_escape") {
+            Some(Self::TUI_CORE_MODAL_COLLISION_ESCAPE)
+        } else if bytes_eq(b, b"tui_core_input_paste_as_atom") {
+            Some(Self::TUI_CORE_INPUT_PASTE_AS_ATOM)
+        } else if bytes_eq(b, b"tui_core_notification_drain") {
+            Some(Self::TUI_CORE_NOTIFICATION_DRAIN)
         } else {
             None
         }
@@ -811,6 +844,24 @@ mod tests {
             "mcp_pro_graph_tools",
             "mcp_pro_review",
             "mcp_pro_custom_tools",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_tui_keys_registered() {
+        for s in &[
+            "tui_core_view_dashboard",
+            "tui_core_view_session_detail",
+            "tui_core_view_plan_inspector",
+            "tui_core_view_palette_overlay",
+            "tui_core_view_issue_browser",
+            "tui_core_view_landing_decision",
+            "tui_core_view_composer",
+            "tui_core_modal_collision_escape",
+            "tui_core_input_paste_as_atom",
+            "tui_core_notification_drain",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
