@@ -36,7 +36,7 @@ fn footer_hint(
             ..
         } => "type to filter \u{00b7} Enter commit \u{00b7} Esc exit search",
         PickerState::Populated { .. } => {
-            "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} d archive \u{00b7} y yank-id \u{00b7} P preview \u{00b7} Esc back"
+            "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} p pin \u{00b7} d archive \u{00b7} y yank-id \u{00b7} P preview \u{00b7} Esc back"
         }
     }
 }
