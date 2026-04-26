@@ -1500,7 +1500,7 @@ Parser arm:
 
 ## Task 23b: Wave-8 second-order composition pruning (NEW — added 2026-04-27)
 
-**Wave 8 4-reviewer (kimi mechanical truth-table + codex code-grounded coupling tracing) + L9-MCTS judge synthesis** identified 15 over-decomposed families, 4 additional drops, and 5 vaporware deferrals. Per spec §4.16 Wave-8 entries (consolidations + drops + defers), this task removes 38 prior-wave entries and adds 0 new keys. Net: 102 (post-Wave-7) → 64 (post-Wave-8) new keys; total registry 138 → 100 consts.
+**Wave 8 4-reviewer (kimi mechanical truth-table + codex code-grounded coupling tracing) + L9-MCTS judge synthesis** identified 15 over-decomposed families, 4 additional drops, and 5 vaporware deferrals. Per spec §4.16 Wave-8 entries (consolidations + drops + defers), this task removes 37 prior-wave entries and adds 2 new umbrella keys (`core_core_event_pipeline`, `core_core_review`). Net: 99 (post-Wave-7) → 64 (post-Wave-8) new keys; total registry 135 → 100 consts.
 
 **Files:**
 - Modify: `crates/spur-license/src/policy/feature_key.rs` (remove consts, parser arms, per-crate test arms; replace with consolidated umbrella keys)
@@ -1552,7 +1552,36 @@ Parser arm:
 - [ ] **Step 8:** Run `cargo build --workspace` — expect PASS (no caller in main has migrated to new keys yet, so no compile-time references to dropped consts).
 - [ ] **Step 9:** Commit: `refactor(spur-license): Wave 8 second-order composition rationalization (102→64 new keys; 15 consolidations + 4 drops + 5 defers)`
 
-After this task completes, the registry has exactly 100 consts (36 legacy + 64 Wave-8-final new). Then proceed to Task 24 to add the comprehensive 64-key roundtrip test.
+After this task completes, the registry has exactly 100 consts (36 legacy + 64 Wave-8-final new). Then proceed to Task 23c (Wave 9 tier shifts) before Task 24.
+
+---
+
+## Task 23c: Wave-9 surgical tier shifts (NEW — added 2026-04-27)
+
+**Wave 9 Iceberg framework + MCTS persona-rollout analysis** (gemini strategy + codex code-grounded dual review with L9-MCTS judge synthesis) identified 2 keys that should tier-shift Pro→Free for tier-integrity reasons. Spec §4.16 Wave-9 entries document the rename + rationale + reviewer convergence.
+
+**Key insight from dual review:** the 2 shifts strengthen Free's daily-driver completeness without weakening Pro's 5+ headline conversion triggers. Both shifts also include `pub const` renames (Pro→Free naming convention).
+
+**Files:**
+- Modify: `crates/spur-license/src/policy/feature_key.rs` (rename 2 consts, move them to Free section, update parser arms, update per-crate tests)
+
+**Wave-9 tier shifts (2 keys, net 0 to total registry count):**
+
+- [ ] Rename `MCP_PRO_GRAPH_TOOLS` → `MCP_CORE_GRAPH_TOOLS` (string `"mcp_pro_graph_tools"` → `"mcp_core_graph_tools"`); move const + parser arm to spur-mcp Free section. Marketing copy: "MCP graph diagnostics / Mermaid text output" (NOT "rendered visual demo material" per codex code-grounding — actual output is raw `bv` JSON or Mermaid text via passthrough at `crates/spur-mcp/src/server.rs:3331-3415`).
+
+- [ ] Rename `CORE_PRO_REVIEW_RETRY_CONFIG` → `CORE_CORE_REVIEW_RETRY_CONFIG` (string `"core_pro_review_retry_config"` → `"core_core_review_retry_config"`); move const + parser arm to spur-core review Free block. Marketing copy: "Review retry limit" (NOT "configurable retry policy" per codex code-grounding — only `max_review_retries` is config; backoff is hard-coded at `crates/spur-core/src/orchestrator.rs:4767-4775`).
+
+- [ ] Update `spur_mcp_keys_registered` test to include `mcp_core_graph_tools` (positive) and assert `mcp_pro_graph_tools` returns None (negative).
+
+- [ ] Update `spur_core_review_keys_registered` test to include `core_core_review_retry_config` (positive) and assert `core_pro_review_retry_config` returns None (negative).
+
+- [ ] Run `cargo test --package spur-license --lib policy::feature_key` — expect ALL 25 tests PASS.
+
+- [ ] Run `cargo build --workspace && cargo clippy --package spur-license --lib -- -D warnings` — expect PASS.
+
+- [ ] Commit: `refactor(spur-license): Wave 9 surgical tier shifts (graph_tools + retry_config Pro→Free per Iceberg analysis)`
+
+After Task 23c, registry is still 100 consts (36 legacy + 64 new), but tier composition shifts to Free 48 + Pro v1 15 + Pro v1.1 1 = 64 new keys. Pro headline-trigger count drops from 5+ to 4+ (still healthy: telegram_solo, peer_mailbox_router, auto_approve, durable_plans + DuckDB analytics + cost_per_project + advanced_beads).
 
 ---
 
@@ -1604,13 +1633,15 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
             "core_core_session_resume",
             "core_pro_session_resume_event_replay",
             "core_core_plan_persistence",
-            // spur-mcp (10) — Wave 8: merged outcome_materializer into delegate (back-end mechanism with no separate MCP tool); merged reconciler_journal_notify into plan_durable (couples to beads+notify); merged mutation_executor into signal_watcher_scope_drift (compile-coupled apply_mutation call); deferred mcp_pro_custom_tools (no dynamic registry)
+            // spur-mcp (10) — Wave 8: merged outcome_materializer into delegate, reconciler_journal_notify into plan_durable, mutation_executor into signal_watcher; deferred custom_tools.
+            // Wave 9: tier-shifted graph_tools Pro→Free (renamed mcp_pro→mcp_core) per "viral acquisition surface" (raw JSON / Mermaid text via `bv` graph passthrough; not visual-rendered demo material per codex code-grounding).
             "mcp_core_server_dispatch", "mcp_core_delegate",
             "mcp_core_outcome_fetch", "mcp_core_pm",
             "mcp_core_pr", "mcp_core_plan_ephemeral",
+            "mcp_core_graph_tools",
             "mcp_pro_plan_durable",
             "mcp_pro_signal_watcher_scope_drift",
-            "mcp_pro_graph_tools", "mcp_pro_review",
+            "mcp_pro_review",
             // spur-tui (8) — Wave 8: collapsed dashboard+landing_decision+composer → dashboard (single view state graph); merged tui_core_notification_drain into core_core_event_pipeline above
             "tui_core_view_dashboard", "tui_core_view_session_detail",
             "tui_core_view_plan_inspector", "tui_core_view_palette_overlay",
