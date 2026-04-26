@@ -876,9 +876,8 @@ impl DashboardView {
     /// The only exceptions are global bypasses (Ctrl+P/N/O, Alt+i) and
     /// Esc which exits Compose mode.
     fn key_owner(&self, key: KeyEvent) -> KeyOwner {
-        if let Some(query_mode) = self.completion.query_mode() {
-            use crate::components::query_source::QueryMode;
-            let is_trigger_driven = query_mode == QueryMode::ReadFromInputBar;
+        if self.completion.is_active() {
+            let is_trigger_driven = self.completion.is_trigger_driven();
             let shell_consumes = if is_trigger_driven {
                 matches!(
                     key.code,
