@@ -32,8 +32,16 @@ This spec replaces the existing tier-plan's individual-tier section (Community +
 ### Free — *"Solve rate-limit fragility — free, forever."*
 Single-line value prop: *Orchestrate any AI coding agent without losing work to rate limits. Open source core, signed-policy free tier, no time limit.*
 
-### Pro — $12/mo or $99 lifetime — *"Ship from your couch — closed-loop today, autonomous tomorrow."*
-Single-line value prop: *Auto-PR your Linear/GitHub issues, approve from Telegram, run plans across sessions. Lifetime includes all v1.x roadmap unlocks.*
+### Pro — *"Ship from your couch — closed-loop today, autonomous tomorrow."*
+
+Three pricing options:
+- **$12/mo** monthly subscription
+- **$99/yr** annual subscription (save $45/yr vs monthly)
+- **$99 lifetime** (one-time, bound to v1.x; includes all v1.x roadmap unlocks)
+
+Single-line value prop: *Auto-PR your Linear/GitHub issues, approve from Telegram, run plans across sessions. Lifetime and annual are priced identically — annual is for users who prefer recurring billing for accounting; lifetime is for users who want one-and-done.*
+
+**7-day Pro trial** available via opt-in: `spur upgrade trial`. Anti-abuse via licenseseat NodeLocked binding (one trial per machine fingerprint).
 
 ### Team — (v2, deferred)
 Reserved value prop: *Govern your team's AI agents — shared lineage, RBAC, audit, multi-operator bot.*
@@ -199,6 +207,9 @@ Risk-blocked features cite the relevant Risk # from `architecture.md` §8.
 | `cli_core_command_cost` | F | v1 | `spur cost` — basic cost summary |
 | `cli_core_command_connect` | F | v1 | `spur connect` — socket bindings |
 | `cli_core_command_version` | F | v1 | `spur version` |
+| `cli_core_command_upgrade_trial` | F | v1 | `spur upgrade trial` — opt-in 7-day Pro trial (anti-abuse via licenseseat NodeLocked binding) |
+| `cli_core_command_upgrade_pro` | F | v1 | `spur upgrade pro` — opens browser to Stripe checkout (monthly/annual/lifetime) |
+| `cli_core_command_license_activate` | F | v1 | `spur license activate <key>` — write license to `~/.spur/license`, arc_swap reload |
 | `cli_team_command_workflow` | T | **v2** | `spur workflow run/validate <file>` (TOML workflow engine — Team only) |
 
 ### 4.6 `spur-pm` (Project Management — 9 keys + 1 Team-deferred)
@@ -309,7 +320,7 @@ Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-c
 | `skills_*` (in spur-core) | 3 | 2 | 0 | 0 |
 | `spur-mcp` | 7 | 7 | 0 | 0 |
 | `spur-tui` | 10 | 2 | 1 | 0 |
-| `spur-cli` | 9 | 0 | 0 | 1 |
+| `spur-cli` | 12 | 0 | 0 | 1 |
 | `spur-pm` | 4 | 6 | 0 | 1 |
 | `spur-cost` | 3 | 2 | 1 | 0 |
 | `spur-context` | 0 | 5 | 0 | 0 |
@@ -319,9 +330,9 @@ Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-c
 | `spur-blob-store` | 2 | 2 | 0 | 0 |
 | `spur-interactive` | 3 | 0 | 0 | 0 |
 | Notifications (cross-crate) | 1 | 0 | 1 | 0 |
-| **Total** | **78** | **41** | **10** | **3** |
+| **Total** | **81** | **41** | **10** | **3** |
 
-**Total atomic feature keys: 132** (well above the ~110 target; matches the user's intuition that 45 was insufficient).
+**Total atomic feature keys: 135** (well above the ~110 target; matches the user's intuition that 45 was insufficient).
 
 **Pro v1 launch arsenal: 41 features** organized into 5 ★ headline triggers + 36 supporting depth capabilities.
 
@@ -382,6 +393,9 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "cli_core_command_exec", "cli_core_command_tui",
         "cli_core_command_cost", "cli_core_command_connect",
         "cli_core_command_version",
+        "cli_core_command_upgrade_trial",
+        "cli_core_command_upgrade_pro",
+        "cli_core_command_license_activate",
 
         "pm_core_beads_basic", "pm_core_pm_read",
         "pm_core_pr_manual", "pm_core_bv_adapter",
@@ -475,11 +489,15 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
       "metadata": {
         "label": "Pro",
         "tagline": "Ship from your couch — closed-loop today, autonomous tomorrow.",
-        "description": "AFK confidence: auto-PR, Telegram remote-control, autonomous review, multi-session epics. Lifetime ($99) includes all v1.x roadmap unlocks.",
+        "description": "AFK confidence: auto-PR, Telegram remote-control, autonomous review, multi-session epics. Annual and lifetime are priced identically; lifetime includes all v1.x roadmap unlocks.",
         "pricing": {
           "monthly_usd": 12,
+          "annual_usd": 99,
           "lifetime_usd": 99,
-          "lifetime_scope": "v1.x"
+          "lifetime_scope": "v1.x",
+          "trial_days": 7,
+          "trial_opt_in_command": "spur upgrade trial",
+          "trial_anti_abuse": "licenseseat NodeLocked binding (one trial per machine fingerprint)"
         }
       }
     },
@@ -503,9 +521,10 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
       "description": "Opt-in anonymous usage stats."
     },
     "enable_v1_1_preview": {
-      "enabled": false,
+      "enabled": true,
       "tier_filter": ["pro"],
-      "description": "Opt-in early access to v1.1-Q3 roadmap features as they land."
+      "subject_filter": ["lifetime", "annual"],
+      "description": "Default-on for lifetime and annual subscribers (early-adopter reward). Monthly subscribers can opt-in via 'spur config set enable_v1_1_preview true'."
     }
   }
 }
@@ -557,6 +576,51 @@ Each tier-gated feature must be enforced at its first use-site. Per `2026-04-21-
 ### Risk #32 mitigation
 
 Currently feature-gates evaluate at startup (point-in-time snapshot). For v1, this is acceptable. For `license_pro_quota_runtime_downgrade` (v1.1), refactor to use-site evaluation via `arc_swap` reload. Existing infrastructure supports this.
+
+---
+
+## 6.2 Pro Trial via licenseseat (no new state machine)
+
+The `spur upgrade trial` command issues a regular Pro license with a 7-day expiry using EXISTING licenseseat infrastructure. No new license state machine, no new tier, no new feature key family.
+
+### Mechanism (uses existing primitives)
+
+| Primitive | Source | Purpose |
+|---|---|---|
+| `LicenseState.expires_at: Option<DateTime<Utc>>` | `spur-license/src/lib.rs:105` | Already exists — time-bound license expiry |
+| `LicenseStatus::Active → Expired` transition | `spur-license/src/licenseseat.rs` | Already wired via `spawn_sdk_event_bridge` |
+| `BindingMode::NodeLocked` (machine fingerprint) | `spur-license/src/lib.rs:53` | Already exists — prevents trial farming |
+| `CommunityProvider` fallback on expiry | `spur-license/src/community.rs` | Already wired — auto-downgrades Pro→Free at expiry |
+| `broadcast(LicenseEvent)` → all subscribers | `spur-core` event bus | Existing — TUI badge updates in real-time |
+
+### `spur upgrade trial` flow
+
+1. User runs `spur upgrade trial` (gated by `cli_core_command_upgrade_trial` — Free)
+2. CLI calls SPUR backend (or licenseseat self-issue API) with current machine fingerprint
+3. Backend issues license: `plan=pro, expires_at=now+7d, binding=NodeLocked, subject_kind=User`
+4. License key cached locally; `arc_swap` reload makes Pro features immediately available
+5. TUI shows persistent badge: "Pro trial — N days remaining" (countdown)
+6. At `expires_at`, licenseseat fires `EventKind::Expired` → `CommunityProvider` takes over
+7. TUI shows: "Trial ended — upgrade to keep Pro features [spur upgrade pro]"
+
+### Anti-abuse
+
+- **Machine binding:** licenseseat's `NodeLocked` binding fingerprints the machine. Same machine cannot claim a second trial.
+- **Backend dedup:** SPUR backend rejects duplicate machine fingerprints across all trial requests.
+- **No re-trial after expiry:** License reactivation requires paid Pro purchase; trial credit is one-time per machine.
+- **No CI bypass:** `subject_kind=Ci` and `binding_mode=FloatingCi` not allowed for trial issuance (forces real machine binding).
+
+### v1 Pro feature exposure during trial
+
+All Pro v1 features active (the user experiences the full Pro bundle for 7 days). v1.1-Q3 roadmap features are NOT exposed during trial — they don't exist yet, and the trial period will end before v1.1 ships.
+
+### Implementation effort
+
+- ~1 day backend (issue trial license endpoint + dedup logic)
+- ~1 day CLI command (`spur upgrade trial` + UX wiring)
+- ~0.5 day TUI badge (countdown + expiry banner)
+- ~0.5 day testing
+- **Total: 2-3 engineer-days, blocking nothing else**
 
 ---
 
@@ -703,8 +767,10 @@ All `acp_core_adapter_*` (7), all `core_core_skill_*` + `skills_core_render_per_
 | **Session resume** | Process-restart re-attach | **Full event-log replay** *(coming Q3)* |
 | **External notifications** | In-TUI only | **Slack/Discord/webhook** *(coming Q3)* |
 | **Bundled skills** | All 17 × 7 vendors | Same + custom org skills |
-| **Lifetime license** | n/a | $99 (v1.x, includes Q3 roadmap) |
 | **Monthly subscription** | n/a | $12/mo |
+| **Annual subscription** | n/a | $99/yr (save $45) |
+| **Lifetime license** | n/a | $99 (v1.x, includes Q3 roadmap) |
+| **Free Pro trial** | n/a | 7 days, opt-in via `spur upgrade trial` |
 
 ★ = headline upgrade trigger
 *(coming Q3)* = v1.1-Q3 roadmap, free for existing Pro subscribers
@@ -719,8 +785,10 @@ All `acp_core_adapter_*` (7), all `core_core_skill_*` + `skills_core_render_per_
 
 ### 9.3 Pro tier copy (pro-tier.md headline section)
 
-> **SPUR Pro: $12/mo or $99 lifetime.**
+> **SPUR Pro: $12/mo, $99/yr, or $99 lifetime.**
 > *Ship from your couch — closed-loop today, autonomous tomorrow.*
+>
+> Try it free for 7 days: `spur upgrade trial` — no card required, one trial per machine.
 >
 > **What you get today (v1):**
 > - Auto-create GitHub PRs the moment delegation succeeds
@@ -808,16 +876,21 @@ If Free → Pro conversion is **above 15% at Month 3**, consider loosening:
 | All skills Free except custom? | Yes | Crippling skills cripples product |
 | 7-day Pro trial? | No | Kimi's churn argument; replaced by capability-tease affordances |
 | Lifetime price? | $99 (revised from $129) | Fewer "shipped today" headline features warrants accessible entry |
+| Pro Annual middle tier? | $99/yr (priced same as lifetime) | Recurring billing for accounting; lifetime for one-and-done |
+| `enable_v1_1_preview` default-on? | Yes for lifetime + annual subscribers | Early-adopter reward; monthly users opt-in |
+| 7-day Pro trial via `spur upgrade trial`? | Yes (opt-in only, NOT auto-baked) | Uses existing licenseseat `expires_at` infrastructure; NodeLocked binding prevents farming |
 | Vapor features? | Listed as v1.1-Q3 roadmap with date buffer; free for existing Pro | Industry-standard playbook (Stripe/Vercel/Snowflake) |
 | Worktree isolation in Free? | Yes | Safety axis (rejected gemini's revenue framing) |
 | `parallel_workers` Free cap? | 2 | Splits gemini (2) and kimi (1); demonstrates orchestration without unlimited |
 | `event_persistence` Free? | 128 MB (corrected from 256 MB) | Matches arch.md actual rotation size |
 
-### Still-open (low priority, can be decided post-launch)
+### Resolved (this session)
 
-1. Will we offer a SPUR Pro Annual ($99/yr — same as lifetime) as a middle-tier between monthly and lifetime?
-2. Should `enable_v1_1_preview` flag default-on for lifetime subscribers (rewards early adopters)?
-3. Should we ship a `spur upgrade trial` command that gives 7 days Pro after install but only as opt-in (not auto-baked)?
+| Decision | Resolution |
+|---|---|
+| Pro Annual middle tier? | **Yes — $99/yr** (priced identically to lifetime; positioning is "recurring billing for accounting" vs "one-and-done") |
+| `enable_v1_1_preview` default-on for lifetime? | **Yes** — extended to lifetime AND annual subscribers as early-adopter reward; monthly subscribers can opt-in via config |
+| 7-day Pro trial via `spur upgrade trial`? | **Yes — opt-in only (NOT auto-baked)**; uses existing licenseseat `expires_at` infrastructure with NodeLocked binding for anti-abuse |
 
 ---
 
