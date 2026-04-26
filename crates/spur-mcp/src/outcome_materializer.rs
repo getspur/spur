@@ -875,8 +875,8 @@ mod tests {
         use async_trait::async_trait;
         use spur_acp::BrainSessionId;
         use spur_blob_store::{
-            OutcomeContent, OutcomeKey as Key, OutcomeMetadata, OutcomeRef, OutcomeStore, Section,
-            StoreError, SweepReport,
+            DeleteNamespaceReport, OutcomeContent, OutcomeKey as Key, OutcomeMetadata, OutcomeRef,
+            OutcomeStore, Section, StoreError, SweepReport,
         };
         use std::sync::Arc;
         use std::time::Duration;
@@ -902,8 +902,11 @@ mod tests {
                 Err(StoreError::Backend("unused".into()))
             }
 
-            async fn delete_namespace(&self, _b: &BrainSessionId) -> Result<usize, StoreError> {
-                Ok(0)
+            async fn delete_namespace(
+                &self,
+                _b: &BrainSessionId,
+            ) -> Result<DeleteNamespaceReport, StoreError> {
+                Ok(DeleteNamespaceReport::default())
             }
 
             async fn sweep_older_than(&self, _ttl: Duration) -> Result<SweepReport, StoreError> {

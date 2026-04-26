@@ -14,8 +14,8 @@ use tokio::sync::RwLock;
 
 use crate::trait_def::OutcomeStore;
 use crate::{
-    BackendTag, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section, StoreError,
-    SweepReport,
+    BackendTag, DeleteNamespaceReport, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef,
+    Section, StoreError, SweepReport,
 };
 
 type MemoryStoreMap = HashMap<OutcomeKey, (Vec<u8>, OutcomeMetadata)>;
@@ -105,11 +105,19 @@ impl OutcomeStore for MemoryOutcomeStore {
     async fn delete_namespace(
         &self,
         brain_session_id: &BrainSessionId,
-    ) -> Result<usize, StoreError> {
+    ) -> Result<DeleteNamespaceReport, StoreError> {
         let mut map = self.inner.write().await;
-        let before = map.len();
-        map.retain(|k, _| &k.brain_session_id != brain_session_id);
-        Ok(before - map.len())
+        let mut report = DeleteNamespaceReport::default();
+        map.retain(|k, (bytes, _)| {
+            if &k.brain_session_id == brain_session_id {
+                report.count += 1;
+                report.total_bytes += bytes.len() as u64;
+                false
+            } else {
+                true
+            }
+        });
+        Ok(report)
     }
 
     async fn sweep_older_than(&self, ttl: Duration) -> Result<SweepReport, StoreError> {
@@ -240,11 +248,12 @@ mod tests {
         store.put(&k_a, &body, &meta).await.unwrap();
         store.put(&k_b, &body, &meta).await.unwrap();
 
-        let removed = store
+        let report = store
             .delete_namespace(&BrainSessionId::new(SessionId(session_a.into())))
             .await
             .unwrap();
-        assert_eq!(removed, 1);
+        assert_eq!(report.count, 1);
+        assert_eq!(report.total_bytes, body.len() as u64);
 
         assert!(store.get(&k_a, None).await.is_err());
         assert!(store.get(&k_b, None).await.is_ok());
@@ -259,7 +268,10 @@ mod tests {
         meta.sha256 = "0".repeat(64);
 
         let err = store.put(&k, &body, &meta).await.unwrap_err();
-        assert!(matches!(err, StoreError::Backend(_)), "expected Backend error, got {err:?}");
+        assert!(
+            matches!(err, StoreError::Backend(_)),
+            "expected Backend error, got {err:?}"
+        );
     }
 
     #[tokio::test]

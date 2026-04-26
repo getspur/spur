@@ -15,7 +15,8 @@ use spur_acp::BrainSessionId;
 
 use crate::trait_def::OutcomeStore;
 use crate::{
-    OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section, StoreError, SweepReport,
+    DeleteNamespaceReport, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section,
+    StoreError, SweepReport,
 };
 
 /// Failure mode the mock injects on every operation. Each enumerant maps
@@ -96,7 +97,7 @@ impl OutcomeStore for MockFailingOutcomeStore {
     async fn delete_namespace(
         &self,
         _brain_session_id: &BrainSessionId,
-    ) -> Result<usize, StoreError> {
+    ) -> Result<DeleteNamespaceReport, StoreError> {
         match &self.mode {
             FailureMode::Io => Err(StoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
