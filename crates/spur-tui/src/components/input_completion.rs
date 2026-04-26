@@ -151,8 +151,11 @@ impl InputCompletionPort {
         self.picker_shell = None;
     }
 
-    pub fn query_mode(&self) -> Option<QueryMode> {
-        self.picker_shell.as_ref().map(PickerShell::query_mode)
+    pub fn is_trigger_driven(&self) -> bool {
+        matches!(
+            self.picker_shell.as_ref().map(PickerShell::query_mode),
+            Some(QueryMode::ReadFromInputBar)
+        )
     }
 
     pub fn open_history(&mut self, history: Vec<crate::input_history::InputHistoryEntry>) {
