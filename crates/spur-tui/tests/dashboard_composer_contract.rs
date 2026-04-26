@@ -50,8 +50,12 @@ fn non_empty_dashboard_j_stays_in_input_bar() {
 #[test]
 fn non_empty_multiline_up_reaches_input_bar() {
     let mut dashboard = DashboardView::new();
-    // Seed a two-line draft with cursor at the end via paste (enters Compose mode).
-    dashboard.handle_paste("line1\nline2");
+    // Enter Compose mode, then seed a two-line draft with cursor at the end.
+    // Multiline paste is atomized, while this test is about multiline cursor routing.
+    dashboard.handle_paste("line1");
+    dashboard
+        .input_bar_mut_for_test()
+        .set_text("line1\nline2".to_string(), "line1\nline2".len());
 
     let before = dashboard.input_bar_mut_for_test().cursor();
     let action = dashboard.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());

@@ -5,7 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_tui::action::{Action, PermissionChoice};
-use spur_tui::components::input_bar::ProtectedRange;
+use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 use spur_tui::views::{session_detail::SessionDetailView, View};
 
@@ -92,6 +92,7 @@ fn ctrl_r_accept_roundtrips_resource_link_on_resubmit() {
     snap.protected_ranges = vec![ProtectedRange {
         start: 3,
         end: 7,
+        kind: RangeKind::Atom,
         uri: "file:///foo".to_string(),
         name: "foo".to_string(),
     }];

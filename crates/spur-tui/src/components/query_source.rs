@@ -421,7 +421,7 @@ impl QuerySource for SlashQuerySource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::input_bar::ProtectedRange;
+    use crate::components::input_bar::{ProtectedRange, RangeKind};
     use crate::input_history::{InputHistoryEntry, InputStateSnapshot};
 
     fn mk_entry(text: &str) -> InputHistoryEntry {
@@ -537,6 +537,7 @@ mod tests {
         with_atom.protected_ranges = vec![crate::components::input_bar::ProtectedRange {
             start: 3,
             end: 7,
+            kind: RangeKind::Atom,
             uri: "file:///foo".to_string(),
             name: "foo".to_string(),
         }];
@@ -585,6 +586,7 @@ mod tests {
         snap.protected_ranges = vec![ProtectedRange {
             start: 3,
             end: 7,
+            kind: RangeKind::Atom,
             uri: "file:///foo".to_string(),
             name: "foo".to_string(),
         }];
@@ -602,6 +604,7 @@ mod tests {
         snap.protected_ranges = vec![ProtectedRange {
             start: 3,
             end: 7,
+            kind: RangeKind::Atom,
             uri: "file:///foo".to_string(),
             name: "foo".to_string(),
         }];
@@ -617,6 +620,7 @@ mod tests {
         snap.protected_ranges = vec![ProtectedRange {
             start: 5,
             end: 9,
+            kind: RangeKind::Atom,
             uri: "file:///foo".to_string(),
             name: "foo".to_string(),
         }];

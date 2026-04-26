@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use spur_acp::ContentBlock;
 
-use crate::components::input_bar::ProtectedRange;
+use crate::components::input_bar::{ProtectedRange, RangeKind};
 
 /// Maximum number of submitted-input entries retained in both the in-memory
 /// `InputBar` ring buffer and the persisted `SessionMetadata::input_history`
@@ -84,6 +84,7 @@ impl InputStateSnapshot {
                     protected_ranges.push(ProtectedRange {
                         start,
                         end,
+                        kind: RangeKind::Atom,
                         uri: r.uri.clone(),
                         name: r.name.clone(),
                     });
