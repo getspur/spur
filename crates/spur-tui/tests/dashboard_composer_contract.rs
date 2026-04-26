@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_core::ExecutorLineage;
 use spur_tui::action::Action;
+use spur_tui::mentions::WorkerMentionDescriptor;
 use spur_tui::views::dashboard::DashboardMode;
 use spur_tui::views::dashboard::DashboardView;
 use spur_tui::views::View;
@@ -93,6 +94,54 @@ fn dashboard_command_registry_includes_spur_local_commands() {
 
     assert!(names.contains(&"help".to_string()), "names={names:?}");
     assert!(names.contains(&"quit".to_string()), "names={names:?}");
+}
+
+#[test]
+fn dashboard_pre_session_slash_help_dispatches_locally() {
+    let mut dashboard = DashboardView::new();
+
+    type_str(&mut dashboard, "/help");
+    let _ = press(&mut dashboard, KeyCode::Esc);
+    let action = press(&mut dashboard, KeyCode::Enter);
+
+    assert!(
+        matches!(action, Some(Action::ShowHelp)),
+        "expected local ShowHelp action, got {action:?}"
+    );
+}
+
+#[test]
+fn dashboard_pre_session_worker_mention_prepends_hint_and_resource_link() {
+    let mut dashboard = DashboardView::new();
+    dashboard.set_worker_snapshot(vec![WorkerMentionDescriptor {
+        name: "codex".into(),
+        description: Some("Writes Rust".into()),
+        tier: Some("generalist".into()),
+    }]);
+
+    type_str(&mut dashboard, "@worker:codex");
+    let _ = press(&mut dashboard, KeyCode::Tab);
+    type_str(&mut dashboard, " hello");
+    let action = press(&mut dashboard, KeyCode::Enter).expect("submit action");
+
+    let blocks = match action {
+        Action::NewSessionWithMessage { blocks, .. } => blocks,
+        other => panic!("expected NewSessionWithMessage, got {other:?}"),
+    };
+
+    assert!(
+        matches!(&blocks[0], ContentBlock::Text(t)
+            if t.text.starts_with("[UI hint]") && t.text.contains("codex")),
+        "expected [UI hint] Text at blocks[0], got {:?}",
+        blocks[0]
+    );
+    assert!(
+        blocks.iter().skip(1).any(|block| matches!(
+            block,
+            ContentBlock::ResourceLink(link) if link.uri == "worker://codex"
+        )),
+        "expected worker ResourceLink after hint, got {blocks:?}"
+    );
 }
 
 #[test]
