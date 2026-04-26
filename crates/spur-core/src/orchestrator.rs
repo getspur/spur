@@ -137,8 +137,12 @@ mod session_attach_guard_transfer_tests {
     }
 
     #[tokio::test]
-    async fn attach_guard_moves_from_brain_session_to_active_connection() {
+    async fn retire_active_brain_moves_attach_guard_to_active_connection() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+
         let attach_guard = match SessionAttachGuard::try_acquire(tmp.path(), "retire-transfer-test")
         {
             AcquireOutcome::Acquired(guard) => Some(guard),
@@ -148,7 +152,7 @@ mod session_attach_guard_transfer_tests {
             ),
         };
 
-        let mut brain = BrainSession {
+        let mut brain = Some(BrainSession {
             connection: Box::new(NoopConnection),
             acp_session_id: "retire-transfer-test".to_string(),
             spur_session_id: SessionId("spur-session".to_string()),
@@ -160,17 +164,59 @@ mod session_attach_guard_transfer_tests {
             attach_guard,
             fs_unsafe: false,
             started_at: std::time::Instant::now(),
-        };
+        });
+        let mut active = None;
+        let mut scheduler = crate::scheduler::BrainScheduler::new(
+            None,
+            std::sync::Arc::new(orchestrator.funnel.clone()),
+        );
+        let overflow =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
 
-        let mut active = ActiveConnection {
-            transport: brain.connection,
-            brain_name: brain.brain_name,
-            attach_guard: brain.attach_guard.take(),
-            fs_unsafe: brain.fs_unsafe,
-        };
+        orchestrator
+            .retire_active_brain(
+                &mut brain,
+                &mut active,
+                &mut scheduler,
+                &overflow,
+                spur_acp::domain::events::BrainRetireReason::Shutdown,
+                None,
+            )
+            .await;
 
+        let mut active = active.expect("retired brain should cache active connection");
         assert!(active.attach_guard.is_some());
         active.transport.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn reconnect_already_attached_maps_to_attach_rejected_event() {
+        let holder = spur_acp::session_lock::HolderInfo {
+            pid: Some(123),
+            ..Default::default()
+        };
+
+        let event = reconnect_failure_event(
+            SessionId("spur-session".to_string()),
+            "test-brain".to_string(),
+            ReconnectError::AlreadyAttached {
+                acp_id: "acp-session".to_string(),
+                holder: holder.clone(),
+            },
+        );
+
+        match event {
+            SpurEventBody::SessionAttachRejected {
+                acp_session_id,
+                holder: event_holder,
+                fs_unsafe,
+            } => {
+                assert_eq!(acp_session_id, "acp-session");
+                assert_eq!(event_holder.pid, holder.pid);
+                assert!(!fs_unsafe);
+            }
+            other => panic!("expected SessionAttachRejected, got {other:?}"),
+        }
     }
 }
 
@@ -234,9 +280,9 @@ pub struct ActiveConnection {
     pub brain_name: String,
     /// `None` only when no ACP session has been attached yet or when attached
     /// under DegradedNoLock (NFS/sshfs).
-    pub attach_guard: Option<SessionAttachGuard>,
+    pub(crate) attach_guard: Option<SessionAttachGuard>,
     /// True when this attachment is unprotected (multi-window unsafe).
-    pub fs_unsafe: bool,
+    pub(crate) fs_unsafe: bool,
 }
 
 /// Holds the state of an active brain session.
@@ -263,9 +309,9 @@ pub struct BrainSession {
     pub notification_pump_handle: Option<JoinHandle<()>>,
     /// Holds the attach lock while the transport lives on this active session.
     /// Moves back to `ActiveConnection` when the transport is cached.
-    pub attach_guard: Option<SessionAttachGuard>,
+    pub(crate) attach_guard: Option<SessionAttachGuard>,
     /// Mirrors `ActiveConnection.fs_unsafe` for the active transport.
-    pub fs_unsafe: bool,
+    pub(crate) fs_unsafe: bool,
     /// Wall-clock instant this session was created. Used by
     /// `retire_active_brain` to record session duration in the cost
     /// ledger on close-out.
@@ -275,6 +321,17 @@ pub struct BrainSession {
 #[derive(Debug, thiserror::Error)]
 pub enum LoadBrainSessionError {
     #[error("session {acp_id} is already attached")]
+    AlreadyAttached {
+        acp_id: String,
+        holder: spur_acp::session_lock::HolderInfo,
+    },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReconnectError {
+    #[error("session already attached")]
     AlreadyAttached {
         acp_id: String,
         holder: spur_acp::session_lock::HolderInfo,
@@ -466,6 +523,27 @@ fn commit_rendered_batch(
 
 fn format_error_chain(error: &anyhow::Error) -> String {
     format!("{error:#}")
+}
+
+fn reconnect_failure_event(
+    session: SessionId,
+    brain_name: String,
+    error: ReconnectError,
+) -> SpurEventBody {
+    match error {
+        ReconnectError::AlreadyAttached { acp_id, holder } => {
+            SpurEventBody::SessionAttachRejected {
+                acp_session_id: acp_id,
+                holder,
+                fs_unsafe: false,
+            }
+        }
+        ReconnectError::Other(e) => SpurEventBody::BrainReconnectFailed {
+            session,
+            brain_name,
+            reason: format_error_chain(&e),
+        },
+    }
 }
 
 /// A user input message from the TUI.
@@ -2676,6 +2754,22 @@ impl Orchestrator {
         }
     }
 
+    fn acquire_attach_guard_for_existing_or_load(
+        &self,
+        acp_session_id: &str,
+        existing_attach_guard: Option<SessionAttachGuard>,
+        existing_fs_unsafe: bool,
+    ) -> std::result::Result<(Option<SessionAttachGuard>, bool), LoadBrainSessionError> {
+        if let Some(guard) = existing_attach_guard {
+            if guard.acp_id() == acp_session_id {
+                return Ok((Some(guard), existing_fs_unsafe));
+            }
+            drop(guard);
+        }
+
+        self.acquire_attach_guard_for_load(acp_session_id)
+    }
+
     fn acquire_attach_guard_for_new(
         &self,
         acp_session_id: &str,
@@ -2702,6 +2796,22 @@ impl Orchestrator {
         }
     }
 
+    fn acquire_attach_guard_for_existing_or_new(
+        &self,
+        acp_session_id: &str,
+        existing_attach_guard: Option<SessionAttachGuard>,
+        existing_fs_unsafe: bool,
+    ) -> Result<(Option<SessionAttachGuard>, bool)> {
+        if let Some(guard) = existing_attach_guard {
+            if guard.acp_id() == acp_session_id {
+                return Ok((Some(guard), existing_fs_unsafe));
+            }
+            drop(guard);
+        }
+
+        self.acquire_attach_guard_for_new(acp_session_id)
+    }
+
     /// Create a full brain session from an already-initialized connection.
     ///
     /// Emits BrainSpawned, starts MCP callback server, logs session start,
@@ -2714,12 +2824,8 @@ impl Orchestrator {
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
         existing_attach_guard: Option<SessionAttachGuard>,
-        _existing_fs_unsafe: bool,
+        existing_fs_unsafe: bool,
     ) -> Result<BrainSession> {
-        // A cached transport may be carrying the previous session's guard from
-        // `retire_active_brain`. A new ACP session receives a new ACP id, so the
-        // old guard must be released before acquiring the new id's lock.
-        drop(existing_attach_guard);
         let session_id = SessionId::new();
 
         info!(brain = %brain_name, session = %session_id, "Creating brain session");
@@ -2822,8 +2928,11 @@ impl Orchestrator {
         })
         .await?;
 
-        let (attach_guard, fs_unsafe) =
-            self.acquire_attach_guard_for_new(&session_response.session_id.to_string())?;
+        let (attach_guard, fs_unsafe) = self.acquire_attach_guard_for_existing_or_new(
+            &session_response.session_id.to_string(),
+            existing_attach_guard,
+            existing_fs_unsafe,
+        )?;
 
         // Spawn delegation handler.
         let max_concurrent = self
@@ -2948,10 +3057,12 @@ impl Orchestrator {
         let (mut attach_guard, mut fs_unsafe) = if force_new_session {
             drop(existing_attach_guard);
             (None, false)
-        } else if let Some(guard) = existing_attach_guard {
-            (Some(guard), existing_fs_unsafe)
         } else {
-            self.acquire_attach_guard_for_load(&acp_session_id)?
+            self.acquire_attach_guard_for_existing_or_load(
+                &acp_session_id,
+                existing_attach_guard,
+                existing_fs_unsafe,
+            )?
         };
 
         info!(brain = %brain_name, session = %session_id, acp_session = %acp_session_id, "Loading brain session");
@@ -3240,7 +3351,7 @@ impl Orchestrator {
         >,
         brain_override: Option<&str>,
         force_new_session: bool,
-    ) -> Result<(BrainSession, spur_acp::LoadOutcome)> {
+    ) -> std::result::Result<(BrainSession, spur_acp::LoadOutcome), ReconnectError> {
         let acp_session_id = dead_brain.acp_session_id.clone();
         let preserve_spur_id = dead_brain.spur_session_id.clone();
         let brain_name_hint = dead_brain.brain_name.clone();
@@ -3267,7 +3378,7 @@ impl Orchestrator {
             .await
             .with_context(|| format!("reconnect: connect_brain failed for '{brain_name_hint}'"))?;
 
-        let (new_session, mut history_stream, outcome) = self
+        let (new_session, mut history_stream, outcome) = match self
             .load_brain_session(
                 connection,
                 brain_name,
@@ -3279,9 +3390,17 @@ impl Orchestrator {
                 existing_fs_unsafe,
             )
             .await
-            .with_context(|| {
-                format!("reconnect: load_brain_session failed for '{brain_name_hint}'")
-            })?;
+        {
+            Ok(result) => result,
+            Err(LoadBrainSessionError::AlreadyAttached { acp_id, holder }) => {
+                return Err(ReconnectError::AlreadyAttached { acp_id, holder });
+            }
+            Err(LoadBrainSessionError::Other(e)) => {
+                return Err(ReconnectError::Other(e.context(format!(
+                    "reconnect: load_brain_session failed for '{brain_name_hint}'"
+                ))));
+            }
+        };
 
         // Drain the history stream to keep the pump contract (same
         // pattern as the ResumeSession arm). We do NOT re-emit
@@ -3365,12 +3484,11 @@ impl Orchestrator {
                 Some(new_brain)
             }
             Err(e) => {
-                let error_message = format_error_chain(&e);
-                self.emit(SpurEvent::now(SpurEventBody::BrainReconnectFailed {
-                    session: spur_session_id,
+                self.emit(SpurEvent::now(reconnect_failure_event(
+                    spur_session_id,
                     brain_name,
-                    reason: error_message,
-                }));
+                    e,
+                )));
                 None
             }
         }
