@@ -122,6 +122,7 @@ async fn worker_ack_during_accepted_state_consumes_message() {
     let _guard = match bundle.router.accept_or_reject(env, &snap).await.unwrap() {
         Acceptance::Created(guard) => guard,
         Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+        _ => panic!("unexpected Acceptance variant"),
     };
     assert_eq!(
         bundle.ledger.get(&mid).await.unwrap().state,
@@ -184,6 +185,7 @@ async fn post_prompt_skip_via_error_arm_does_not_emit_audit_failed() {
     {
         Acceptance::Created(guard) => guard,
         Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+        _ => panic!("unexpected Acceptance variant"),
     };
 
     let (ack_tx, mut ack_rx) = unbounded_channel();
@@ -243,6 +245,7 @@ async fn full_stage1_flow_accept_inject_consume() {
     let guard = match router.accept_or_reject(env, &snap).await.unwrap() {
         Acceptance::Created(g) => g,
         Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+        _ => panic!("unexpected Acceptance variant"),
     };
     assert_eq!(ledger.get(&mid).await.unwrap().state, LedgerState::Accepted);
 
@@ -315,6 +318,7 @@ async fn reconcile_advance_to_delivered_then_worker_ack_consumes() {
     let guard = match bundle.router.accept_or_reject(env, &snap).await.unwrap() {
         Acceptance::Created(guard) => guard,
         Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+        _ => panic!("unexpected Acceptance variant"),
     };
     assert_eq!(
         bundle.ledger.get(&mid).await.unwrap().state,
@@ -433,6 +437,7 @@ async fn carry_forward_re_injects_after_pre_delivery_failure() {
     let guard1 = match router.accept_or_reject(env, &snap).await.unwrap() {
         Acceptance::Created(g) => g,
         Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+        _ => panic!("unexpected Acceptance variant"),
     };
     assert_eq!(ledger.get(&mid).await.unwrap().state, LedgerState::Accepted);
 
