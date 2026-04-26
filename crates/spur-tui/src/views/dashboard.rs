@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -64,6 +64,7 @@ pub struct DashboardView {
     completion: crate::components::input_completion::InputCompletionPort,
     command_registry: crate::commands::CommandRegistry,
     mention_registry: std::rc::Rc<std::cell::RefCell<crate::mentions::MentionRegistry>>,
+    known_worker_names: HashSet<String>,
     cwd: std::path::PathBuf,
     focused_panel: Panel,
     focused_node: Option<ExecutorId>,
@@ -151,6 +152,7 @@ impl DashboardView {
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(
                 crate::mentions::MentionRegistry::new(),
             )),
+            known_worker_names: HashSet::new(),
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             focused_panel: Panel::Log,
             focused_node: None,
@@ -181,6 +183,13 @@ impl DashboardView {
 
     pub fn agents_configured(&self) -> bool {
         self.agents_configured
+    }
+
+    pub fn set_worker_snapshot(&mut self, workers: Vec<crate::mentions::WorkerMentionDescriptor>) {
+        self.known_worker_names = workers.iter().map(|d| d.name.clone()).collect();
+        self.mention_registry = std::rc::Rc::new(std::cell::RefCell::new(
+            crate::mentions::MentionRegistry::for_brain_session(workers),
+        ));
     }
 
     /// Advance rotating example prompts. Call from App::tick().
@@ -1456,25 +1465,49 @@ impl DashboardView {
                             &mut self.input_bar,
                             &env,
                         );
-                        let blocks = self
+                        let (captured, ranges, captured_interrupt) = self
                             .input_bar
                             .take_submit_capture()
-                            .map(|(captured, ranges, _)| {
-                                crate::commands::submit_router::assemble_blocks(&captured, &ranges)
-                            })
-                            .unwrap_or_else(|| {
-                                vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
-                                    text,
-                                ))]
-                            });
-                        if self.session_attached {
-                            Some(Action::SendMessage {
-                                session: spur_acp::SessionId(String::new()),
-                                blocks,
+                            .unwrap_or_else(|| (text, Vec::new(), interrupt));
+                        use crate::commands::submit_router::{route, SubmitDecision};
+                        match route(
+                            &captured,
+                            &ranges,
+                            &self.command_registry,
+                            captured_interrupt,
+                        ) {
+                            SubmitDecision::Empty => None,
+                            SubmitDecision::Send {
+                                mut blocks,
                                 interrupt,
-                            })
-                        } else {
-                            Some(Action::NewSessionWithMessage { blocks, interrupt })
+                            } => {
+                                let _ = crate::mentions::hint::prepend_worker_hint(
+                                    &mut blocks,
+                                    &ranges,
+                                    &self.known_worker_names,
+                                );
+                                if self.session_attached {
+                                    Some(Action::SendMessage {
+                                        session: spur_acp::SessionId(String::new()),
+                                        blocks,
+                                        interrupt,
+                                    })
+                                } else {
+                                    Some(Action::NewSessionWithMessage { blocks, interrupt })
+                                }
+                            }
+                            SubmitDecision::Local { action } => Some(action),
+                            SubmitDecision::VendorExec { method, params } => {
+                                if self.session_attached {
+                                    Some(Action::VendorExec {
+                                        session: spur_acp::SessionId(String::new()),
+                                        method,
+                                        params,
+                                    })
+                                } else {
+                                    None
+                                }
+                            }
                         }
                     }
                     HandleOutcome::Key(intent) => {

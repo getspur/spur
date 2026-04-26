@@ -350,6 +350,8 @@ impl App {
         if let crate::landing::LandingDecision::SetupRequired = &app.landing {
             app.dashboard.set_agents_configured(false);
         }
+        app.dashboard
+            .set_worker_snapshot(app.build_worker_snapshot());
 
         app.license_badge = license_badge_from_state(&app.license_state);
         app.flag_summary = compute_flag_summary();
