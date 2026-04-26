@@ -110,6 +110,43 @@ fn populated_single_brain_no_filter() {
 }
 
 #[test]
+fn populated_empty_no_filter() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(SessionMetadata::default());
+    picker.set_sessions("claude".into(), vec![]);
+
+    // Inline golden — captures the empty-list layout: only the [+ New]
+    // virtual row + separator visible, status bar at line 22, footer at 23.
+    let expected: &[&str] = &[
+        "Sessions (claude)",
+        "  Search",
+        "",
+        "▸ + Start new session",
+        "  ────",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav · Enter resume · / search · n new · R rename · p pin · d archive · y yan",
+    ];
+    assert_render(&mut picker, expected);
+}
+
+#[test]
 fn loading_state() {
     let mut picker = SessionPickerView::new();
     let expected: &[&str] = &[
