@@ -307,6 +307,88 @@ async fn full_stage1_flow_accept_inject_consume() {
 }
 
 #[tokio::test]
+async fn reconcile_advance_to_delivered_then_worker_ack_consumes() {
+    let (bundle, mut bcast_rx, funnel) = bundle_with_broadcast();
+    let snap = snapshot();
+    let env = envelope("Worker B: recover this after crash");
+    let mid = env.message_id;
+    let guard = match bundle.router.accept_or_reject(env, &snap).await.unwrap() {
+        Acceptance::Created(guard) => guard,
+        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
+    };
+    assert_eq!(
+        bundle.ledger.get(&mid).await.unwrap().state,
+        LedgerState::Accepted
+    );
+
+    let ctx = bundle
+        .builder
+        .build_for_target(&DelegationId("tgt".into()), 200_000, 8, 2_048)
+        .await;
+    assert_eq!(ctx.injection_records.len(), 1);
+    assert_eq!(ctx.injection_records[0].message_id, mid);
+    bundle
+        .ledger
+        .record_injection(&mid, &ctx.target_prompt_id)
+        .await
+        .unwrap();
+    bundle
+        .ledger
+        .transition(&mid, LedgerState::DeliveredInflight)
+        .await
+        .unwrap();
+
+    spur_core::peer_mailbox::reconciler::run_startup_reconcile(
+        bundle.ledger.clone(),
+        funnel.clone(),
+        "bs".into(),
+        Duration::from_millis(100),
+    )
+    .await;
+
+    assert_eq!(
+        bundle.ledger.get(&mid).await.unwrap().state,
+        LedgerState::Delivered
+    );
+    let delivered_events = drain_broadcast_events(&mut bcast_rx).await;
+    assert!(delivered_events.iter().any(|event| {
+        matches!(
+            event,
+            SpurEventBody::WorkerPeerMessageDelivered { message_id, .. } if *message_id == mid
+        )
+    }));
+
+    let (ack_tx, mut ack_rx) = unbounded_channel();
+    spur_core::spur_ext_interp::interpret_peer_message_terminal(
+        "_spur/peer_message_consumed",
+        json!({ "message_id": mid }),
+        &bundle,
+        &ack_tx,
+        &funnel,
+        "bs",
+        "exec-1",
+    )
+    .await;
+
+    assert_eq!(
+        bundle.ledger.get(&mid).await.unwrap().state,
+        LedgerState::Consumed
+    );
+    let consumed_events = drain_broadcast_events(&mut bcast_rx).await;
+    assert!(consumed_events.iter().any(|event| {
+        matches!(
+            event,
+            SpurEventBody::WorkerPeerMessageConsumed { message_id, .. } if *message_id == mid
+        )
+    }));
+    assert!(ack_rx.try_recv().is_ok());
+
+    guard
+        .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
+        .await;
+}
+
+#[tokio::test]
 async fn malformed_terminal_notification_emits_malformed_funnel_event() {
     let (bundle, mut bcast_rx, funnel) = bundle_with_broadcast();
     let (ack_tx, mut ack_rx) = unbounded_channel();
