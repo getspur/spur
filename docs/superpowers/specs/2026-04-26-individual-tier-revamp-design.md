@@ -334,29 +334,21 @@ Retained `license_pro_offline_grace` as Pro v1 — Free has no polling so offlin
 
 **Note on dropped license-meta keys:** the spur-license crate's components (entitlement facade, policy resolver, ed25519 verifier, provider heartbeat) are documented as system invariants in `docs/architecture.md` and the spec body above. They are NOT in the FeatureKey registry because they are always-on integrity infrastructure, not toggleable runtime gates.
 
-### 4.12 `spur-blob-store` (Outcome storage — 4 keys)
+### 4.12 `spur-blob-store` (Outcome storage — 1 key)
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
-| `blob_core_memory_backend` | F | v1 | `MemoryOutcomeStore` (tests) |
-| `blob_core_fs_backend` | F | v1 | `FsOutcomeStore` local filesystem |
-| `blob_pro_measured_backend` | P | v1 | `MeasuredOutcomeStore` instrumentation wrapper |
-| `blob_pro_delete_namespace` | P | v1 | `DeleteNamespaceReport` bulk cleanup |
+| `blob_pro_namespace_deletion` | P | v1 | `DeleteNamespaceReport` bulk cleanup, gated at `spur gc outcomes --namespace` CLI route |
 
-### 4.13 `spur-interactive` (Shared host — 3 keys)
+**Wave 7 drops:** `blob_core_memory_backend`, `blob_core_fs_backend`, `blob_pro_measured_backend` are trait-impl variants chosen at construction time, not user-toggleable capabilities. Production wiring is hardwired to `MeasuredOutcomeStore<GitBlobOutcomeStore>` at `crates/spur-core/src/orchestrator.rs:963`; `spur gc outcomes` constructs `GitBlobOutcomeStore` directly, bypassing the wrapper. See §4.16.
 
-| Key | Tier | Status | Description |
-|---|---|---|---|
-| `interactive_core_frontend_host` | F | v1 | Unified TUI/bot trait host |
-| `interactive_core_review_lane_mpsc` | F | v1 | Dedicated review lane preventing head-of-line blocking |
-| `interactive_core_shutdown_orchestrator` | F | v1 | Multi-subsystem abort propagation |
+### 4.13 `spur-interactive` (Shared host — 0 keys)
 
-### 4.14 Notifications (cross-crate, kept here for clarity — 2 keys)
+Wave 7 dropped all 3 candidate keys (`interactive_core_frontend_host`, `interactive_core_review_lane_mpsc`, `interactive_core_shutdown_orchestrator`). All three describe production invariants of the shared host shared by TUI + Telegram bot: the host itself is structural infrastructure (not tier-gated), the review lane MPSC separation is a production correctness invariant (not a feature toggle), and shutdown orchestration is always-on lifecycle hygiene. None are independently toggleable. See §4.16.
 
-| Key | Tier | Status | Description |
-|---|---|---|---|
-| `notif_core_in_tui` | F | v1 | In-TUI notification pump (existing) |
-| `notif_pro_external_channels` | P | **v1.1-Q3** | Slack/Discord/email/webhook routing (greenfield — does not exist today) |
+### 4.14 Notifications (cross-crate — 0 keys)
+
+Wave 7 dropped both candidate keys. `notif_core_in_tui` was redundant with already-merged `core_core_notification_pump` + `tui_core_notification_drain` (triple-naming the same path). `notif_pro_external_channels` is greenfield vaporware (no Slack/Discord/email/webhook code exists) and was deferred per the Wave 5/6 vaporware precedent. The entire `notif_*` namespace evaporates from v1; no orphan prefix remains. See §4.16.
 
 ---
 
@@ -364,7 +356,7 @@ Retained `license_pro_offline_grace` as Pro v1 — Free has no polling so offlin
 
 Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-core/src/skills/`) but are listed in their own row below for grep-discoverability; they're counted in the Skills row, not double-counted under spur-core.
 
-**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** Total **v1 registry** keys reduced from 123 to **107** after Wave 6 rationalization (135 → 123 → 107 across Waves 5+6). Core principle that drove Wave 6 cuts: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities only.* Always-on infrastructure, security baselines, and tightly-coupled-to-other-key mechanisms violate the schema's purpose and were dropped. See **§4.16 Deferred-keys backlog** below for explicit deferred/dropped lists. Counts below show only what's in the v1 Plan A registry.
+**Revised 2026-04-27 (Wave 7 L9-MCTS first-principles pass).** Total **v1 registry** keys reduced from 107 to **99** after Wave 7 rationalization (135 → 123 → 107 → 99 across Waves 5+6+7). Core principle reaffirmed: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities only.* Always-on infrastructure, trait-impl variants chosen at construction time, production correctness invariants, and greenfield vaporware all violate the schema's purpose and were dropped. See **§4.16 Deferred-keys backlog** below for explicit deferred/dropped lists. Counts below show only what's in the v1 Plan A registry.
 
 | Crate / Subsystem | Free keys | Pro keys (v1) | Pro keys (v1.1) | Team-deferred |
 |---|---|---|---|---|
@@ -380,18 +372,18 @@ Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-c
 | `spur-worktree` | 2 | 0 | 0 | 0 |
 | `spur-bot` | 0 | 3 | 0 | 0 |
 | `spur-license` | 0 | 2 | 0 | 0 |
-| `spur-blob-store` | 2 | 2 | 0 | 0 |
-| `spur-interactive` | 3 | 0 | 0 | 0 |
-| Notifications (cross-crate) | 1 | 0 | 1 | 0 |
-| **Total** | **73** | **28** | **6** | **0** |
+| `spur-blob-store` | 0 | 1 | 0 | 0 |
+| `spur-interactive` | 0 | 0 | 0 | 0 |
+| Notifications (cross-crate) | 0 | 0 | 0 | 0 |
+| **Total** | **67** | **27** | **5** | **0** |
 
-**Total v1 atomic feature keys: 107** (73 + 28 + 6 + 0) — was 123 post-Wave-5, 135 before Wave 5. Wave 6 net reduction of 16 keys reflects: (a) 9 keys dropped as tightly-coupled mechanism / always-on integrity infrastructure (cost_ingestion_pipeline, cost_sqlite_wal_mode, ctx_async_engine, worktree_artifact_resolver, bot_runtime, bot_runtime_render, bot_callback_validation, license_facade_entitlement, license_policy_resolver, license_ed25519_verify); (b) 4 keys deferred to v1.1 (cost_budget_caps, ctx_live_mode, worktree_git_blob_store, license_quota_runtime_downgrade); (c) 3 keys deferred to v2 (worktree_custom_policies, bot_team_multi_chat); offset by (d) tier shift on worktree_orphan_cleanup Pro→Free and license_revocation_polling Free→Pro.
+**Total v1 atomic feature keys: 99** (67 + 27 + 5 + 0) — was 107 post-Wave-6, 123 post-Wave-5, 135 before Wave 5. Wave 7 net reduction of 8 keys reflects: (a) 6 keys dropped as trait-impl variants / production invariants / always-on infrastructure (`blob_core_memory_backend`, `blob_core_fs_backend`, `blob_pro_measured_backend`, `interactive_core_frontend_host`, `interactive_core_review_lane_mpsc`, `interactive_core_shutdown_orchestrator`); (b) 1 key dropped as redundant with already-merged keys (`notif_core_in_tui` overlaps `core_core_notification_pump` + `tui_core_notification_drain`); (c) 1 key deferred to §4.16 v1.1 backlog (`notif_pro_external_channels` — greenfield, no impl); (d) 1 key kept with rename (`blob_pro_delete_namespace` → `blob_pro_namespace_deletion` per claude-code noun-pattern consistency).
 
-The registry naturally lands close to the original ~110 target. The drop reflects that the original spec conflated *runtime gate dispatch* (this registry's purpose) with *system manifest documentation* (which lives in this spec body and `docs/architecture.md`).
+The registry naturally lands close to but below the original ~110 target. The continued drop reflects that earlier spec drafts conflated *runtime gate dispatch* (this registry's purpose) with *system manifest documentation* (which lives in this spec body and `docs/architecture.md`).
 
-**Pro v1 launch arsenal: 28 features** organized into 5 ★ headline triggers + 23 supporting depth capabilities.
+**Pro v1 launch arsenal: 27 features** organized into 5 ★ headline triggers + 22 supporting depth capabilities.
 
-**Pro v1.1 roadmap: 6 features in v1 registry** (deferred-status flag) + 9 backlog items in §4.16 below = 15 v1.1 candidates total, target Q3 2026.
+**Pro v1.1 roadmap: 5 features in v1 registry** (deferred-status flag) + 10 backlog items in §4.16 below = 15 v1.1 candidates total, target Q3 2026.
 
 ### 4.16 Deferred-keys backlog (Wave 5 + Wave 6 design-review passes)
 
@@ -410,6 +402,7 @@ The following keys were proposed in earlier drafts but deferred to v1.1 or v2, o
 | `ctx_pro_live_mode` | (later, retains name) | Backend APIs exist (`LiveSessionTracker` at `crates/spur-context/src/live.rs:15`) but no CLI/user surface. Lands with live-report CLI command. | 6 |
 | `worktree_pro_git_blob_store` | (later, retains name) | Orchestrator hardwires `GitBlobOutcomeStore` at `crates/spur-core/src/orchestrator.rs:963`; no Free/Pro backend selector exists. Lands with backend-routing capability. | 6 |
 | `license_pro_quota_runtime_downgrade` | (later, retains name) | Quotas dynamic in `FeatureGate::ArcSwap` but runtime does not propagate license refreshes into `update_state`. Lands with mid-session downgrade enforcement (Risk #32 fix). | 6 |
+| `notif_pro_external_channels` | (later, retains name) | Greenfield — no Slack/Discord/email/webhook router or channel-adapter surface exists. Telegram already has its own `bot_pro_*` keys. Lands when a real cross-channel notification subsystem is built. Spec already flagged greenfield at `docs/.../specs/2026-04-26-individual-tier-revamp-design.md:359` (pre-Wave 7). | 7 |
 
 #### v2 backlog (Team or speculative)
 
@@ -422,6 +415,13 @@ The following keys were proposed in earlier drafts but deferred to v1.1 or v2, o
 | `pm_team_webhooks` | Vaporware — no receiver implementation in spur-pm. | 5 |
 | `worktree_pro_custom_policies` | Vaporware — only single cherry-pick path at `crates/spur-worktree/src/manager.rs:402`; no squash/rebase/octopus/naming-template surface. | 6 |
 | `bot_team_multi_chat` | Vaporware — single `operator_user_id` config at `crates/spur-acp/src/config/mod.rs:326`; router rejects all other users. Multi-chat requires multi-user RBAC. | 6 |
+| `blob_core_memory_backend` | Trait-impl variant chosen at construction time (`MemoryOutcomeStore` is test/dev plumbing at `crates/spur-blob-store/src/memory_store.rs:24`); not a user-toggleable runtime capability. No CLI/UI/config selects it. | 7 |
+| `blob_core_fs_backend` | Trait-impl variant; production wiring uses `MeasuredOutcomeStore<GitBlobOutcomeStore>` at `crates/spur-core/src/orchestrator.rs:963`, not `FsOutcomeStore`. No selector exists. | 7 |
+| `blob_pro_measured_backend` | Always-on telemetry wrapper hardwired in `Orchestrator::new` at `crates/spur-core/src/orchestrator.rs:963`; `spur gc outcomes` constructs `GitBlobOutcomeStore` directly bypassing the wrapper. Not gateable, not a Pro upsell. | 7 |
+| `interactive_core_frontend_host` | Shared infrastructure used by both TUI (`crates/spur-cli/src/main.rs:710`) and Telegram bot (`crates/spur-bot/src/telegram/mod.rs:9`); not tier-gated (Free + Pro both depend on it). API boundary, not a feature toggle. | 7 |
+| `interactive_core_review_lane_mpsc` | Production correctness invariant — `SubmitReview` is rejected on the command lane at `crates/spur-interactive/src/host.rs:21`; the lane separation is a sound-architecture requirement, not a tier feature. Toggling it off would break interactive_core_frontend_host's contract. | 7 |
+| `interactive_core_shutdown_orchestrator` | Lifecycle hygiene; tightly coupled to `interactive_core_frontend_host` (no host = no shutdown). Always-on safety infrastructure that *must* run. | 7 |
+| `notif_core_in_tui` | Redundant with already-merged `core_core_notification_pump` (producer at `crates/spur-core/src/notification_pump.rs:30`) + `tui_core_notification_drain` (consumer at `crates/spur-tui/src/app.rs:2552`); triple-naming the same path with no documented boundary. The `notif_*` namespace's only justification (cross-crate clarity) is undermined when the Free key duplicates per-crate keys. | 7 |
 
 #### Dropped (capability is not gateable per first-principles analysis)
 
@@ -513,16 +513,9 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "worktree_core_isolation", "worktree_core_artifact_resolver",
 
         "license_core_facade_entitlement", "license_core_policy_resolver",
-        "license_core_ed25519_verify", "license_core_provider_heartbeat",
-
-        "blob_core_memory_backend", "blob_core_fs_backend",
-
-        "interactive_core_frontend_host",
-        "interactive_core_review_lane_mpsc",
-        "interactive_core_shutdown_orchestrator",
-
-        "notif_core_in_tui"
+        "license_core_ed25519_verify", "license_core_provider_heartbeat"
       ],
+      "_wave7_dropped_from_above": "spur-blob-store backend trait-impl variants (3), spur-interactive shared host invariants (3), notif_core_in_tui (redundant) — see §4.16",
       "quotas": {
         "max_concurrent_workers": 2,
         "event_retention_mb": 128,
@@ -571,8 +564,9 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
 
         "license_pro_offline_grace",
 
-        "blob_pro_measured_backend", "blob_pro_delete_namespace"
+        "blob_pro_namespace_deletion"
       ],
+      "_wave7_dropped_from_pro": "blob_pro_measured_backend (always-on telemetry — see §4.16); blob_pro_delete_namespace renamed to blob_pro_namespace_deletion",
       "v1_1_q3_roadmap": [
         "core_pro_brain_failover_auto_pool",
         "core_pro_broadcast_lagged_recovery",
@@ -582,9 +576,9 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "tui_pro_trace_source_react",
         "cost_pro_budget_caps",
         "worktree_pro_cleanup_orphans",
-        "license_pro_quota_runtime_downgrade",
-        "notif_pro_external_channels"
+        "license_pro_quota_runtime_downgrade"
       ],
+      "_wave7_dropped_from_v1_1": "notif_pro_external_channels deferred to §4.16 v1.1 backlog (greenfield, no impl)",
       "quotas": {
         "max_concurrent_workers": 10,
         "event_retention_gb": 10,
@@ -745,7 +739,7 @@ Features marked `[v1.1-Q3]` in §4 cannot ship until specific architecture risks
 | `core_pro_peer_mailbox_stranded_recon` (GA flip) | #22 (transitive) | Same root cause | (bundled with #22) |
 | `worktree_pro_cleanup_orphans` | #4 | "cleanup_orphans() exists but has zero call sites and is unsafe" | 2 weeks (refactor required) |
 | `license_pro_quota_runtime_downgrade` | #32 | "Feature gates evaluated once at startup" | 1 week |
-| `notif_pro_external_channels` | (greenfield) | No Slack/Discord/webhook code exists | 4-6 weeks |
+| `notif_pro_external_channels` | (greenfield) | Deferred to §4.16 v1.1 backlog (Wave 7); no Slack/Discord/webhook code exists | 4-6 weeks |
 | `tui_pro_trace_source_react` | (placeholder) | `TraceSource` exists but not wired into palette | 1 week |
 
 **Total v1.1-Q3 effort estimate: ~14-20 engineer-weeks.** Q3 2026 (target month: July 2026 internal, August buffer) is achievable from May 1 start.
@@ -782,13 +776,13 @@ Features marked `[v1.1-Q3]` in §4 cannot ship until specific architecture risks
 | `pm_integration` | (split into 9 keys per §4.6) | Major decomposition |
 | `mcp_standard_tools` | `mcp_core_*` (5 keys) | Split |
 | `custom_mcp_tools` | `mcp_pro_custom_tools` | Naming |
-| `basic_notifications` | `notif_core_in_tui` | Naming |
-| `custom_notifications` | `notif_pro_external_channels` (v1.1) | Re-dated |
+| `basic_notifications` | (subsumed by `core_core_notification_pump` + `tui_core_notification_drain`; Wave 7 dropped `notif_core_in_tui` as redundant) | Subsumed |
+| `custom_notifications` | `notif_pro_external_channels` (deferred to §4.16 v1.1 backlog) | Vaporware → backlog |
 | `local_config` | `cli_core_command_*` (subsumed) | Removed |
 
 ### 8.3 New keys (no equivalent in old plan)
 
-All `acp_core_adapter_*` (7), all `core_core_skill_*` + `skills_core_render_per_vendor`, all `core_core_event_*`, `core_core_continuation_bridge`, `core_core_notification_pump`, all `bot_pro_*` (5), all `ctx_pro_*` (5), all `blob_*` (4), all `license_*` (6), all `interactive_core_*` (3), `acp_core_session_attach_*` (2), `tui_core_modal_collision_escape`, `tui_core_input_paste_as_atom`, etc.
+All `acp_core_adapter_*` (7), all `core_core_skill_*` + `skills_core_render_per_vendor`, all `core_core_event_*`, `core_core_continuation_bridge`, `core_core_notification_pump`, all `bot_pro_*` (3), all `ctx_pro_*` (3), `blob_pro_namespace_deletion` (1), all `license_pro_*` (2), `acp_core_session_attach_*` (2), `tui_core_modal_collision_escape`, `tui_core_input_paste_as_atom`, etc. (Wave 7 dropped all 3 `interactive_core_*`, all 3 `blob_core_*` backend variants, `blob_pro_measured_backend`, and the entire `notif_*` namespace per §4.16.)
 
 ### 8.4 Re-tiered features (key changes)
 
@@ -846,7 +840,7 @@ All `acp_core_adapter_*` (7), all `core_core_skill_*` + `skills_core_render_per_
 - [ ] Risk #22 fix → flip `core_pro_peer_mailbox_*` to GA
 - [ ] Risk #4 fix → `worktree_pro_cleanup_orphans`
 - [ ] Risk #32 fix → `license_pro_quota_runtime_downgrade`
-- [ ] Greenfield → `notif_pro_external_channels`
+- [ ] Greenfield → `notif_pro_external_channels` (Wave 7 deferred to §4.16; lands when Slack/Discord/email/webhook subsystem exists)
 - [ ] Wiring → `tui_pro_trace_source_react`
 
 ---
