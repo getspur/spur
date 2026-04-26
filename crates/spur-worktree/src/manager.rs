@@ -247,6 +247,67 @@ impl WorktreeManager {
         })
     }
 
+    /// Create a worktree under the v2 branch namespace
+    /// `spur/worker/v2/{agent}/{brain_session_id}/{worker_session_id}`.
+    pub async fn create_worktree_v2(
+        &mut self,
+        brain_session_id: &spur_acp::BrainSessionId,
+        worker_session_id: &SessionId,
+        agent: &str,
+        base_branch: &str,
+    ) -> Result<WorktreeInfo> {
+        let worker_str = worker_session_id.to_string();
+        let worktree_path = self.repo_root.join(".spur/worktrees").join(&worker_str);
+        let branch_name = format!(
+            "spur/worker/v2/{}/{}/{}",
+            agent,
+            brain_session_id.as_session_id().0,
+            worker_str,
+        );
+
+        let worktree_path_str = worktree_path
+            .to_str()
+            .ok_or_else(|| anyhow!("worktree path is not valid UTF-8"))?;
+        let base_commit = self
+            .run_git(&["rev-parse", base_branch], None)
+            .await
+            .with_context(|| format!("failed to resolve base branch '{base_branch}'"))?;
+
+        self.run_git(
+            &[
+                "worktree",
+                "add",
+                worktree_path_str,
+                "-b",
+                &branch_name,
+                base_branch,
+            ],
+            None,
+        )
+        .await
+        .with_context(|| format!("failed to create v2 worktree at {worktree_path_str}"))?;
+
+        let info = WorktreeInfo {
+            session_id: worker_session_id.clone(),
+            path: worktree_path,
+            branch: branch_name,
+            base_commit,
+            agent: agent.to_string(),
+            created_at: Instant::now(),
+        };
+        self.active.insert(worker_str.clone(), info);
+
+        let stored = self.active.get(&worker_str).unwrap();
+        Ok(WorktreeInfo {
+            session_id: stored.session_id.clone(),
+            path: stored.path.clone(),
+            branch: stored.branch.clone(),
+            base_commit: stored.base_commit.clone(),
+            agent: stored.agent.clone(),
+            created_at: stored.created_at,
+        })
+    }
+
     /// Delete a snapshot branch previously created by `snapshot_brain_state`.
     /// Safe to call immediately after `create_worktree` succeeds because the
     /// worktree already has its own ref state.
@@ -748,6 +809,28 @@ mod tests_option_e {
             .await
             .expect("worktree status after snapshot deletion");
         assert!(status.is_empty(), "worktree should remain usable");
+    }
+
+    #[tokio::test]
+    async fn create_worktree_uses_v2_namespace() {
+        use spur_acp::SessionId;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+
+        let mut manager = WorktreeManager::new(tmp.path().to_path_buf());
+        let brain = spur_acp::BrainSessionId::new(SessionId(
+            "550e8400-e29b-41d4-a716-446655440000".into(),
+        ));
+        let worker = SessionId("deadbeef-1111-2222-3333-444455556666".into());
+
+        let info = manager
+            .create_worktree_v2(&brain, &worker, "codex", "main")
+            .await
+            .expect("create v2 worktree");
+        assert_eq!(
+            info.branch,
+            "spur/worker/v2/codex/550e8400-e29b-41d4-a716-446655440000/deadbeef-1111-2222-3333-444455556666"
+        );
     }
 }
 
