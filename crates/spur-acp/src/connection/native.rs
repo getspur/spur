@@ -62,6 +62,20 @@ use agent_client_protocol::{
 use crate::connection::{AgentConnection, ExtNotificationPayload};
 use crate::types::AgentHealth;
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn spawn_native_worker_for_test(
+    command: &str,
+    args: &[&str],
+) -> std::io::Result<tokio::process::Child> {
+    tokio::process::Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+}
+
 // ─── Commands sent to the dedicated ACP thread ──────────────────────────────
 
 /// Commands sent from the main (Send) world to the dedicated !Send ACP thread.
@@ -723,7 +737,8 @@ fn acp_thread_main(
         cmd.args(&extra_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(stderr_cfg);
+            .stderr(stderr_cfg)
+            .kill_on_drop(true);
         // Put the child (and its descendants, e.g. the `node` tree beneath
         // `claude-agent-acp`) in its own process group so shutdown can reap
         // the whole tree with `killpg`. Without this, grandchildren orphan
