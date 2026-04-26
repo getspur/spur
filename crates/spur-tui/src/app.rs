@@ -186,6 +186,7 @@ pub struct App {
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     brain_status: BrainStatus,
     brain_name: Option<String>,
+    pending_first_user_message: Option<String>,
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
     /// Event-sourced projection of brain → executor lineage.
     lineage: ExecutorLineage,
@@ -321,6 +322,7 @@ impl App {
             user_input_tx,
             brain_status: BrainStatus::Idle,
             brain_name: None,
+            pending_first_user_message: None,
             pending_permission: None,
             lineage: ExecutorLineage::new(),
             plan_projection: PlanProjectionStore::new(),
@@ -404,6 +406,12 @@ impl App {
     #[doc(hidden)]
     pub fn license_badge_for_test(&self) -> Option<&LicenseBadge> {
         self.license_badge.as_ref()
+    }
+
+    /// Test-only accessor: borrow the first message waiting for trace seeding.
+    #[doc(hidden)]
+    pub fn pending_first_user_message_for_test(&self) -> Option<&str> {
+        self.pending_first_user_message.as_deref()
     }
 
     fn update_license_state(&mut self, license_state: LicenseStateEvent) {
@@ -1105,6 +1113,7 @@ impl App {
             SpurEventBody::BrainConnectFailed { brain, reason } => {
                 self.brain_status = BrainStatus::Error(reason.clone());
                 self.brain_name = Some(brain.clone());
+                self.pending_first_user_message = None;
             }
             SpurEventBody::BrainSpawned { agent, session } => {
                 self.brain_status = BrainStatus::Thinking;
@@ -1237,6 +1246,7 @@ impl App {
             }
             SpurEventBody::BrainError { message, .. } => {
                 self.brain_status = BrainStatus::Error(message.clone());
+                self.pending_first_user_message = None;
             }
             SpurEventBody::BrainReconnecting { .. } => {
                 self.brain_status = BrainStatus::Thinking;
@@ -1246,9 +1256,11 @@ impl App {
             }
             SpurEventBody::BrainReconnectFailed { reason, .. } => {
                 self.brain_status = BrainStatus::Error(reason.clone());
+                self.pending_first_user_message = None;
             }
             SpurEventBody::SessionCompleted { .. } => {
                 self.brain_status = BrainStatus::Idle;
+                self.pending_first_user_message = None;
             }
             SpurEventBody::BrainRetired { reason, .. } => {
                 // Null per-App state that was tied to the retired session.
@@ -1259,6 +1271,7 @@ impl App {
                 //    is already loading the next brain; overriding to
                 //    Idle would race that transition.
                 self.brain_name = None;
+                self.pending_first_user_message = None;
                 // Clear auto-resume pointers so /clear followed by a
                 // process quit before the next prompt does not cause
                 // spur-cli to auto-resume the just-retired session on
@@ -1318,6 +1331,29 @@ impl App {
             }
         }
 
+        if let SpurEventBody::PromptDispatched {
+            session, turn_kind, ..
+        } = &event.body
+        {
+            let matches_active = self
+                .session_detail
+                .as_ref()
+                .is_some_and(|detail| detail.session_id() == session);
+            let should_drain = matches_active
+                && matches!(turn_kind.as_str(), "user_only" | "merged")
+                && self.session_detail.as_ref().is_some_and(|detail| {
+                    // App handles this before SessionDetailView can add a merged-turn Think note.
+                    detail.trace_entry_count() == 0
+                });
+            if should_drain {
+                if let Some(message) = self.pending_first_user_message.take() {
+                    if let Some(ref mut detail) = self.session_detail {
+                        detail.append_user_message(&message);
+                    }
+                }
+            }
+        }
+
         // Forward to views
         let ctx = crate::views::ViewContext {
             lineage: &self.lineage,
@@ -1345,7 +1381,7 @@ impl App {
     }
 
     /// Process a single Action returned by a view.
-    fn process_action(&mut self, action: Action) {
+    pub(crate) fn process_action(&mut self, action: Action) {
         #[cfg(any(test, debug_assertions))]
         {
             self.last_action = Some(action.clone());
@@ -1507,6 +1543,7 @@ impl App {
             }
 
             Action::ClearSession => {
+                self.pending_first_user_message = None;
                 // /clear is a spur-local META command. Spec §3.6 requires
                 // send-first ordering: if the channel send fails, the brain is
                 // NOT retired, so we must NOT visually reset the view —
@@ -1560,13 +1597,12 @@ impl App {
                     self.brain_status = BrainStatus::Thinking;
                 }
 
-                // Note: we do NOT buffer the preview locally. The
-                // orchestrator owns the typed text from here on and will
-                // deliver it to the brain atomically when the session spawns.
-                // The first-turn user message will appear in the trace via
-                // the normal AgentNotification stream once the agent echoes
-                // or acts on it. Buffering here caused BUG-1 (cross-session
-                // replay into an unrelated session that happens to spawn next).
+                let preview = crate::commands::submit_router::blocks_preview(&blocks);
+                self.pending_first_user_message = if blocks.is_empty() || preview.is_empty() {
+                    None
+                } else {
+                    Some(preview)
+                };
 
                 let history_entry = InputHistoryEntry::from_blocks(&blocks).with_context(
                     Some(chrono::Utc::now().to_rfc3339()),
@@ -1643,6 +1679,7 @@ impl App {
             }
 
             Action::ResumeSession { session_id } => {
+                self.pending_first_user_message = None;
                 // Optimistic navigation: move to SessionDetail immediately so
                 // the picker dismisses in the same tick (FP-6). Lazy-construct
                 // a pre-ready SessionDetailView so LoadState renders correctly
