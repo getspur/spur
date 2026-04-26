@@ -24,7 +24,10 @@ pub enum TransitionAuditOutcome {
     Changed,
     Unchanged(LedgerState),
     TerminalSkip(LedgerState),
-    AuditFailed,
+    /// Helper has already emitted `WorkerPeerMessageAuditFailed`. The carried
+    /// `String` is the underlying `LedgerError`'s `to_string()` so the caller
+    /// can preserve the `?err` field on its `tracing::warn!` line.
+    AuditFailed(String),
 }
 
 pub async fn transition_with_audit(
@@ -43,14 +46,15 @@ pub async fn transition_with_audit(
             TransitionAuditOutcome::TerminalSkip(from)
         }
         Err(err) => {
+            let error = err.to_string();
             funnel.emit(SpurEventBody::WorkerPeerMessageAuditFailed {
                 brain_session_id: brain_session_id.to_string(),
                 message_id,
                 target_delegation_id: target_delegation_id.clone(),
                 transition_kind: transition_kind.as_audit_str().to_string(),
-                error: err.to_string(),
+                error: error.clone(),
             });
-            TransitionAuditOutcome::AuditFailed
+            TransitionAuditOutcome::AuditFailed(error)
         }
     }
 }
@@ -219,7 +223,14 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(outcome, TransitionAuditOutcome::AuditFailed));
+        let outcome_err = match outcome {
+            TransitionAuditOutcome::AuditFailed(err) => err,
+            other => panic!("expected AuditFailed, got {other:?}"),
+        };
+        assert!(
+            !outcome_err.is_empty(),
+            "AuditFailed should carry the LedgerError text for caller-side warn logging"
+        );
         let audit_failed: Vec<_> = drain_events(&mut events)
             .await
             .into_iter()
@@ -228,18 +239,21 @@ mod tests {
                     message_id,
                     target_delegation_id,
                     transition_kind,
+                    error,
                     ..
-                } => Some((message_id, target_delegation_id, transition_kind)),
+                } => Some((message_id, target_delegation_id, transition_kind, error)),
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            audit_failed,
-            vec![(
-                env.message_id,
-                env.target_delegation_id,
-                "delivered".to_string()
-            )]
+        assert_eq!(audit_failed.len(), 1);
+        let (event_message_id, event_target, event_kind, event_error) = &audit_failed[0];
+        assert_eq!(event_message_id, &env.message_id);
+        assert_eq!(event_target, &env.target_delegation_id);
+        assert_eq!(event_kind, "delivered");
+        assert!(
+            !event_error.is_empty(),
+            "WorkerPeerMessageAuditFailed.error must carry the LedgerError text"
         );
+        assert_eq!(event_error, &outcome_err);
     }
 }

@@ -4995,9 +4995,10 @@ async fn run_one_worker_attempt(
                     );
                     continue;
                 }
-                TransitionAuditOutcome::AuditFailed => {
+                TransitionAuditOutcome::AuditFailed(err) => {
                     tracing::warn!(
                         message_id = ?inj.message_id,
+                        %err,
                         "peer mailbox: delivered-inflight transition failed"
                     );
                 }
@@ -5040,9 +5041,10 @@ async fn run_one_worker_attempt(
                     );
                     continue;
                 }
-                TransitionAuditOutcome::AuditFailed => {
+                TransitionAuditOutcome::AuditFailed(err) => {
                     tracing::warn!(
                         message_id = ?inj.message_id,
+                        %err,
                         "peer mailbox: delivered transition failed"
                     );
                 }
