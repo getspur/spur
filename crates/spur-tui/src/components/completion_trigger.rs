@@ -283,7 +283,7 @@ impl TriggerDetector {
 #[cfg(test)]
 mod detector_tests {
     use super::*;
-    use crate::components::input_bar::ProtectedRange;
+    use crate::components::input_bar::{ProtectedRange, RangeKind};
 
     fn d() -> TriggerDetector {
         TriggerDetector::new()
@@ -352,6 +352,7 @@ mod detector_tests {
         let ranges = [ProtectedRange {
             start: 0,
             end: 4,
+            kind: RangeKind::Atom,
             uri: "u".into(),
             name: "n".into(),
         }];
@@ -528,12 +529,14 @@ mod detector_tests {
             ProtectedRange {
                 start: 0,
                 end: 11,
+                kind: RangeKind::Atom,
                 uri: "a".into(),
                 name: "a".into(),
             },
             ProtectedRange {
                 start: 16,
                 end: 28,
+                kind: RangeKind::Atom,
                 uri: "b".into(),
                 name: "b".into(),
             },

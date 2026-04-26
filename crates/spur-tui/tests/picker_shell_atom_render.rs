@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 
-use spur_tui::components::input_bar::ProtectedRange;
+use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::components::picker_shell::PickerShell;
 use spur_tui::components::query_source::HistoryQuerySource;
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
@@ -53,6 +53,7 @@ fn atoms_render_with_light_blue_underlined_styling_no_newline() {
         vec![ProtectedRange {
             start: 3,
             end: 7,
+            kind: RangeKind::Atom,
             uri: "file:///foo".to_string(),
             name: "foo".to_string(),
         }],
@@ -87,6 +88,7 @@ fn atoms_render_with_styling_across_newline_replacement() {
         vec![ProtectedRange {
             start: 3,
             end: 7,
+            kind: RangeKind::Atom,
             uri: "file:///foo".to_string(),
             name: "foo".to_string(),
         }],

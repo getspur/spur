@@ -3,7 +3,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_tui::action::Action;
-use spur_tui::components::input_bar::ProtectedRange;
+use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 use spur_tui::views::{session_detail::SessionDetailView, View};
 
@@ -92,6 +92,7 @@ fn ctrl_r_history_restore_preserves_resource_links() {
         vec![ProtectedRange {
             start: 6,
             end: 17,
+            kind: RangeKind::Atom,
             uri: "file:///abs/src/foo.rs".into(),
             name: "src/foo.rs".into(),
         }],

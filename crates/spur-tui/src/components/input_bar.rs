@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::Rect,
@@ -13,6 +15,22 @@ use crate::components::completion_trigger::IntentEvent;
 use crate::components::spinner;
 use crate::input_history::{InputHistoryEntry, InputStateSnapshot, HISTORY_CAP};
 
+/// Kind discriminator for protected byte ranges.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum RangeKind {
+    /// Atom whose display text is also its on-submit text (e.g., @mention).
+    #[default]
+    Atom,
+    /// Pasted block; on submit, replace placeholder with `pastes[id]`.
+    PasteRef(usize),
+}
+
+impl RangeKind {
+    fn is_atom(&self) -> bool {
+        matches!(self, Self::Atom)
+    }
+}
+
 /// A protected byte range inside the text representing an atomic token
 /// (e.g., a resource mention). These ranges are skipped atomically by
 /// cursor movement and deleted as a unit.
@@ -20,6 +38,8 @@ use crate::input_history::{InputHistoryEntry, InputStateSnapshot, HISTORY_CAP};
 pub struct ProtectedRange {
     pub start: usize,
     pub end: usize,
+    #[serde(default, skip_serializing_if = "RangeKind::is_atom")]
+    pub kind: RangeKind,
     pub uri: String,
     pub name: String,
 }
@@ -95,6 +115,10 @@ pub struct InputBar {
     vim_pending: Option<Input>,
     /// Sorted, non-overlapping protected ranges representing atomic tokens.
     protected_ranges: Vec<ProtectedRange>,
+    /// Side store for atomized paste content keyed by paste id.
+    pastes: BTreeMap<usize, String>,
+    /// Monotonic paste counter (per-session). Never decrements.
+    next_paste_id: usize,
     /// Line cache: byte offset where each line starts.
     line_cache: Vec<usize>,
     /// Status label shown before the prompt.
@@ -129,6 +153,7 @@ pub struct InputBar {
 // constants and the borders flag; rendering and arithmetic auto-track.
 const BORDER_OVERHEAD_ROWS: u16 = 2; // Borders::TOP | Borders::BOTTOM
 const BORDER_OVERHEAD_COLS: u16 = 0; // no left/right side borders
+const PASTE_STORE_CAP: usize = 50;
 
 impl InputBar {
     pub fn new() -> Self {
@@ -142,6 +167,8 @@ impl InputBar {
             mode: EditMode::Emacs,
             vim_pending: None,
             protected_ranges: Vec::new(),
+            pastes: BTreeMap::new(),
+            next_paste_id: 1,
             line_cache: vec![0],
             status: None,
             activity: ActivityKind::Idle,
@@ -1171,14 +1198,14 @@ impl InputBar {
         if text.is_empty() {
             return None;
         }
-        let interrupt = text.starts_with('!');
-        let ranges = self.protected_ranges.clone();
-        self.submit_capture = Some((text.clone(), ranges.clone(), interrupt));
+        let (expanded, ranges) = expand_paste_refs(&text, &self.protected_ranges, &self.pastes);
+        let interrupt = expanded.starts_with('!');
+        self.submit_capture = Some((expanded.clone(), ranges.clone(), interrupt));
 
         // Push to history
         self.history
             .push(InputHistoryEntry::new(InputStateSnapshot::new(
-                text.clone(),
+                expanded.clone(),
                 ranges,
             )));
         if self.history.len() > HISTORY_CAP {
@@ -1187,8 +1214,9 @@ impl InputBar {
         self.history_cursor = None;
         self.draft = InputStateSnapshot::default();
         self.clear();
+        self.pastes.clear();
 
-        Some((text, interrupt))
+        Some((expanded, interrupt))
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
@@ -1207,6 +1235,7 @@ impl InputBar {
         self.protected_ranges.push(ProtectedRange {
             start: cursor,
             end,
+            kind: RangeKind::Atom,
             uri,
             name,
         });
@@ -1218,27 +1247,50 @@ impl InputBar {
         if text.is_empty() {
             return;
         }
+        if self.history_cursor.is_some() {
+            self.restore_draft();
+        }
         if let Some(idx) = self.range_at_cursor() {
             self.delete_range(idx);
         }
         let cursor = self.cursor_to_byte();
-        let mut lines = text.split('\n');
-        if let Some(first) = lines.next() {
-            if !first.is_empty() {
-                self.textarea.insert_str(first);
+        if !text.contains('\n') {
+            self.textarea.insert_str(text);
+            self.rebuild_line_cache();
+            let new_cursor = self.cursor_to_byte();
+            let delta = new_cursor as isize - cursor as isize;
+            if delta != 0 {
+                self.shift_ranges(cursor, delta);
             }
-            for line in lines {
-                self.textarea.insert_newline();
-                if !line.is_empty() {
-                    self.textarea.insert_str(line);
-                }
-            }
+            self.history_cursor = None;
+            self.goal_vcol = None;
+            return;
         }
+
+        let id = self.next_paste_id;
+        self.next_paste_id += 1;
+        let line_count = text.lines().count();
+        let placeholder = format!("[Paste #{id} · {line_count} lines]");
+
+        self.textarea.insert_str(&placeholder);
         self.rebuild_line_cache();
-        let new_cursor = self.cursor_to_byte();
-        let delta = new_cursor as isize - cursor as isize;
-        if delta != 0 {
-            self.shift_ranges(cursor, delta);
+        let end = cursor + placeholder.len();
+        self.shift_ranges(cursor, placeholder.len() as isize);
+        self.protected_ranges.push(ProtectedRange {
+            start: cursor,
+            end,
+            kind: RangeKind::PasteRef(id),
+            uri: String::new(),
+            name: placeholder,
+        });
+        self.protected_ranges.sort_by_key(|r| r.start);
+        self.pastes.insert(id, text.to_string());
+        while self.pastes.len() > PASTE_STORE_CAP {
+            if let Some((&oldest_id, _)) = self.pastes.iter().next() {
+                self.pastes.remove(&oldest_id);
+            } else {
+                break;
+            }
         }
         self.history_cursor = None;
         self.goal_vcol = None;
@@ -1268,6 +1320,7 @@ impl InputBar {
         self.textarea.set_cursor_line_style(Style::default());
         self.line_cache = vec![0];
         self.protected_ranges.clear();
+        self.pastes.clear();
         self.last_inner_width.set(last_w);
         self.goal_vcol = None;
         self.activity = ActivityKind::Idle;
@@ -1426,6 +1479,13 @@ impl InputBar {
         let snapshot = self.history[idx].snapshot.clone();
         let len = snapshot.text.len();
         self.restore_snapshot(&snapshot, len);
+    }
+
+    fn restore_draft(&mut self) {
+        self.history_cursor = None;
+        let draft = std::mem::take(&mut self.draft);
+        let len = draft.text.len();
+        self.restore_snapshot(&draft, len);
     }
 
     /// Test-only: set cursor position.
@@ -1702,9 +1762,254 @@ fn target_byte_abs(lines: &[String], row: usize, byte_col: usize) -> usize {
     acc
 }
 
+fn expand_paste_refs(
+    text: &str,
+    protected_ranges: &[ProtectedRange],
+    pastes: &BTreeMap<usize, String>,
+) -> (String, Vec<ProtectedRange>) {
+    let mut ranges = protected_ranges.to_vec();
+    ranges.sort_by_key(|r| r.start);
+
+    let mut expanded = String::with_capacity(text.len());
+    let mut expanded_ranges = Vec::with_capacity(ranges.len());
+    let mut cursor = 0usize;
+
+    for range in ranges {
+        if range.start > text.len() || range.end > text.len() || range.start > range.end {
+            continue;
+        }
+        let range_end = range.end;
+        if cursor < range.start {
+            expanded.push_str(&text[cursor..range.start]);
+        }
+
+        let start = expanded.len();
+        match range.kind {
+            RangeKind::Atom => {
+                expanded.push_str(&text[range.start..range.end]);
+                let mut adjusted = range;
+                adjusted.start = start;
+                adjusted.end = expanded.len();
+                expanded_ranges.push(adjusted);
+            }
+            RangeKind::PasteRef(id) => {
+                if let Some(paste) = pastes.get(&id) {
+                    expanded.push_str(paste);
+                } else {
+                    expanded.push_str(&text[range.start..range.end]);
+                }
+            }
+        }
+        cursor = range_end;
+    }
+
+    if cursor < text.len() {
+        expanded.push_str(&text[cursor..]);
+    }
+
+    (expanded, expanded_ranges)
+}
+
 impl Default for InputBar {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod paste_atom_tests {
+    use super::*;
+
+    #[test]
+    fn single_line_paste_stays_inline() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("hello world");
+
+        assert_eq!(bar.text(), "hello world");
+        assert!(bar
+            .protected_ranges
+            .iter()
+            .all(|r| r.kind == RangeKind::Atom));
+    }
+
+    #[test]
+    fn multi_line_paste_atomizes() {
+        let mut bar = InputBar::new();
+        let text = "fn main() {\n    let x = 1;\n}";
+
+        bar.insert_paste(text);
+
+        assert_eq!(bar.text(), "[Paste #1 · 3 lines]");
+        assert_eq!(bar.protected_ranges.len(), 1);
+        assert_eq!(bar.protected_ranges[0].kind, RangeKind::PasteRef(1));
+        assert_eq!(bar.pastes[&1], text);
+    }
+
+    #[test]
+    fn submit_expands_placeholder_back_to_original_text() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("multi\nline\npaste");
+        let submitted = bar.submit().unwrap();
+        let (captured, ranges, interrupt) = bar.take_submit_capture().unwrap();
+
+        assert_eq!(submitted, ("multi\nline\npaste".to_string(), false));
+        assert_eq!(captured, "multi\nline\npaste");
+        assert!(ranges.is_empty());
+        assert!(!interrupt);
+    }
+
+    #[test]
+    fn paste_atom_with_bang_prefix_propagates_interrupt() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("!stop\nplease");
+        bar.submit();
+        let (captured, _, interrupt) = bar.take_submit_capture().unwrap();
+
+        assert_eq!(captured, "!stop\nplease");
+        assert!(
+            interrupt,
+            "expanded text starts with `!` so interrupt must be true"
+        );
+    }
+
+    #[test]
+    fn submitted_history_restores_expanded_text_inline() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("multi\nline\npaste");
+        bar.submit();
+        bar.history_prev();
+
+        assert_eq!(bar.text(), "multi\nline\npaste");
+        assert!(bar.protected_ranges.is_empty());
+    }
+
+    #[test]
+    fn submit_preserves_non_paste_ranges_with_adjusted_offsets() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("x\ny");
+        bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        bar.submit();
+        let (captured, ranges, _) = bar.take_submit_capture().unwrap();
+
+        assert_eq!(captured, "x\ny@foo");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].kind, RangeKind::Atom);
+        assert_eq!((ranges[0].start, ranges[0].end), (3, 7));
+    }
+
+    #[test]
+    fn mixed_text_and_paste_expands_correctly() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("hey ");
+        bar.insert_paste("multi\nline");
+        bar.insert_paste(" thanks");
+
+        assert_eq!(bar.text(), "hey [Paste #1 · 2 lines] thanks");
+        bar.submit();
+        let (captured, ranges, _) = bar.take_submit_capture().unwrap();
+        assert_eq!(captured, "hey multi\nline thanks");
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn per_session_numbering_does_not_reset_after_submit() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("a\nb");
+        bar.submit();
+        bar.insert_paste("c\nd");
+
+        assert_eq!(bar.text(), "[Paste #2 · 2 lines]");
+        assert_eq!(bar.protected_ranges[0].kind, RangeKind::PasteRef(2));
+    }
+
+    #[test]
+    fn paste_store_caps_oldest_entries_evicted() {
+        let mut bar = InputBar::new();
+
+        for i in 0..(PASTE_STORE_CAP + 5) {
+            bar.insert_paste(&format!("paste {i}\nline2"));
+        }
+
+        assert_eq!(bar.pastes.len(), PASTE_STORE_CAP);
+        assert!(!bar.pastes.contains_key(&1));
+        assert!(bar.pastes.contains_key(&(PASTE_STORE_CAP + 5)));
+    }
+
+    #[test]
+    fn placeholder_format_uses_str_lines_count() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("a\nb");
+        assert_eq!(bar.text(), "[Paste #1 · 2 lines]");
+        bar.clear();
+
+        bar.insert_paste("a\nb\n");
+        assert_eq!(bar.text(), "[Paste #2 · 2 lines]");
+        bar.clear();
+
+        bar.insert_paste("a");
+        assert_eq!(bar.text(), "a");
+        assert!(bar.protected_ranges.is_empty());
+    }
+
+    #[test]
+    fn backspace_at_end_of_placeholder_removes_whole_atom() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("x\ny");
+        bar.delete_char_before_cursor();
+
+        assert_eq!(bar.text(), "");
+        assert!(bar.protected_ranges.is_empty());
+    }
+
+    #[test]
+    fn multiple_pastes_in_same_draft_expand_in_order() {
+        let mut bar = InputBar::new();
+        let a = "a\nb\nc";
+        let b = "1\n2\n3\n4\n5";
+
+        bar.insert_paste(a);
+        bar.insert_paste(b);
+
+        assert_eq!(bar.text(), "[Paste #1 · 3 lines][Paste #2 · 5 lines]");
+        bar.submit();
+        let (captured, ranges, _) = bar.take_submit_capture().unwrap();
+        assert_eq!(captured, format!("{a}{b}"));
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn paste_during_history_browse_restores_draft_first() {
+        let mut bar = InputBar::new();
+
+        bar.set_text("draft content".to_string(), "draft content".len());
+        bar.insert_paste("first\npaste");
+        bar.submit();
+
+        bar.set_text("new draft".to_string(), "new draft".len());
+        bar.history_prev();
+        bar.insert_paste("interrupting\npaste");
+
+        assert!(bar.text().contains("new draft"));
+        assert!(bar.text().contains("[Paste"));
+    }
+
+    #[test]
+    fn empty_paste_is_noop() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("");
+
+        assert_eq!(bar.text(), "");
+        assert!(bar.protected_ranges.is_empty());
     }
 }
 

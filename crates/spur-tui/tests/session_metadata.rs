@@ -1,4 +1,4 @@
-use spur_tui::components::input_bar::ProtectedRange;
+use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 use spur_tui::session_metadata::{SessionEntry, SessionMetadataStore};
 use tempfile::tempdir;
@@ -96,6 +96,7 @@ fn save_then_load_roundtrip_structured_input_history() {
         vec![ProtectedRange {
             start: 6,
             end: 17,
+            kind: RangeKind::Atom,
             uri: "file:///abs/src/foo.rs".into(),
             name: "src/foo.rs".into(),
         }],
