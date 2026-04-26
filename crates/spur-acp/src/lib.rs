@@ -6,6 +6,7 @@ pub mod domain;
 pub mod ext;
 pub mod protocol;
 pub mod registry;
+pub mod session_liveness;
 pub mod session_lock;
 pub mod types;
 
@@ -20,6 +21,7 @@ pub use connection::{
     StreamJsonAdapter,
 };
 pub use registry::AgentRegistry;
+pub use session_liveness::SelfHeldSet;
 
 // Re-export domain types
 pub use crate::domain::events::{
