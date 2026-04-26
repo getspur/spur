@@ -105,6 +105,13 @@ impl FeatureKey {
     pub const ACP_CORE_SESSION_ATTACH_DEGRADED_NOLOCK: Self =
         Self("acp_core_session_attach_degraded_nolock");
 
+    // --- spur-core: brain & scheduling (5) ---
+    pub const CORE_CORE_BRAIN_SESSION: Self = Self("core_core_brain_session");
+    pub const CORE_CORE_BRAIN_SCHEDULER: Self = Self("core_core_brain_scheduler");
+    pub const CORE_CORE_BRAIN_FAILOVER_MANUAL_KEYSTROKE: Self = Self("core_core_brain_failover_manual_keystroke");
+    pub const CORE_PRO_BRAIN_FAILOVER_AUTO_POOL: Self = Self("core_pro_brain_failover_auto_pool");
+    pub const CORE_CORE_CONTINUATION_BRIDGE: Self = Self("core_core_continuation_bridge");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -211,6 +218,17 @@ impl FeatureKey {
             Some(Self::ACP_CORE_SESSION_ATTACH_ADVISORY_LOCK)
         } else if bytes_eq(b, b"acp_core_session_attach_degraded_nolock") {
             Some(Self::ACP_CORE_SESSION_ATTACH_DEGRADED_NOLOCK)
+        // spur-core: brain & scheduling
+        } else if bytes_eq(b, b"core_core_brain_session") {
+            Some(Self::CORE_CORE_BRAIN_SESSION)
+        } else if bytes_eq(b, b"core_core_brain_scheduler") {
+            Some(Self::CORE_CORE_BRAIN_SCHEDULER)
+        } else if bytes_eq(b, b"core_core_brain_failover_manual_keystroke") {
+            Some(Self::CORE_CORE_BRAIN_FAILOVER_MANUAL_KEYSTROKE)
+        } else if bytes_eq(b, b"core_pro_brain_failover_auto_pool") {
+            Some(Self::CORE_PRO_BRAIN_FAILOVER_AUTO_POOL)
+        } else if bytes_eq(b, b"core_core_continuation_bridge") {
+            Some(Self::CORE_CORE_CONTINUATION_BRIDGE)
         } else {
             None
         }
@@ -507,6 +525,19 @@ mod tests {
             "acp_core_adapter_kimi",
             "acp_core_session_attach_advisory_lock",
             "acp_core_session_attach_degraded_nolock",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_core_brain_keys_registered() {
+        for s in &[
+            "core_core_brain_session",
+            "core_core_brain_scheduler",
+            "core_core_brain_failover_manual_keystroke",
+            "core_pro_brain_failover_auto_pool",
+            "core_core_continuation_bridge",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
