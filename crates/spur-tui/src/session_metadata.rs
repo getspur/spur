@@ -231,6 +231,21 @@ impl SessionMetadataStore {
         Some((acp, brain))
     }
 
+    pub fn brain_for_acp(&self, acp_id: &str) -> Option<String> {
+        self.metadata
+            .sessions
+            .values()
+            .find(|entry| entry.acp_session_id.as_deref() == Some(acp_id))
+            .and_then(|entry| entry.brain_name.clone())
+            .or_else(|| {
+                if self.metadata.last_active_acp_session_id.as_deref() == Some(acp_id) {
+                    self.metadata.last_active_brain.clone()
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Atomic save: write to `path.tmp`, then rename to `path`. Creates parent
     /// directory if missing. Survives process crashes and partial writes via
     /// POSIX rename semantics (macOS/Linux). Does not guarantee durability

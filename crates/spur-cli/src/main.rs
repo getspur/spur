@@ -57,6 +57,7 @@ fn resolve_landing(
     new: bool,
     sessions: bool,
     dashboard: bool,
+    session: Option<&str>,
     brain_override: Option<&str>,
     meta: &spur_tui::session_metadata::SessionMetadataStore,
     registry: &spur_acp::AgentRegistry,
@@ -65,8 +66,28 @@ fn resolve_landing(
     if new {
         return LandingDecision::ShowDashboard;
     }
+    if let Some(acp) = session {
+        let stored_brain = meta.brain_for_acp(acp);
+        if let (Some(requested), Some(stored)) = (brain_override, stored_brain.as_deref()) {
+            if requested != stored {
+                tracing::warn!(
+                    session = %acp,
+                    requested_brain = %requested,
+                    stored_brain = %stored,
+                    "ignoring --brain override for explicit session attach"
+                );
+            }
+        }
+        let brain = stored_brain
+            .or_else(|| brain_override.map(str::to_string))
+            .unwrap_or_else(|| "claude-code".to_string());
+        return LandingDecision::AttachExplicit {
+            acp_id: acp.to_string(),
+            brain,
+        };
+    }
     if sessions && !dashboard {
-        return LandingDecision::ShowPicker;
+        return LandingDecision::ShowPicker { preselect: None };
     }
     if dashboard {
         return LandingDecision::ShowDashboard;
@@ -90,7 +111,7 @@ fn resolve_landing(
     }
 
     if meta.has_any_session() {
-        return LandingDecision::ShowPicker;
+        return LandingDecision::ShowPicker { preselect: None };
     }
 
     LandingDecision::ShowDashboard
@@ -230,6 +251,9 @@ enum Commands {
         /// Force Dashboard — do not auto-resume last session.
         #[arg(long)]
         new: bool,
+        /// Attach to a specific ACP session by id.
+        #[arg(long)]
+        session: Option<String>,
         /// Profile the watch session and generate a flamegraph
         #[arg(long)]
         profile: bool,
@@ -584,6 +608,7 @@ async fn main() -> Result<()> {
             sessions,
             dashboard,
             new,
+            session,
             profile,
             duration,
         } => {
@@ -600,6 +625,9 @@ async fn main() -> Result<()> {
                 }
                 if new {
                     args.push("--new".to_string());
+                }
+                if let Some(ref session) = session {
+                    args.push(format!("--session={session}"));
                 }
                 return commands::profile::run(Some(
                     commands::profile::ProfileCommands::Flamegraph {
@@ -672,6 +700,7 @@ async fn main() -> Result<()> {
                 new,
                 sessions,
                 dashboard,
+                session.as_deref(),
                 brain_for_resume.as_deref(),
                 &meta,
                 &orch.registry,
@@ -712,10 +741,15 @@ async fn main() -> Result<()> {
             });
 
             use spur_tui::landing::LandingDecision;
-            let force_picker = matches!(landing, LandingDecision::ShowPicker);
+            let start_in_picker_with_preselect: Option<Option<String>> = match &landing {
+                LandingDecision::AutoResume { acp_id, .. } => Some(Some(acp_id.clone())),
+                LandingDecision::AttachExplicit { acp_id, .. } => Some(Some(acp_id.clone())),
+                LandingDecision::ShowPicker { preselect } => Some(preselect.clone()),
+                _ => None,
+            };
 
             match &landing {
-                LandingDecision::AutoResume { acp_id, .. } => {
+                LandingDecision::AttachExplicit { acp_id, .. } => {
                     let resume_tx = tui_tx.clone();
                     let id = acp_id.clone();
                     tokio::spawn(async move {
@@ -724,8 +758,11 @@ async fn main() -> Result<()> {
                             .await;
                     });
                 }
-                LandingDecision::ShowPicker => {
-                    // picker opened by start_in_picker = true below
+                LandingDecision::AutoResume { .. } => {
+                    // picker preselects; user must press Enter.
+                }
+                LandingDecision::ShowPicker { .. } => {
+                    // picker opened by start_in_picker_with_preselect below
                 }
                 LandingDecision::ShowDashboard | LandingDecision::SetupRequired => {
                     let warm_handle = host.handle();
@@ -744,7 +781,7 @@ async fn main() -> Result<()> {
                 event_rx,
                 Some(tui_tx),
                 perm_rx,
-                force_picker,
+                start_in_picker_with_preselect,
                 config_arc,
                 initial_license_state,
                 landing.clone(),
@@ -1317,4 +1354,48 @@ fn parse_range(range: Option<&str>, today: bool, _week: bool) -> Result<spur_con
         return Ok(ReportRange::today());
     }
     Ok(ReportRange::last_days(7))
+}
+
+#[cfg(test)]
+mod resolve_landing_tests {
+    use super::*;
+
+    fn empty_store() -> spur_tui::session_metadata::SessionMetadataStore {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        spur_tui::session_metadata::SessionMetadataStore::load(file.path())
+    }
+
+    #[test]
+    fn explicit_session_returns_attach_explicit() {
+        let landing = resolve_landing(
+            false,
+            false,
+            false,
+            Some("abc-123"),
+            None,
+            &empty_store(),
+            &spur_acp::AgentRegistry::new(),
+        );
+        assert!(matches!(
+            landing,
+            spur_tui::landing::LandingDecision::AttachExplicit { acp_id, .. } if acp_id == "abc-123"
+        ));
+    }
+
+    #[test]
+    fn new_flag_overrides_session_flag() {
+        let landing = resolve_landing(
+            true,
+            false,
+            false,
+            Some("abc-123"),
+            None,
+            &empty_store(),
+            &spur_acp::AgentRegistry::new(),
+        );
+        assert!(matches!(
+            landing,
+            spur_tui::landing::LandingDecision::ShowDashboard
+        ));
+    }
 }
