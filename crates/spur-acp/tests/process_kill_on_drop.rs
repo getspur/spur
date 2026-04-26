@@ -19,7 +19,7 @@ async fn native_worker_dies_on_drop() {
     use spur_acp::connection::native::spawn_native_worker_for_test;
 
     // Spawn a long-running child via the production helper.
-    let mut child = spawn_native_worker_for_test("/bin/sh", &["-c", "sleep 60"])
+    let child = spawn_native_worker_for_test("/bin/sh", &["-c", "sleep 60"])
         .await
         .expect("spawn child");
 
@@ -42,7 +42,7 @@ async fn native_worker_dies_on_drop() {
 async fn stdio_adapter_dies_on_drop() {
     use spur_acp::connection::stdio_adapter::spawn_stdio_for_test;
 
-    let mut child = spawn_stdio_for_test("/bin/sh", &["-c", "sleep 60"])
+    let child = spawn_stdio_for_test("/bin/sh", &["-c", "sleep 60"])
         .await
         .expect("spawn child");
     let pid = child.id().expect("pid present");
@@ -63,7 +63,7 @@ async fn stdio_adapter_dies_on_drop() {
 #[tokio::test]
 async fn cli_wrap_dies_on_drop() {
     use spur_acp::connection::cli_wrap_adapter::spawn_cli_wrap_for_test;
-    let mut child = spawn_cli_wrap_for_test("/bin/sh", &["-c", "sleep 60"])
+    let child = spawn_cli_wrap_for_test("/bin/sh", &["-c", "sleep 60"])
         .await
         .expect("spawn child");
     let pid = child.id().expect("pid present");
