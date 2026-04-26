@@ -95,6 +95,21 @@ fn scroll_label(
     Cow::Owned(format!(" ▲ {} ↑ ", scroll_offset))
 }
 
+fn position_indicator(total: usize, visible: usize, offset: usize, width: u16) -> Option<String> {
+    if total <= visible || width < 20 {
+        return None;
+    }
+
+    let bottom = (offset + visible).min(total);
+    let percent = bottom * 100 / total;
+
+    if width < 30 {
+        Some(format!(" · {percent}% "))
+    } else {
+        Some(format!(" · {bottom}/{total} · {percent}% "))
+    }
+}
+
 impl DetailPane {
     pub fn new() -> Self {
         Self {
@@ -195,7 +210,7 @@ impl DetailPane {
         // also appear on the skeleton. Content can be placeholder because
         // inner() is a function of borders + title presence, not content.
         let mut skeleton = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP | Borders::BOTTOM)
             .title(" ") // matches final top-left (agent name)
             .title_bottom(" "); // matches final bottom-left (scroll_label)
         if issue_badge.is_some() {
@@ -254,12 +269,21 @@ impl DetailPane {
             self.scroll_offset,
             self.is_following,
         );
+        let position_indicator =
+            position_indicator(total, visible_h, self.scroll_offset, area.width);
 
         // ── 5. Build the real block with all titles. ─────────────────
         let mut block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP | Borders::BOTTOM)
             .title(format!(" {} ", node.agent))
             .title_bottom(scroll_label_text.as_ref().to_string());
+        if let Some(pos) = position_indicator {
+            block = block.title_bottom(
+                Line::from(pos)
+                    .alignment(Alignment::Right)
+                    .style(Style::default().fg(Color::DarkGray)),
+            );
+        }
         if let Some(badge) = issue_badge {
             block = block
                 .title_top(Line::from(format!(" {} ", badge)).alignment(Alignment::Right))
@@ -288,7 +312,7 @@ impl DetailPane {
                     .position(|t| *t == self.current_tab)
                     .unwrap_or(0),
             )
-            .divider("│");
+            .divider(" ");
         frame.render_widget(tabs, chunks[0]);
 
         // ── 7. Render body. ──────────────────────────────────────────

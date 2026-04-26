@@ -1401,6 +1401,20 @@ impl InputBar {
         self.textarea.max_histories()
     }
 
+    /// Test-only: read paste ids currently retained in the side store.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn paste_ids_for_test(&self) -> Vec<usize> {
+        self.pastes.keys().copied().collect()
+    }
+
+    /// Test-only: read whether the input bar is browsing history.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn history_cursor_for_test(&self) -> Option<usize> {
+        self.history_cursor
+    }
+
     /// Set the status label and activity kind.
     pub fn set_status(&mut self, status: Option<String>, activity: ActivityKind) {
         self.status = status;

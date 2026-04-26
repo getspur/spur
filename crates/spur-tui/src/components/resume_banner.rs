@@ -101,11 +101,11 @@ impl ResumeBanner {
 
     pub fn tick(&mut self) {
         // Advance Fading -> Hidden when fade completes
-        if self.state == BannerState::Fading {
-            if self.state_changed_at.elapsed().as_millis() >= Self::FADE_DURATION_MS as u128 {
-                self.state = BannerState::Hidden;
-                self.state_changed_at = Instant::now();
-            }
+        if self.state == BannerState::Fading
+            && self.state_changed_at.elapsed().as_millis() >= Self::FADE_DURATION_MS as u128
+        {
+            self.state = BannerState::Hidden;
+            self.state_changed_at = Instant::now();
         }
     }
 
@@ -131,8 +131,7 @@ impl ResumeBanner {
             BannerState::Fading => {
                 let elapsed = self.state_changed_at.elapsed().as_millis() as f64;
                 let max = Self::FADE_DURATION_MS as f64;
-                let ratio = 1.0 - (elapsed / max).min(1.0);
-                ratio
+                1.0 - (elapsed / max).min(1.0)
             }
             _ => 1.0,
         };
