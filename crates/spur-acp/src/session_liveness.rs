@@ -71,7 +71,7 @@ impl SessionLivenessProbe {
             return SessionLivenessProbeResult::Self_;
         }
         let lock_path = lock_path_for(repo_root, target);
-        let _file = match OpenOptions::new()
+        let file = match OpenOptions::new()
             .read(true)
             .write(true)
             .create(false)
@@ -83,13 +83,24 @@ impl SessionLivenessProbe {
                 return SessionLivenessProbeResult::Missing;
             }
             Err(e) => {
-                tracing::warn!(error=%e, path=%lock_path.display(),
-                    "session liveness probe open failed; treating as Live");
+                tracing::warn!(error=%e, "session liveness probe open failed");
                 return SessionLivenessProbeResult::Live;
             }
         };
-        // flock branch added in next task
-        unimplemented!("flock variant in Task 9")
+
+        use fs4::fs_std::FileExt;
+        match file.try_lock_exclusive() {
+            Ok(true) => SessionLivenessProbeResult::DeadAcquired(DeadSessionGuard {
+                file,
+                brain_session_id: target.clone(),
+            }),
+            Ok(false) => SessionLivenessProbeResult::Live,
+            Err(e) if is_enotsup_or_enolck(&e) => SessionLivenessProbeResult::FsUnsafe,
+            Err(e) => {
+                tracing::warn!(error=%e, "try_lock_exclusive failed; treating as Live");
+                SessionLivenessProbeResult::Live
+            }
+        }
     }
 }
 
@@ -99,14 +110,30 @@ fn lock_path_for(repo_root: &Path, target: &BrainSessionId) -> PathBuf {
         .join(format!("{}.lock", target.as_session_id().0))
 }
 
+fn is_enotsup_or_enolck(e: &io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(e.kind(), ErrorKind::Unsupported)
+        || e.raw_os_error() == Some(libc::ENOLCK)
+        || e.raw_os_error() == Some(libc::ENOTSUP)
+}
+
 #[cfg(test)]
 mod probe_tests {
     use super::*;
     use crate::SessionId;
+    use fs4::fs_std::FileExt;
     use tempfile::TempDir;
 
     fn id(s: &str) -> BrainSessionId {
         BrainSessionId::new(SessionId(s.into()))
+    }
+
+    fn create_lockfile(td: &TempDir, target: &BrainSessionId) -> PathBuf {
+        let dir = td.path().join(".spur/sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.lock", target.as_session_id().0));
+        std::fs::write(&path, b"").unwrap();
+        path
     }
 
     #[test]
@@ -126,6 +153,76 @@ mod probe_tests {
         let target = id("550e8400-e29b-41d4-a716-446655440000");
         let result = SessionLivenessProbe::probe(td.path(), &target, &set);
         assert!(matches!(result, SessionLivenessProbeResult::Missing));
+    }
+
+    #[test]
+    fn probe_returns_dead_acquired_when_lockfile_unlocked() {
+        let td = TempDir::new().unwrap();
+        let set = SelfHeldSet::new();
+        let target = id("550e8400-e29b-41d4-a716-446655440000");
+        create_lockfile(&td, &target);
+
+        let result = SessionLivenessProbe::probe(td.path(), &target, &set);
+        match result {
+            SessionLivenessProbeResult::DeadAcquired(guard) => {
+                assert_eq!(guard.brain_session_id(), &target);
+            }
+            other => panic!("expected DeadAcquired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn probe_returns_live_when_other_holds_lock() {
+        let td = TempDir::new().unwrap();
+        let set = SelfHeldSet::new();
+        let target = id("550e8400-e29b-41d4-a716-446655440000");
+        let lock_path = create_lockfile(&td, &target);
+
+        // Acquire the lock from "another process" (this test holds it).
+        let held = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        held.try_lock_exclusive().expect("hold lock");
+
+        let result = SessionLivenessProbe::probe(td.path(), &target, &set);
+        assert!(matches!(result, SessionLivenessProbeResult::Live));
+
+        // Cleanup: drop releases.
+        drop(held);
+    }
+
+    #[test]
+    fn probe_does_not_truncate_lockfile() {
+        let td = TempDir::new().unwrap();
+        let set = SelfHeldSet::new();
+        let target = id("550e8400-e29b-41d4-a716-446655440000");
+        let lock_path = create_lockfile(&td, &target);
+        std::fs::write(&lock_path, b"holder-info-payload").unwrap();
+        let before = std::fs::read(&lock_path).unwrap();
+
+        let _result = SessionLivenessProbe::probe(td.path(), &target, &set);
+        let after = std::fs::read(&lock_path).unwrap();
+        assert_eq!(before, after, "probe must not truncate or modify lockfile");
+    }
+
+    #[test]
+    fn dead_session_guard_releases_on_drop() {
+        let td = TempDir::new().unwrap();
+        let set = SelfHeldSet::new();
+        let target = id("550e8400-e29b-41d4-a716-446655440000");
+        create_lockfile(&td, &target);
+
+        {
+            let r = SessionLivenessProbe::probe(td.path(), &target, &set);
+            assert!(matches!(r, SessionLivenessProbeResult::DeadAcquired(_)));
+            // Guard goes out of scope here; lock should release.
+        }
+
+        // Re-probe; should be DeadAcquired again (lock was released).
+        let r2 = SessionLivenessProbe::probe(td.path(), &target, &set);
+        assert!(matches!(r2, SessionLivenessProbeResult::DeadAcquired(_)));
     }
 }
 
