@@ -3,7 +3,8 @@
 
 use agent_client_protocol::SessionId as AcpSessionId;
 use spur_acp::{
-    AvailableCommandsUpdate, CurrentModeUpdate, SessionNotification, SessionUpdate, UsageUpdate,
+    domain::events::BrainRetireReason, AvailableCommandsUpdate, CurrentModeUpdate,
+    SessionNotification, SessionUpdate, UsageUpdate,
 };
 
 fn test_ctx() -> spur_tui::views::ViewContext<'static> {
@@ -14,6 +15,41 @@ fn test_ctx() -> spur_tui::views::ViewContext<'static> {
 
 fn nid() -> AcpSessionId {
     AcpSessionId::new("test")
+}
+
+fn submit_new_session_message(app: &mut spur_tui::app::App, text: &str) {
+    submit_text(app, text);
+}
+
+fn submit_text(app: &mut spur_tui::app::App, text: &str) {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    for ch in text.chars() {
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+}
+
+fn brain_spawned(session: &spur_acp::SessionId) -> spur_acp::SpurEvent {
+    spur_acp::SpurEvent::now(spur_acp::SpurEventBody::BrainSpawned {
+        agent: "agent".to_string(),
+        session: session.clone(),
+    })
+}
+
+fn prompt_dispatched(session: &spur_acp::SessionId, turn_kind: &str) -> spur_acp::SpurEvent {
+    spur_acp::SpurEvent::now(spur_acp::SpurEventBody::PromptDispatched {
+        session: session.clone(),
+        turn_kind: turn_kind.to_string(),
+        continuations_count: usize::from(turn_kind == "merged"),
+    })
+}
+
+fn brain_retired_user_clear(session: &spur_acp::SessionId) -> spur_acp::SpurEvent {
+    spur_acp::SpurEvent::now(spur_acp::SpurEventBody::BrainRetired {
+        session: session.clone(),
+        reason: BrainRetireReason::UserClear,
+    })
 }
 
 #[test]
@@ -77,29 +113,159 @@ fn usage_update_sets_context() {
     assert_eq!(s.context_size, Some(200_000));
 }
 
+/// Documents the residual ad-hoc race; current state-machine ordering prevents it in production.
 #[test]
-fn new_session_with_message_does_not_leak_into_later_sessions() {
-    // Regression for BUG-1: after Task 15's NewSessionWithMessage plumbing,
-    // a typed dashboard message must NOT get replayed into an unrelated
-    // session that happens to spawn later. The `pending_user_messages`
-    // buffer has been removed, so the only cross-session-replay vector
-    // is gone — this test asserts a fresh BrainSpawned produces a trace
-    // with zero user entries.
+fn unrelated_brain_then_prompt_dispatched_drains_to_that_view() {
+    use spur_acp::SessionId;
+
+    let (mut app, _rx) = spur_tui::test_support::app_with_user_input_tx();
+    submit_new_session_message(&mut app, "hello");
+
+    let sid = SessionId("unrelated".to_string());
+    spur_tui::test_support::push_event(&mut app, brain_spawned(&sid));
+    spur_tui::test_support::push_event(&mut app, prompt_dispatched(&sid, "user_only"));
+
+    let detail = spur_tui::test_support::session_detail(&app).expect("has detail");
+    assert_eq!(detail.trace_snapshot_for_test(), vec!["hello".to_string()]);
+}
+
+#[test]
+fn merged_turn_kind_first_message_appears_in_trace() {
+    use spur_acp::SessionId;
+
+    let (mut app, _rx) = spur_tui::test_support::app_with_user_input_tx();
+    submit_new_session_message(&mut app, "hello");
+
+    let sid = SessionId("merged-session".to_string());
+    spur_tui::test_support::push_event(&mut app, brain_spawned(&sid));
+    spur_tui::test_support::push_event(&mut app, prompt_dispatched(&sid, "merged"));
+
+    let detail = spur_tui::test_support::session_detail(&app).expect("has detail");
+    let trace = detail.trace_snapshot_for_test();
+    assert_eq!(trace.first().map(String::as_str), Some("hello"));
+}
+
+#[test]
+fn continuation_only_preserves_pending() {
+    use spur_acp::SessionId;
+
+    let (mut app, _rx) = spur_tui::test_support::app_with_user_input_tx();
+    submit_new_session_message(&mut app, "hello");
+
+    let sid = SessionId("continuation-session".to_string());
+    spur_tui::test_support::push_event(&mut app, brain_spawned(&sid));
+    spur_tui::test_support::push_event(&mut app, prompt_dispatched(&sid, "continuation_only"));
+
+    let detail = spur_tui::test_support::session_detail(&app).expect("has detail");
+    assert_eq!(
+        spur_tui::test_support::pending_first_user_message(&app),
+        Some("hello")
+    );
+    let trace = detail.trace_snapshot_for_test();
+    assert_eq!(
+        trace.first().map(String::as_str),
+        Some("▸ Brain resuming with 0 worker results"),
+        "continuation-only should render a resume note, not the pending user message: {trace:?}"
+    );
+}
+
+#[test]
+fn new_session_pending_cleared_on_clear() {
+    use spur_tui::action::Action;
+
+    let (mut app, _rx) = spur_tui::test_support::app_with_user_input_tx();
+    submit_new_session_message(&mut app, "hello");
+    assert!(spur_tui::test_support::pending_first_user_message(&app).is_some());
+
+    spur_tui::test_support::process_action(&mut app, Action::ClearSession);
+
+    assert_eq!(
+        spur_tui::test_support::pending_first_user_message(&app),
+        None,
+        "ClearSession must drop pending first message"
+    );
+}
+
+#[test]
+fn existing_send_message_does_not_set_pending() {
+    let (mut app, _rx) = spur_tui::test_support::app_with_user_input_tx();
+    let sid = spur_acp::SessionId("existing".to_string());
+    spur_tui::test_support::push_event(&mut app, brain_spawned(&sid));
+
+    submit_new_session_message(&mut app, "hi");
+
+    assert_eq!(
+        spur_tui::test_support::pending_first_user_message(&app),
+        None
+    );
+    let detail = spur_tui::test_support::session_detail(&app).unwrap();
+    assert_eq!(detail.trace_entry_count(), 1);
+    let snap = detail.trace_snapshot_for_test();
+    assert!(snap[0].contains("hi"));
+}
+
+#[test]
+fn post_clear_submission_lands_in_new_session_trace() {
+    use spur_tui::action::Action;
+
+    let (mut app, _rx) = spur_tui::test_support::app_with_user_input_tx();
+
+    let sid_a = spur_acp::SessionId("existing-a".to_string());
+    spur_tui::test_support::push_event(&mut app, brain_spawned(&sid_a));
+
+    spur_tui::test_support::process_action(&mut app, Action::ClearSession);
+    spur_tui::test_support::push_event(&mut app, brain_retired_user_clear(&sid_a));
+    assert!(spur_tui::test_support::session_detail(&app)
+        .expect("has cleared detail")
+        .is_cleared());
+
+    submit_new_session_message(&mut app, "refactor auth");
+    assert_eq!(
+        spur_tui::test_support::pending_first_user_message(&app),
+        Some("refactor auth")
+    );
+
+    let sid_b = spur_acp::SessionId("new-b".to_string());
+    spur_tui::test_support::push_event(&mut app, brain_spawned(&sid_b));
+    spur_tui::test_support::push_event(&mut app, prompt_dispatched(&sid_b, "user_only"));
+
+    let detail = spur_tui::test_support::session_detail(&app).unwrap();
+    assert_eq!(detail.session_id().0, "new-b");
+    let snap = detail.trace_snapshot_for_test();
+    assert!(
+        snap.iter().any(|s| s.contains("refactor auth")),
+        "snap: {:?}",
+        snap
+    );
+}
+
+#[test]
+fn brain_connect_failed_clears_pending() {
     use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 
-    let mut app = spur_tui::test_support::new_app();
-    let sid = SessionId("unrelated".to_string());
-    let ev = SpurEvent::now(SpurEventBody::BrainSpawned {
-        agent: "agent".to_string(),
-        session: sid.clone(),
-    });
-    spur_tui::test_support::push_event(&mut app, ev);
+    let (mut app, _rx) = spur_tui::test_support::app_with_user_input_tx();
+    submit_new_session_message(&mut app, "hello");
+    assert_eq!(
+        spur_tui::test_support::pending_first_user_message(&app),
+        Some("hello")
+    );
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::BrainConnectFailed {
+            brain: "agent".to_string(),
+            reason: "dial failed".to_string(),
+        }),
+    );
+
+    let sid = SessionId("after-failure".to_string());
+    spur_tui::test_support::push_event(&mut app, brain_spawned(&sid));
+    spur_tui::test_support::push_event(&mut app, prompt_dispatched(&sid, "user_only"));
 
     let detail = spur_tui::test_support::session_detail(&app).expect("has detail");
     assert_eq!(
         detail.trace_entry_count(),
         0,
-        "buffered text leaked into unrelated session"
+        "connect-fail pending text leaked into a later session"
     );
 }
 

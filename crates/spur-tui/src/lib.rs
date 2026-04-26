@@ -19,7 +19,7 @@ pub mod test_support {
     //! full `App`. Not a stable API; gated behind a hidden module so
     //! integration tests in `tests/` can exercise `apply_session_update`.
 
-    use crate::views::session_detail::SessionDetailView;
+    use crate::{action::Action, views::session_detail::SessionDetailView};
     use spur_acp::{SessionId, SessionNotification, SpurEvent};
 
     /// Build a `ViewContext` backed by the given lineage and an idle brain
@@ -87,8 +87,18 @@ pub mod test_support {
         app.handle_spur_event(ev);
     }
 
+    /// Dispatch an `Action` through the app controller.
+    pub fn process_action(app: &mut crate::app::App, action: Action) {
+        app.process_action(action);
+    }
+
     /// Borrow the current `SessionDetailView`, if one exists.
     pub fn session_detail(app: &crate::app::App) -> Option<&SessionDetailView> {
         app.session_detail_for_test()
+    }
+
+    /// Borrow the pending first user message, if one exists.
+    pub fn pending_first_user_message(app: &crate::app::App) -> Option<&str> {
+        app.pending_first_user_message_for_test()
     }
 }
