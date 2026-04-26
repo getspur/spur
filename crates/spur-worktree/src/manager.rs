@@ -251,7 +251,7 @@ impl WorktreeManager {
     /// `spur/worker/v2/{agent}/{brain_session_id}/{worker_session_id}`.
     pub async fn create_worktree_v2(
         &mut self,
-        brain_session_id: &spur_acp::BrainSessionId,
+        brain_session_id: &BrainSessionId,
         worker_session_id: &SessionId,
         agent: &str,
         base_branch: &str,
@@ -261,7 +261,7 @@ impl WorktreeManager {
         let branch_name = format!(
             "spur/worker/v2/{}/{}/{}",
             agent,
-            brain_session_id.as_session_id().0,
+            brain_session_id,
             worker_str,
         );
 
