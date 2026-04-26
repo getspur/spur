@@ -399,6 +399,17 @@ pub enum SpurEventBody {
         target_delegation_id: crate::domain::delegation::DelegationId,
         reason: String,
     },
+    /// Diagnostic-only. Do NOT count in message-loss metrics — message loss
+    /// is counted via WorkerPeerMessageIgnored per-message events. Use this
+    /// for drain-health / worker-behavior dashboards.
+    WorkerPeerMessageDrainCappedOut {
+        brain_session_id: String,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+        acks_received: u32,
+        remaining_messages: u32,
+        cap_ms: u64,
+        actual_elapsed_ms: u64,
+    },
     /// Worker sent a terminal peer-message notification whose payload could
     /// not be parsed at the `_spur/*` boundary.
     ///
@@ -1215,6 +1226,38 @@ mod worker_peer_event_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn worker_peer_message_drain_capped_out_round_trips() {
+        let body = SpurEventBody::WorkerPeerMessageDrainCappedOut {
+            brain_session_id: "bs-1".into(),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            acks_received: 5,
+            remaining_messages: 2,
+            cap_ms: 5_000,
+            actual_elapsed_ms: 5_001,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        if let SpurEventBody::WorkerPeerMessageDrainCappedOut {
+            brain_session_id,
+            target_delegation_id,
+            acks_received,
+            remaining_messages,
+            cap_ms,
+            actual_elapsed_ms,
+        } = back
+        {
+            assert_eq!(brain_session_id, "bs-1");
+            assert_eq!(target_delegation_id.0, "tgt");
+            assert_eq!(acks_received, 5);
+            assert_eq!(remaining_messages, 2);
+            assert_eq!(cap_ms, 5_000);
+            assert_eq!(actual_elapsed_ms, 5_001);
+        } else {
+            panic!("wrong variant");
+        }
     }
 
     #[test]

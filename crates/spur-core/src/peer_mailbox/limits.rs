@@ -5,6 +5,7 @@ pub struct Limits {
     pub max_messages_per_source_delegation: usize,
     pub max_fanout_per_message: usize,
     pub drain_quiet_window_ms: u64,
+    pub drain_max_total_ms: u64,
 }
 
 impl Default for Limits {
@@ -15,6 +16,7 @@ impl Default for Limits {
             max_messages_per_source_delegation: 32,
             max_fanout_per_message: 4,
             drain_quiet_window_ms: 2_000,
+            drain_max_total_ms: 10_000,
         }
     }
 }
