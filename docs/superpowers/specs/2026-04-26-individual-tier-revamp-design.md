@@ -255,61 +255,84 @@ Gemini's "drop all CLI keys as routing facade" critique rejected: keeping CLI as
 | `pm_core_beads_graph_adapter` | F | v1 | `bv` (beads-viewer) graph-aware analysis adapter integration |
 | `pm_pro_beads_advanced` | P | v1 | `PmService::advanced()` activation + `BeadsAdvanced` extension surface (the Pro PM-side gate; downstream advanced capabilities — plan persistence, signal watching, auto-merge — gate separately at `mcp_pro_*` keys) |
 
-### 4.7 `spur-cost` (Cost tracking — 6 keys)
+### 4.7 `spur-cost` (Cost tracking — 3 keys)
+
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 6 → 3 keys per 4-reviewer judge synthesis:
+- Renamed `cost_core_basic_display` → `cost_core_session_display` (claude-code: drop `_basic_` orphan; codex: scoped to actual `today_summary` ledger).
+- Removed `cost_core_ingestion_pipeline` — always-coupled prerequisite to all cost capabilities; cannot be independently gated (a tier with zero ingestion has zero cost features). Codex confirmed code is JSONL-only, not ACP, so the original description was inaccurate anyway.
+- Removed `cost_pro_sqlite_wal_mode` — codex ❌ NOT IMPLEMENTED (`init_db` opens SQLite without `PRAGMA journal_mode=WAL`). If implemented, would be a database-correctness baseline (Risk #29) belonging to Free per Wave 4 safety/liveness precedent, not a Pro upsell.
+- Deferred `cost_pro_budget_caps` to v1.1 backlog — codex ❌ no spawn/runtime enforcement; tracker is observational only.
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
-| `cost_core_basic_display` | F | v1 | Per-session running cost in TUI + soft daily warning |
-| `cost_core_pricing_registry` | F | v1 | Model pricing table |
-| `cost_core_ingestion_pipeline` | F | v1 | `TokenEvent` ingestion from ACP notifications |
-| `cost_pro_per_project_tracking` | P | v1 | Per-project aggregation (separate from per-session) |
-| `cost_pro_sqlite_wal_mode` | P | v1 | WAL mode + `busy_timeout` for concurrent reader/writer (Risk #29 mitigation) |
-| `cost_pro_budget_caps` | P | **v1.1-Q3** | Hard budget enforcement at spawn-time + runtime (Risk #17 fix) |
+| `cost_core_session_display` | F | v1 | Per-session running cost ledger via `CostTracker::today_summary` (renamed from `_basic_display`: `_basic_` is an orphan tier-flavor adjective per claude-code) |
+| `cost_core_pricing_registry` | F | v1 | `PricingRegistry` model pricing lookup table |
+| `cost_pro_per_project_tracking` | P | v1 | Per-project aggregation via `CostTracker::by_project` SQL grouping (Free path skips this query branch) |
 
-### 4.8 `spur-context` (DuckDB analytics — 5 keys)
+### 4.8 `spur-context` (DuckDB analytics — 3 keys)
 
-| Key | Tier | Status | Description |
-|---|---|---|---|
-| `ctx_pro_duckdb_engine` | P | v1 | `AnalyticsEngine` in-memory DuckDB |
-| `ctx_pro_async_engine` | P | v1 | `AsyncAnalyticsEngine` `spawn_blocking` wrapper (Risk #30 hardening pending) |
-| `ctx_pro_live_mode` | P | v1 | Real-time analytics |
-| `ctx_pro_daily_report` | P | v1 | Day-bucketed cost/time reports |
-| `ctx_pro_weekly_report` | P | v1 | Week-bucketed cost/time reports |
-
-### 4.9 `spur-worktree` (Git isolation — 5 keys)
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 5 → 3 keys per 4-reviewer judge synthesis:
+- Removed `ctx_pro_async_engine` — codex ⚠ no production callers found for `AsyncEngine`. Pure threading infrastructure with no user-visible boundary. Drop, do not defer.
+- Deferred `ctx_pro_live_mode` to v1.1 backlog — codex ⚠ APIs exist (`LiveSessionTracker`) but no CLI/user surface; gate has no enforcement point yet.
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
-| `worktree_core_isolation` | F | v1 | Auto-create/cleanup `git worktree` per delegation (safety axis — kept Free) |
-| `worktree_core_artifact_resolver` | F | v1 | Delegation result artifact lookup |
-| `worktree_pro_git_blob_store` | P | v1 | `GitBlobOutcomeStore` production backend (`refs/spur/outcomes/...`) |
-| `worktree_pro_custom_policies` | P | v1 | Merge strategies (squash/rebase/octopus), naming templates |
-| `worktree_pro_cleanup_orphans` | P | **v1.1** | Safe global orphan cleanup (Risk #4 fix required) |
+| `ctx_pro_duckdb_engine` | P | v1 | `AnalyticsEngine` in-memory DuckDB engine |
+| `ctx_pro_daily_report` | P | v1 | Day-bucketed cost/time reports (CLI uses `Reporter::daily_report`) |
+| `ctx_pro_weekly_report` | P | v1 | Week-bucketed cost/time reports (engine support ready; CLI gap acceptable) |
 
-### 4.10 `spur-bot` (Telegram subsystem — 6 keys + 1 Team-deferred)
+### 4.9 `spur-worktree` (Git isolation — 2 keys)
 
-**Revised 2026-04-26 (Wave 5 design-review pass).** Per codex code-grounded review: the user-facing bundle key `bot_pro_telegram_solo` (renamed from the earlier `tui_pro_telegram_bot_solo` in §4.4) belongs in this crate, not spur-tui — actual gate point is `Commands::Bot` activation in `crates/spur-cli/src/main.rs:348` / `run_telegram_bot` in `crates/spur-bot/src/telegram/mod.rs:9`, with single-operator filter at `router.rs:25`. Gating in spur-tui would let users bypass via `spur bot ...` CLI invocation.
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 5 → 2 keys per 4-reviewer judge synthesis:
+- Removed `worktree_core_artifact_resolver` — always-on for the system to function (delegation outcomes can't be returned without artifact lookup); not independently gateable.
+- Renamed `worktree_pro_cleanup_orphans` → `worktree_core_orphan_cleanup` AND moved Pro→Free (claude-code: verb→noun; codex confirmed code exists at `manager.rs:539` + `worktree_authority.rs:99` so v1.1 status flag was wrong; Wave 4 safety/liveness precedent: garbage collection is a correctness invariant, never a paywall — analogous to Postgres VACUUM, RocksDB compaction).
+- Deferred `worktree_pro_git_blob_store` to v1.1 backlog — codex ⚠ orchestrator hardwires GitBlob at `orchestrator.rs:963`; no Free/Pro backend selector exists, so the gate has nothing to enforce.
+- Deferred `worktree_pro_custom_policies` to v1.1 backlog — codex ❌ only single cherry-pick path exists; squash/rebase/octopus/naming templates are vaporware.
+
+| Key | Tier | Status | Description |
+|---|---|---|---|
+| `worktree_core_isolation` | F | v1 | Per-delegation `git worktree` create/destroy via `WorktreeManager::create_worktree` |
+| `worktree_core_orphan_cleanup` | F | v1 | Safe global orphan cleanup via `WorktreeAuthority::sweep_once` (Risk #4 mitigation; renamed from `worktree_pro_cleanup_orphans`; tier shifted Pro→Free per safety/liveness precedent — disk-filling worktrees on Free would break daily-driver positioning §2) |
+
+### 4.10 `spur-bot` (Telegram subsystem — 3 keys)
+
+**Revised 2026-04-26 (Wave 5).** Added `bot_pro_telegram_solo` (relocated from spur-tui §4.4); per codex code-grounded review the gate point is `Commands::Bot` (`crates/spur-cli/src/main.rs:591`) / `run_telegram_bot` (`crates/spur-bot/src/telegram/mod.rs:9`), with single-operator filter at `router.rs:25`. Gating in spur-tui would let users bypass via `spur bot ...` CLI invocation.
+
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 7 → 3 keys per 4-reviewer judge synthesis. Core principle: bot sub-keys must be *independently business-toggleable*, not just real boundaries in code. Codex confirmed all 5 sub-keys map to real code, but multiple are tightly-coupled mechanism with no plausible tier-axis:
+- Removed `bot_pro_runtime` — always-coupled to telegram_solo (no bot without long-poll loop). Folded under umbrella.
+- Removed `bot_pro_runtime_render` — always-coupled to runtime (no telegram bot would ship without markdown rendering; "raw text mode" is degenerate UX, not a tier).
+- Removed `bot_pro_callback_validation` — security invariant (analogous to dropped `license_core_ed25519_verify`); never a Pro upsell. Disabling it = exploit (any user could replay any callback).
+- Deferred `bot_team_multi_chat` to v2 backlog — codex ❌ no multi-user code (single `operator_user_id` config; router rejects all others).
+
+Retained the 3 keys with plausible business tier axes:
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
 | `bot_pro_telegram_solo` ★ | P | v1 | Single-operator Telegram remote-control (user-facing umbrella; gate at `Commands::Bot` / `run_telegram_bot`) |
-| `bot_pro_runtime` | P | v1 | `BotRuntime` long-poll connection |
-| `bot_pro_thread_registry` | P | v1 | Forum-topic-per-session multiplexing |
-| `bot_pro_runtime_render` | P | v1 | `SpurEvent` → Markdown state machine |
-| `bot_pro_callback_validation` | P | v1 | `live_session` callback expiry validation (Risk #12 closure) |
-| `bot_pro_inline_review` | P | v1 | Inline keyboard review buttons (approve/reject/modify/retry) |
-| `bot_team_multi_chat` | T | **v2** | Team-wide multi-chat with RBAC |
+| `bot_pro_thread_registry` | P | v1 | Forum-topic-per-session multiplexing via `PersistedBotState.threads` (real product axis: single-thread vs multi-thread bots are distinguishable customer-visible tiers) |
+| `bot_pro_inline_review` | P | v1 | Inline keyboard review buttons (real product axis: passive notify-only bot vs interactive review bot are distinguishable customer-visible tiers) |
 
-### 4.11 `spur-license` (Entitlements — 6 keys)
+### 4.11 `spur-license` (Entitlements — 2 keys)
+
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 6 → 2 keys per 4-reviewer judge synthesis. The original 6-key set conflated *runtime gating dispatch table* (the FeatureKey registry's actual purpose) with *system manifest documentation* (which belongs in this spec, not in `feature_key.rs`).
+
+Removed via **Bootstrap Paradox** principle (gemini + codex aligned): a feature gate cannot meaningfully toggle the gating system that implements it.
+- `license_core_facade_entitlement` — IS the gating mechanism (`FeatureGate::has`); cannot gate itself.
+- `license_core_policy_resolver` — must run for ANY policy (including one that disables it) to load.
+- `license_core_ed25519_verify` — build-time integrity invariant (`build.rs:28`); not a runtime capability.
+
+Removed/renamed per codex code-grounded review:
+- Renamed `license_core_provider_heartbeat` → `license_pro_revocation_polling` AND moved Free→Pro — this is a networked Pro capability (LicenseSeat polling for revocations); Free runs offline-only, so the gate is meaningfully tier-axial only at Pro.
+- Deferred `license_pro_quota_runtime_downgrade` to v1.1 backlog — codex ⚠ runtime does not visibly propagate license refreshes into `FeatureGate::update_state`; downgrade is not fully enforced.
+
+Retained `license_pro_offline_grace` as Pro v1 — Free has no polling so offline grace is moot/automatic; only meaningfully toggleable for Pro tiers (cached license validity duration during backend unreachability). This is the only non-paradoxical license-system capability worth gating today.
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
-| `license_core_facade_entitlement` | F | v1 | Point-in-time `FeatureGate` + `arc_swap` entitlement check |
-| `license_core_policy_resolver` | F | v1 | Signed PolicyDocument parsing |
-| `license_core_ed25519_verify` | F | v1 | Ed25519 signature verification |
-| `license_core_provider_heartbeat` | F | v1 | Background polling for revocations |
-| `license_pro_offline_grace` | P | v1 | Configurable offline grace period during network failure (Risk #31 mitigation) |
-| `license_pro_quota_runtime_downgrade` | P | **v1.1** | Mid-session downgrade enforcement (Risk #32 fix) |
+| `license_pro_revocation_polling` | P | v1 | LicenseSeat backend polling for revocations (renamed from `license_core_provider_heartbeat`; tier shifted Free→Pro: Free runs offline-only with embedded license, polling is a Pro networked capability) |
+| `license_pro_offline_grace` | P | v1 | Configurable offline grace period during backend unreachability (Risk #31 mitigation; meaningful only for Pro since only Pro polls) |
+
+**Note on dropped license-meta keys:** the spur-license crate's components (entitlement facade, policy resolver, ed25519 verifier, provider heartbeat) are documented as system invariants in `docs/architecture.md` and the spec body above. They are NOT in the FeatureKey registry because they are always-on integrity infrastructure, not toggleable runtime gates.
 
 ### 4.12 `spur-blob-store` (Outcome storage — 4 keys)
 
@@ -341,7 +364,7 @@ Gemini's "drop all CLI keys as routing facade" critique rejected: keeping CLI as
 
 Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-core/src/skills/`) but are listed in their own row below for grep-discoverability; they're counted in the Skills row, not double-counted under spur-core.
 
-**Revised 2026-04-26 (Wave 5 design-review pass).** Total **v1 registry** keys reduced from 135 to **123** after Wave 5 rationalization: 12 keys deferred to v1.1/v2 backlog because their capability is vaporware (no implementation), lives in a different crate, or duplicates an already-merged key. See **§4.16 Deferred-keys backlog** below for the explicit deferred list. Counts below show only what's in the v1 Plan A registry (deferred keys not counted).
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** Total **v1 registry** keys reduced from 123 to **107** after Wave 6 rationalization (135 → 123 → 107 across Waves 5+6). Core principle that drove Wave 6 cuts: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities only.* Always-on infrastructure, security baselines, and tightly-coupled-to-other-key mechanisms violate the schema's purpose and were dropped. See **§4.16 Deferred-keys backlog** below for explicit deferred/dropped lists. Counts below show only what's in the v1 Plan A registry.
 
 | Crate / Subsystem | Free keys | Pro keys (v1) | Pro keys (v1.1) | Team-deferred |
 |---|---|---|---|---|
@@ -352,53 +375,73 @@ Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-c
 | `spur-tui` | 10 | 0 | 0 | 0 |
 | `spur-cli` | 9 | 0 | 0 | 0 |
 | `spur-pm` | 4 | 1 | 0 | 0 |
-| `spur-cost` | 3 | 2 | 1 | 0 |
-| `spur-context` | 0 | 5 | 0 | 0 |
-| `spur-worktree` | 2 | 2 | 1 | 0 |
-| `spur-bot` | 0 | 6 | 0 | 1 |
-| `spur-license` | 4 | 1 | 1 | 0 |
+| `spur-cost` | 2 | 1 | 0 | 0 |
+| `spur-context` | 0 | 3 | 0 | 0 |
+| `spur-worktree` | 2 | 0 | 0 | 0 |
+| `spur-bot` | 0 | 3 | 0 | 0 |
+| `spur-license` | 0 | 2 | 0 | 0 |
 | `spur-blob-store` | 2 | 2 | 0 | 0 |
 | `spur-interactive` | 3 | 0 | 0 | 0 |
 | Notifications (cross-crate) | 1 | 0 | 1 | 0 |
-| **Total** | **78** | **35** | **9** | **1** |
+| **Total** | **73** | **28** | **6** | **0** |
 
-**Total v1 atomic feature keys: 123** (78 + 35 + 9 + 1) — was 135 before Wave 5 rationalization. The 12-key reduction reflects (a) 5 keys folded into already-merged spur-mcp keys (signal_watcher/auto_merge dedup + github_auto goes to mcp); (b) 4 keys deferred to v1.1 (trace_source_react + 2 trial CLI commands + 1 mcp_pro_pr_auto follow-up); (c) 4 keys deferred to v2 (vaporware: linear_sync, plane_sync, custom_keybindings, pm_team_webhooks); offset by (d) +1 key relocated (`tui_pro_telegram_bot_solo` → `bot_pro_telegram_solo`).
+**Total v1 atomic feature keys: 107** (73 + 28 + 6 + 0) — was 123 post-Wave-5, 135 before Wave 5. Wave 6 net reduction of 16 keys reflects: (a) 9 keys dropped as tightly-coupled mechanism / always-on integrity infrastructure (cost_ingestion_pipeline, cost_sqlite_wal_mode, ctx_async_engine, worktree_artifact_resolver, bot_runtime, bot_runtime_render, bot_callback_validation, license_facade_entitlement, license_policy_resolver, license_ed25519_verify); (b) 4 keys deferred to v1.1 (cost_budget_caps, ctx_live_mode, worktree_git_blob_store, license_quota_runtime_downgrade); (c) 3 keys deferred to v2 (worktree_custom_policies, bot_team_multi_chat); offset by (d) tier shift on worktree_orphan_cleanup Pro→Free and license_revocation_polling Free→Pro.
 
-**Pro v1 launch arsenal: 35 features** organized into 5 ★ headline triggers + 30 supporting depth capabilities.
+The registry naturally lands close to the original ~110 target. The drop reflects that the original spec conflated *runtime gate dispatch* (this registry's purpose) with *system manifest documentation* (which lives in this spec body and `docs/architecture.md`).
 
-**Pro v1.1 roadmap: 9 features in v1 registry** (deferred-status flag) + 5 backlog items in §4.16 below = 14 v1.1 candidates total, target Q3 2026.
+**Pro v1 launch arsenal: 28 features** organized into 5 ★ headline triggers + 23 supporting depth capabilities.
 
-### 4.16 Deferred-keys backlog (Wave 5 design-review pass)
+**Pro v1.1 roadmap: 6 features in v1 registry** (deferred-status flag) + 9 backlog items in §4.16 below = 15 v1.1 candidates total, target Q3 2026.
 
-The following keys were proposed in earlier drafts but deferred to v1.1 or v2 after the Wave 5 4-reviewer judge synthesis. Documented here as a single source of truth so future tier-plan or Plan A follow-up authors don't reinvent them.
+### 4.16 Deferred-keys backlog (Wave 5 + Wave 6 design-review passes)
+
+The following keys were proposed in earlier drafts but deferred to v1.1 or v2, or dropped entirely, after multi-reviewer judge synthesis (4-reviewer pattern: kimi mechanical / codex code-grounded / claude-code consistency / gemini design-smells; judge synthesizes via L9 first-principles MCTS). Documented here as a single source of truth so future tier-plan or Plan A follow-up authors don't reinvent them.
 
 #### v1.1 backlog (will land when implementation exists)
 
-| Original key | Replacement | Reason |
-|---|---|---|
-| `tui_pro_telegram_bot_solo` | → `bot_pro_telegram_solo` (now in §4.10) | Gate point belongs in spur-bot crate, not spur-tui (codex code-grounded). |
-| `tui_pro_trace_source_react` | (later) | Palette `TraceSource` is explicitly `// TODO` deferred in `app.rs:430,458,470` — no active wiring. |
-| `cli_core_command_upgrade_trial` | `cli_core_upgrade_trial` (later) | No `Commands::Upgrade` in CLI yet. Lands with trial implementation per §6.2. |
-| `cli_core_command_upgrade_pro` | `cli_core_upgrade_pro` (later) | No Stripe/browser checkout command yet. |
-| `pm_pro_github_auto` | `mcp_pro_pr_auto` (later) | Auto-PR-on-success lives in `crates/spur-mcp/src/plan/reconciler.rs:623`, not spur-pm. |
+| Original key | Replacement | Reason | Wave |
+|---|---|---|---|
+| `tui_pro_telegram_bot_solo` | → `bot_pro_telegram_solo` (now in §4.10) | Gate point belongs in spur-bot crate, not spur-tui (codex code-grounded). | 5 |
+| `tui_pro_trace_source_react` | (later) | Palette `TraceSource` is explicitly `// TODO` deferred in `app.rs:430,458,470` — no active wiring. | 5 |
+| `cli_core_command_upgrade_trial` | `cli_core_upgrade_trial` (later) | No `Commands::Upgrade` in CLI yet. Lands with trial implementation per §6.2. | 5 |
+| `cli_core_command_upgrade_pro` | `cli_core_upgrade_pro` (later) | No Stripe/browser checkout command yet. | 5 |
+| `pm_pro_github_auto` | `mcp_pro_pr_auto` (later) | Auto-PR-on-success lives in `crates/spur-mcp/src/plan/reconciler.rs:623`, not spur-pm. | 5 |
+| `cost_pro_budget_caps` | (later, retains name) | Tracker is observational only at `crates/spur-cost/src/tracker.rs:33,70`; no spawn/runtime enforcement. Lands with hard budget enforcement (Risk #17). | 6 |
+| `ctx_pro_live_mode` | (later, retains name) | Backend APIs exist (`LiveSessionTracker` at `crates/spur-context/src/live.rs:15`) but no CLI/user surface. Lands with live-report CLI command. | 6 |
+| `worktree_pro_git_blob_store` | (later, retains name) | Orchestrator hardwires `GitBlobOutcomeStore` at `crates/spur-core/src/orchestrator.rs:963`; no Free/Pro backend selector exists. Lands with backend-routing capability. | 6 |
+| `license_pro_quota_runtime_downgrade` | (later, retains name) | Quotas dynamic in `FeatureGate::ArcSwap` but runtime does not propagate license refreshes into `update_state`. Lands with mid-session downgrade enforcement (Risk #32 fix). | 6 |
 
 #### v2 backlog (Team or speculative)
 
-| Original key | Reason |
-|---|---|
-| `tui_pro_custom_keybindings` | Vaporware — no configurable keymap subsystem; only fixed handlers + Vim/Emacs edit mode exist. |
-| `cli_team_command_workflow` | Phase 3 print-only stub (Team-only, was already v2). |
-| `pm_pro_linear_sync` | Vaporware — only `PmSource::Linear` enum value (`types.rs:9`); no adapter. |
-| `pm_pro_plane_sync` | Vaporware — same as Linear (`types.rs:10`); no adapter. |
-| `pm_team_webhooks` | Vaporware — no receiver implementation in spur-pm. |
+| Original key | Reason | Wave |
+|---|---|---|
+| `tui_pro_custom_keybindings` | Vaporware — no configurable keymap subsystem; only fixed handlers + Vim/Emacs edit mode exist. | 5 |
+| `cli_team_command_workflow` | Phase 3 print-only stub (Team-only, was already v2). | 5 |
+| `pm_pro_linear_sync` | Vaporware — only `PmSource::Linear` enum value (`types.rs:9`); no adapter. | 5 |
+| `pm_pro_plane_sync` | Vaporware — same as Linear (`types.rs:10`); no adapter. | 5 |
+| `pm_team_webhooks` | Vaporware — no receiver implementation in spur-pm. | 5 |
+| `worktree_pro_custom_policies` | Vaporware — only single cherry-pick path at `crates/spur-worktree/src/manager.rs:402`; no squash/rebase/octopus/naming-template surface. | 6 |
+| `bot_team_multi_chat` | Vaporware — single `operator_user_id` config at `crates/spur-acp/src/config/mod.rs:326`; router rejects all other users. Multi-chat requires multi-user RBAC. | 6 |
 
-#### Dropped (no replacement; capability redundant with already-merged keys)
+#### Dropped (capability is not gateable per first-principles analysis)
 
-| Original key | Reason |
-|---|---|
-| `cli_core_command_version` | Clap built-in `#[command(version)]` attribute, not a separate dispatch site to gate. |
-| `pm_pro_signal_watcher` | Duplicates already-merged `mcp_pro_signal_watcher_scope_drift` (Wave 4); real implementation is in spur-mcp. |
-| `pm_pro_auto_merge` | Covered by already-merged `mcp_pro_review` (Wave 4); auto-merge gating policies live in spur-mcp reconciler. |
+These keys were considered for v1 but rejected on principle: they describe always-on infrastructure, security baselines, or tightly-coupled mechanism that cannot meaningfully be toggled by a runtime FeatureGate. Documented as system invariants in spec body and `docs/architecture.md` instead.
+
+| Original key | Drop reason | Wave |
+|---|---|---|
+| `cli_core_command_version` | Clap built-in `#[command(version)]` attribute, not a separate dispatch site to gate. | 5 |
+| `pm_pro_signal_watcher` | Duplicates already-merged `mcp_pro_signal_watcher_scope_drift` (Wave 4); real implementation is in spur-mcp. | 5 |
+| `pm_pro_auto_merge` | Covered by already-merged `mcp_pro_review` (Wave 4); auto-merge gating policies live in spur-mcp reconciler. | 5 |
+| `cost_core_ingestion_pipeline` | Always-coupled prerequisite to all cost capabilities (no ingestion = no `pricing_registry`/`session_display`); not independently gateable. Codex confirmed code is JSONL-only, not ACP, so original description was inaccurate. | 6 |
+| `cost_pro_sqlite_wal_mode` | Codex ❌ NOT IMPLEMENTED. If implemented, would be a database-correctness invariant (Risk #29 mitigation) belonging to Free per safety/liveness precedent — never a Pro upsell. | 6 |
+| `ctx_pro_async_engine` | Codex ⚠ no production callers found for `AsyncEngine` at `crates/spur-context/src/async_engine.rs:31`. Pure threading infrastructure with no user-visible boundary. | 6 |
+| `worktree_core_artifact_resolver` | Always-on for system to function (delegation outcomes can't be returned without artifact lookup); not independently gateable. | 6 |
+| `bot_pro_runtime` | Always-coupled to `bot_pro_telegram_solo` (no telegram bot without long-poll loop). Folded under umbrella key. | 6 |
+| `bot_pro_runtime_render` | Always-coupled to runtime; "raw text mode" telegram bot is degenerate UX, not a real tier axis. | 6 |
+| `bot_pro_callback_validation` | Security invariant (analogous to `license_core_ed25519_verify`); never a Pro upsell. Disabling = exploit (any user could replay any callback). | 6 |
+| `license_core_facade_entitlement` | **Bootstrap paradox** — IS the gating mechanism (`FeatureGate::has` at `crates/spur-license/src/gate.rs:40`); cannot meaningfully gate itself. | 6 |
+| `license_core_policy_resolver` | **Bootstrap paradox** — must run to load ANY policy (including one that disables it). | 6 |
+| `license_core_ed25519_verify` | Build-time integrity invariant (`crates/spur-license/build.rs:28`); not a runtime capability that can be toggled per license. | 6 |
 
 ---
 

@@ -1173,9 +1173,15 @@ Parser arms:
 
 ---
 
-## Task 16: Add spur-cost keys (6)
+## Task 16: Add spur-cost keys (3)
 
-Per spec §4.7: 3 Free + 3 Pro.
+Per spec §4.7 (revised 2026-04-27): 2 Free + 1 Pro.
+
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 6 → 3 keys per 4-reviewer judge synthesis:
+- Renamed `cost_core_basic_display` → `cost_core_session_display` (claude-code: drop `_basic_` orphan suffix; codex: scoped to actual `today_summary` ledger).
+- Removed `cost_core_ingestion_pipeline` — always-coupled prerequisite to all cost capabilities; not independently gateable. Codex confirmed code is JSONL-only (not ACP).
+- Removed `cost_pro_sqlite_wal_mode` — codex ❌ NOT IMPLEMENTED. If implemented, would be database-correctness baseline (Risk #29) for Free per Wave 4 safety/liveness precedent, not a Pro upsell.
+- Deferred `cost_pro_budget_caps` to v1.1 backlog — codex ❌ no spawn/runtime enforcement.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1183,12 +1189,9 @@ Per spec §4.7: 3 Free + 3 Pro.
     #[test]
     fn spur_cost_keys_registered() {
         for s in &[
-            "cost_core_basic_display",
+            "cost_core_session_display",
             "cost_core_pricing_registry",
-            "cost_core_ingestion_pipeline",
             "cost_pro_per_project_tracking",
-            "cost_pro_sqlite_wal_mode",
-            "cost_pro_budget_caps",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -1199,41 +1202,36 @@ Per spec §4.7: 3 Free + 3 Pro.
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-cost (6: 3 Free + 3 Pro) ---
-    pub const COST_CORE_BASIC_DISPLAY: Self = Self("cost_core_basic_display");
+    // --- spur-cost (3) ---
+    pub const COST_CORE_SESSION_DISPLAY: Self = Self("cost_core_session_display");
     pub const COST_CORE_PRICING_REGISTRY: Self = Self("cost_core_pricing_registry");
-    pub const COST_CORE_INGESTION_PIPELINE: Self = Self("cost_core_ingestion_pipeline");
     pub const COST_PRO_PER_PROJECT_TRACKING: Self = Self("cost_pro_per_project_tracking");
-    pub const COST_PRO_SQLITE_WAL_MODE: Self = Self("cost_pro_sqlite_wal_mode");
-    pub const COST_PRO_BUDGET_CAPS: Self = Self("cost_pro_budget_caps");
 ```
 
 Parser arms:
 
 ```rust
         // spur-cost
-        } else if bytes_eq(b, b"cost_core_basic_display") {
-            Some(Self::COST_CORE_BASIC_DISPLAY)
+        } else if bytes_eq(b, b"cost_core_session_display") {
+            Some(Self::COST_CORE_SESSION_DISPLAY)
         } else if bytes_eq(b, b"cost_core_pricing_registry") {
             Some(Self::COST_CORE_PRICING_REGISTRY)
-        } else if bytes_eq(b, b"cost_core_ingestion_pipeline") {
-            Some(Self::COST_CORE_INGESTION_PIPELINE)
         } else if bytes_eq(b, b"cost_pro_per_project_tracking") {
             Some(Self::COST_PRO_PER_PROJECT_TRACKING)
-        } else if bytes_eq(b, b"cost_pro_sqlite_wal_mode") {
-            Some(Self::COST_PRO_SQLITE_WAL_MODE)
-        } else if bytes_eq(b, b"cost_pro_budget_caps") {
-            Some(Self::COST_PRO_BUDGET_CAPS)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-cost keys (6) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-cost keys (3) for tier revamp Plan A`
 
 ---
 
-## Task 17: Add spur-context keys (5)
+## Task 17: Add spur-context keys (3)
 
-Per spec §4.8: all Pro.
+Per spec §4.8 (revised 2026-04-27): 3 Pro.
+
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 5 → 3 keys per 4-reviewer judge synthesis:
+- Removed `ctx_pro_async_engine` — codex ⚠ no production callers found for `AsyncEngine`. Pure threading infrastructure with no user-visible boundary. Drop, do not defer.
+- Deferred `ctx_pro_live_mode` to v1.1 backlog — codex ⚠ APIs exist but no CLI/user surface; gate has no enforcement point.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1242,8 +1240,6 @@ Per spec §4.8: all Pro.
     fn spur_context_keys_registered() {
         for s in &[
             "ctx_pro_duckdb_engine",
-            "ctx_pro_async_engine",
-            "ctx_pro_live_mode",
             "ctx_pro_daily_report",
             "ctx_pro_weekly_report",
         ] {
@@ -1256,10 +1252,8 @@ Per spec §4.8: all Pro.
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-context (5: all Pro) ---
+    // --- spur-context (3) ---
     pub const CTX_PRO_DUCKDB_ENGINE: Self = Self("ctx_pro_duckdb_engine");
-    pub const CTX_PRO_ASYNC_ENGINE: Self = Self("ctx_pro_async_engine");
-    pub const CTX_PRO_LIVE_MODE: Self = Self("ctx_pro_live_mode");
     pub const CTX_PRO_DAILY_REPORT: Self = Self("ctx_pro_daily_report");
     pub const CTX_PRO_WEEKLY_REPORT: Self = Self("ctx_pro_weekly_report");
 ```
@@ -1270,10 +1264,6 @@ Parser arms:
         // spur-context
         } else if bytes_eq(b, b"ctx_pro_duckdb_engine") {
             Some(Self::CTX_PRO_DUCKDB_ENGINE)
-        } else if bytes_eq(b, b"ctx_pro_async_engine") {
-            Some(Self::CTX_PRO_ASYNC_ENGINE)
-        } else if bytes_eq(b, b"ctx_pro_live_mode") {
-            Some(Self::CTX_PRO_LIVE_MODE)
         } else if bytes_eq(b, b"ctx_pro_daily_report") {
             Some(Self::CTX_PRO_DAILY_REPORT)
         } else if bytes_eq(b, b"ctx_pro_weekly_report") {
@@ -1281,13 +1271,19 @@ Parser arms:
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-context keys (5) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-context keys (3) for tier revamp Plan A`
 
 ---
 
-## Task 18: Add spur-worktree keys (5)
+## Task 18: Add spur-worktree keys (2)
 
-Per spec §4.9: 2 Free + 3 Pro.
+Per spec §4.9 (revised 2026-04-27): 2 Free.
+
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 5 → 2 keys per 4-reviewer judge synthesis:
+- Removed `worktree_core_artifact_resolver` — always-on for system to function (delegation outcomes can't be returned without artifact lookup); not independently gateable.
+- Renamed `worktree_pro_cleanup_orphans` → `worktree_core_orphan_cleanup` AND moved Pro→Free (claude-code: verb→noun convention; codex confirmed code exists at `manager.rs:539` + `worktree_authority.rs:99`; Wave 4 safety/liveness precedent: garbage collection is a correctness invariant, never a paywall — analogous to Postgres VACUUM, RocksDB compaction).
+- Deferred `worktree_pro_git_blob_store` to v1.1 backlog — codex ⚠ orchestrator hardwires GitBlob; no Free/Pro selector exists.
+- Deferred `worktree_pro_custom_policies` to v1.1 backlog — codex ❌ only single cherry-pick path; vaporware.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1296,10 +1292,7 @@ Per spec §4.9: 2 Free + 3 Pro.
     fn spur_worktree_keys_registered() {
         for s in &[
             "worktree_core_isolation",
-            "worktree_core_artifact_resolver",
-            "worktree_pro_git_blob_store",
-            "worktree_pro_custom_policies",
-            "worktree_pro_cleanup_orphans",
+            "worktree_core_orphan_cleanup",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -1310,12 +1303,9 @@ Per spec §4.9: 2 Free + 3 Pro.
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-worktree (5: 2 Free + 3 Pro) ---
+    // --- spur-worktree (2) ---
     pub const WORKTREE_CORE_ISOLATION: Self = Self("worktree_core_isolation");
-    pub const WORKTREE_CORE_ARTIFACT_RESOLVER: Self = Self("worktree_core_artifact_resolver");
-    pub const WORKTREE_PRO_GIT_BLOB_STORE: Self = Self("worktree_pro_git_blob_store");
-    pub const WORKTREE_PRO_CUSTOM_POLICIES: Self = Self("worktree_pro_custom_policies");
-    pub const WORKTREE_PRO_CLEANUP_ORPHANS: Self = Self("worktree_pro_cleanup_orphans");
+    pub const WORKTREE_CORE_ORPHAN_CLEANUP: Self = Self("worktree_core_orphan_cleanup");
 ```
 
 Parser arms:
@@ -1324,26 +1314,28 @@ Parser arms:
         // spur-worktree
         } else if bytes_eq(b, b"worktree_core_isolation") {
             Some(Self::WORKTREE_CORE_ISOLATION)
-        } else if bytes_eq(b, b"worktree_core_artifact_resolver") {
-            Some(Self::WORKTREE_CORE_ARTIFACT_RESOLVER)
-        } else if bytes_eq(b, b"worktree_pro_git_blob_store") {
-            Some(Self::WORKTREE_PRO_GIT_BLOB_STORE)
-        } else if bytes_eq(b, b"worktree_pro_custom_policies") {
-            Some(Self::WORKTREE_PRO_CUSTOM_POLICIES)
-        } else if bytes_eq(b, b"worktree_pro_cleanup_orphans") {
-            Some(Self::WORKTREE_PRO_CLEANUP_ORPHANS)
+        } else if bytes_eq(b, b"worktree_core_orphan_cleanup") {
+            Some(Self::WORKTREE_CORE_ORPHAN_CLEANUP)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-worktree keys (5) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-worktree keys (2) for tier revamp Plan A`
 
 ---
 
-## Task 19: Add spur-bot keys (7)
+## Task 19: Add spur-bot keys (3)
 
-Per spec §4.10 (revised 2026-04-26): 6 Pro + 1 Team.
+Per spec §4.10 (revised 2026-04-27): 3 Pro.
 
-**Revised 2026-04-26 (Wave 5 design-review pass).** Added `bot_pro_telegram_solo` (relocated from spur-tui where it was `tui_pro_telegram_bot_solo`). Per codex code-grounded review: gate point is `Commands::Bot` activation (`crates/spur-cli/src/main.rs:348`) / `run_telegram_bot` (`crates/spur-bot/src/telegram/mod.rs:9`), with single-operator filter at `router.rs:25` — gating in spur-tui would let users bypass via `spur bot ...` invocation.
+**Revised 2026-04-26 (Wave 5).** Added `bot_pro_telegram_solo` (relocated from spur-tui §4.4); per codex code-grounded review the gate point is `Commands::Bot` (`crates/spur-cli/src/main.rs:591`) / `run_telegram_bot` (`crates/spur-bot/src/telegram/mod.rs:9`), with single-operator filter at `router.rs:25`.
+
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 7 → 3 keys per 4-reviewer judge synthesis. Core principle: bot sub-keys must be *independently business-toggleable*, not just real boundaries in code:
+- Removed `bot_pro_runtime` — always-coupled to telegram_solo (no telegram bot without long-poll loop). Folded under umbrella.
+- Removed `bot_pro_runtime_render` — always-coupled (raw text mode is degenerate UX, not a tier).
+- Removed `bot_pro_callback_validation` — security invariant (analogous to dropped `license_core_ed25519_verify`); never a Pro upsell.
+- Deferred `bot_team_multi_chat` to v2 backlog — codex ❌ no multi-user code.
+
+Retained the 3 keys with plausible business tier axes: telegram_solo (umbrella), thread_registry (single-thread vs multi-thread bots), inline_review (passive notify-only vs interactive review bots).
 
 - [ ] **Step 1: Write failing test**
 
@@ -1352,12 +1344,8 @@ Per spec §4.10 (revised 2026-04-26): 6 Pro + 1 Team.
     fn spur_bot_keys_registered() {
         for s in &[
             "bot_pro_telegram_solo",
-            "bot_pro_runtime",
             "bot_pro_thread_registry",
-            "bot_pro_runtime_render",
-            "bot_pro_callback_validation",
             "bot_pro_inline_review",
-            "bot_team_multi_chat",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -1368,14 +1356,10 @@ Per spec §4.10 (revised 2026-04-26): 6 Pro + 1 Team.
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-bot (7: 6 Pro + 1 Team) ---
+    // --- spur-bot (3) ---
     pub const BOT_PRO_TELEGRAM_SOLO: Self = Self("bot_pro_telegram_solo");
-    pub const BOT_PRO_RUNTIME: Self = Self("bot_pro_runtime");
     pub const BOT_PRO_THREAD_REGISTRY: Self = Self("bot_pro_thread_registry");
-    pub const BOT_PRO_RUNTIME_RENDER: Self = Self("bot_pro_runtime_render");
-    pub const BOT_PRO_CALLBACK_VALIDATION: Self = Self("bot_pro_callback_validation");
     pub const BOT_PRO_INLINE_REVIEW: Self = Self("bot_pro_inline_review");
-    pub const BOT_TEAM_MULTI_CHAT: Self = Self("bot_team_multi_chat");
 ```
 
 Parser arms:
@@ -1384,28 +1368,35 @@ Parser arms:
         // spur-bot
         } else if bytes_eq(b, b"bot_pro_telegram_solo") {
             Some(Self::BOT_PRO_TELEGRAM_SOLO)
-        } else if bytes_eq(b, b"bot_pro_runtime") {
-            Some(Self::BOT_PRO_RUNTIME)
         } else if bytes_eq(b, b"bot_pro_thread_registry") {
             Some(Self::BOT_PRO_THREAD_REGISTRY)
-        } else if bytes_eq(b, b"bot_pro_runtime_render") {
-            Some(Self::BOT_PRO_RUNTIME_RENDER)
-        } else if bytes_eq(b, b"bot_pro_callback_validation") {
-            Some(Self::BOT_PRO_CALLBACK_VALIDATION)
         } else if bytes_eq(b, b"bot_pro_inline_review") {
             Some(Self::BOT_PRO_INLINE_REVIEW)
-        } else if bytes_eq(b, b"bot_team_multi_chat") {
-            Some(Self::BOT_TEAM_MULTI_CHAT)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-bot keys (7) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-bot keys (3) for tier revamp Plan A`
 
 ---
 
-## Task 20: Add spur-license meta keys (6)
+## Task 20: Add spur-license meta keys (2)
 
-Per spec §4.11: 4 Free + 2 Pro. Self-referential — these gate license-system features.
+Per spec §4.11 (revised 2026-04-27): 2 Pro.
+
+**Revised 2026-04-27 (Wave 6 L9-Rust+data-engineer first-principles pass).** 6 → 2 keys per 4-reviewer judge synthesis. The original 6-key set conflated *runtime gating dispatch* (this registry's purpose) with *system manifest documentation* (which lives in spec body / `docs/architecture.md`).
+
+Removed via **Bootstrap Paradox** principle (gemini + codex aligned):
+- `license_core_facade_entitlement` — IS the gating mechanism (`FeatureGate::has`); cannot gate itself.
+- `license_core_policy_resolver` — must run for ANY policy (including one that disables it) to load.
+- `license_core_ed25519_verify` — build-time integrity invariant (`build.rs:28`); not a runtime capability.
+
+Renamed + tier-shifted:
+- `license_core_provider_heartbeat` → `license_pro_revocation_polling` (Free→Pro): networked Pro capability; Free runs offline-only.
+
+Deferred to v1.1 backlog:
+- `license_pro_quota_runtime_downgrade` — codex ⚠ runtime does not propagate license refreshes into `FeatureGate::update_state`; not enforced.
+
+Retained as the only non-paradoxical license-system gate: `license_pro_offline_grace` (Pro-only by nature: Free has no polling so offline grace is moot/automatic).
 
 - [ ] **Step 1: Write failing test**
 
@@ -1413,12 +1404,8 @@ Per spec §4.11: 4 Free + 2 Pro. Self-referential — these gate license-system 
     #[test]
     fn spur_license_keys_registered() {
         for s in &[
-            "license_core_facade_entitlement",
-            "license_core_policy_resolver",
-            "license_core_ed25519_verify",
-            "license_core_provider_heartbeat",
+            "license_pro_revocation_polling",
             "license_pro_offline_grace",
-            "license_pro_quota_runtime_downgrade",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -1429,35 +1416,23 @@ Per spec §4.11: 4 Free + 2 Pro. Self-referential — these gate license-system 
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-license meta (6: 4 Free + 2 Pro) ---
-    pub const LICENSE_CORE_FACADE_ENTITLEMENT: Self = Self("license_core_facade_entitlement");
-    pub const LICENSE_CORE_POLICY_RESOLVER: Self = Self("license_core_policy_resolver");
-    pub const LICENSE_CORE_ED25519_VERIFY: Self = Self("license_core_ed25519_verify");
-    pub const LICENSE_CORE_PROVIDER_HEARTBEAT: Self = Self("license_core_provider_heartbeat");
+    // --- spur-license meta (2) ---
+    pub const LICENSE_PRO_REVOCATION_POLLING: Self = Self("license_pro_revocation_polling");
     pub const LICENSE_PRO_OFFLINE_GRACE: Self = Self("license_pro_offline_grace");
-    pub const LICENSE_PRO_QUOTA_RUNTIME_DOWNGRADE: Self = Self("license_pro_quota_runtime_downgrade");
 ```
 
 Parser arms:
 
 ```rust
         // spur-license meta
-        } else if bytes_eq(b, b"license_core_facade_entitlement") {
-            Some(Self::LICENSE_CORE_FACADE_ENTITLEMENT)
-        } else if bytes_eq(b, b"license_core_policy_resolver") {
-            Some(Self::LICENSE_CORE_POLICY_RESOLVER)
-        } else if bytes_eq(b, b"license_core_ed25519_verify") {
-            Some(Self::LICENSE_CORE_ED25519_VERIFY)
-        } else if bytes_eq(b, b"license_core_provider_heartbeat") {
-            Some(Self::LICENSE_CORE_PROVIDER_HEARTBEAT)
+        } else if bytes_eq(b, b"license_pro_revocation_polling") {
+            Some(Self::LICENSE_PRO_REVOCATION_POLLING)
         } else if bytes_eq(b, b"license_pro_offline_grace") {
             Some(Self::LICENSE_PRO_OFFLINE_GRACE)
-        } else if bytes_eq(b, b"license_pro_quota_runtime_downgrade") {
-            Some(Self::LICENSE_PRO_QUOTA_RUNTIME_DOWNGRADE)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-license meta keys (6) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-license meta keys (2) for tier revamp Plan A`
 
 ---
 
@@ -1686,27 +1661,19 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
             "pm_core_beads_basic", "pm_core_browse",
             "pm_core_pr", "pm_core_beads_graph_adapter",
             "pm_pro_beads_advanced",
-            // spur-cost (6)
-            "cost_core_basic_display", "cost_core_pricing_registry",
-            "cost_core_ingestion_pipeline", "cost_pro_per_project_tracking",
-            "cost_pro_sqlite_wal_mode", "cost_pro_budget_caps",
-            // spur-context (5)
-            "ctx_pro_duckdb_engine", "ctx_pro_async_engine",
-            "ctx_pro_live_mode", "ctx_pro_daily_report",
+            // spur-cost (3) — revised Wave 6: renamed basic_display→session_display; dropped ingestion_pipeline (always-coupled prereq) + sqlite_wal_mode (NOT IMPLEMENTED + would be Free safety baseline); deferred budget_caps (no enforcement)
+            "cost_core_session_display", "cost_core_pricing_registry",
+            "cost_pro_per_project_tracking",
+            // spur-context (3) — revised Wave 6: dropped async_engine (no production callers); deferred live_mode (no CLI surface)
+            "ctx_pro_duckdb_engine", "ctx_pro_daily_report",
             "ctx_pro_weekly_report",
-            // spur-worktree (5)
-            "worktree_core_isolation", "worktree_core_artifact_resolver",
-            "worktree_pro_git_blob_store", "worktree_pro_custom_policies",
-            "worktree_pro_cleanup_orphans",
-            // spur-bot (7) — revised Wave 5: added bot_pro_telegram_solo (relocated from spur-tui)
-            "bot_pro_telegram_solo",
-            "bot_pro_runtime", "bot_pro_thread_registry",
-            "bot_pro_runtime_render", "bot_pro_callback_validation",
-            "bot_pro_inline_review", "bot_team_multi_chat",
-            // spur-license meta (6)
-            "license_core_facade_entitlement", "license_core_policy_resolver",
-            "license_core_ed25519_verify", "license_core_provider_heartbeat",
-            "license_pro_offline_grace", "license_pro_quota_runtime_downgrade",
+            // spur-worktree (2) — revised Wave 6: dropped artifact_resolver (always-on prereq); deferred git_blob_store + custom_policies; renamed cleanup_orphans→orphan_cleanup AND moved Pro→Free per Wave 4 safety/liveness precedent
+            "worktree_core_isolation", "worktree_core_orphan_cleanup",
+            // spur-bot (3) — revised Wave 6: dropped runtime + runtime_render + callback_validation (always-coupled mechanism / security baseline); deferred multi_chat
+            "bot_pro_telegram_solo", "bot_pro_thread_registry",
+            "bot_pro_inline_review",
+            // spur-license meta (2) — revised Wave 6: dropped facade_entitlement + policy_resolver + ed25519_verify (bootstrap paradox); renamed provider_heartbeat→revocation_polling AND moved Free→Pro; deferred quota_runtime_downgrade
+            "license_pro_revocation_polling", "license_pro_offline_grace",
             // spur-blob-store (4)
             "blob_core_memory_backend", "blob_core_fs_backend",
             "blob_pro_measured_backend", "blob_pro_delete_namespace",
@@ -1719,9 +1686,10 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
 
         assert_eq!(
             NEW_KEYS.len(),
-            123,
-            "Expected exactly 123 new tier-revamp v1 keys (was 135 pre-Wave-5; \
-             12 keys deferred to v1.1/v2 backlog per spec §4.16), got {}",
+            107,
+            "Expected exactly 107 new tier-revamp v1 keys (was 135 pre-Wave-5, \
+             123 post-Wave-5; Wave 6 net -16 keys: 9 dropped as always-on/coupled \
+             infrastructure + 4 deferred v1.1 + 3 deferred v2 per spec §4.16), got {}",
             NEW_KEYS.len()
         );
 
@@ -1740,13 +1708,13 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
 
 Run: `cargo test --package spur-license --lib policy::feature_key::tests::tier_revamp_v1_keys_roundtrip`
 
-Expected: PASS — all 123 v1 keys roundtrip correctly.
+Expected: PASS — all 107 v1 keys roundtrip correctly.
 
 - [ ] **Step 3: Run the full feature_key test suite**
 
 Run: `cargo test --package spur-license --lib policy::feature_key`
 
-Expected: ALL PASS — original 36-key tests + 21 new per-crate tests + comprehensive 123-key test + count guard.
+Expected: ALL PASS — original 36-key tests + 21 new per-crate tests + comprehensive 107-key test + count guard.
 
 - [ ] **Step 4: Run the full spur-license test suite**
 
