@@ -46,6 +46,8 @@ fn node(task_spec: &str) -> ExecutorNode {
         last_error: None,
         stream_buffer: VecDeque::new(),
         issue_id: None,
+        delegation_id: None,
+        peer_edges: Vec::new(),
     }
 }
 
