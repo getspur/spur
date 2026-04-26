@@ -1247,7 +1247,8 @@ impl Client for SpurAcpClientDynamic {
         cmd.args(&args.args)
             .current_dir(&cwd)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         for env_var in &args.env {
             cmd.env(&env_var.name, &env_var.value);
         }
