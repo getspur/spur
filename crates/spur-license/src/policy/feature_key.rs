@@ -88,7 +88,14 @@ impl FeatureKey {
     pub const ENABLE_COMPACTION_V2: Self = Self("enable_compaction_v2");
     pub const ENABLE_TELEMETRY: Self = Self("enable_telemetry");
 
-    // === Tier revamp v1 keys (post-2026-04-26) ===
+    // ============================================================
+    // === BOUNDARY: keys above this line are pre-tier-revamp ====
+    // === (legacy v0 policy still references them); keys below ==
+    // === this line are added by tier-revamp Plan A and become ==
+    // === active when Plan B ships the rewritten policy. ========
+    // ============================================================
+
+    // === Tier revamp v1 keys (post-2026-04-26, Wave-9 final shape: 64 keys) ===
 
     // --- spur-acp (7) — Wave 8: dropped 3 ghost adapters + merged degraded_nolock into advisory_lock ---
     pub const ACP_CORE_TRANSPORT_STDIO: Self = Self("acp_core_transport_stdio");
@@ -1037,5 +1044,115 @@ mod tests {
     #[test]
     fn spur_blob_store_keys_registered() {
         assert!(FeatureKey::from_known("blob_pro_namespace_deletion").is_some());
+    }
+
+    /// Task 24: Comprehensive roundtrip across every Wave-9-final v1 key.
+    /// Total: 64 new v1 keys (48 Free + 15 Pro v1 + 1 Pro v1.1 + 0 Team).
+    /// Plan A trajectory: 135 (initial) → 123 (Wave 5) → 107 (Wave 6) → 99 (Wave 7) →
+    /// 64 (Wave 8 consolidation) → 64 (Wave 9 tier-shifts; total unchanged).
+    #[test]
+    fn tier_revamp_v1_keys_roundtrip() {
+        const NEW_KEYS: &[&str] = &[
+            // spur-acp (7) — Wave 8 dropped 3 ghost adapters + merged degraded_nolock.
+            "acp_core_transport_stdio",
+            "acp_core_transport_socket",
+            "acp_core_adapter_claude_code",
+            "acp_core_adapter_codex",
+            "acp_core_adapter_gemini",
+            "acp_core_adapter_kiro",
+            "acp_core_session_attach_advisory_lock",
+            // spur-core: brain (2) — Wave 8 consolidated trio → brain_session.
+            "core_core_brain_session",
+            "core_core_brain_failover_manual_keystroke",
+            // spur-core: workers (2) — Wave 8 merged cancellable_semaphore.
+            "core_core_parallel_workers",
+            "core_pro_worker_heartbeat_watchdog",
+            // spur-core: event pipeline (1) — Wave 8 NEW umbrella.
+            "core_core_event_pipeline",
+            // spur-core: review (3) — Wave 8 umbrella + Wave 9 retry_config tier-shift.
+            "core_core_review",
+            "core_core_review_retry_config",
+            "core_pro_review_auto_approve",
+            // skills (2) — Wave 8 quartet → registry.
+            "skills_core_registry",
+            "skills_pro_custom",
+            // spur-core: peer mailbox (1) — Wave 8 trio → router.
+            "core_pro_peer_mailbox_router",
+            // spur-core: system events (1).
+            "core_core_permission_request_detection",
+            // spur-core: reliability & lifecycle (3).
+            "core_core_session_resume",
+            "core_pro_session_resume_event_replay",
+            "core_core_plan_persistence",
+            // spur-mcp (10) — Wave 8 merges + Wave 9 graph_tools tier-shift.
+            "mcp_core_server_dispatch",
+            "mcp_core_delegate",
+            "mcp_core_outcome_fetch",
+            "mcp_core_pm",
+            "mcp_core_pr",
+            "mcp_core_plan_ephemeral",
+            "mcp_core_graph_tools",
+            "mcp_pro_plan_durable",
+            "mcp_pro_signal_watcher_scope_drift",
+            "mcp_pro_review",
+            // spur-tui (7) — Wave 8 collapsed dashboard trio + drain absorbed.
+            "tui_core_view_dashboard",
+            "tui_core_view_session_detail",
+            "tui_core_view_plan_inspector",
+            "tui_core_view_palette_overlay",
+            "tui_core_view_issue_browser",
+            "tui_core_modal_collision_escape",
+            "tui_core_input_paste_as_atom",
+            // spur-cli (9) — KEEP_ATOMIC.
+            "cli_core_init",
+            "cli_core_agents",
+            "cli_core_sessions",
+            "cli_core_run",
+            "cli_core_exec",
+            "cli_core_tui",
+            "cli_core_cost",
+            "cli_core_connect",
+            "cli_core_license_activate",
+            // spur-pm (5) — KEEP_ATOMIC with prereq.
+            "pm_core_beads_basic",
+            "pm_core_browse",
+            "pm_core_pr",
+            "pm_core_beads_graph_adapter",
+            "pm_pro_beads_advanced",
+            // spur-cost (3) — KEEP_ATOMIC with pricing_registry prereq.
+            "cost_core_session_display",
+            "cost_core_pricing_registry",
+            "cost_pro_per_project_tracking",
+            // spur-context (1) — Wave 8 absorbed daily/weekly reports.
+            "ctx_pro_duckdb_engine",
+            // spur-worktree (2) — KEEP_ATOMIC with prereq.
+            "worktree_core_isolation",
+            "worktree_core_orphan_cleanup",
+            // spur-bot (2) — Wave 8 merged thread_registry.
+            "bot_pro_telegram_solo",
+            "bot_pro_inline_review",
+            // spur-license meta (2) — KEEP_ATOMIC with prereq.
+            "license_pro_revocation_polling",
+            "license_pro_offline_grace",
+            // spur-blob-store (1) — Wave 7 final.
+            "blob_pro_namespace_deletion",
+        ];
+
+        assert_eq!(
+            NEW_KEYS.len(),
+            64,
+            "Expected exactly 64 new tier-revamp v1 keys post-Wave-9; got {}. \
+             Trajectory: 135 → 123 (W5) → 107 (W6) → 99 (W7) → 64 (W8 consolidation) → 64 (W9 tier-shifts).",
+            NEW_KEYS.len()
+        );
+
+        let mut seen = std::collections::HashSet::new();
+        for s in NEW_KEYS {
+            let parsed = FeatureKey::from_known(s);
+            assert!(parsed.is_some(), "key {s:?} not parseable via from_known");
+            let key = parsed.unwrap();
+            assert_eq!(key.as_str(), *s, "as_str roundtrip mismatch for {s}");
+            assert!(seen.insert(*s), "duplicate key in test list: {s}");
+        }
     }
 }
