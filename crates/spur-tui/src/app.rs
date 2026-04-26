@@ -259,7 +259,7 @@ impl App {
     ) -> Self {
         Self::build_with_license_state(
             user_input_tx,
-            start_in_picker,
+            start_in_picker.then_some(None),
             config,
             license_state,
             landing,
@@ -283,16 +283,18 @@ impl App {
 
     fn build_with_license_state(
         user_input_tx: Option<mpsc::Sender<UserInput>>,
-        start_in_picker: bool,
+        start_in_picker_with_preselect: Option<Option<String>>,
         config: std::sync::Arc<spur_acp::SpurConfig>,
         license_state: LicenseStateEvent,
         landing: crate::landing::LandingDecision,
     ) -> Self {
         let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
         let metadata_store = SessionMetadataStore::load(&metadata_path);
+        let start_in_picker = start_in_picker_with_preselect.is_some();
 
-        let (current_view, session_picker) = if start_in_picker {
-            let mut picker = SessionPickerView::new();
+        let (current_view, session_picker) = if let Some(preselect) = start_in_picker_with_preselect
+        {
+            let mut picker = SessionPickerView::with_preselect(preselect);
             picker.set_metadata(metadata_store.metadata().clone());
             (ViewId::SessionPicker, Some(picker))
         } else {
@@ -2402,7 +2404,7 @@ pub async fn run_tui(
         event_rx,
         user_input_tx,
         perm_rx,
-        start_in_picker,
+        start_in_picker.then_some(None),
         std::sync::Arc::new(spur_acp::SpurConfig::default()),
         App::default_license_state("licensing not configured"),
         crate::landing::LandingDecision::ShowDashboard,
@@ -2414,15 +2416,15 @@ pub async fn run_tui_with_license(
     event_rx: broadcast::Receiver<SpurEvent>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     mut perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
-    start_in_picker: bool,
+    start_in_picker_with_preselect: Option<Option<String>>,
     config: std::sync::Arc<spur_acp::SpurConfig>,
     license_state: LicenseStateEvent,
     landing: crate::landing::LandingDecision,
 ) -> anyhow::Result<()> {
     let mut terminal = tui::setup()?;
-    let mut app = App::new_with_license(
+    let mut app = App::build_with_license_state(
         user_input_tx,
-        start_in_picker,
+        start_in_picker_with_preselect,
         config,
         license_state,
         landing,
@@ -2550,7 +2552,7 @@ pub async fn run_tui_with_config(
         event_rx,
         user_input_tx,
         perm_rx,
-        start_in_picker,
+        start_in_picker.then_some(None),
         config,
         App::default_license_state("licensing not configured"),
         crate::landing::LandingDecision::ShowDashboard,
