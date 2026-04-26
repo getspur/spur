@@ -114,10 +114,11 @@ impl FeatureKey {
     // --- spur-core: peer mailbox (1) — Wave 8: collapsed router+ledger+stranded_recon → router (constructor compile-coupled) ---
     pub const CORE_PRO_PEER_MAILBOX_ROUTER: Self = Self("core_pro_peer_mailbox_router");
 
-    // --- spur-core: review (3) — Wave 8 NEW umbrella: collapsed sink+timeout+retry → review; merged timeout_routing into auto_approve ---
+    // --- spur-core: review (3) — Wave 8: collapsed sink+timeout+retry → review; merged timeout_routing into auto_approve.
+    //     Wave 9: tier-shifted retry_config Pro→Free per "Free reliability baseline" precedent (max_review_retries config; backoff hard-coded).
     pub const CORE_CORE_REVIEW: Self = Self("core_core_review");
+    pub const CORE_CORE_REVIEW_RETRY_CONFIG: Self = Self("core_core_review_retry_config");
     pub const CORE_PRO_REVIEW_AUTO_APPROVE: Self = Self("core_pro_review_auto_approve");
-    pub const CORE_PRO_REVIEW_RETRY_CONFIG: Self = Self("core_pro_review_retry_config");
 
     // --- spur-core: system events (1) — Wave 8: deferred conflict + rate_limit (no production emitters); agent_notification absorbed by event_pipeline ---
     pub const CORE_CORE_PERMISSION_REQUEST_DETECTION: Self =
@@ -133,16 +134,17 @@ impl FeatureKey {
     pub const SKILLS_CORE_REGISTRY: Self = Self("skills_core_registry");
     pub const SKILLS_PRO_CUSTOM: Self = Self("skills_pro_custom");
 
-    // --- spur-mcp (10) — Wave 8: merged outcome_materializer into delegate, reconciler_journal_notify into plan_durable, mutation_executor into signal_watcher; deferred custom_tools to v1.1 ---
+    // --- spur-mcp (10) — Wave 8: merged outcome_materializer into delegate, reconciler_journal_notify into plan_durable, mutation_executor into signal_watcher; deferred custom_tools to v1.1.
+    //     Wave 9: tier-shifted graph_tools Pro→Free per "viral acquisition surface" rationale (raw JSON / Mermaid text output via `bv` graph passthrough).
     pub const MCP_CORE_SERVER_DISPATCH: Self = Self("mcp_core_server_dispatch");
     pub const MCP_CORE_DELEGATE: Self = Self("mcp_core_delegate");
     pub const MCP_CORE_OUTCOME_FETCH: Self = Self("mcp_core_outcome_fetch");
     pub const MCP_CORE_PM: Self = Self("mcp_core_pm");
     pub const MCP_CORE_PR: Self = Self("mcp_core_pr");
     pub const MCP_CORE_PLAN_EPHEMERAL: Self = Self("mcp_core_plan_ephemeral");
+    pub const MCP_CORE_GRAPH_TOOLS: Self = Self("mcp_core_graph_tools");
     pub const MCP_PRO_PLAN_DURABLE: Self = Self("mcp_pro_plan_durable");
     pub const MCP_PRO_SIGNAL_WATCHER_SCOPE_DRIFT: Self = Self("mcp_pro_signal_watcher_scope_drift");
-    pub const MCP_PRO_GRAPH_TOOLS: Self = Self("mcp_pro_graph_tools");
     pub const MCP_PRO_REVIEW: Self = Self("mcp_pro_review");
 
     // --- spur-tui (7) — Wave 8: collapsed dashboard+landing+composer → dashboard; notification_drain absorbed by event_pipeline ---
@@ -309,13 +311,13 @@ impl FeatureKey {
         // spur-core: peer mailbox
         } else if bytes_eq(b, b"core_pro_peer_mailbox_router") {
             Some(Self::CORE_PRO_PEER_MAILBOX_ROUTER)
-        // spur-core: review (Wave 8 NEW umbrella)
+        // spur-core: review (Wave 8 umbrella + Wave 9 retry_config tier-shift)
         } else if bytes_eq(b, b"core_core_review") {
             Some(Self::CORE_CORE_REVIEW)
+        } else if bytes_eq(b, b"core_core_review_retry_config") {
+            Some(Self::CORE_CORE_REVIEW_RETRY_CONFIG)
         } else if bytes_eq(b, b"core_pro_review_auto_approve") {
             Some(Self::CORE_PRO_REVIEW_AUTO_APPROVE)
-        } else if bytes_eq(b, b"core_pro_review_retry_config") {
-            Some(Self::CORE_PRO_REVIEW_RETRY_CONFIG)
         // spur-core: system events
         } else if bytes_eq(b, b"core_core_permission_request_detection") {
             Some(Self::CORE_CORE_PERMISSION_REQUEST_DETECTION)
@@ -344,12 +346,12 @@ impl FeatureKey {
             Some(Self::MCP_CORE_PR)
         } else if bytes_eq(b, b"mcp_core_plan_ephemeral") {
             Some(Self::MCP_CORE_PLAN_EPHEMERAL)
+        } else if bytes_eq(b, b"mcp_core_graph_tools") {
+            Some(Self::MCP_CORE_GRAPH_TOOLS)
         } else if bytes_eq(b, b"mcp_pro_plan_durable") {
             Some(Self::MCP_PRO_PLAN_DURABLE)
         } else if bytes_eq(b, b"mcp_pro_signal_watcher_scope_drift") {
             Some(Self::MCP_PRO_SIGNAL_WATCHER_SCOPE_DRIFT)
-        } else if bytes_eq(b, b"mcp_pro_graph_tools") {
-            Some(Self::MCP_PRO_GRAPH_TOOLS)
         } else if bytes_eq(b, b"mcp_pro_review") {
             Some(Self::MCP_PRO_REVIEW)
         // spur-tui
@@ -812,10 +814,11 @@ mod tests {
     fn spur_core_review_keys_registered() {
         // Wave 8 NEW umbrella: collapsed sink+timeout+retry → review.
         // Merged core_pro_review_timeout_routing into core_pro_review_auto_approve.
+        // Wave 9: tier-shifted retry_config Pro→Free (renamed core_pro→core_core).
         for s in &[
             "core_core_review",
+            "core_core_review_retry_config",
             "core_pro_review_auto_approve",
-            "core_pro_review_retry_config",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -824,10 +827,11 @@ mod tests {
             "core_core_review_timeout",
             "core_core_review_retry",
             "core_pro_review_timeout_routing",
+            "core_pro_review_retry_config", // Wave 9: renamed to core_core_*
         ] {
             assert!(
                 FeatureKey::from_known(dropped).is_none(),
-                "Wave-8 absorbed key {dropped} should not parse"
+                "Wave-8/9 absorbed/renamed key {dropped} should not parse"
             );
         }
     }
@@ -890,6 +894,7 @@ mod tests {
     fn spur_mcp_keys_registered() {
         // Wave 8: merged outcome_materializer→delegate, reconciler_journal_notify→plan_durable,
         // mutation_executor→signal_watcher; deferred custom_tools to v1.1.
+        // Wave 9: tier-shifted graph_tools Pro→Free (renamed mcp_pro→mcp_core).
         for s in &[
             "mcp_core_server_dispatch",
             "mcp_core_delegate",
@@ -897,9 +902,9 @@ mod tests {
             "mcp_core_pm",
             "mcp_core_pr",
             "mcp_core_plan_ephemeral",
+            "mcp_core_graph_tools",
             "mcp_pro_plan_durable",
             "mcp_pro_signal_watcher_scope_drift",
-            "mcp_pro_graph_tools",
             "mcp_pro_review",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
@@ -909,10 +914,11 @@ mod tests {
             "mcp_pro_reconciler_journal_notify",
             "mcp_pro_mutation_executor",
             "mcp_pro_custom_tools",
+            "mcp_pro_graph_tools", // Wave 9: renamed to mcp_core_*
         ] {
             assert!(
                 FeatureKey::from_known(dropped).is_none(),
-                "Wave-8 absorbed/deferred key {dropped} should not parse"
+                "Wave-8/9 absorbed/renamed/deferred key {dropped} should not parse"
             );
         }
     }
