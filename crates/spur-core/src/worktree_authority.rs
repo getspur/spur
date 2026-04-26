@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use spur_acp::session_liveness::{SessionLivenessProbe, SessionLivenessProbeResult};
 use spur_acp::{session_liveness::SelfHeldSet, BrainSessionId};
+use spur_worktree::manager::parse_v2_branch;
+use tokio::process::Command;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct AuthorityConfig {
@@ -62,12 +66,9 @@ impl From<std::io::Error> for AuthorityError {
 }
 
 pub struct WorktreeAuthority {
-    #[allow(dead_code)] // wired up in Task 15 (sweep_once)
     repo_root: Arc<PathBuf>,
-    #[allow(dead_code)] // wired up in Task 15 (sweep_once)
     self_held: SelfHeldSet,
     config: AuthorityConfig,
-    #[allow(dead_code)] // wired up in Task 15 (sweep_once)
     last_seen_alive: tokio::sync::Mutex<HashMap<BrainSessionId, Instant>>,
     #[allow(dead_code)] // wired up in Task 15 (sweep_once) for SweepReport telemetry
     funnel: crate::event_funnel::FunnelHandle,
@@ -94,10 +95,160 @@ impl WorktreeAuthority {
     }
 }
 
+impl WorktreeAuthority {
+    pub async fn sweep_once(&self) -> Result<SweepReport, AuthorityError> {
+        let mut report = SweepReport::default();
+        let entries = self.enumerate_worktrees().await?;
+        let now = Instant::now();
+        let mut last_seen = self.last_seen_alive.lock().await;
+
+        for (path, branch) in entries {
+            if !branch.starts_with("refs/heads/spur/worker/v2/") {
+                report.skipped_unknown_owner += 1;
+                continue;
+            }
+            let trimmed = branch.trim_start_matches("refs/heads/");
+            let owner = match parse_v2_branch(trimmed) {
+                Some(o) => o,
+                None => {
+                    report.skipped_unknown_owner += 1;
+                    continue;
+                }
+            };
+            report.probed += 1;
+            let result = SessionLivenessProbe::probe(
+                &self.repo_root,
+                &owner.brain_session_id,
+                &self.self_held,
+            );
+            match result {
+                SessionLivenessProbeResult::Self_ => {
+                    last_seen.insert(owner.brain_session_id.clone(), now);
+                    report.skipped_self += 1;
+                }
+                SessionLivenessProbeResult::Live => {
+                    last_seen.insert(owner.brain_session_id.clone(), now);
+                    report.skipped_live += 1;
+                }
+                SessionLivenessProbeResult::FsUnsafe => {
+                    report.skipped_fs_unsafe += 1;
+                }
+                SessionLivenessProbeResult::Missing => {
+                    if self.is_quarantine_expired(&owner.brain_session_id, now, &last_seen) {
+                        if let Err(e) = self.sweep_one(&path, trimmed).await {
+                            warn!(error=%e, path=%path.display(), "sweep_one (missing lock) failed");
+                            report.remove_failures += 1;
+                        } else {
+                            report.swept += 1;
+                        }
+                    } else {
+                        report.skipped_quarantine += 1;
+                    }
+                }
+                SessionLivenessProbeResult::DeadAcquired(guard) => {
+                    if self.is_quarantine_expired(&owner.brain_session_id, now, &last_seen) {
+                        if let Err(e) = self.sweep_one(&path, trimmed).await {
+                            warn!(error=%e, path=%path.display(), "sweep_one failed");
+                            report.remove_failures += 1;
+                        } else {
+                            report.swept += 1;
+                        }
+                    } else {
+                        report.skipped_quarantine += 1;
+                    }
+                    drop(guard);
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    fn is_quarantine_expired(
+        &self,
+        brain: &BrainSessionId,
+        now: Instant,
+        last_seen: &HashMap<BrainSessionId, Instant>,
+    ) -> bool {
+        match last_seen.get(brain) {
+            Some(t) => now.duration_since(*t) >= self.config.quarantine_grace,
+            None => true,
+        }
+    }
+
+    async fn enumerate_worktrees(&self) -> Result<Vec<(PathBuf, String)>, AuthorityError> {
+        let out = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&*self.repo_root)
+            .output()
+            .await?;
+        if !out.status.success() {
+            return Err(AuthorityError::Git(
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut result = Vec::new();
+        let mut path: Option<PathBuf> = None;
+        let repo_root = tokio::fs::canonicalize(&*self.repo_root)
+            .await
+            .unwrap_or_else(|_| self.repo_root.as_ref().clone());
+        for line in stdout.lines().chain(std::iter::once("")) {
+            if line.is_empty() {
+                path = None;
+                continue;
+            }
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            }
+            if let Some(b) = line.strip_prefix("branch ") {
+                if let Some(p) = path.take() {
+                    let is_repo_root = tokio::fs::canonicalize(&p)
+                        .await
+                        .map(|canonical| canonical == repo_root)
+                        .unwrap_or_else(|_| p.as_path() == self.repo_root.as_ref().as_path());
+                    if !is_repo_root {
+                        result.push((p, b.to_string()));
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    async fn sweep_one(&self, path: &std::path::Path, branch: &str) -> Result<(), AuthorityError> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| AuthorityError::Git("worktree path not UTF-8".into()))?;
+        let out = Command::new("git")
+            .args(["worktree", "remove", "--force", "--force", path_str])
+            .current_dir(&*self.repo_root)
+            .output()
+            .await?;
+        if !out.status.success() {
+            return Err(AuthorityError::Git(
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ));
+        }
+        let _ = Command::new("git")
+            .args(["branch", "-D", branch])
+            .current_dir(&*self.repo_root)
+            .output()
+            .await;
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&*self.repo_root)
+            .output()
+            .await;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event_funnel;
+    use spur_acp::SessionId;
+    use tempfile::TempDir;
 
     #[test]
     fn default_config_has_sane_values() {
@@ -140,5 +291,115 @@ mod tests {
             AuthorityConfig::default(),
         );
         assert_eq!(authority.config().quarantine_grace, Duration::from_secs(30));
+    }
+
+    async fn seed_repo_with_worktree(td: &TempDir, branch: &str) -> std::path::PathBuf {
+        use tokio::process::Command;
+        async fn git(dir: &std::path::Path, args: &[&str]) {
+            let s = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                s.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&s.stderr)
+            );
+        }
+        git(td.path(), &["init", "-q", "-b", "main"]).await;
+        git(td.path(), &["config", "user.email", "t@t"]).await;
+        git(td.path(), &["config", "user.name", "t"]).await;
+        tokio::fs::write(td.path().join("a"), b"x").await.unwrap();
+        git(td.path(), &["add", "a"]).await;
+        git(td.path(), &["commit", "-q", "-m", "base"]).await;
+        let wt = td.path().join(".spur/worktrees/abc");
+        git(
+            td.path(),
+            &[
+                "worktree",
+                "add",
+                wt.to_str().unwrap(),
+                "-b",
+                branch,
+                "main",
+            ],
+        )
+        .await;
+        wt
+    }
+
+    fn id(s: &str) -> BrainSessionId {
+        BrainSessionId::new(SessionId(s.into()))
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_legacy_worker_branches() {
+        let td = TempDir::new().unwrap();
+        let _ = seed_repo_with_worktree(
+            &td,
+            "spur/worker-legacy-deadbeef-1111-2222-3333-444455556666",
+        )
+        .await;
+        let (funnel, _rx) = event_funnel::test_channel();
+        let auth = WorktreeAuthority::new(
+            td.path().to_path_buf(),
+            SelfHeldSet::new(),
+            funnel,
+            AuthorityConfig {
+                quarantine_grace: Duration::ZERO,
+                ..AuthorityConfig::default()
+            },
+        );
+        let r = auth.sweep_once().await.expect("sweep ok");
+        assert_eq!(r.skipped_unknown_owner, 1);
+        assert_eq!(r.swept, 0);
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_v2_worktree_when_session_lock_missing() {
+        let td = TempDir::new().unwrap();
+        let brain = "550e8400-e29b-41d4-a716-446655440000";
+        let worker = "deadbeef-1111-2222-3333-444455556666";
+        let branch = format!("spur/worker/v2/codex/{brain}/{worker}");
+        let _ = seed_repo_with_worktree(&td, &branch).await;
+        let (funnel, _rx) = event_funnel::test_channel();
+        let auth = WorktreeAuthority::new(
+            td.path().to_path_buf(),
+            SelfHeldSet::new(),
+            funnel,
+            AuthorityConfig {
+                quarantine_grace: Duration::ZERO,
+                ..AuthorityConfig::default()
+            },
+        );
+        let r = auth.sweep_once().await.expect("sweep ok");
+        assert_eq!(r.swept, 1);
+        assert_eq!(r.probed, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_self_held_session() {
+        let td = TempDir::new().unwrap();
+        let brain = "550e8400-e29b-41d4-a716-446655440000";
+        let worker = "deadbeef-1111-2222-3333-444455556666";
+        let branch = format!("spur/worker/v2/codex/{brain}/{worker}");
+        let _ = seed_repo_with_worktree(&td, &branch).await;
+        let self_held = SelfHeldSet::new();
+        self_held.insert(id(brain));
+        let (funnel, _rx) = event_funnel::test_channel();
+        let auth = WorktreeAuthority::new(
+            td.path().to_path_buf(),
+            self_held,
+            funnel,
+            AuthorityConfig {
+                quarantine_grace: Duration::ZERO,
+                ..AuthorityConfig::default()
+            },
+        );
+        let r = auth.sweep_once().await.expect("sweep ok");
+        assert_eq!(r.skipped_self, 1);
+        assert_eq!(r.swept, 0);
     }
 }
