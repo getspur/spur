@@ -347,11 +347,8 @@ impl App {
         };
 
         // Apply landing-specific setup
-        match &app.landing {
-            crate::landing::LandingDecision::SetupRequired => {
-                app.dashboard.set_agents_configured(false);
-            }
-            _ => {}
+        if let crate::landing::LandingDecision::SetupRequired = &app.landing {
+            app.dashboard.set_agents_configured(false);
         }
 
         app.license_badge = license_badge_from_state(&app.license_state);
@@ -520,6 +517,20 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn dashboard_is_configured(&self) -> bool {
         self.dashboard.agents_configured()
+    }
+
+    /// Test-only accessor for the Dashboard view.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn dashboard_for_test(&self) -> &crate::views::dashboard::DashboardView {
+        &self.dashboard
+    }
+
+    /// Test-only mutable accessor for the Dashboard view.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn dashboard_mut_for_test(&mut self) -> &mut crate::views::dashboard::DashboardView {
+        &mut self.dashboard
     }
 
     #[cfg(any(test, debug_assertions))]

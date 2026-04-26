@@ -31,10 +31,7 @@ fn session_updated(id: &str, title: &str, updated_at: &str) -> SessionInfo {
 
 fn archived_meta(id: &str) -> spur_tui::session_metadata::SessionMetadata {
     let mut meta = spur_tui::session_metadata::SessionMetadata::default();
-    meta.sessions
-        .entry(id.to_string())
-        .or_default()
-        .archived = true;
+    meta.sessions.entry(id.to_string()).or_default().archived = true;
     meta
 }
 
@@ -56,8 +53,10 @@ fn highlighted_session_id(picker: &SessionPickerView) -> Option<&str> {
 #[test]
 fn cursor_default_lands_on_last_active_when_present() {
     let mut picker = SessionPickerView::new();
-    let mut meta = spur_tui::session_metadata::SessionMetadata::default();
-    meta.last_active_session_id = Some("a2".to_string());
+    let meta = spur_tui::session_metadata::SessionMetadata {
+        last_active_session_id: Some("a2".to_string()),
+        ..Default::default()
+    };
     picker.set_metadata(meta);
     picker.set_sessions(
         "t".into(),
@@ -94,8 +93,10 @@ fn cursor_default_falls_back_to_zero_when_no_sessions() {
 #[test]
 fn cursor_default_falls_back_when_last_active_not_in_visible_list() {
     let mut picker = SessionPickerView::new();
-    let mut meta = spur_tui::session_metadata::SessionMetadata::default();
-    meta.last_active_session_id = Some("does-not-exist".to_string());
+    let meta = spur_tui::session_metadata::SessionMetadata {
+        last_active_session_id: Some("does-not-exist".to_string()),
+        ..Default::default()
+    };
     picker.set_metadata(meta);
     picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
     // last_active id is unknown → fall back to row 1.
@@ -153,10 +154,9 @@ fn cursor_preserved_by_session_id_after_set_sessions_reorders_list() {
 #[test]
 fn cursor_preserves_new_session_row_across_refresh() {
     let mut picker = SessionPickerView::new();
-    picker.set_metadata({
-        let mut m = spur_tui::session_metadata::SessionMetadata::default();
-        m.last_active_session_id = Some("a1".to_string());
-        m
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata {
+        last_active_session_id: Some("a1".to_string()),
+        ..Default::default()
     });
     picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
     // last_active=a1 → cursor lands on row 1 by P1.
@@ -176,10 +176,9 @@ fn cursor_preserves_new_session_row_across_refresh() {
 #[test]
 fn cursor_falls_through_to_p1_when_highlighted_session_disappears() {
     let mut picker = SessionPickerView::new();
-    picker.set_metadata({
-        let mut m = spur_tui::session_metadata::SessionMetadata::default();
-        m.last_active_session_id = Some("a1".to_string());
-        m
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata {
+        last_active_session_id: Some("a1".to_string()),
+        ..Default::default()
     });
     picker.set_sessions(
         "t".into(),
@@ -375,10 +374,9 @@ fn d_key_on_new_session_row_is_noop() {
 #[test]
 fn y_emits_copy_session_id_for_highlighted_row() {
     let mut picker = SessionPickerView::new();
-    picker.set_metadata({
-        let mut m = spur_tui::session_metadata::SessionMetadata::default();
-        m.last_active_session_id = Some("a1".to_string());
-        m
+    picker.set_metadata(spur_tui::session_metadata::SessionMetadata {
+        last_active_session_id: Some("a1".to_string()),
+        ..Default::default()
     });
     picker.set_sessions(
         "t".into(),

@@ -856,7 +856,12 @@ impl DashboardView {
 
         match self.mode {
             DashboardMode::Compose => {
-                // Esc exits Compose mode and is handled by the view.
+                // Vim Insert/Visual/Operator owns Esc so it can return to
+                // Normal mode before the dashboard-level Esc handler runs.
+                if key.code == KeyCode::Esc && self.input_bar.wants_esc() {
+                    return KeyOwner::Composer;
+                }
+                // Other Esc presses exit Compose mode and are handled by the view.
                 if key.code == KeyCode::Esc {
                     return KeyOwner::View;
                 }
