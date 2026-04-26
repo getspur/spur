@@ -115,13 +115,16 @@ Risk-blocked features cite the relevant Risk # from `architecture.md` §8.
 | `core_pro_broadcast_lagged_recovery` | P | **v1.1-Q3** | `Lagged(n)` → NDJSON replay reconstruction (Risk #2/#9 fix) |
 
 #### Review subsystem
+**Revised 2026-04-26 per gemini gate-review findings.** Original draft over-gated baseline safety/UX behaviors. Manual review is intrinsic to `review_sink`; basic timeout fallback (auto-cancel) and basic retry (press 'R') are universal liveness features. Only configurable customization (rule-based auto-approve, custom fallback routing, custom retry policy with backoff) is Pro.
+
 | Key | Tier | Status | Description |
 |---|---|---|---|
-| `core_core_review_sink` | F | v1 | Pipeline routing review cards to frontends |
-| `core_core_review_policy_manual` | F | v1 | Human-in-loop Approved/Rejected/Modified flows |
+| `core_core_review_sink` | F | v1 | Pipeline routing review cards to frontends; includes built-in manual Approve/Reject/Modify resolution (formerly separate `review_policy_manual` — folded in) |
+| `core_core_review_policy_timeout_fallback_basic` | F | v1 | Auto-cancel on review timeout (liveness baseline; prevents indefinite hangs) |
+| `core_core_review_policy_retry_basic` | F | v1 | Press 'R' to retry a failed review (UX baseline; non-deterministic agent behavior) |
 | `core_pro_review_policy_auto_approve` | P | v1 | Configurable auto-approve rules (path globs, change-size limits) |
-| `core_pro_review_policy_timeout_fallback` | P | v1 | Configurable `FallbackAction` on review timeout |
-| `core_pro_review_policy_retry` | P | v1 | `RetryRequested` resolution with exponential backoff (Risk #5 closure) |
+| `core_pro_review_policy_timeout_fallback_custom` | P | v1 | Configurable `FallbackAction` routing on timeout (Slack hand-off, alt agent, etc.) |
+| `core_pro_review_policy_retry_backoff` | P | v1 | `RetryRequested` resolution with configurable exponential backoff + max-attempts policy (Risk #5 closure) |
 
 #### Skills system
 | Key | Tier | Status | Description |
@@ -369,7 +372,9 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "core_core_event_sink_ndjson_128mb",
         "core_core_executor_lineage_projection",
         "core_core_notification_pump",
-        "core_core_review_sink", "core_core_review_policy_manual",
+        "core_core_review_sink",
+        "core_core_review_policy_timeout_fallback_basic",
+        "core_core_review_policy_retry_basic",
         "core_core_skill_registry", "core_core_skill_atomic_installation",
         "skills_core_render_per_vendor",
         "core_core_conflict_detection", "core_core_rate_limit_detection",
@@ -434,8 +439,8 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
 
         "core_pro_worker_heartbeat_watchdog",
         "core_pro_review_policy_auto_approve",
-        "core_pro_review_policy_timeout_fallback",
-        "core_pro_review_policy_retry",
+        "core_pro_review_policy_timeout_fallback_custom",
+        "core_pro_review_policy_retry_backoff",
         "core_pro_peer_mailbox_router",
         "core_pro_plan_orphan_recovery",
         "core_pro_background_task_tracker",
@@ -662,8 +667,8 @@ Features marked `[v1.1-Q3]` in §4 cannot ship until specific architecture risks
 | `event_persistence` | `core_core_event_sink_ndjson_128mb` | Atomic + correct size |
 | `extended_retention` | (removed; subsumed by quota lift) | Quota-only |
 | `session_resume` | `core_core_basic_session_resume` (Free) + `core_pro_session_resume_event_replay` (Pro v1.1) | Split |
-| `manual_review` | `core_core_review_policy_manual` | Atomic |
-| `auto_review_policies` | `core_pro_review_policy_auto_approve` + 3 more | Split |
+| `manual_review` | (folded into `core_core_review_sink` per gemini gate-review 2026-04-26) | Subsumed |
+| `auto_review_policies` | `core_pro_review_policy_auto_approve` + custom `timeout_fallback`/`retry_backoff` (basics moved to Free) | Split + re-tiered |
 | `tui_dashboard` | `tui_core_view_dashboard` | Naming convention |
 | `tui_session_detail` | `tui_core_view_session_detail` (now Free) | Re-tiered |
 | `basic_lineage` | `core_core_executor_lineage_projection` | Naming |

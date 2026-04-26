@@ -561,9 +561,16 @@ git commit -m "feat(spur-license): registry add spur-core event pipeline keys (5
 
 ---
 
-## Task 7: Add spur-core review subsystem keys (5)
+## Task 7: Add spur-core review subsystem keys (6)
 
-Adds: review_sink, review_policy_manual, review_policy_auto_approve, review_policy_timeout_fallback, review_policy_retry.
+**REVISED 2026-04-26 per gemini gate-review.** Original draft had 3 design smells:
+- `review_policy_manual` gated baseline behavior (anti-pattern; folded into `review_sink`)
+- `review_policy_timeout_fallback` gated safety/liveness baseline (split into Free `_basic` + Pro `_custom`)
+- `review_policy_retry` gated fundamental UX (press 'R'; split into Free `_basic` + Pro `_backoff`)
+
+**Net 6 keys, 3 Free + 3 Pro:**
+- Free: `review_sink` (now includes built-in manual resolution), `review_policy_timeout_fallback_basic` (auto-cancel), `review_policy_retry_basic` (press 'R')
+- Pro: `review_policy_auto_approve`, `review_policy_timeout_fallback_custom` (FallbackAction routing), `review_policy_retry_backoff` (configurable backoff/max-attempts)
 
 - [ ] **Step 1: Write failing test**
 
@@ -572,10 +579,11 @@ Adds: review_sink, review_policy_manual, review_policy_auto_approve, review_poli
     fn spur_core_review_keys_registered() {
         for s in &[
             "core_core_review_sink",
-            "core_core_review_policy_manual",
+            "core_core_review_policy_timeout_fallback_basic",
+            "core_core_review_policy_retry_basic",
             "core_pro_review_policy_auto_approve",
-            "core_pro_review_policy_timeout_fallback",
-            "core_pro_review_policy_retry",
+            "core_pro_review_policy_timeout_fallback_custom",
+            "core_pro_review_policy_retry_backoff",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -587,12 +595,18 @@ Adds: review_sink, review_policy_manual, review_policy_auto_approve, review_poli
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-core: review subsystem (5) ---
+    // --- spur-core: review subsystem (6) ---
     pub const CORE_CORE_REVIEW_SINK: Self = Self("core_core_review_sink");
-    pub const CORE_CORE_REVIEW_POLICY_MANUAL: Self = Self("core_core_review_policy_manual");
-    pub const CORE_PRO_REVIEW_POLICY_AUTO_APPROVE: Self = Self("core_pro_review_policy_auto_approve");
-    pub const CORE_PRO_REVIEW_POLICY_TIMEOUT_FALLBACK: Self = Self("core_pro_review_policy_timeout_fallback");
-    pub const CORE_PRO_REVIEW_POLICY_RETRY: Self = Self("core_pro_review_policy_retry");
+    pub const CORE_CORE_REVIEW_POLICY_TIMEOUT_FALLBACK_BASIC: Self =
+        Self("core_core_review_policy_timeout_fallback_basic");
+    pub const CORE_CORE_REVIEW_POLICY_RETRY_BASIC: Self =
+        Self("core_core_review_policy_retry_basic");
+    pub const CORE_PRO_REVIEW_POLICY_AUTO_APPROVE: Self =
+        Self("core_pro_review_policy_auto_approve");
+    pub const CORE_PRO_REVIEW_POLICY_TIMEOUT_FALLBACK_CUSTOM: Self =
+        Self("core_pro_review_policy_timeout_fallback_custom");
+    pub const CORE_PRO_REVIEW_POLICY_RETRY_BACKOFF: Self =
+        Self("core_pro_review_policy_retry_backoff");
 ```
 
 Parser arms:
@@ -601,18 +615,20 @@ Parser arms:
         // spur-core: review subsystem
         } else if bytes_eq(b, b"core_core_review_sink") {
             Some(Self::CORE_CORE_REVIEW_SINK)
-        } else if bytes_eq(b, b"core_core_review_policy_manual") {
-            Some(Self::CORE_CORE_REVIEW_POLICY_MANUAL)
+        } else if bytes_eq(b, b"core_core_review_policy_timeout_fallback_basic") {
+            Some(Self::CORE_CORE_REVIEW_POLICY_TIMEOUT_FALLBACK_BASIC)
+        } else if bytes_eq(b, b"core_core_review_policy_retry_basic") {
+            Some(Self::CORE_CORE_REVIEW_POLICY_RETRY_BASIC)
         } else if bytes_eq(b, b"core_pro_review_policy_auto_approve") {
             Some(Self::CORE_PRO_REVIEW_POLICY_AUTO_APPROVE)
-        } else if bytes_eq(b, b"core_pro_review_policy_timeout_fallback") {
-            Some(Self::CORE_PRO_REVIEW_POLICY_TIMEOUT_FALLBACK)
-        } else if bytes_eq(b, b"core_pro_review_policy_retry") {
-            Some(Self::CORE_PRO_REVIEW_POLICY_RETRY)
+        } else if bytes_eq(b, b"core_pro_review_policy_timeout_fallback_custom") {
+            Some(Self::CORE_PRO_REVIEW_POLICY_TIMEOUT_FALLBACK_CUSTOM)
+        } else if bytes_eq(b, b"core_pro_review_policy_retry_backoff") {
+            Some(Self::CORE_PRO_REVIEW_POLICY_RETRY_BACKOFF)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-core review keys (5) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-core review keys (6) for tier revamp Plan A`
 
 ---
 
