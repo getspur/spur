@@ -556,12 +556,7 @@ impl SessionPickerView {
                 ),
             ]),
         ];
-        let chunks = Layout::vertical([
-            Constraint::Min(4),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
+        let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
         let v_pad = chunks[0].height.saturating_sub(4) / 3;
         let content_area = Rect {
             x: chunks[0].x,
@@ -595,7 +590,6 @@ impl SessionPickerView {
                 }),
             },
         );
-        render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));
     }
 
     fn build_preselect_banner(&self, acp_id: &str) -> Line<'static> {
@@ -806,26 +800,49 @@ impl SessionPickerView {
         }
 
         let preview_height: u16 = 8;
+        // Layout: chunks[1]/[2] (status + footer hint) are kept as two rows
+        // ONLY when a state-specific prompt is active (rename or confirm-switch),
+        // so that the prompt and its key-hint can coexist on separate rows.
+        // In normal/list mode, the StatusBar's `view_hint_override` already
+        // carries the key hints alongside the stats, so a separate footer row
+        // would duplicate. We collapse to one row in that case.
+        let needs_footer_row = self.rename_state.is_some() || self.confirm_switch.is_some();
         let chunks = if self.preview_visible {
+            if needs_footer_row {
+                Layout::vertical([
+                    Constraint::Min(4),
+                    Constraint::Length(preview_height),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .split(area)
+            } else {
+                Layout::vertical([
+                    Constraint::Min(4),
+                    Constraint::Length(preview_height),
+                    Constraint::Length(1),
+                ])
+                .split(area)
+            }
+        } else if needs_footer_row {
             Layout::vertical([
                 Constraint::Min(4),
-                Constraint::Length(preview_height),
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(area)
         } else {
-            Layout::vertical([
-                Constraint::Min(4),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(area)
+            Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area)
         };
         frame.render_widget(Paragraph::new(lines), chunks[0]);
 
-        // When preview is visible, the status/footer chunks shift by one.
-        let (status_idx, footer_idx) = if self.preview_visible { (2, 3) } else { (1, 2) };
+        // Status row (chunks[status_idx]) and optional footer-hint row (chunks[footer_idx]).
+        // Footer-hint row is only allocated when a state-specific prompt is active.
+        let (status_idx, footer_idx_opt) = if self.preview_visible {
+            (2, if needs_footer_row { Some(3) } else { None })
+        } else {
+            (1, if needs_footer_row { Some(2) } else { None })
+        };
 
         if self.preview_visible {
             use crate::components::session_preview::{PreviewContent, SessionPreview};
@@ -948,12 +965,17 @@ impl SessionPickerView {
                 },
             );
         }
-        let hint = footer_hint(
-            &self.state,
-            self.rename_state.is_some(),
-            self.confirm_switch.is_some(),
-        );
-        render_footer_hint(frame, chunks[footer_idx], hint);
+        // Render the contextual key-hint row ONLY when a state-specific prompt
+        // occupies the status row. In normal/list mode, the StatusBar already
+        // carries the hint via its view_hint_override (avoiding duplication).
+        if let Some(footer_idx) = footer_idx_opt {
+            let hint = footer_hint(
+                &self.state,
+                self.rename_state.is_some(),
+                self.confirm_switch.is_some(),
+            );
+            render_footer_hint(frame, chunks[footer_idx], hint);
+        }
     }
 
     fn render_error(
@@ -981,12 +1003,7 @@ impl SessionPickerView {
                 Style::default().fg(Color::DarkGray),
             )),
         ];
-        let chunks = Layout::vertical([
-            Constraint::Min(4),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
+        let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
         let v_pad = chunks[0].height.saturating_sub(5) / 3;
         let content_area = Rect {
             x: chunks[0].x,
@@ -1020,7 +1037,6 @@ impl SessionPickerView {
                 }),
             },
         );
-        render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));
     }
 
     #[cfg(test)]
