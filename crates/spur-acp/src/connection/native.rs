@@ -45,19 +45,20 @@ use futures::stream::unfold;
 use futures::Stream;
 use tokio::sync::{mpsc, oneshot};
 
-use agent_client_protocol::{
-    Agent, AuthenticateRequest, AuthenticateResponse, CancelNotification, Client,
-    ClientSideConnection, CreateTerminalRequest, CreateTerminalResponse, ExtNotification,
-    ExtRequest, ExtResponse, InitializeRequest, InitializeResponse, KillTerminalRequest,
-    KillTerminalResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer,
-    NewSessionRequest, NewSessionResponse, PromptRequest, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+use agent_client_protocol::schema::{
+    AuthenticateRequest, AuthenticateResponse, CancelNotification, ContentBlock, ContentChunk,
+    CreateTerminalRequest, CreateTerminalResponse, ExtNotification, ExtRequest, ExtResponse,
+    InitializeRequest, InitializeResponse, KillTerminalRequest, KillTerminalResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest,
+    NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionModeRequest,
+    SetSessionModeResponse, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
+use agent_client_protocol::{Agent, Client, ClientSideConnection};
 
 use crate::connection::{AgentConnection, ExtNotificationPayload};
 use crate::types::AgentHealth;
@@ -160,7 +161,7 @@ pub struct NativeAcpConnection {
     /// dead_tx. Capacity 1024 absorbs bursty history replay from
     /// `load_session`. Task 4 rewires `session_notification` onto this;
     /// today it's only plumbed.
-    session_notif_tx: tokio::sync::broadcast::Sender<agent_client_protocol::SessionNotification>,
+    session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     /// Process-group id of the spawned child (equal to its pid because we spawn
     /// with `process_group(0)`). Populated by the ACP thread after spawn, read
     /// by the graceful shutdown path and the `Drop` safety net to kill the
@@ -663,7 +664,7 @@ fn acp_thread_main(
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
-    session_notif_tx: tokio::sync::broadcast::Sender<agent_client_protocol::SessionNotification>,
+    session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     child_pgid: Arc<Mutex<Option<i32>>>,
 ) {
     // Build a single-threaded runtime for this thread.
@@ -1083,7 +1084,7 @@ impl Client for SpurAcpClientDynamic {
 
         match tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx).await {
             Ok(Ok(response)) => {
-                let option_id = agent_client_protocol::PermissionOptionId::new(response.option_id);
+                let option_id = PermissionOptionId::new(response.option_id);
                 tracing::debug!(option = %option_id, "NativeAcpConnection: permission responded");
                 Ok(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
@@ -1106,11 +1107,9 @@ impl Client for SpurAcpClientDynamic {
     ) -> agent_client_protocol::Result<()> {
         let variant = session_update_variant_name(&args.update);
         let text_len = match &args.update {
-            agent_client_protocol::SessionUpdate::AgentMessageChunk(c)
-            | agent_client_protocol::SessionUpdate::AgentThoughtChunk(c)
-            | agent_client_protocol::SessionUpdate::UserMessageChunk(c) => {
-                content_chunk_text_len(c)
-            }
+            SessionUpdate::AgentMessageChunk(c)
+            | SessionUpdate::AgentThoughtChunk(c)
+            | SessionUpdate::UserMessageChunk(c) => content_chunk_text_len(c),
             _ => 0,
         };
         let session = args.session_id.to_string();
@@ -1403,8 +1402,8 @@ impl Client for SpurAcpClientDynamic {
 
 /// Short static name for each SessionUpdate discriminant.
 /// Used by diagnostic logging only; keep lowercase snake_case.
-fn session_update_variant_name(u: &agent_client_protocol::SessionUpdate) -> &'static str {
-    use agent_client_protocol::SessionUpdate::*;
+fn session_update_variant_name(u: &SessionUpdate) -> &'static str {
+    use agent_client_protocol::schema::SessionUpdate::*;
     match u {
         AgentThoughtChunk(_) => "agent_thought_chunk",
         AgentMessageChunk(_) => "agent_message_chunk",
@@ -1419,9 +1418,9 @@ fn session_update_variant_name(u: &agent_client_protocol::SessionUpdate) -> &'st
 }
 
 /// Return the text length of a content chunk, or 0 if non-text.
-fn content_chunk_text_len(chunk: &agent_client_protocol::ContentChunk) -> usize {
+fn content_chunk_text_len(chunk: &ContentChunk) -> usize {
     match &chunk.content {
-        agent_client_protocol::ContentBlock::Text(tc) => tc.text.len(),
+        ContentBlock::Text(tc) => tc.text.len(),
         _ => 0,
     }
 }
@@ -1443,13 +1442,12 @@ fn auto_approve(
         .find(|o| {
             matches!(
                 o.kind,
-                agent_client_protocol::PermissionOptionKind::AllowAlways
-                    | agent_client_protocol::PermissionOptionKind::AllowOnce
+                PermissionOptionKind::AllowAlways | PermissionOptionKind::AllowOnce
             )
         })
         .map(|o| o.option_id.clone())
         .or_else(|| args.options.first().map(|o| o.option_id.clone()))
-        .unwrap_or_else(|| agent_client_protocol::PermissionOptionId::new("allow"));
+        .unwrap_or_else(|| PermissionOptionId::new("allow"));
     Ok(RequestPermissionResponse::new(
         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
     ))
@@ -1473,7 +1471,7 @@ fn auto_deny(
         .options
         .last()
         .map(|o| o.option_id.clone())
-        .unwrap_or_else(|| agent_client_protocol::PermissionOptionId::new("deny"));
+        .unwrap_or_else(|| PermissionOptionId::new("deny"));
     Ok(RequestPermissionResponse::new(
         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
     ))
