@@ -216,6 +216,7 @@ async fn n_task_accept_race_with_same_envelope() {
         match result.expect("accept should succeed") {
             Acceptance::Created(guard) => created.push(guard),
             Acceptance::AlreadyAccepted => already_accepted += 1,
+            _ => panic!("unexpected Acceptance variant"),
         }
     }
 
@@ -455,6 +456,7 @@ async fn sequential_replay_after_acceptance_returns_already_accepted() {
     {
         Acceptance::Created(guard) => guard,
         Acceptance::AlreadyAccepted => panic!("first accept should create guard"),
+        _ => panic!("unexpected Acceptance variant"),
     };
     drop(guard);
 
@@ -466,6 +468,7 @@ async fn sequential_replay_after_acceptance_returns_already_accepted() {
         {
             Acceptance::AlreadyAccepted => {}
             Acceptance::Created(_) => panic!("replay returned a second guard"),
+            _ => panic!("replay returned an unexpected Acceptance variant"),
         }
     }
 
@@ -492,6 +495,7 @@ async fn concurrent_record_terminal_does_not_double_emit() {
     {
         Acceptance::Created(guard) => guard,
         Acceptance::AlreadyAccepted => panic!("first accept should create guard"),
+        _ => panic!("unexpected Acceptance variant"),
     };
     ledger
         .transition(&message_id, LedgerState::Queued)
@@ -563,6 +567,7 @@ async fn reconciler_does_not_race_with_concurrent_workers() {
             let guard = match router.accept_or_reject(env, &snapshot).await.unwrap() {
                 Acceptance::Created(guard) => guard,
                 Acceptance::AlreadyAccepted => panic!("distinct message should be created"),
+                _ => panic!("unexpected Acceptance variant"),
             };
             ready.wait().await;
             ledger

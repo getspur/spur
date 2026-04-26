@@ -27,16 +27,17 @@ pub enum RouterError {
     InvariantViolation(String),
 }
 
-/// Result of `accept_or_reject`. Distinguishes a fresh acceptance (caller
-/// receives a guard and is responsible for finalize) from a replay
-/// (caller receives nothing — the original handler still owns the guard).
+/// Outcome of a successful router accept attempt. Distinct from rejection
+/// (which is signaled via `RouterError::Rejected`) and ledger errors
+/// (which surface via `RouterError::Ledger`).
 ///
-/// This separation is critical for spec invariant
-/// "at most one guard exists per message at any time": if we returned a
-/// fresh guard on replay, dropping it would enqueue a stranded message
-/// and the reconciler would forcibly mark the in-flight original as
-/// Undeliverable. The `AlreadyAccepted` variant prevents that.
+/// Forward-compat note: marked `#[non_exhaustive]` so future variants
+/// (e.g., `Deferred`, `Buffered` for Stage-2 persistent ledger) can be
+/// added without breaking external matchers. Internal same-crate matches
+/// remain exhaustive — the compile-time pressure to handle new variants
+/// is preserved where it matters most.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Acceptance {
     Created(PeerMessageGuard),
     AlreadyAccepted,
