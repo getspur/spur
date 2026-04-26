@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 schemars = { workspace = true }
 tokio = { workspace = true }
@@ -29,6 +32,7 @@ fs4 = "0.13"
 libc = "0.2"
 
 [dev-dependencies]
+spur-acp = { path = ".", features = ["test-support"] }
 tempfile = "3"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
