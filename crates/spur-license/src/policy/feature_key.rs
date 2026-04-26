@@ -178,6 +178,17 @@ impl FeatureKey {
     pub const MCP_PRO_REVIEW: Self = Self("mcp_pro_review");
     pub const MCP_PRO_CUSTOM_TOOLS: Self = Self("mcp_pro_custom_tools");
 
+    // --- spur-cli (9) ---
+    pub const CLI_CORE_INIT: Self = Self("cli_core_init");
+    pub const CLI_CORE_AGENTS: Self = Self("cli_core_agents");
+    pub const CLI_CORE_SESSIONS: Self = Self("cli_core_sessions");
+    pub const CLI_CORE_RUN: Self = Self("cli_core_run");
+    pub const CLI_CORE_EXEC: Self = Self("cli_core_exec");
+    pub const CLI_CORE_TUI: Self = Self("cli_core_tui");
+    pub const CLI_CORE_COST: Self = Self("cli_core_cost");
+    pub const CLI_CORE_CONNECT: Self = Self("cli_core_connect");
+    pub const CLI_CORE_LICENSE_ACTIVATE: Self = Self("cli_core_license_activate");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -393,6 +404,25 @@ impl FeatureKey {
             Some(Self::MCP_PRO_REVIEW)
         } else if bytes_eq(b, b"mcp_pro_custom_tools") {
             Some(Self::MCP_PRO_CUSTOM_TOOLS)
+        // spur-cli
+        } else if bytes_eq(b, b"cli_core_init") {
+            Some(Self::CLI_CORE_INIT)
+        } else if bytes_eq(b, b"cli_core_agents") {
+            Some(Self::CLI_CORE_AGENTS)
+        } else if bytes_eq(b, b"cli_core_sessions") {
+            Some(Self::CLI_CORE_SESSIONS)
+        } else if bytes_eq(b, b"cli_core_run") {
+            Some(Self::CLI_CORE_RUN)
+        } else if bytes_eq(b, b"cli_core_exec") {
+            Some(Self::CLI_CORE_EXEC)
+        } else if bytes_eq(b, b"cli_core_tui") {
+            Some(Self::CLI_CORE_TUI)
+        } else if bytes_eq(b, b"cli_core_cost") {
+            Some(Self::CLI_CORE_COST)
+        } else if bytes_eq(b, b"cli_core_connect") {
+            Some(Self::CLI_CORE_CONNECT)
+        } else if bytes_eq(b, b"cli_core_license_activate") {
+            Some(Self::CLI_CORE_LICENSE_ACTIVATE)
         } else {
             None
         }
@@ -811,6 +841,23 @@ mod tests {
             "mcp_pro_graph_tools",
             "mcp_pro_review",
             "mcp_pro_custom_tools",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_cli_keys_registered() {
+        for s in &[
+            "cli_core_init",
+            "cli_core_agents",
+            "cli_core_sessions",
+            "cli_core_run",
+            "cli_core_exec",
+            "cli_core_tui",
+            "cli_core_cost",
+            "cli_core_connect",
+            "cli_core_license_activate",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
