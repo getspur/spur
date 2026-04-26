@@ -942,9 +942,15 @@ Parser arms:
 
 ---
 
-## Task 13: Add spur-tui keys (13)
+## Task 13: Add spur-tui keys (10)
 
-Per spec §4.4: 10 Free + 3 Pro.
+Per spec §4.4 (revised 2026-04-26): 10 Free.
+
+**Revised 2026-04-26 (Wave 5 design-review pass).** 13 → 10 keys per 4-reviewer judge synthesis:
+- Renamed `tui_core_notification_in_tui_drain` → `tui_core_notification_drain` (drop redundant `_in_tui_` infix per claude-code).
+- Removed `tui_pro_telegram_bot_solo` — gate point belongs at CLI launch / spur-bot subsystem (codex). Will land as `bot_pro_telegram_solo` in Task 19.
+- Removed `tui_pro_trace_source_react` — palette source is explicitly `// TODO` deferred in code (codex). Deferred to v1.1 backlog.
+- Removed `tui_pro_custom_keybindings` — vaporware: no configurable keymap subsystem exists, only fixed handlers + Vim/Emacs edit mode (codex). Deferred to v2 backlog.
 
 - [ ] **Step 1: Write failing test**
 
@@ -961,10 +967,7 @@ Per spec §4.4: 10 Free + 3 Pro.
             "tui_core_view_composer",
             "tui_core_modal_collision_escape",
             "tui_core_input_paste_as_atom",
-            "tui_core_notification_in_tui_drain",
-            "tui_pro_telegram_bot_solo",
-            "tui_pro_trace_source_react",
-            "tui_pro_custom_keybindings",
+            "tui_core_notification_drain",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -975,7 +978,7 @@ Per spec §4.4: 10 Free + 3 Pro.
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-tui (13: 10 Free + 3 Pro) ---
+    // --- spur-tui (10) ---
     pub const TUI_CORE_VIEW_DASHBOARD: Self = Self("tui_core_view_dashboard");
     pub const TUI_CORE_VIEW_SESSION_DETAIL: Self = Self("tui_core_view_session_detail");
     pub const TUI_CORE_VIEW_PLAN_INSPECTOR: Self = Self("tui_core_view_plan_inspector");
@@ -985,10 +988,7 @@ Per spec §4.4: 10 Free + 3 Pro.
     pub const TUI_CORE_VIEW_COMPOSER: Self = Self("tui_core_view_composer");
     pub const TUI_CORE_MODAL_COLLISION_ESCAPE: Self = Self("tui_core_modal_collision_escape");
     pub const TUI_CORE_INPUT_PASTE_AS_ATOM: Self = Self("tui_core_input_paste_as_atom");
-    pub const TUI_CORE_NOTIFICATION_IN_TUI_DRAIN: Self = Self("tui_core_notification_in_tui_drain");
-    pub const TUI_PRO_TELEGRAM_BOT_SOLO: Self = Self("tui_pro_telegram_bot_solo");
-    pub const TUI_PRO_TRACE_SOURCE_REACT: Self = Self("tui_pro_trace_source_react");
-    pub const TUI_PRO_CUSTOM_KEYBINDINGS: Self = Self("tui_pro_custom_keybindings");
+    pub const TUI_CORE_NOTIFICATION_DRAIN: Self = Self("tui_core_notification_drain");
 ```
 
 Parser arms:
@@ -1013,24 +1013,28 @@ Parser arms:
             Some(Self::TUI_CORE_MODAL_COLLISION_ESCAPE)
         } else if bytes_eq(b, b"tui_core_input_paste_as_atom") {
             Some(Self::TUI_CORE_INPUT_PASTE_AS_ATOM)
-        } else if bytes_eq(b, b"tui_core_notification_in_tui_drain") {
-            Some(Self::TUI_CORE_NOTIFICATION_IN_TUI_DRAIN)
-        } else if bytes_eq(b, b"tui_pro_telegram_bot_solo") {
-            Some(Self::TUI_PRO_TELEGRAM_BOT_SOLO)
-        } else if bytes_eq(b, b"tui_pro_trace_source_react") {
-            Some(Self::TUI_PRO_TRACE_SOURCE_REACT)
-        } else if bytes_eq(b, b"tui_pro_custom_keybindings") {
-            Some(Self::TUI_PRO_CUSTOM_KEYBINDINGS)
+        } else if bytes_eq(b, b"tui_core_notification_drain") {
+            Some(Self::TUI_CORE_NOTIFICATION_DRAIN)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-tui keys (13) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-tui keys (10) for tier revamp Plan A`
 
 ---
 
-## Task 14: Add spur-cli keys (12 Free + 1 Team)
+## Task 14: Add spur-cli keys (9)
 
-Per spec §4.5 plus §6.2 trial CLI commands: init, agents, sessions, run, exec, tui, cost, connect, version, upgrade_trial, upgrade_pro, license_activate, workflow (Team).
+Per spec §4.5 (revised 2026-04-26): 9 Free.
+
+**Revised 2026-04-26 (Wave 5 design-review pass).** 13 → 9 keys per 4-reviewer judge synthesis:
+- Dropped `_command_` infix on every key (claude-code consistency: matches established spur-mcp precedent — 14 MCP tool keys are named `mcp_core_pm`/`_pr`/`_delegate`, not `mcp_core_tool_*`; in cli, every public capability IS a subcommand so the infix carries no information).
+- Removed `cli_core_command_version` — Clap built-in `#[command(version)]` attribute, not a separate dispatch site (codex).
+- Removed `cli_core_command_upgrade_trial` and `cli_core_command_upgrade_pro` — no `Commands::Upgrade` exists in code yet (codex). Deferred to v1.1 backlog (will land alongside trial/checkout implementation).
+- Removed `cli_team_command_workflow` — Phase 3 print-only stub (codex). Deferred to v2 backlog (already marked v2 in spec).
+- Updated `cli_core_license_activate` description to match actual `spur auth login --key` implementation; canonical command is `auth login` with `license activate` as planned alias.
+- Updated `cli_core_connect` description: actual implementation is GitHub auth/connect, not "socket bindings".
+
+Gemini's "drop all CLI keys as routing facade" critique rejected: keeping CLI as gate-layer is consistent with spur-mcp's already-merged tool-dispatch gates and provides defense-in-depth before downstream crate enforcement.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1038,19 +1042,15 @@ Per spec §4.5 plus §6.2 trial CLI commands: init, agents, sessions, run, exec,
     #[test]
     fn spur_cli_keys_registered() {
         for s in &[
-            "cli_core_command_init",
-            "cli_core_command_agents",
-            "cli_core_command_sessions",
-            "cli_core_command_run",
-            "cli_core_command_exec",
-            "cli_core_command_tui",
-            "cli_core_command_cost",
-            "cli_core_command_connect",
-            "cli_core_command_version",
-            "cli_core_command_upgrade_trial",
-            "cli_core_command_upgrade_pro",
-            "cli_core_command_license_activate",
-            "cli_team_command_workflow",
+            "cli_core_init",
+            "cli_core_agents",
+            "cli_core_sessions",
+            "cli_core_run",
+            "cli_core_exec",
+            "cli_core_tui",
+            "cli_core_cost",
+            "cli_core_connect",
+            "cli_core_license_activate",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -1061,62 +1061,67 @@ Per spec §4.5 plus §6.2 trial CLI commands: init, agents, sessions, run, exec,
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-cli (13: 12 Free + 1 Team) ---
-    pub const CLI_CORE_COMMAND_INIT: Self = Self("cli_core_command_init");
-    pub const CLI_CORE_COMMAND_AGENTS: Self = Self("cli_core_command_agents");
-    pub const CLI_CORE_COMMAND_SESSIONS: Self = Self("cli_core_command_sessions");
-    pub const CLI_CORE_COMMAND_RUN: Self = Self("cli_core_command_run");
-    pub const CLI_CORE_COMMAND_EXEC: Self = Self("cli_core_command_exec");
-    pub const CLI_CORE_COMMAND_TUI: Self = Self("cli_core_command_tui");
-    pub const CLI_CORE_COMMAND_COST: Self = Self("cli_core_command_cost");
-    pub const CLI_CORE_COMMAND_CONNECT: Self = Self("cli_core_command_connect");
-    pub const CLI_CORE_COMMAND_VERSION: Self = Self("cli_core_command_version");
-    pub const CLI_CORE_COMMAND_UPGRADE_TRIAL: Self = Self("cli_core_command_upgrade_trial");
-    pub const CLI_CORE_COMMAND_UPGRADE_PRO: Self = Self("cli_core_command_upgrade_pro");
-    pub const CLI_CORE_COMMAND_LICENSE_ACTIVATE: Self = Self("cli_core_command_license_activate");
-    pub const CLI_TEAM_COMMAND_WORKFLOW: Self = Self("cli_team_command_workflow");
+    // --- spur-cli (9) ---
+    pub const CLI_CORE_INIT: Self = Self("cli_core_init");
+    pub const CLI_CORE_AGENTS: Self = Self("cli_core_agents");
+    pub const CLI_CORE_SESSIONS: Self = Self("cli_core_sessions");
+    pub const CLI_CORE_RUN: Self = Self("cli_core_run");
+    pub const CLI_CORE_EXEC: Self = Self("cli_core_exec");
+    pub const CLI_CORE_TUI: Self = Self("cli_core_tui");
+    pub const CLI_CORE_COST: Self = Self("cli_core_cost");
+    pub const CLI_CORE_CONNECT: Self = Self("cli_core_connect");
+    pub const CLI_CORE_LICENSE_ACTIVATE: Self = Self("cli_core_license_activate");
 ```
 
 Parser arms:
 
 ```rust
         // spur-cli
-        } else if bytes_eq(b, b"cli_core_command_init") {
-            Some(Self::CLI_CORE_COMMAND_INIT)
-        } else if bytes_eq(b, b"cli_core_command_agents") {
-            Some(Self::CLI_CORE_COMMAND_AGENTS)
-        } else if bytes_eq(b, b"cli_core_command_sessions") {
-            Some(Self::CLI_CORE_COMMAND_SESSIONS)
-        } else if bytes_eq(b, b"cli_core_command_run") {
-            Some(Self::CLI_CORE_COMMAND_RUN)
-        } else if bytes_eq(b, b"cli_core_command_exec") {
-            Some(Self::CLI_CORE_COMMAND_EXEC)
-        } else if bytes_eq(b, b"cli_core_command_tui") {
-            Some(Self::CLI_CORE_COMMAND_TUI)
-        } else if bytes_eq(b, b"cli_core_command_cost") {
-            Some(Self::CLI_CORE_COMMAND_COST)
-        } else if bytes_eq(b, b"cli_core_command_connect") {
-            Some(Self::CLI_CORE_COMMAND_CONNECT)
-        } else if bytes_eq(b, b"cli_core_command_version") {
-            Some(Self::CLI_CORE_COMMAND_VERSION)
-        } else if bytes_eq(b, b"cli_core_command_upgrade_trial") {
-            Some(Self::CLI_CORE_COMMAND_UPGRADE_TRIAL)
-        } else if bytes_eq(b, b"cli_core_command_upgrade_pro") {
-            Some(Self::CLI_CORE_COMMAND_UPGRADE_PRO)
-        } else if bytes_eq(b, b"cli_core_command_license_activate") {
-            Some(Self::CLI_CORE_COMMAND_LICENSE_ACTIVATE)
-        } else if bytes_eq(b, b"cli_team_command_workflow") {
-            Some(Self::CLI_TEAM_COMMAND_WORKFLOW)
+        } else if bytes_eq(b, b"cli_core_init") {
+            Some(Self::CLI_CORE_INIT)
+        } else if bytes_eq(b, b"cli_core_agents") {
+            Some(Self::CLI_CORE_AGENTS)
+        } else if bytes_eq(b, b"cli_core_sessions") {
+            Some(Self::CLI_CORE_SESSIONS)
+        } else if bytes_eq(b, b"cli_core_run") {
+            Some(Self::CLI_CORE_RUN)
+        } else if bytes_eq(b, b"cli_core_exec") {
+            Some(Self::CLI_CORE_EXEC)
+        } else if bytes_eq(b, b"cli_core_tui") {
+            Some(Self::CLI_CORE_TUI)
+        } else if bytes_eq(b, b"cli_core_cost") {
+            Some(Self::CLI_CORE_COST)
+        } else if bytes_eq(b, b"cli_core_connect") {
+            Some(Self::CLI_CORE_CONNECT)
+        } else if bytes_eq(b, b"cli_core_license_activate") {
+            Some(Self::CLI_CORE_LICENSE_ACTIVATE)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-cli keys (13) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-cli keys (9) for tier revamp Plan A`
 
 ---
 
-## Task 15: Add spur-pm keys (10 + 1 Team)
+## Task 15: Add spur-pm keys (5)
 
-Per spec §4.6: 4 Free + 6 Pro + 1 Team.
+Per spec §4.6 (revised 2026-04-26): 4 Free + 1 Pro.
+
+**Revised 2026-04-26 (Wave 5 design-review pass).** 11 → 5 keys per 4-reviewer judge synthesis (major rationalization driven by codex code-grounded findings — 6 of the original 11 keys gated capabilities that live in OTHER crates or don't exist):
+
+**Renames (codex + claude-code):**
+- `pm_core_pm_read` → `pm_core_browse` (drop awkward duplicate `pm_pm_` segment).
+- `pm_core_pr_manual` → `pm_core_pr` (cross-crate parity with already-merged `mcp_core_pr`; same orphan `_manual` suffix rule).
+- `pm_core_bv_adapter` → `pm_core_beads_graph_adapter` (drop opaque `bv` abbreviation; reframe as capability).
+
+**Removed (codex code-grounded):**
+- `pm_pro_github_auto` — actual implementation in `crates/spur-mcp/src/plan/reconciler.rs:623`. Deferred to v1.1 backlog (will land as `mcp_pro_pr_auto` in spur-mcp follow-up).
+- `pm_pro_linear_sync` — vaporware: only `PmSource::Linear` enum value exists in `crates/spur-pm/src/types.rs:9`, no adapter. Deferred to v2 backlog.
+- `pm_pro_plane_sync` — vaporware: same situation as Linear (`types.rs:10`). Deferred to v2 backlog.
+- `pm_pro_signal_watcher` — duplicates `mcp_pro_signal_watcher_scope_drift` (already merged in Wave 4); real implementation lives in `crates/spur-mcp/src/plan/signal_watcher.rs`. Dropped.
+- `pm_pro_auto_merge` — covered by already-merged `mcp_pro_review` (auto-merge gating policies live in `crates/spur-mcp/src/plan/reconciler.rs:205`). Dropped.
+- `pm_team_webhooks` — vaporware: no receiver implementation. Deferred to v2 backlog.
+
+**Narrowed scope:** `pm_pro_beads_advanced` retained but description narrowed from omnibus "plan persistence + projection + mutation + signal-watch + auto-merge" (those live in spur-mcp) to its actual PM-crate boundary: `PmService::advanced()` activation + `BeadsAdvanced` extension surface.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1125,16 +1130,10 @@ Per spec §4.6: 4 Free + 6 Pro + 1 Team.
     fn spur_pm_keys_registered() {
         for s in &[
             "pm_core_beads_basic",
-            "pm_core_pm_read",
-            "pm_core_pr_manual",
-            "pm_core_bv_adapter",
+            "pm_core_browse",
+            "pm_core_pr",
+            "pm_core_beads_graph_adapter",
             "pm_pro_beads_advanced",
-            "pm_pro_github_auto",
-            "pm_pro_linear_sync",
-            "pm_pro_plane_sync",
-            "pm_pro_signal_watcher",
-            "pm_pro_auto_merge",
-            "pm_team_webhooks",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -1145,18 +1144,12 @@ Per spec §4.6: 4 Free + 6 Pro + 1 Team.
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-pm (11: 4 Free + 6 Pro + 1 Team) ---
+    // --- spur-pm (5) ---
     pub const PM_CORE_BEADS_BASIC: Self = Self("pm_core_beads_basic");
-    pub const PM_CORE_PM_READ: Self = Self("pm_core_pm_read");
-    pub const PM_CORE_PR_MANUAL: Self = Self("pm_core_pr_manual");
-    pub const PM_CORE_BV_ADAPTER: Self = Self("pm_core_bv_adapter");
+    pub const PM_CORE_BROWSE: Self = Self("pm_core_browse");
+    pub const PM_CORE_PR: Self = Self("pm_core_pr");
+    pub const PM_CORE_BEADS_GRAPH_ADAPTER: Self = Self("pm_core_beads_graph_adapter");
     pub const PM_PRO_BEADS_ADVANCED: Self = Self("pm_pro_beads_advanced");
-    pub const PM_PRO_GITHUB_AUTO: Self = Self("pm_pro_github_auto");
-    pub const PM_PRO_LINEAR_SYNC: Self = Self("pm_pro_linear_sync");
-    pub const PM_PRO_PLANE_SYNC: Self = Self("pm_pro_plane_sync");
-    pub const PM_PRO_SIGNAL_WATCHER: Self = Self("pm_pro_signal_watcher");
-    pub const PM_PRO_AUTO_MERGE: Self = Self("pm_pro_auto_merge");
-    pub const PM_TEAM_WEBHOOKS: Self = Self("pm_team_webhooks");
 ```
 
 Parser arms:
@@ -1165,30 +1158,18 @@ Parser arms:
         // spur-pm
         } else if bytes_eq(b, b"pm_core_beads_basic") {
             Some(Self::PM_CORE_BEADS_BASIC)
-        } else if bytes_eq(b, b"pm_core_pm_read") {
-            Some(Self::PM_CORE_PM_READ)
-        } else if bytes_eq(b, b"pm_core_pr_manual") {
-            Some(Self::PM_CORE_PR_MANUAL)
-        } else if bytes_eq(b, b"pm_core_bv_adapter") {
-            Some(Self::PM_CORE_BV_ADAPTER)
+        } else if bytes_eq(b, b"pm_core_browse") {
+            Some(Self::PM_CORE_BROWSE)
+        } else if bytes_eq(b, b"pm_core_pr") {
+            Some(Self::PM_CORE_PR)
+        } else if bytes_eq(b, b"pm_core_beads_graph_adapter") {
+            Some(Self::PM_CORE_BEADS_GRAPH_ADAPTER)
         } else if bytes_eq(b, b"pm_pro_beads_advanced") {
             Some(Self::PM_PRO_BEADS_ADVANCED)
-        } else if bytes_eq(b, b"pm_pro_github_auto") {
-            Some(Self::PM_PRO_GITHUB_AUTO)
-        } else if bytes_eq(b, b"pm_pro_linear_sync") {
-            Some(Self::PM_PRO_LINEAR_SYNC)
-        } else if bytes_eq(b, b"pm_pro_plane_sync") {
-            Some(Self::PM_PRO_PLANE_SYNC)
-        } else if bytes_eq(b, b"pm_pro_signal_watcher") {
-            Some(Self::PM_PRO_SIGNAL_WATCHER)
-        } else if bytes_eq(b, b"pm_pro_auto_merge") {
-            Some(Self::PM_PRO_AUTO_MERGE)
-        } else if bytes_eq(b, b"pm_team_webhooks") {
-            Some(Self::PM_TEAM_WEBHOOKS)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-pm keys (11) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-pm keys (5) for tier revamp Plan A`
 
 ---
 
@@ -1358,9 +1339,11 @@ Parser arms:
 
 ---
 
-## Task 19: Add spur-bot keys (6)
+## Task 19: Add spur-bot keys (7)
 
-Per spec §4.10: 5 Pro + 1 Team.
+Per spec §4.10 (revised 2026-04-26): 6 Pro + 1 Team.
+
+**Revised 2026-04-26 (Wave 5 design-review pass).** Added `bot_pro_telegram_solo` (relocated from spur-tui where it was `tui_pro_telegram_bot_solo`). Per codex code-grounded review: gate point is `Commands::Bot` activation (`crates/spur-cli/src/main.rs:348`) / `run_telegram_bot` (`crates/spur-bot/src/telegram/mod.rs:9`), with single-operator filter at `router.rs:25` — gating in spur-tui would let users bypass via `spur bot ...` invocation.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1368,6 +1351,7 @@ Per spec §4.10: 5 Pro + 1 Team.
     #[test]
     fn spur_bot_keys_registered() {
         for s in &[
+            "bot_pro_telegram_solo",
             "bot_pro_runtime",
             "bot_pro_thread_registry",
             "bot_pro_runtime_render",
@@ -1384,7 +1368,8 @@ Per spec §4.10: 5 Pro + 1 Team.
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-bot (6: 5 Pro + 1 Team) ---
+    // --- spur-bot (7: 6 Pro + 1 Team) ---
+    pub const BOT_PRO_TELEGRAM_SOLO: Self = Self("bot_pro_telegram_solo");
     pub const BOT_PRO_RUNTIME: Self = Self("bot_pro_runtime");
     pub const BOT_PRO_THREAD_REGISTRY: Self = Self("bot_pro_thread_registry");
     pub const BOT_PRO_RUNTIME_RENDER: Self = Self("bot_pro_runtime_render");
@@ -1397,6 +1382,8 @@ Parser arms:
 
 ```rust
         // spur-bot
+        } else if bytes_eq(b, b"bot_pro_telegram_solo") {
+            Some(Self::BOT_PRO_TELEGRAM_SOLO)
         } else if bytes_eq(b, b"bot_pro_runtime") {
             Some(Self::BOT_PRO_RUNTIME)
         } else if bytes_eq(b, b"bot_pro_thread_registry") {
@@ -1412,7 +1399,7 @@ Parser arms:
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-bot keys (6) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-bot keys (7) for tier revamp Plan A`
 
 ---
 
@@ -1683,29 +1670,22 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
             "mcp_pro_signal_watcher_scope_drift", "mcp_pro_mutation_executor",
             "mcp_pro_graph_tools", "mcp_pro_review",
             "mcp_pro_custom_tools",
-            // spur-tui (13)
+            // spur-tui (10) — revised Wave 5: removed telegram_bot_solo (moved to spur-bot), trace_source_react (v1.1), custom_keybindings (v2)
             "tui_core_view_dashboard", "tui_core_view_session_detail",
             "tui_core_view_plan_inspector", "tui_core_view_palette_overlay",
             "tui_core_view_issue_browser", "tui_core_view_landing_decision",
             "tui_core_view_composer", "tui_core_modal_collision_escape",
-            "tui_core_input_paste_as_atom", "tui_core_notification_in_tui_drain",
-            "tui_pro_telegram_bot_solo", "tui_pro_trace_source_react",
-            "tui_pro_custom_keybindings",
-            // spur-cli (13)
-            "cli_core_command_init", "cli_core_command_agents",
-            "cli_core_command_sessions", "cli_core_command_run",
-            "cli_core_command_exec", "cli_core_command_tui",
-            "cli_core_command_cost", "cli_core_command_connect",
-            "cli_core_command_version", "cli_core_command_upgrade_trial",
-            "cli_core_command_upgrade_pro", "cli_core_command_license_activate",
-            "cli_team_command_workflow",
-            // spur-pm (11)
-            "pm_core_beads_basic", "pm_core_pm_read",
-            "pm_core_pr_manual", "pm_core_bv_adapter",
-            "pm_pro_beads_advanced", "pm_pro_github_auto",
-            "pm_pro_linear_sync", "pm_pro_plane_sync",
-            "pm_pro_signal_watcher", "pm_pro_auto_merge",
-            "pm_team_webhooks",
+            "tui_core_input_paste_as_atom", "tui_core_notification_drain",
+            // spur-cli (9) — revised Wave 5: dropped _command_ infix; removed version (Clap built-in), upgrade_trial/_pro (v1.1), workflow (v2)
+            "cli_core_init", "cli_core_agents",
+            "cli_core_sessions", "cli_core_run",
+            "cli_core_exec", "cli_core_tui",
+            "cli_core_cost", "cli_core_connect",
+            "cli_core_license_activate",
+            // spur-pm (5) — revised Wave 5: renamed pm_read→browse, pr_manual→pr, bv_adapter→beads_graph_adapter; removed github_auto (mcp), linear/plane_sync (v2), signal_watcher/auto_merge (mcp dups), webhooks (v2)
+            "pm_core_beads_basic", "pm_core_browse",
+            "pm_core_pr", "pm_core_beads_graph_adapter",
+            "pm_pro_beads_advanced",
             // spur-cost (6)
             "cost_core_basic_display", "cost_core_pricing_registry",
             "cost_core_ingestion_pipeline", "cost_pro_per_project_tracking",
@@ -1718,7 +1698,8 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
             "worktree_core_isolation", "worktree_core_artifact_resolver",
             "worktree_pro_git_blob_store", "worktree_pro_custom_policies",
             "worktree_pro_cleanup_orphans",
-            // spur-bot (6)
+            // spur-bot (7) — revised Wave 5: added bot_pro_telegram_solo (relocated from spur-tui)
+            "bot_pro_telegram_solo",
             "bot_pro_runtime", "bot_pro_thread_registry",
             "bot_pro_runtime_render", "bot_pro_callback_validation",
             "bot_pro_inline_review", "bot_team_multi_chat",
@@ -1738,8 +1719,9 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
 
         assert_eq!(
             NEW_KEYS.len(),
-            135,
-            "Expected exactly 135 new tier-revamp keys, got {}",
+            123,
+            "Expected exactly 123 new tier-revamp v1 keys (was 135 pre-Wave-5; \
+             12 keys deferred to v1.1/v2 backlog per spec §4.16), got {}",
             NEW_KEYS.len()
         );
 
@@ -1758,13 +1740,13 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
 
 Run: `cargo test --package spur-license --lib policy::feature_key::tests::tier_revamp_v1_keys_roundtrip`
 
-Expected: PASS — all 135 keys roundtrip correctly.
+Expected: PASS — all 123 v1 keys roundtrip correctly.
 
 - [ ] **Step 3: Run the full feature_key test suite**
 
 Run: `cargo test --package spur-license --lib policy::feature_key`
 
-Expected: ALL PASS — original 36-key tests + 21 new per-crate tests + comprehensive 135-key test + count guard.
+Expected: ALL PASS — original 36-key tests + 21 new per-crate tests + comprehensive 123-key test + count guard.
 
 - [ ] **Step 4: Run the full spur-license test suite**
 

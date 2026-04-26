@@ -188,7 +188,14 @@ Net 4 Free keys (was 5).
 | `mcp_pro_review` | P | v1 | `review_task` with auto-merge gating policies (renamed from `_review_advanced`: orphan `_advanced` suffix without Free counterpart) |
 | `mcp_pro_custom_tools` | P | v1 | Register org-internal MCP tools |
 
-### 4.4 `spur-tui` (Terminal interface — 13 keys)
+### 4.4 `spur-tui` (Terminal interface — 10 keys)
+
+**Revised 2026-04-26 (Wave 5 design-review pass).** Per 4-reviewer synthesis (kimi mechanical, codex code-grounded, claude-code consistency, gemini design-smells):
+- Renamed `_notification_in_tui_drain` → `_notification_drain` (drop redundant `_in_tui_` infix; crate prefix already says tui — claude-code consistency).
+- Moved `tui_pro_telegram_bot_solo` → `bot_pro_telegram_solo` (gate point is at CLI launch / bot subsystem, not TUI — codex code-grounded; deferred to spur-bot Task 19).
+- Deferred `tui_pro_trace_source_react` to v1.1 backlog (codex confirmed the palette source is explicitly `// TODO` deferred; aspirational keys do not belong in v1 registry).
+- Deferred `tui_pro_custom_keybindings` to v2 backlog (codex confirmed vaporware: only fixed handlers + Vim/Emacs edit mode exist; no configurable keymap subsystem).
+- View-per-key granularity preserved against gemini's "umbrella" critique — keeps future tier-move flexibility (e.g. plan_inspector could become Pro later).
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
@@ -196,49 +203,57 @@ Net 4 Free keys (was 5).
 | `tui_core_view_session_detail` | F | v1 | Per-session event stream + notification drain |
 | `tui_core_view_plan_inspector` | F | v1 | DAG visualization for in-flight plans |
 | `tui_core_view_palette_overlay` | F | v1 | Ctrl+K command palette |
-| `tui_core_view_issue_browser` | F | v1 | Browse Linear/GitHub/beads issues (read-only on Free) |
-| `tui_core_view_landing_decision` | F | v1 | Boot routing (`--new`, `--session`, `--sessions`, `--force-attach`) |
+| `tui_core_view_issue_browser` | F | v1 | Browse Linear/GitHub/beads issues (Free tier read-only — write actions like status mutation gated separately by `pm_pro_*` keys) |
+| `tui_core_view_landing_decision` | F | v1 | Boot routing (`--new`, `--session`, `--sessions`) |
 | `tui_core_view_composer` | F | v1 | Multi-line input composer |
-| `tui_core_modal_collision_escape` | F | v1 | `kill <pid>` escape hatch for rejected attaches |
+| `tui_core_modal_collision_escape` | F | v1 | `kill <pid>` escape-hatch UI for rejected attaches |
 | `tui_core_input_paste_as_atom` | F | v1 | LRU-50 multi-line paste atomic placeholders + `ProtectedRange` |
-| `tui_core_notification_in_tui_drain` | F | v1 | 8-event-per-frame display buffer |
-| `tui_pro_telegram_bot_solo` ★ | P | v1 | Single-operator Telegram remote-control (full bot subsystem — see §4.10) |
-| `tui_pro_trace_source_react` | P | **v1.1** | `TraceSource`/`ReactTrace` palette wiring (placeholder exists) |
-| `tui_pro_custom_keybindings` | P | v1 | User-configurable keybinding overlay |
+| `tui_core_notification_drain` | F | v1 | 8-event-per-frame display buffer (governs TUI frame responsiveness) |
 
-### 4.5 `spur-cli` (Command surface — 10 keys)
+### 4.5 `spur-cli` (Command surface — 9 keys)
 
-| Key | Tier | Status | Description |
-|---|---|---|---|
-| `cli_core_command_init` | F | v1 | `spur init` — workspace scaffolding |
-| `cli_core_command_agents` | F | v1 | `spur agents` — vendor configuration & registry |
-| `cli_core_command_sessions` | F | v1 | `spur sessions` — list active/historical |
-| `cli_core_command_run` | F | v1 | `spur run "<task>"` — ad-hoc execution |
-| `cli_core_command_exec` | F | v1 | `spur exec --agent <name>` — direct vendor execution |
-| `cli_core_command_tui` | F | v1 | `spur tui` — open dashboard |
-| `cli_core_command_cost` | F | v1 | `spur cost` — basic cost summary |
-| `cli_core_command_connect` | F | v1 | `spur connect` — socket bindings |
-| `cli_core_command_version` | F | v1 | `spur version` |
-| `cli_core_command_upgrade_trial` | F | v1 | `spur upgrade trial` — opt-in 7-day Pro trial (anti-abuse via licenseseat NodeLocked binding) |
-| `cli_core_command_upgrade_pro` | F | v1 | `spur upgrade pro` — opens browser to Stripe checkout (monthly/annual/lifetime) |
-| `cli_core_command_license_activate` | F | v1 | `spur license activate <key>` — write license to `~/.spur/license`, arc_swap reload |
-| `cli_team_command_workflow` | T | **v2** | `spur workflow run/validate <file>` (TOML workflow engine — Team only) |
+**Revised 2026-04-26 (Wave 5 design-review pass).** Per claude-code consistency: dropped `_command_` infix on every key (cli crate's only public capabilities ARE subcommands; infix carries zero discriminating information — matches spur-mcp precedent where 14 MCP tools are named `mcp_core_pm`/`_pr`/`_delegate`, not `mcp_core_tool_*`). Per codex code-grounded: dropped `_version` (Clap built-in attribute, not a separate dispatch site to gate); deferred `_upgrade_trial` and `_upgrade_pro` to v1.1 backlog (no `Commands::Upgrade` in code yet); deferred `_workflow` to v2 backlog (Phase 3 stub). Per codex: `_license_activate` retained but description updated to reflect actual implementation (`spur auth login --key`).
 
-### 4.6 `spur-pm` (Project Management — 9 keys + 1 Team-deferred)
+Gemini's "drop all CLI keys as routing facade" critique rejected: keeping CLI as gate-layer is consistent with the established treatment of MCP tool dispatch (also a routing layer) and provides defense-in-depth before downstream crate enforcement.
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
-| `pm_core_beads_basic` | F | v1 | Standard beads CRUD via `br` CLI |
-| `pm_core_pm_read` | F | v1 | Browse Linear/GitHub/Plane/beads (read-only, no risk) |
-| `pm_core_pr_manual` | F | v1 | User-initiated `create_pr` via `gh` CLI |
-| `pm_core_bv_adapter` | F | v1 | bv adapter integration |
-| `pm_pro_beads_advanced` | P | v1 | Plan persistence + projection + mutation execution + signal-watch + auto-merge |
-| `pm_pro_github_auto` ★ | P | v1 | Auto-create PR on delegation success |
-| `pm_pro_linear_sync` ★ | P | v1 | Bidirectional Linear status sync (comments, agent activity log, status mapping) |
-| `pm_pro_plane_sync` | P | v1 | Same for Plane (REST + MCP) |
-| `pm_pro_signal_watcher` | P | v1 | Beads-advanced signal proposal + scope drift detection |
-| `pm_pro_auto_merge` | P | v1 | Beads-advanced auto-merge gating |
-| `pm_team_webhooks` | T | **v2** | Bidirectional webhook receivers |
+| `cli_core_init` | F | v1 | `spur init` — workspace scaffolding |
+| `cli_core_agents` | F | v1 | `spur agents` — vendor configuration & registry |
+| `cli_core_sessions` | F | v1 | `spur sessions` — list active/historical |
+| `cli_core_run` | F | v1 | `spur run "<task>"` — ad-hoc execution |
+| `cli_core_exec` | F | v1 | `spur exec --agent <name>` — direct vendor execution |
+| `cli_core_tui` | F | v1 | `spur tui` — open dashboard |
+| `cli_core_cost` | F | v1 | `spur cost` — basic cost summary (defense-in-depth gate; primary enforcement at `cost_core_summary`) |
+| `cli_core_connect` | F | v1 | `spur connect` — GitHub auth/connect (description was previously "socket bindings"; corrected to match implementation) |
+| `cli_core_license_activate` | F | v1 | `spur auth login --key <key>` — write license to `~/.spur/license`, arc_swap reload (canonical form is `auth login`; `license activate` is a planned alias) |
+
+### 4.6 `spur-pm` (Project Management — 5 keys)
+
+**Revised 2026-04-26 (Wave 5 design-review pass).** Major rationalization per codex code-grounded review (capabilities lived in different crates) + claude-code naming consistency:
+
+**Renames (codex + claude-code):**
+- `pm_core_pm_read` → `pm_core_browse` (drop awkward duplicate `pm_pm_` segment; description scoped to actually-implemented Beads + GitHub adapters; Linear/Plane stubs are enum-only).
+- `pm_core_pr_manual` → `pm_core_pr` (cross-crate parity with just-merged `mcp_core_pr` — same `_manual` orphan-suffix rule applied; both crates intentionally gate the same capability at different surfaces).
+- `pm_core_bv_adapter` → `pm_core_beads_graph_adapter` (drop opaque `bv` abbreviation; reframe as capability noun rather than tool name; survives a future tool swap).
+
+**Deferred to v1.1/v2 backlog (codex code-grounded findings — capability lives in another crate or is vaporware):**
+- `pm_pro_github_auto` — actual implementation lives in `crates/spur-mcp/src/plan/reconciler.rs`. Roll into a future `mcp_pro_pr_auto` key (deferred to spur-mcp v1.1 follow-up).
+- `pm_pro_linear_sync` — vaporware (only `PmSource::Linear` enum value exists; no adapter). v2 backlog.
+- `pm_pro_plane_sync` — vaporware (only `PmSource::Plane` enum value exists). v2 backlog.
+- `pm_pro_signal_watcher` — duplicates already-merged `mcp_pro_signal_watcher_scope_drift` (real implementation lives in spur-mcp). Drop.
+- `pm_pro_auto_merge` — covered by already-merged `mcp_pro_review` (auto-merge gating policies live in MCP review path). Drop.
+- `pm_team_webhooks` — vaporware (no receiver implementation in spur-pm). v2 backlog.
+
+**Narrowed scope:** `pm_pro_beads_advanced` retained, but description narrowed from the previous "plan persistence + projection + mutation + signal-watch + auto-merge" omnibus (those live in spur-mcp) to its actual PM-crate boundary: the `PmService::advanced()` activation gate + `BeadsAdvanced` extension surface.
+
+| Key | Tier | Status | Description |
+|---|---|---|---|
+| `pm_core_beads_basic` | F | v1 | Standard beads CRUD via `br` CLI (paired with `pm_pro_beads_advanced` — `_basic`/`_advanced` is a real Free/Pro capability split, not an orphan tier-flavor adjective) |
+| `pm_core_browse` | F | v1 | Browse PM tracker (Beads + GitHub Issues today; Linear/Plane adapters deferred to v2) |
+| `pm_core_pr` | F | v1 | User-initiated `create_pr` via `gh` CLI through `PmService::create_pr` |
+| `pm_core_beads_graph_adapter` | F | v1 | `bv` (beads-viewer) graph-aware analysis adapter integration |
+| `pm_pro_beads_advanced` | P | v1 | `PmService::advanced()` activation + `BeadsAdvanced` extension surface (the Pro PM-side gate; downstream advanced capabilities — plan persistence, signal watching, auto-merge — gate separately at `mcp_pro_*` keys) |
 
 ### 4.7 `spur-cost` (Cost tracking — 6 keys)
 
@@ -271,12 +286,13 @@ Net 4 Free keys (was 5).
 | `worktree_pro_custom_policies` | P | v1 | Merge strategies (squash/rebase/octopus), naming templates |
 | `worktree_pro_cleanup_orphans` | P | **v1.1** | Safe global orphan cleanup (Risk #4 fix required) |
 
-### 4.10 `spur-bot` (Telegram subsystem — 5 keys + 1 Team-deferred)
+### 4.10 `spur-bot` (Telegram subsystem — 6 keys + 1 Team-deferred)
 
-`tui_pro_telegram_bot_solo` ★ (in §4.4) is the user-facing bundle. Underneath it gates these atomic capabilities:
+**Revised 2026-04-26 (Wave 5 design-review pass).** Per codex code-grounded review: the user-facing bundle key `bot_pro_telegram_solo` (renamed from the earlier `tui_pro_telegram_bot_solo` in §4.4) belongs in this crate, not spur-tui — actual gate point is `Commands::Bot` activation in `crates/spur-cli/src/main.rs:348` / `run_telegram_bot` in `crates/spur-bot/src/telegram/mod.rs:9`, with single-operator filter at `router.rs:25`. Gating in spur-tui would let users bypass via `spur bot ...` CLI invocation.
 
 | Key | Tier | Status | Description |
 |---|---|---|---|
+| `bot_pro_telegram_solo` ★ | P | v1 | Single-operator Telegram remote-control (user-facing umbrella; gate at `Commands::Bot` / `run_telegram_bot`) |
 | `bot_pro_runtime` | P | v1 | `BotRuntime` long-poll connection |
 | `bot_pro_thread_registry` | P | v1 | Forum-topic-per-session multiplexing |
 | `bot_pro_runtime_render` | P | v1 | `SpurEvent` → Markdown state machine |
@@ -325,30 +341,64 @@ Net 4 Free keys (was 5).
 
 Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-core/src/skills/`) but are listed in their own row below for grep-discoverability; they're counted in the Skills row, not double-counted under spur-core.
 
+**Revised 2026-04-26 (Wave 5 design-review pass).** Total **v1 registry** keys reduced from 135 to **123** after Wave 5 rationalization: 12 keys deferred to v1.1/v2 backlog because their capability is vaporware (no implementation), lives in a different crate, or duplicates an already-merged key. See **§4.16 Deferred-keys backlog** below for the explicit deferred list. Counts below show only what's in the v1 Plan A registry (deferred keys not counted).
+
 | Crate / Subsystem | Free keys | Pro keys (v1) | Pro keys (v1.1) | Team-deferred |
 |---|---|---|---|---|
 | `spur-acp` | 11 | 0 | 0 | 0 |
 | `spur-core` | 19 | 7 | 5 | 0 |
 | `skills_*` (in spur-core) | 3 | 2 | 0 | 0 |
 | `spur-mcp` | 7 | 7 | 0 | 0 |
-| `spur-tui` | 10 | 2 | 1 | 0 |
-| `spur-cli` | 12 | 0 | 0 | 1 |
-| `spur-pm` | 4 | 6 | 0 | 1 |
+| `spur-tui` | 10 | 0 | 0 | 0 |
+| `spur-cli` | 9 | 0 | 0 | 0 |
+| `spur-pm` | 4 | 1 | 0 | 0 |
 | `spur-cost` | 3 | 2 | 1 | 0 |
 | `spur-context` | 0 | 5 | 0 | 0 |
 | `spur-worktree` | 2 | 2 | 1 | 0 |
-| `spur-bot` | 0 | 5 | 0 | 1 |
+| `spur-bot` | 0 | 6 | 0 | 1 |
 | `spur-license` | 4 | 1 | 1 | 0 |
 | `spur-blob-store` | 2 | 2 | 0 | 0 |
 | `spur-interactive` | 3 | 0 | 0 | 0 |
 | Notifications (cross-crate) | 1 | 0 | 1 | 0 |
-| **Total** | **81** | **41** | **10** | **3** |
+| **Total** | **78** | **35** | **9** | **1** |
 
-**Total atomic feature keys: 135** (well above the ~110 target; matches the user's intuition that 45 was insufficient).
+**Total v1 atomic feature keys: 123** (78 + 35 + 9 + 1) — was 135 before Wave 5 rationalization. The 12-key reduction reflects (a) 5 keys folded into already-merged spur-mcp keys (signal_watcher/auto_merge dedup + github_auto goes to mcp); (b) 4 keys deferred to v1.1 (trace_source_react + 2 trial CLI commands + 1 mcp_pro_pr_auto follow-up); (c) 4 keys deferred to v2 (vaporware: linear_sync, plane_sync, custom_keybindings, pm_team_webhooks); offset by (d) +1 key relocated (`tui_pro_telegram_bot_solo` → `bot_pro_telegram_solo`).
 
-**Pro v1 launch arsenal: 41 features** organized into 5 ★ headline triggers + 36 supporting depth capabilities.
+**Pro v1 launch arsenal: 35 features** organized into 5 ★ headline triggers + 30 supporting depth capabilities.
 
-**Pro v1.1 roadmap: 10 features** (target Q3 2026 for the 8 risk-blocked items + greenfield notifications + TraceSource wiring; 2 peer-mailbox features ship as soon as Risk #22 ledger pruning lands, which may be earlier than Q3).
+**Pro v1.1 roadmap: 9 features in v1 registry** (deferred-status flag) + 5 backlog items in §4.16 below = 14 v1.1 candidates total, target Q3 2026.
+
+### 4.16 Deferred-keys backlog (Wave 5 design-review pass)
+
+The following keys were proposed in earlier drafts but deferred to v1.1 or v2 after the Wave 5 4-reviewer judge synthesis. Documented here as a single source of truth so future tier-plan or Plan A follow-up authors don't reinvent them.
+
+#### v1.1 backlog (will land when implementation exists)
+
+| Original key | Replacement | Reason |
+|---|---|---|
+| `tui_pro_telegram_bot_solo` | → `bot_pro_telegram_solo` (now in §4.10) | Gate point belongs in spur-bot crate, not spur-tui (codex code-grounded). |
+| `tui_pro_trace_source_react` | (later) | Palette `TraceSource` is explicitly `// TODO` deferred in `app.rs:430,458,470` — no active wiring. |
+| `cli_core_command_upgrade_trial` | `cli_core_upgrade_trial` (later) | No `Commands::Upgrade` in CLI yet. Lands with trial implementation per §6.2. |
+| `cli_core_command_upgrade_pro` | `cli_core_upgrade_pro` (later) | No Stripe/browser checkout command yet. |
+| `pm_pro_github_auto` | `mcp_pro_pr_auto` (later) | Auto-PR-on-success lives in `crates/spur-mcp/src/plan/reconciler.rs:623`, not spur-pm. |
+
+#### v2 backlog (Team or speculative)
+
+| Original key | Reason |
+|---|---|
+| `tui_pro_custom_keybindings` | Vaporware — no configurable keymap subsystem; only fixed handlers + Vim/Emacs edit mode exist. |
+| `cli_team_command_workflow` | Phase 3 print-only stub (Team-only, was already v2). |
+| `pm_pro_linear_sync` | Vaporware — only `PmSource::Linear` enum value (`types.rs:9`); no adapter. |
+| `pm_pro_plane_sync` | Vaporware — same as Linear (`types.rs:10`); no adapter. |
+| `pm_team_webhooks` | Vaporware — no receiver implementation in spur-pm. |
+
+#### Dropped (no replacement; capability redundant with already-merged keys)
+
+| Original key | Reason |
+|---|---|
+| `cli_core_command_version` | Clap built-in `#[command(version)]` attribute, not a separate dispatch site to gate. |
+| `pm_pro_signal_watcher` | Duplicates already-merged `mcp_pro_signal_watcher_scope_drift` (Wave 4); real implementation is in spur-mcp. |
+| `pm_pro_auto_merge` | Covered by already-merged `mcp_pro_review` (Wave 4); auto-merge gating policies live in spur-mcp reconciler. |
 
 ---
 
