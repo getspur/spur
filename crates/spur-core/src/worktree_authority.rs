@@ -432,4 +432,59 @@ mod tests {
         assert_eq!(r.skipped_self, 1);
         assert_eq!(r.swept, 0);
     }
+
+    #[tokio::test]
+    async fn sweep_respects_quarantine_grace() {
+        let td = TempDir::new().unwrap();
+        let brain = "550e8400-e29b-41d4-a716-446655440000";
+        let worker = "deadbeef-1111-2222-3333-444455556666";
+        let branch = format!("spur/worker/v2/codex/{brain}/{worker}");
+        let _ = seed_repo_with_worktree(&td, &branch).await;
+
+        // Externally hold the session lockfile so the first sweep observes Live.
+        std::fs::create_dir_all(td.path().join(".spur/sessions")).unwrap();
+        let lock_path = td
+            .path()
+            .join(".spur/sessions")
+            .join(format!("{brain}.lock"));
+        std::fs::write(&lock_path, b"").unwrap();
+
+        use fs4::fs_std::FileExt;
+        use std::fs::OpenOptions;
+        let held = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        held.try_lock_exclusive().unwrap();
+
+        let (funnel, _rx) = event_funnel::test_channel();
+        let auth = WorktreeAuthority::new(
+            td.path().to_path_buf(),
+            SelfHeldSet::new(),
+            funnel,
+            AuthorityConfig {
+                quarantine_grace: Duration::from_secs(5),
+                sweep_interval: Duration::from_secs(900),
+                fs_unsafe_skip: true,
+            },
+        );
+
+        // First sweep: lock is held externally, probe returns Live; primes last_seen_alive.
+        let r1 = auth.sweep_once().await.expect("first sweep ok");
+        assert_eq!(r1.skipped_live, 1, "first sweep should observe Live");
+        assert_eq!(r1.swept, 0);
+
+        drop(held);
+
+        // Second sweep: probe now succeeds in acquiring (DeadAcquired), but
+        // quarantine grace (5s) has not expired since first sweep, so we
+        // skip rather than sweep.
+        let r2 = auth.sweep_once().await.expect("second sweep ok");
+        assert_eq!(
+            r2.skipped_quarantine, 1,
+            "second sweep within grace should skip quarantine"
+        );
+        assert_eq!(r2.swept, 0, "must not sweep within quarantine grace");
+    }
 }
