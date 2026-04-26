@@ -1,10 +1,13 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
+
+#[cfg(feature = "markdown")]
+use ratatui::style::Modifier;
 
 use crate::components::line_wrap::wrap_line_to_width;
 
@@ -265,6 +268,19 @@ fn render_inline_image(
 }
 
 impl ReactTrace {
+    fn build_trace_block<'a>(
+        &self,
+        title_str: &'a str,
+        accent: Color,
+        following_indicator: &'static str,
+    ) -> Block<'a> {
+        Block::default()
+            .title(Span::styled(title_str, Style::default().fg(accent)))
+            .title_bottom(following_indicator)
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::DarkGray))
+    }
+
     /// Render the full ReAct trace into the given frame area.
     ///
     /// Non-markdown path. For markdown-enabled sessions, callers should use
@@ -282,11 +298,7 @@ impl ReactTrace {
         };
 
         let (title_str, accent) = self.pane_title_and_color();
-        let block = ratatui::widgets::Block::default()
-            .title(Span::styled(title_str, Style::default().fg(accent)))
-            .title_bottom(following_indicator)
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+        let block = self.build_trace_block(&title_str, accent, following_indicator);
 
         let inner = block.inner(area);
         let effective_width = inner.width;
@@ -294,8 +306,6 @@ impl ReactTrace {
 
         // Cache check: rebuild only when generation or width changed.
         // Only used in non-markdown builds; markdown builds use render_with_ctx.
-        #[cfg(not(feature = "markdown"))]
-        let wrapped_owned: Vec<Line<'static>>;
         #[cfg(not(feature = "markdown"))]
         {
             let hit = self
@@ -316,7 +326,6 @@ impl ReactTrace {
                     generation: self.generation,
                 });
             }
-            wrapped_owned = Vec::new(); // placeholder — we borrow from cache below
         }
 
         // In markdown builds, render() is a fallback that doesn't use the
@@ -397,11 +406,7 @@ impl ReactTrace {
         };
 
         let (title_str, accent) = self.pane_title_and_color();
-        let block = ratatui::widgets::Block::default()
-            .title(Span::styled(title_str, Style::default().fg(accent)))
-            .title_bottom(following_indicator)
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+        let block = self.build_trace_block(&title_str, accent, following_indicator);
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -724,5 +729,58 @@ mod resolve_anchor_tests {
             "result must be < total_rows even for zero-height entry; got {}",
             row
         );
+    }
+}
+
+#[cfg(test)]
+mod copy_friendly_border_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+
+    fn assert_no_vertical_border_glyphs(buf: &ratatui::buffer::Buffer, width: u16, height: u16) {
+        for y in 0..height {
+            for x in 0..width {
+                let cell = buf.cell((x, y)).expect("cell should be inside trace area");
+                assert_ne!(
+                    cell.symbol(),
+                    "│",
+                    "react trace copy surface should not render side border glyph at ({x}, {y})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_does_not_write_vertical_border_glyphs() {
+        let width = 40;
+        let height = 8;
+        let mut trace = ReactTrace::new_for_tests();
+        trace.append_message("copy this line\nand this line", "codex", "12:00".into());
+
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| trace.render(f, Rect::new(0, 0, width, height), None))
+            .unwrap();
+
+        assert_no_vertical_border_glyphs(term.backend().buffer(), width, height);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn render_with_ctx_does_not_write_vertical_border_glyphs() {
+        let width = 40;
+        let height = 8;
+        let mut trace = ReactTrace::new_for_tests();
+        trace.append_message("copy this line\nand this line", "codex", "12:00".into());
+        let registry = std::collections::HashMap::new();
+        let ctx = RenderContext {
+            mermaid_registry: &registry,
+            picker: None,
+        };
+
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &ctx, None))
+            .unwrap();
+
+        assert_no_vertical_border_glyphs(term.backend().buffer(), width, height);
     }
 }
