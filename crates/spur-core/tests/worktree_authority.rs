@@ -84,6 +84,88 @@ async fn self_held_session_prevents_sweep_during_active_use() {
 }
 
 #[tokio::test]
+async fn self_held_remove_allows_sweep_to_reclaim() {
+    use tokio::process::Command;
+
+    let td = TempDir::new().unwrap();
+    // Set up repo + v2 worktree.
+    let _ = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    let _ = Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    tokio::fs::write(td.path().join("a"), b"x").await.unwrap();
+    let _ = Command::new("git")
+        .args(["add", "a"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    let _ = Command::new("git")
+        .args(["commit", "-q", "-m", "base"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+
+    let brain = "550e8400-e29b-41d4-a716-446655440000";
+    let worker = "deadbeef-1111-2222-3333-444455556666";
+    let branch = format!("spur/worker/v2/codex/{brain}/{worker}");
+    let wt = td.path().join(".spur/worktrees/abc");
+    let _ = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            wt.to_str().unwrap(),
+            "-b",
+            &branch,
+            "main",
+        ])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+
+    // No lockfile -> SessionLivenessProbeResult::Missing -> reclaim eligible.
+    let self_held = SelfHeldSet::new();
+    let bid = spur_acp::BrainSessionId::new(spur_acp::SessionId(brain.into()));
+    self_held.insert(bid.clone());
+    self_held.remove(&bid); // simulate retire-side cleanup
+
+    let (funnel, _rx) = event_funnel::test_channel();
+    let auth = WorktreeAuthority::new(
+        td.path().to_path_buf(),
+        self_held,
+        funnel,
+        AuthorityConfig {
+            quarantine_grace: Duration::ZERO,
+            ..AuthorityConfig::default()
+        },
+    );
+    let report = auth.sweep_once().await.expect("sweep");
+    // No lockfile means probe sees Missing; with quarantine_grace=ZERO, sweep reclaims.
+    // (The remove is the precondition; this test verifies the post-remove behavior
+    // does NOT skip via Self_.)
+    assert_eq!(
+        report.skipped_self, 0,
+        "after remove, must NOT skip via Self_"
+    );
+}
+
+#[tokio::test]
 async fn two_orchestrators_do_not_sweep_each_others_worktrees() {
     use fs4::fs_std::FileExt;
     use std::fs::OpenOptions;
