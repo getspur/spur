@@ -131,6 +131,14 @@ impl FeatureKey {
     pub const CORE_PRO_PEER_MAILBOX_STRANDED_RECON: Self =
         Self("core_pro_peer_mailbox_stranded_recon");
 
+    // --- spur-core: review subsystem (6) ---
+    pub const CORE_CORE_REVIEW_SINK: Self = Self("core_core_review_sink");
+    pub const CORE_CORE_REVIEW_TIMEOUT: Self = Self("core_core_review_timeout");
+    pub const CORE_CORE_REVIEW_RETRY: Self = Self("core_core_review_retry");
+    pub const CORE_PRO_REVIEW_AUTO_APPROVE: Self = Self("core_pro_review_auto_approve");
+    pub const CORE_PRO_REVIEW_TIMEOUT_ROUTING: Self = Self("core_pro_review_timeout_routing");
+    pub const CORE_PRO_REVIEW_RETRY_CONFIG: Self = Self("core_pro_review_retry_config");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -273,6 +281,19 @@ impl FeatureKey {
             Some(Self::CORE_PRO_PEER_MAILBOX_LEDGER)
         } else if bytes_eq(b, b"core_pro_peer_mailbox_stranded_recon") {
             Some(Self::CORE_PRO_PEER_MAILBOX_STRANDED_RECON)
+        // spur-core: review subsystem
+        } else if bytes_eq(b, b"core_core_review_sink") {
+            Some(Self::CORE_CORE_REVIEW_SINK)
+        } else if bytes_eq(b, b"core_core_review_timeout") {
+            Some(Self::CORE_CORE_REVIEW_TIMEOUT)
+        } else if bytes_eq(b, b"core_core_review_retry") {
+            Some(Self::CORE_CORE_REVIEW_RETRY)
+        } else if bytes_eq(b, b"core_pro_review_auto_approve") {
+            Some(Self::CORE_PRO_REVIEW_AUTO_APPROVE)
+        } else if bytes_eq(b, b"core_pro_review_timeout_routing") {
+            Some(Self::CORE_PRO_REVIEW_TIMEOUT_ROUTING)
+        } else if bytes_eq(b, b"core_pro_review_retry_config") {
+            Some(Self::CORE_PRO_REVIEW_RETRY_CONFIG)
         } else {
             None
         }
@@ -617,6 +638,20 @@ mod tests {
             "core_pro_peer_mailbox_router",
             "core_pro_peer_mailbox_ledger",
             "core_pro_peer_mailbox_stranded_recon",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_core_review_keys_registered() {
+        for s in &[
+            "core_core_review_sink",
+            "core_core_review_timeout",
+            "core_core_review_retry",
+            "core_pro_review_auto_approve",
+            "core_pro_review_timeout_routing",
+            "core_pro_review_retry_config",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
