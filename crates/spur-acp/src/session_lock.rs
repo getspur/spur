@@ -38,6 +38,25 @@ pub enum AcquireOutcome {
 }
 
 impl SessionAttachGuard {
+    pub fn acp_id(&self) -> &str {
+        &self.acp_id
+    }
+
+    pub fn try_acquire_or_replace(
+        repo_root: &Path,
+        acp_id: &str,
+        existing_guard: Option<SessionAttachGuard>,
+    ) -> AcquireOutcome {
+        if let Some(guard) = existing_guard {
+            if guard.acp_id() == acp_id {
+                return AcquireOutcome::Acquired(guard);
+            }
+            drop(guard);
+        }
+
+        Self::try_acquire(repo_root, acp_id)
+    }
+
     pub fn try_acquire(repo_root: &Path, acp_id: &str) -> AcquireOutcome {
         use fs4::fs_std::FileExt;
 
@@ -159,6 +178,36 @@ mod tests {
             }
             other => panic!(
                 "expected Acquired, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn replace_drops_mismatched_guard_and_acquires_new_id() {
+        let tmp = TempDir::new().unwrap();
+        let guard_a = match SessionAttachGuard::try_acquire(tmp.path(), "A") {
+            AcquireOutcome::Acquired(g) => g,
+            other => panic!(
+                "expected Acquired for A, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+
+        let guard_b =
+            match SessionAttachGuard::try_acquire_or_replace(tmp.path(), "B", Some(guard_a)) {
+                AcquireOutcome::Acquired(g) => g,
+                other => panic!(
+                    "expected Acquired for B, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            };
+
+        assert_eq!(guard_b.acp_id(), "B");
+        match SessionAttachGuard::try_acquire(tmp.path(), "A") {
+            AcquireOutcome::Acquired(_) => {}
+            other => panic!(
+                "expected A to be released, got {:?}",
                 std::mem::discriminant(&other)
             ),
         }

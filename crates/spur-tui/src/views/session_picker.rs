@@ -602,7 +602,7 @@ impl SessionPickerView {
         if let PickerState::Populated { sessions, .. } = &self.state {
             if let Some(session) = sessions.iter().find(|s| s.session_id.0.as_ref() == acp_id) {
                 let label = Self::resolved_title(session, &self.metadata, false);
-                return Line::from(vec![
+                let mut spans = vec![
                     Span::raw(" Last: "),
                     Span::styled(
                         label,
@@ -610,11 +610,23 @@ impl SessionPickerView {
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     ),
+                ];
+                if let Some(relative) = session
+                    .updated_at
+                    .as_deref()
+                    .map(Self::relative_time)
+                    .filter(|relative| !relative.is_empty())
+                {
+                    spans.push(Span::raw("  ·  "));
+                    spans.push(Span::styled(relative, Style::default().fg(Color::DarkGray)));
+                }
+                spans.extend([
                     Span::raw("  ·  "),
                     Span::styled("[Enter] resume", Style::default().fg(Color::Green)),
                     Span::raw("  ·  "),
                     Span::styled("[n] new", Style::default().fg(Color::DarkGray)),
                 ]);
+                return Line::from(spans);
             }
 
             let short = acp_id[..8.min(acp_id.len())].to_string();
@@ -1432,6 +1444,26 @@ mod current_session_shortcut_tests {
         );
 
         assert_eq!(picker.cursor(), 0);
+    }
+
+    #[test]
+    fn preselect_banner_includes_relative_updated_time() {
+        let mut picker = SessionPickerView::with_preselect(Some("B".into()));
+        let mut session = make_session("B");
+        session.title = Some("Build fix".to_string());
+        session.updated_at = Some((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339());
+        picker.set_sessions("test-brain".into(), vec![session]);
+
+        let banner = picker.build_preselect_banner("B");
+        let text = banner
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("Last: Build fix"));
+        assert!(text.contains("5m ago"));
+        assert!(text.contains("[Enter] resume"));
     }
 
     #[test]
