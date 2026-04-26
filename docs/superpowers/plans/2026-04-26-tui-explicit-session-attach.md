@@ -722,12 +722,16 @@ AcquireOutcome::Rejected { holder } => {
 }
 ```
 
-### Task 16: Extend `ActiveConnection` with the lock fields
+### Task 16: Thread `attach_guard` + `fs_unsafe` through BOTH `ActiveConnection` AND `BrainSession` with explicit move semantics
+
+**Background — why both structs:** `agent_connection: Option<ActiveConnection>` holds an idle transport. When `create_brain_session(connection, brain_name)` or the `ResumeSession` path consumes that connection, the transport MOVES into a freshly constructed `BrainSession` and `agent_connection` becomes `None`. Throughout the active-session lifetime, the transport lives on `BrainSession.connection`, NOT on `agent_connection`. When the brain is later retired (`retire_active_brain` at the `*agent_connection = Some(ActiveConnection { transport: b.connection, ... })` line), the transport moves back. **The lock guard MUST follow the transport at every step or the single-attach invariant is silently broken.**
+
+If the guard lived ONLY on `ActiveConnection`: it would be dropped the moment `agent_connection.take()` consumed the transport into `BrainSession` — the entire session would run with NO LOCK HELD. Concrete close-session paths that would silently leak the lock without this fix: `crates/spur-core/src/orchestrator.rs` lines ~2015 (auth-required brain death), ~2034 (connection-death reconnect), ~2056 (general brain error), ~2188 (main loop exit cleanup), ~2206 (drop unused agent_connection on exit), and ~2444 (`retire_active_brain` connection write-back).
 
 **Files:**
-- Modify: `crates/spur-core/src/orchestrator.rs` (the struct from Task 1)
+- Modify: `crates/spur-core/src/orchestrator.rs` (the `ActiveConnection` struct from Task 1, the `BrainSession` struct at line ~143, and 6 close/transfer sites)
 
-- [ ] **Step 1: Add fields**
+- [ ] **Step 1: Add fields to `ActiveConnection`**
 
 ```rust
 pub struct ActiveConnection {
@@ -735,44 +739,131 @@ pub struct ActiveConnection {
     pub brain_name: String,
     /// `None` only when attached under DegradedNoLock (NFS/sshfs).
     /// Holding this for the lifetime of `transport` enforces the
-    /// single-attach invariant.
+    /// single-attach invariant. Moves between this struct and
+    /// BrainSession.attach_guard whenever the transport moves.
     pub attach_guard: Option<spur_acp::session_lock::SessionAttachGuard>,
     /// True when this attachment is unprotected (multi-window unsafe).
     pub fs_unsafe: bool,
 }
 ```
 
-- [ ] **Step 2: Update every `ActiveConnection { ... }` constructor**
+- [ ] **Step 2: Add the SAME two fields to `BrainSession` (line ~143)**
 
-Search workspace:
-```bash
-rg -n 'ActiveConnection\s*\{' --type rust
-```
-
-For sites that reuse a connection without a new lock acquire (e.g., line 1342, 1444, 2366 from Phase 1a), preserve the previous guard:
-- `retire_active_brain` (line 2366): the brain is being torn down but the connection persists. Move the guard from the retiring `BrainSession` (if it stored one) — OR keep the guard on `ActiveConnection` from the prior `load_brain_session` call. Confirm there is exactly ONE place that calls `try_acquire`, namely Task 14 + 15.
-
-For all other sites, propagate `attach_guard: existing_guard, fs_unsafe: existing_fs_unsafe`.
-
-- [ ] **Step 3: At the `load_brain_session` post-acquire site, store the guard**
-
-Where `ActiveConnection` is built after a successful `load_brain_session`:
 ```rust
-ActiveConnection {
-    transport: conn,
-    brain_name,
-    attach_guard,    // from Task 14 Step 2
-    fs_unsafe,
+pub struct BrainSession {
+    pub connection: Box<dyn AgentConnection>,
+    pub acp_session_id: String,
+    pub spur_session_id: SessionId,
+    pub brain_name: String,
+    pub delegation_handle: JoinHandle<()>,
+    pub mcp_server: Option<Arc<McpCallbackServer>>,
+    pub mcp_guard: Option<AbortOnDropHandle<()>>,
+    pub notification_pump_handle: Option<JoinHandle<()>>,
+    // ...existing fields...
+    /// Mirrors ActiveConnection.attach_guard. Holds the lock for the
+    /// duration the transport lives on this struct (between
+    /// create/load_brain_session and retire_active_brain).
+    /// `None` only under DegradedNoLock (NFS/sshfs).
+    pub attach_guard: Option<spur_acp::session_lock::SessionAttachGuard>,
+    /// Mirrors ActiveConnection.fs_unsafe. Surfaces to the TUI via
+    /// AgentSessionReady so the SessionDetailView can render the
+    /// ⚠ unsafe-fs banner.
+    pub fs_unsafe: bool,
 }
 ```
 
-- [ ] **Step 4: Emit `AgentSessionReady` with the right `fs_unsafe`**
+- [ ] **Step 3: Update `BrainSession` constructors to take + store the new fields**
 
-Where the orchestrator currently emits `AgentSessionReady`, pass `fs_unsafe: active_connection.fs_unsafe`.
+Find every site that constructs `BrainSession { ... }`. Add `attach_guard` and `fs_unsafe` to each. The values come from:
+- `load_brain_session` (Task 14): from the local bindings produced by `try_acquire`
+- `create_brain_session` (Task 15): same
+- `reconnect_with_events` (around line 2034 path): the OLD BrainSession is moved in via `dead`. Pass `dead.attach_guard` and `dead.fs_unsafe` through to the new one — the lock is for the SAME acp_session_id, so the guard stays valid across reconnect. **Do NOT call `try_acquire` again during reconnect** — that would trigger self-collision (the lock is still held by us).
 
-- [ ] **Step 5: Run `cargo build --workspace`**
+```rust
+BrainSession {
+    connection: conn,
+    acp_session_id: acp_id.clone(),
+    spur_session_id,
+    brain_name,
+    delegation_handle,
+    mcp_server,
+    mcp_guard,
+    notification_pump_handle,
+    // ...existing fields...
+    attach_guard,    // Some(guard) on Acquired path; None on DegradedNoLock
+    fs_unsafe,       // false on Acquired path; true on DegradedNoLock
+}
+```
+
+- [ ] **Step 4: Update `ActiveConnection` constructors**
+
+Search:
+```bash
+rg -n 'ActiveConnection\s*\{' --type rust crates/spur-core/src/orchestrator.rs
+```
+
+For each construction site, set `attach_guard` and `fs_unsafe` according to whether we're holding a guard at that point. The 3 sites that EXIST AFTER PHASE 1A:
+- Line ~1415 (BrainConnectStarted handler): `connect_brain` returned a fresh transport with NO guard yet. Set `attach_guard: None, fs_unsafe: false`. (Lock will be acquired when this transport is later consumed by create/load_brain_session.)
+- Line ~1517 (ListSessions handler): same — fresh transport, no guard. `attach_guard: None, fs_unsafe: false`.
+- Line ~2444 (`retire_active_brain` write-back): transport moves from `b.connection` back to `agent_connection`. **Move the guard with it.** `attach_guard: b.attach_guard.take(), fs_unsafe: b.fs_unsafe`.
+
+```rust
+// retire_active_brain at line ~2444:
+*agent_connection = Some(ActiveConnection {
+    transport: b.connection,
+    brain_name: b.brain_name,
+    attach_guard: b.attach_guard.take(),  // CRITICAL: guard follows transport
+    fs_unsafe: b.fs_unsafe,
+});
+```
+
+- [ ] **Step 5: Update create_brain_session/load_brain_session to take + transfer the guard**
+
+Both functions receive the transport (and now: the acquired guard from Task 14/15) and construct a `BrainSession`. Wire `attach_guard` and `fs_unsafe` into the `BrainSession { ... }` construction. The values come from the `try_acquire` outcome at the top of each function (Task 14 Step 2 / Task 15 Step 1).
+
+If the caller passes a previously-acquired guard via `agent_connection` (e.g., from the BrainConnectStarted ladder), the `try_acquire` call at the start of load_brain_session would self-collide. Avoid this by: when `agent_connection.take()` returns `Some(ac)` and `ac.attach_guard.is_some()`, REUSE that guard instead of calling `try_acquire` again. Add this branching at the top of load_brain_session/create_brain_session.
+
+Concretely:
+```rust
+let (attach_guard, fs_unsafe) = match existing_guard_from_agent_connection {
+    Some(guard) => (Some(guard), existing_fs_unsafe),  // reuse, no re-acquire
+    None => match SessionAttachGuard::try_acquire(&self.repo_root, &acp_id) {
+        AcquireOutcome::Acquired(g) => (Some(g), false),
+        AcquireOutcome::DegradedNoLock { reason } => { tracing::warn!(...); (None, true) }
+        AcquireOutcome::Rejected { holder } => return Err(LoadBrainSessionError::AlreadyAttached { acp_id, holder }),
+        AcquireOutcome::Io(e) => return Err(LoadBrainSessionError::Other(anyhow::Error::from(e))),
+    }
+};
+```
+
+- [ ] **Step 6: Audit the 3 close-session paths — guard drops with `BrainSession`**
+
+Lines ~2015 (auth-required), ~2034 (reconnect-death), ~2056 (general brain error), and ~2188 (main loop exit) all do `let mut dead = brain.take()` followed by `dead.connection.shutdown().await`. After Step 2 the guard lives on `dead.attach_guard`; when `dead` falls out of scope at the end of each block, the guard is dropped via `Drop` and the kernel releases the flock. **No code change needed at those sites — Step 2's field placement is what makes this correct.**
+
+Verify by inspection: walk each of the 4 paths above and confirm there is no path that moves `dead.connection` somewhere else without also moving `dead.attach_guard`. The reconnect path at line ~2034 IS such a case (`dead` is moved into `reconnect_with_events`); Step 3 handles that by threading the guard through.
+
+- [ ] **Step 7: Update `agent_connection.take()` cleanup at line ~2206 (main loop exit)**
+
+```rust
+if let Some(ActiveConnection { transport: mut conn, attach_guard: _, .. }) = agent_connection.take() {
+    let _ = conn.shutdown().await;
+    // attach_guard drops here at end of scope, releasing the kernel flock
+}
+```
+
+The `..` rest pattern automatically discards `attach_guard` and `fs_unsafe` at end of scope, releasing the lock. No explicit handling needed beyond ensuring the destructure compiles after Step 1.
+
+- [ ] **Step 8: Emit `AgentSessionReady` with the right `fs_unsafe`**
+
+Where the orchestrator currently emits `AgentSessionReady`, pass `fs_unsafe: brain.fs_unsafe` (read from the live BrainSession, NOT from a transient ActiveConnection).
+
+- [ ] **Step 9: Run `cargo build --workspace`**
 
 Expected: clean.
+
+- [ ] **Step 10: Add a unit test asserting the guard travels through retire**
+
+In `crates/spur-core/src/orchestrator.rs` test module, add a regression test that exercises a full create→retire→reuse cycle and asserts `agent_connection.as_ref().unwrap().attach_guard.is_some()` after retire. This is the single most likely site for future implementer regression — the test pins it down. (Use `#[cfg(test)]` mocks for `Box<dyn AgentConnection>` if the existing test infrastructure already has them; otherwise leave a `// TODO: regression test pending mock infra` and document the gap in the commit message.)
 
 ### Task 17: Cross-process integration test
 

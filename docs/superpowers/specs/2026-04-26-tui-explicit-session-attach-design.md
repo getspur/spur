@@ -89,7 +89,7 @@ pub struct HolderInfo {
 
 ### 4.2 Orchestrator integration
 
-Replace the current `agent_connection: Option<(Box<dyn AgentConnection>, String)>` tuple with a named struct:
+Replace the current `agent_connection: Option<(Box<dyn AgentConnection>, String)>` tuple with a named struct, AND add a mirroring field to `BrainSession` (the existing struct that holds the connection during a session's lifetime):
 
 ```rust
 // crates/spur-core/src/orchestrator.rs
@@ -97,26 +97,50 @@ Replace the current `agent_connection: Option<(Box<dyn AgentConnection>, String)
 struct ActiveConnection {
     transport: Box<dyn AgentConnection>,
     brain_name: String,
-    /// `None` only when we attached under degraded fs_unsafe mode.
-    /// Holding this guard for the lifetime of `transport` is what enforces
-    /// the single-attach invariant.
+    /// `None` only when attached under DegradedNoLock (NFS/sshfs).
+    /// Moves between this struct and BrainSession.attach_guard whenever
+    /// the transport moves.
     attach_guard: Option<SessionAttachGuard>,
-    /// Whether this attachment is unprotected (NFS/sshfs/SMB without flock).
+    fs_unsafe: bool,
+}
+
+struct BrainSession {
+    connection: Box<dyn AgentConnection>,
+    // ...existing fields...
+    /// Mirrors ActiveConnection.attach_guard. Holds the lock while the
+    /// transport lives on this struct (between create/load_brain_session
+    /// and retire_active_brain). Drops with BrainSession at all
+    /// close-session paths.
+    attach_guard: Option<SessionAttachGuard>,
     fs_unsafe: bool,
 }
 
 // agent_connection: Option<ActiveConnection>
 ```
 
-**Lifetime rule:** `attach_guard` is dropped when `transport` is dropped. Both live inside `ActiveConnection`. When `retire_active_brain` (`orchestrator.rs:2288-2366`) extracts the transport back into `agent_connection`, the guard MUST move with it. Code reviewers MUST verify no path drops `attach_guard` while `transport` survives.
+**Why both structs (corrected from initial design):** The initial spec stored the guard only on `ActiveConnection`, but the orchestrator's actual lifetime model moves the transport OUT of `agent_connection` into `BrainSession.connection` whenever a session becomes active (via `create_brain_session` / `load_brain_session`). During the entire active-session lifetime, `agent_connection` is `None` and the transport lives on `BrainSession`. If the guard lived only on `ActiveConnection`, it would be dropped at the moment of session creation — the session would run with no lock held, silently breaking the invariant. Storing the guard on `BrainSession` and moving it WITH the transport in `retire_active_brain` is what keeps the lock alive for the full session lifetime.
+
+**Lifetime rule (corrected):** the `attach_guard` always lives WITH the transport. Concretely:
+- When transport is in `agent_connection` (idle), guard is on `ActiveConnection.attach_guard`
+- When transport moves to `BrainSession.connection` (active session via create/load), guard MUST move to `BrainSession.attach_guard`
+- When `retire_active_brain` writes the transport back to `agent_connection`, guard MUST move back via `b.attach_guard.take()`
+- When `BrainSession` is dropped at any close-session path, the guard drops with it and the kernel releases the flock
+
+**Close-session paths that depend on the guard living on `BrainSession`** (`crates/spur-core/src/orchestrator.rs`):
+- ~line 2015 — auth-required brain death: `dead = brain.take(); ...; dead.connection.shutdown().await; /* dead drops, guard drops */`
+- ~line 2034 — connection-death reconnect: `dead = brain.take()` moves into `reconnect_with_events`; that function MUST thread `dead.attach_guard` into the new BrainSession (the lock is for the SAME acp_id, so the same guard is reused — do NOT call `try_acquire` again, that would self-collide)
+- ~line 2056 — general brain error: same pattern as 2015
+- ~line 2188 — main loop exit cleanup: `b = brain.take(); ...; b.connection.shutdown().await; /* b drops, guard drops */`
+- ~line 2206 — drop unused `agent_connection` on exit: `ActiveConnection { ..., attach_guard: _, .. }` rest pattern; guard drops at end of scope
+- ~line 2444 — `retire_active_brain` write-back: explicit `attach_guard: b.attach_guard.take()` to move guard with transport
 
 **Acquisition sites:**
-- `Orchestrator::load_brain_session` (`orchestrator.rs:2614`) — call `SessionAttachGuard::try_acquire` after the connection is established but before constructing the `BrainSession`. Lock acquired ONCE per ACP id, NOT pre-TUI in CLI.
+- `Orchestrator::load_brain_session` — call `SessionAttachGuard::try_acquire` AFTER the connection is established but BEFORE constructing the `BrainSession`. Lock acquired ONCE per ACP id. **Skip `try_acquire` if the caller already passed a guard via `agent_connection`** (e.g., a prior load returned the connection to the cache). Reusing the existing guard avoids self-collision.
 - `Orchestrator::create_brain_session` — same pattern. New session id is unique by construction; expect `Acquired` always (log if not).
 
 **Outcome handling:**
-- `Acquired(guard)` → wrap into `ActiveConnection`; emit `AgentSessionReady { fs_unsafe: false, .. }`
-- `DegradedNoLock { reason }` → wrap with `attach_guard: None, fs_unsafe: true`; emit `AgentSessionReady { fs_unsafe: true, .. }`
+- `Acquired(guard)` → store on `BrainSession.attach_guard`; emit `AgentSessionReady { fs_unsafe: false, .. }`
+- `DegradedNoLock { reason }` → `attach_guard: None, fs_unsafe: true` on BrainSession; emit `AgentSessionReady { fs_unsafe: true, .. }`
 - `Rejected { holder }` → return `LoadBrainSessionError::AlreadyAttached { holder }`; orchestrator emits `SessionAttachRejected { acp_id, holder, fs_unsafe: false }` event
 - `Io(e)` → propagate as today (`BrainError`)
 
