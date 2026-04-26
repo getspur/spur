@@ -11,7 +11,8 @@ use spur_acp::session_liveness::{SessionLivenessProbe, SessionLivenessProbeResul
 use spur_acp::{session_liveness::SelfHeldSet, BrainSessionId};
 use spur_worktree::manager::parse_v2_branch;
 use tokio::process::Command;
-use tracing::{info, warn};
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct AuthorityConfig {
@@ -307,6 +308,39 @@ impl WorktreeAuthority {
                 || e.raw_os_error() == Some(libc::ENOTSUP)
         )
     }
+
+    pub fn spawn_periodic(self: Arc<Self>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let jitter_ms: u64 = (std::ptr::addr_of!(*self) as usize as u64) % 120_000;
+                let delay = self.config.sweep_interval + Duration::from_millis(jitter_ms);
+                tokio::time::sleep(delay).await;
+                match self.sweep_once().await {
+                    Ok(report) => {
+                        info!(
+                            target: "spur.metrics.worktree_authority.periodic",
+                            probed = report.probed,
+                            swept = report.swept,
+                            skipped_self = report.skipped_self,
+                            skipped_live = report.skipped_live,
+                            skipped_quarantine = report.skipped_quarantine,
+                            skipped_unknown_owner = report.skipped_unknown_owner,
+                            skipped_fs_unsafe = report.skipped_fs_unsafe,
+                            remove_failures = report.remove_failures,
+                            "periodic sweep complete"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            target: "spur.metrics.worktree_authority.periodic_failed",
+                            error = %e,
+                            "periodic sweep failed"
+                        );
+                    }
+                }
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -548,6 +582,30 @@ mod tests {
         assert!(
             r.is_err(),
             "with fs_unsafe_skip=false on a non-repo dir, sweep should error"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_periodic_returns_abortable_handle() {
+        let td = TempDir::new().unwrap();
+        let (funnel, _rx) = event_funnel::test_channel();
+        let auth = Arc::new(WorktreeAuthority::new(
+            td.path().to_path_buf(),
+            SelfHeldSet::new(),
+            funnel,
+            AuthorityConfig {
+                sweep_interval: Duration::from_millis(50),
+                quarantine_grace: Duration::ZERO,
+                fs_unsafe_skip: true,
+            },
+        ));
+        let handle = auth.clone().spawn_periodic();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        handle.abort();
+        let res = handle.await;
+        assert!(
+            res.is_err() && res.unwrap_err().is_cancelled(),
+            "handle must be cancellable"
         );
     }
 }
