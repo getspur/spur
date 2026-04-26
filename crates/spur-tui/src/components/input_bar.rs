@@ -1435,6 +1435,13 @@ impl InputBar {
         self.move_cursor_to_byte(cursor);
     }
 
+    /// Test-only: set editing mode.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn set_mode_for_test(&mut self, mode: EditMode) {
+        self.set_mode(mode);
+    }
+
     /// Required render height given the available `width`.
     ///
     /// Includes rows for top+bottom borders. The inner rows are the
@@ -1814,5 +1821,48 @@ mod required_height_tests {
             .draw(|f| bar.render(f, Rect::new(0, 0, 20, 3)))
             .unwrap();
         assert_eq!(bar.last_inner_width_for_test(), 20);
+    }
+
+    #[test]
+    fn badge_includes_glyph_prefix_for_each_mode() {
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        use ratatui::Terminal;
+
+        // For each mode, build an InputBar in that mode, render to a
+        // TestBackend, and confirm the expected glyph appears in the title row.
+        let cases: &[(EditMode, char)] = &[
+            (EditMode::Emacs, '●'),
+            (EditMode::Vim(VimMode::Insert), '●'),
+            (EditMode::Vim(VimMode::Normal), '▣'),
+            (EditMode::Vim(VimMode::Visual), '▦'),
+        ];
+
+        for (mode, glyph) in cases {
+            let mut bar = InputBar::new();
+            bar.set_mode_for_test(*mode);
+            bar.set_active(true);
+            let backend = TestBackend::new(40, 3);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| bar.render(f, Rect::new(0, 0, 40, 3)))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            // The title sits on row 0 (the top border row).
+            let row0: String = (0..40)
+                .map(|x| {
+                    buf.cell((x, 0))
+                        .and_then(|cell| cell.symbol().chars().next())
+                        .unwrap_or(' ')
+                })
+                .collect();
+            assert!(
+                row0.contains(*glyph),
+                "expected glyph {:?} on row 0 for mode {:?}, got: {:?}",
+                glyph,
+                mode,
+                row0
+            );
+        }
     }
 }
