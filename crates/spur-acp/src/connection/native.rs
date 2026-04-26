@@ -1,3 +1,12 @@
+// kill_on_drop audit (bd-arch.WTA Phase 0a, 2026-04-26):
+// - pre-audit line 204 is the killpg helper. The helper itself does not wait; its
+//   graceful-shutdown escalation caller pairs it with child.wait()/child.kill(),
+//   but the Drop safety-net caller cannot reap. Phase 0a follow-up: keep this
+//   distinction explicit when adding kill_on_drop(true).
+// - pre-audit lines 884, 1340, and 1367 are terminal SIGKILL fallbacks. The terminal
+//   Child is owned by terminal_reader, which always reaches child.wait().await
+//   after stdout/stderr close, so these explicit kills are paired with reaping.
+// Second SIGKILL races after kill_on_drop are benign on POSIX (ESRCH/no-op).
 //! `NativeAcpConnection` — wraps the official ACP SDK's `ClientSideConnection`
 //! to talk native ACP over stdio to a real agent subprocess.
 //!
