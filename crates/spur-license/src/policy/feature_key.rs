@@ -231,6 +231,9 @@ impl FeatureKey {
     pub const LICENSE_PRO_REVOCATION_POLLING: Self = Self("license_pro_revocation_polling");
     pub const LICENSE_PRO_OFFLINE_GRACE: Self = Self("license_pro_offline_grace");
 
+    // --- spur-blob-store (1: 0 Free + 1 Pro) ---
+    pub const BLOB_PRO_NAMESPACE_DELETION: Self = Self("blob_pro_namespace_deletion");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -528,6 +531,9 @@ impl FeatureKey {
             Some(Self::LICENSE_PRO_REVOCATION_POLLING)
         } else if bytes_eq(b, b"license_pro_offline_grace") {
             Some(Self::LICENSE_PRO_OFFLINE_GRACE)
+        // spur-blob-store
+        } else if bytes_eq(b, b"blob_pro_namespace_deletion") {
+            Some(Self::BLOB_PRO_NAMESPACE_DELETION)
         } else {
             None
         }
@@ -1050,5 +1056,10 @@ mod tests {
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
+    }
+
+    #[test]
+    fn spur_blob_store_keys_registered() {
+        assert!(FeatureKey::from_known("blob_pro_namespace_deletion").is_some());
     }
 }
