@@ -4959,61 +4959,62 @@ async fn run_one_worker_attempt(
         worker_success = false;
         output_text = format!("Failed to prompt worker: {e}");
     } else if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
-        use crate::peer_mailbox::ledger::is_terminal;
+        use crate::peer_mailbox::{
+            transition_with_audit, PeerTransitionKind, TransitionAuditOutcome,
+        };
         use spur_acp::domain::peer_message::LedgerState;
 
         let target_delegation_id =
             spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
 
         for inj in pc.injection_records {
-            match bundle
-                .ledger
-                .transition(&inj.message_id, LedgerState::DeliveredInflight)
-                .await
+            match transition_with_audit(
+                bundle.ledger.as_ref(),
+                funnel,
+                &ctx.brain_session_id,
+                &target_delegation_id,
+                inj.message_id,
+                LedgerState::DeliveredInflight,
+                PeerTransitionKind::DeliveredInflight,
+            )
+            .await
             {
-                Ok(crate::peer_mailbox::ledger::TransitionOutcome::Changed { .. }) => {}
-                Ok(crate::peer_mailbox::ledger::TransitionOutcome::Unchanged(state)) => {
+                TransitionAuditOutcome::Changed => {}
+                TransitionAuditOutcome::Unchanged(state) => {
                     tracing::debug!(
                         message_id = ?inj.message_id,
                         state = ?state,
                         "peer mailbox: delivered-inflight transition no-op"
                     );
                 }
-                Err(crate::peer_mailbox::ledger::LedgerError::InvalidTransition {
-                    from, ..
-                }) if is_terminal(from) => {
+                TransitionAuditOutcome::TerminalSkip(state) => {
                     tracing::debug!(
                         message_id = ?inj.message_id,
-                        state = ?from,
+                        state = ?state,
                         "post-prompt DeliveredInflight transition skipped: message already terminal"
                     );
                     continue;
                 }
-                Err(err) => {
+                TransitionAuditOutcome::AuditFailed => {
                     tracing::warn!(
                         message_id = ?inj.message_id,
-                        ?err,
                         "peer mailbox: delivered-inflight transition failed"
                     );
-                    // Spec audit-failed rule: every state-transition failure
-                    // must emit a corresponding event so operators can
-                    // detect partial deliveries from the funnel alone.
-                    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageAuditFailed {
-                        brain_session_id: ctx.brain_session_id.to_string(),
-                        message_id: inj.message_id,
-                        target_delegation_id: target_delegation_id.clone(),
-                        transition_kind: "delivered_inflight".into(),
-                        error: err.to_string(),
-                    });
                 }
             }
 
-            match bundle
-                .ledger
-                .transition(&inj.message_id, LedgerState::Delivered)
-                .await
+            match transition_with_audit(
+                bundle.ledger.as_ref(),
+                funnel,
+                &ctx.brain_session_id,
+                &target_delegation_id,
+                inj.message_id,
+                LedgerState::Delivered,
+                PeerTransitionKind::Delivered,
+            )
+            .await
             {
-                Ok(crate::peer_mailbox::ledger::TransitionOutcome::Changed { .. }) => {
+                TransitionAuditOutcome::Changed => {
                     funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDelivered {
                         brain_session_id: ctx.brain_session_id.to_string(),
                         message_id: inj.message_id,
@@ -5024,36 +5025,26 @@ async fn run_one_worker_attempt(
                     // TODO(peer-mailbox): Task 14 startup reconciliation is
                     // the durable peer-mailbox audit path.
                 }
-                Ok(crate::peer_mailbox::ledger::TransitionOutcome::Unchanged(state)) => {
+                TransitionAuditOutcome::Unchanged(state) => {
                     tracing::debug!(
                         message_id = ?inj.message_id,
                         state = ?state,
                         "peer mailbox: delivered transition no-op"
                     );
                 }
-                Err(crate::peer_mailbox::ledger::LedgerError::InvalidTransition {
-                    from, ..
-                }) if is_terminal(from) => {
+                TransitionAuditOutcome::TerminalSkip(state) => {
                     tracing::debug!(
                         message_id = ?inj.message_id,
-                        state = ?from,
+                        state = ?state,
                         "post-prompt Delivered transition skipped: message already terminal"
                     );
                     continue;
                 }
-                Err(err) => {
+                TransitionAuditOutcome::AuditFailed => {
                     tracing::warn!(
                         message_id = ?inj.message_id,
-                        ?err,
                         "peer mailbox: delivered transition failed"
                     );
-                    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageAuditFailed {
-                        brain_session_id: ctx.brain_session_id.to_string(),
-                        message_id: inj.message_id,
-                        target_delegation_id: target_delegation_id.clone(),
-                        transition_kind: "delivered".into(),
-                        error: err.to_string(),
-                    });
                 }
             }
         }
