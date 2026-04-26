@@ -218,6 +218,10 @@ impl FeatureKey {
     pub const CTX_PRO_DAILY_REPORT: Self = Self("ctx_pro_daily_report");
     pub const CTX_PRO_WEEKLY_REPORT: Self = Self("ctx_pro_weekly_report");
 
+    // --- spur-worktree (2) ---
+    pub const WORKTREE_CORE_ISOLATION: Self = Self("worktree_core_isolation");
+    pub const WORKTREE_CORE_ORPHAN_CLEANUP: Self = Self("worktree_core_orphan_cleanup");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -498,6 +502,11 @@ impl FeatureKey {
             Some(Self::CTX_PRO_DAILY_REPORT)
         } else if bytes_eq(b, b"ctx_pro_weekly_report") {
             Some(Self::CTX_PRO_WEEKLY_REPORT)
+        // spur-worktree
+        } else if bytes_eq(b, b"worktree_core_isolation") {
+            Some(Self::WORKTREE_CORE_ISOLATION)
+        } else if bytes_eq(b, b"worktree_core_orphan_cleanup") {
+            Some(Self::WORKTREE_CORE_ORPHAN_CLEANUP)
         } else {
             None
         }
@@ -986,6 +995,16 @@ mod tests {
             "ctx_pro_duckdb_engine",
             "ctx_pro_daily_report",
             "ctx_pro_weekly_report",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_worktree_keys_registered() {
+        for s in &[
+            "worktree_core_isolation",
+            "worktree_core_orphan_cleanup",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
