@@ -787,6 +787,11 @@ impl SessionDetailView {
         });
     }
 
+    pub fn append_user_message(&mut self, text: &str) {
+        self.react_trace
+            .append_user_message(text, Self::now_stamp());
+    }
+
     /// Push a system-note trace entry (informational message from the TUI
     /// itself, e.g. stubbed kiro execution).
     pub fn push_system_note(&mut self, msg: impl Into<String>) {
@@ -1163,19 +1168,27 @@ impl SessionDetailView {
                                             &self.known_worker_names,
                                         );
                                     }
-                                    Some(Action::SendMessage {
-                                        session: self.session_id.clone(),
-                                        blocks,
-                                        interrupt,
-                                    })
+                                    if self.is_cleared() {
+                                        Some(Action::NewSessionWithMessage { blocks, interrupt })
+                                    } else {
+                                        Some(Action::SendMessage {
+                                            session: self.session_id.clone(),
+                                            blocks,
+                                            interrupt,
+                                        })
+                                    }
                                 }
                                 SubmitDecision::Local { action } => Some(action),
                                 SubmitDecision::VendorExec { method, params } => {
-                                    Some(Action::VendorExec {
-                                        session: self.session_id.clone(),
-                                        method,
-                                        params,
-                                    })
+                                    if self.is_cleared() {
+                                        None
+                                    } else {
+                                        Some(Action::VendorExec {
+                                            session: self.session_id.clone(),
+                                            method,
+                                            params,
+                                        })
+                                    }
                                 }
                             };
                         }
