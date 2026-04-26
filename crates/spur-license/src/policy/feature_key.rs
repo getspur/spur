@@ -208,6 +208,10 @@ impl FeatureKey {
     pub const PM_CORE_BEADS_GRAPH_ADAPTER: Self = Self("pm_core_beads_graph_adapter");
     pub const PM_PRO_BEADS_ADVANCED: Self = Self("pm_pro_beads_advanced");
 
+    // --- spur-license meta (2) ---
+    pub const LICENSE_PRO_REVOCATION_POLLING: Self = Self("license_pro_revocation_polling");
+    pub const LICENSE_PRO_OFFLINE_GRACE: Self = Self("license_pro_offline_grace");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -474,6 +478,11 @@ impl FeatureKey {
             Some(Self::PM_CORE_BEADS_GRAPH_ADAPTER)
         } else if bytes_eq(b, b"pm_pro_beads_advanced") {
             Some(Self::PM_PRO_BEADS_ADVANCED)
+        // spur-license meta
+        } else if bytes_eq(b, b"license_pro_revocation_polling") {
+            Some(Self::LICENSE_PRO_REVOCATION_POLLING)
+        } else if bytes_eq(b, b"license_pro_offline_grace") {
+            Some(Self::LICENSE_PRO_OFFLINE_GRACE)
         } else {
             None
         }
@@ -940,6 +949,16 @@ mod tests {
             "pm_core_pr",
             "pm_core_beads_graph_adapter",
             "pm_pro_beads_advanced",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_license_keys_registered() {
+        for s in &[
+            "license_pro_revocation_polling",
+            "license_pro_offline_grace",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
