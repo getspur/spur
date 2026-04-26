@@ -155,7 +155,7 @@ Net 4 Free keys (was 5).
 |---|---|---|---|
 | `core_core_conflict_detection` | F | v1 | `ConflictDetected` event emission + frontend surfacing |
 | `core_core_rate_limit_detection` | F | v1 | `RateLimitDetected` event emission for ACP throttling (prevents runaway billing) |
-| `core_core_permission_request_prompt` | F | v1 | One-shot `PermissionRequest` modals from orchestrator (security baseline) |
+| `core_core_permission_request_detection` | F | v1 | One-shot `PermissionRequest` event detection + surfacing from orchestrator (security baseline; renamed from `_prompt` per gemini gate-review symmetric with `license_event_broadcast` removal: `_prompt` is UI wiring, `_detection` matches sibling `_detection` keys) |
 | `core_core_agent_notification` | F | v1 | Agent-originated out-of-band notifications: progress, rate-limit, intent-to-send (advanced peer-payload routing gated separately by `core_pro_peer_mailbox_router`) |
 
 #### Reliability & lifecycle
@@ -176,8 +176,8 @@ Net 4 Free keys (was 5).
 | `mcp_core_server_dispatch` | F | v1 | MCP server tool dispatch loop |
 | `mcp_core_delegate` | F | v1 | `delegate_to_worker`, `delegate_parallel`, `cancel_delegation`, `list_available_workers` (renamed from `_delegate_basic` per gemini gate-review: no `_advanced` Pro counterpart \u2014 advanced delegation behaviors are gated by `pm_pro_*` and `mcp_pro_mutation_executor`) |
 | `mcp_core_outcome_fetch` | F | v1 | `fetch_outcome_artifact`, `get_task_diff` |
-| `mcp_core_pm_basic` | F | v1 | `get_issue`, `list_issues`, `create_issue`, `update_issue` (acting on `pm_core_*`) |
-| `mcp_core_pr_manual` | F | v1 | `create_pr` user-initiated via MCP tool |
+| `mcp_core_pm` | F | v1 | `get_issue`, `list_issues`, `create_issue`, `update_issue` (acting on `pm_core_*`; renamed from `_pm_basic` per gemini gate-review: orphan `_basic` suffix without Pro counterpart) |
+| `mcp_core_pr` | F | v1 | `create_pr` user-initiated via MCP tool (renamed from `_pr_manual`: orphan `_manual` suffix without Pro counterpart) |
 | `mcp_core_plan_ephemeral` | F | v1 | `submit_plan` in-memory (any size, lost on restart) |
 | `mcp_core_outcome_materializer` | F | v1 | Store→clip→build with truncation ladder (`MERGE_BUDGET = 8192B`) |
 | `mcp_pro_plan_durable` | P | v1 | `submit_plan(persist_as_epic=true)`, `execute_epic`, multi-session |
@@ -185,7 +185,7 @@ Net 4 Free keys (was 5).
 | `mcp_pro_signal_watcher_scope_drift` | P | v1 | Autonomous drift detection + mutation proposals |
 | `mcp_pro_mutation_executor` | P | v1 | Apply plan mutations (label ops, signal markers) |
 | `mcp_pro_graph_tools` | P | v1 | `graph_plan`, `graph_subgraph`, `graph_alerts`, `graph_insights`, `graph_triage` |
-| `mcp_pro_review_advanced` | P | v1 | `review_task` with auto-merge gating policies |
+| `mcp_pro_review` | P | v1 | `review_task` with auto-merge gating policies (renamed from `_review_advanced`: orphan `_advanced` suffix without Free counterpart) |
 | `mcp_pro_custom_tools` | P | v1 | Register org-internal MCP tools |
 
 ### 4.4 `spur-tui` (Terminal interface — 13 keys)
@@ -387,13 +387,13 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "skills_core_registry", "skills_core_atomic_installation",
         "skills_core_render_per_vendor",
         "core_core_conflict_detection", "core_core_rate_limit_detection",
-        "core_core_permission_request_prompt", "core_core_agent_notification",
+        "core_core_permission_request_detection", "core_core_agent_notification",
         "core_core_session_resume", "core_core_plan_persistence",
         "core_core_plan_orphan_recovery", "core_core_background_task_tracker",
 
         "mcp_core_server_dispatch", "mcp_core_delegate",
-        "mcp_core_outcome_fetch", "mcp_core_pm_basic",
-        "mcp_core_pr_manual", "mcp_core_plan_ephemeral",
+        "mcp_core_outcome_fetch", "mcp_core_pm",
+        "mcp_core_pr", "mcp_core_plan_ephemeral",
         "mcp_core_outcome_materializer",
 
         "tui_core_view_dashboard", "tui_core_view_session_detail",
@@ -456,7 +456,7 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
 
         "mcp_pro_plan_durable", "mcp_pro_reconciler_journal_notify",
         "mcp_pro_signal_watcher_scope_drift", "mcp_pro_mutation_executor",
-        "mcp_pro_graph_tools", "mcp_pro_review_advanced",
+        "mcp_pro_graph_tools", "mcp_pro_review",
         "mcp_pro_custom_tools",
 
         "tui_pro_telegram_bot_solo", "tui_pro_custom_keybindings",
