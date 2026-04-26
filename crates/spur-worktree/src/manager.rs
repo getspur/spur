@@ -748,10 +748,11 @@ mod tests_option_e {
 
         // Create three branches: legacy, v2, and a non-SPUR user branch.
         let manager = WorktreeManager::new_for_test(tmp.path().to_path_buf());
-        let _ = manager
+        manager
             .run_git(&["branch", "spur/worker-legacy-deadbeef"], None)
-            .await;
-        let _ = manager
+            .await
+            .expect("setup: create legacy branch");
+        manager
             .run_git(
                 &[
                     "branch",
@@ -759,8 +760,12 @@ mod tests_option_e {
                 ],
                 None,
             )
-            .await;
-        let _ = manager.run_git(&["branch", "feature/userwork"], None).await;
+            .await
+            .expect("setup: create v2 branch");
+        manager
+            .run_git(&["branch", "feature/userwork"], None)
+            .await
+            .expect("setup: create user branch");
 
         // No worktrees back any of these branches, so cleanup_orphans should
         // not delete any worktrees AND must not touch user branches.
