@@ -399,6 +399,18 @@ pub enum SpurEventBody {
         target_delegation_id: crate::domain::delegation::DelegationId,
         reason: String,
     },
+    /// Diagnostic-only. Emitted at drain entry to anchor latency / saturation
+    /// dashboards. Does NOT mutate lineage state. Pairs with the eventual
+    /// drain exit event (`WorkerPeerMessageDrainCappedOut` or
+    /// `WorkerPeerMessageDrainTimedOut`); a clean exit (quiet window with
+    /// `remaining_messages == 0`) emits no exit event by design.
+    WorkerPeerMessageDrainStarted {
+        brain_session_id: String,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+        candidates_at_start: u32,
+        cap_ms: u64,
+        quiet_window_ms: u64,
+    },
     /// Diagnostic-only. Do NOT count in message-loss metrics — message loss
     /// is counted via WorkerPeerMessageIgnored per-message events. Use this
     /// for drain-health / worker-behavior dashboards.
@@ -408,6 +420,24 @@ pub enum SpurEventBody {
         acks_received: u32,
         remaining_messages: u32,
         cap_ms: u64,
+        actual_elapsed_ms: u64,
+    },
+    /// Diagnostic-only. Emitted when the drain exits via quiet-window
+    /// timeout WITH non-terminal messages still in the mailbox. Does NOT
+    /// count as message-loss observability — that is per-`WorkerPeerMessageIgnored`.
+    /// Use this for drain-health dashboards (worker stopped acking but
+    /// did not consume all peer messages).
+    ///
+    /// Mutually exclusive with `WorkerPeerMessageDrainCappedOut` for any
+    /// given drain. Not emitted on the clean-exit path
+    /// (`remaining_messages == 0`).
+    WorkerPeerMessageDrainTimedOut {
+        brain_session_id: String,
+        target_delegation_id: crate::domain::delegation::DelegationId,
+        acks_received: u32,
+        remaining_messages: u32,
+        cap_ms: u64,
+        quiet_window_ms: u64,
         actual_elapsed_ms: u64,
     },
     /// Worker sent a terminal peer-message notification whose payload could
@@ -1292,6 +1322,70 @@ mod worker_peer_event_tests {
             assert_eq!(remaining_messages, 2);
             assert_eq!(cap_ms, 5_000);
             assert_eq!(actual_elapsed_ms, 5_001);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn worker_peer_message_drain_started_round_trips() {
+        let body = SpurEventBody::WorkerPeerMessageDrainStarted {
+            brain_session_id: "bs-1".into(),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            candidates_at_start: 3,
+            cap_ms: 5_000,
+            quiet_window_ms: 250,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        if let SpurEventBody::WorkerPeerMessageDrainStarted {
+            brain_session_id,
+            target_delegation_id,
+            candidates_at_start,
+            cap_ms,
+            quiet_window_ms,
+        } = back
+        {
+            assert_eq!(brain_session_id, "bs-1");
+            assert_eq!(target_delegation_id.0, "tgt");
+            assert_eq!(candidates_at_start, 3);
+            assert_eq!(cap_ms, 5_000);
+            assert_eq!(quiet_window_ms, 250);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn worker_peer_message_drain_timed_out_round_trips() {
+        let body = SpurEventBody::WorkerPeerMessageDrainTimedOut {
+            brain_session_id: "bs-1".into(),
+            target_delegation_id: crate::domain::delegation::DelegationId("tgt".into()),
+            acks_received: 2,
+            remaining_messages: 1,
+            cap_ms: 5_000,
+            quiet_window_ms: 250,
+            actual_elapsed_ms: 251,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        if let SpurEventBody::WorkerPeerMessageDrainTimedOut {
+            brain_session_id,
+            target_delegation_id,
+            acks_received,
+            remaining_messages,
+            cap_ms,
+            quiet_window_ms,
+            actual_elapsed_ms,
+        } = back
+        {
+            assert_eq!(brain_session_id, "bs-1");
+            assert_eq!(target_delegation_id.0, "tgt");
+            assert_eq!(acks_received, 2);
+            assert_eq!(remaining_messages, 1);
+            assert_eq!(cap_ms, 5_000);
+            assert_eq!(quiet_window_ms, 250);
+            assert_eq!(actual_elapsed_ms, 251);
         } else {
             panic!("wrong variant");
         }

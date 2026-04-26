@@ -371,7 +371,9 @@ impl ExecutorLineage {
             | SpurEventBody::WorkerPeerMessageQueued { .. }
             | SpurEventBody::WorkerPeerMessageAuditFailed { .. }
             | SpurEventBody::WorkerPeerMessageReconciledStranded { .. }
+            | SpurEventBody::WorkerPeerMessageDrainStarted { .. }
             | SpurEventBody::WorkerPeerMessageDrainCappedOut { .. }
+            | SpurEventBody::WorkerPeerMessageDrainTimedOut { .. }
             | SpurEventBody::WorkerPeerMailboxReconciled { .. } => {
                 // Lifecycle events that don't currently mutate the edge graph.
             }
