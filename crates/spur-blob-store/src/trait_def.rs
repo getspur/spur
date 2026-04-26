@@ -13,7 +13,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use spur_acp::BrainSessionId;
 
-use crate::{OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section, StoreError, SweepReport};
+use crate::{
+    DeleteNamespaceReport, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section,
+    StoreError, SweepReport,
+};
 
 /// Content-addressed outcome blob storage.
 ///
@@ -43,13 +46,13 @@ pub trait OutcomeStore: Send + Sync {
         section: Option<Section>,
     ) -> Result<OutcomeContent, StoreError>;
 
-    /// Delete every blob owned by `brain_session_id`. Returns the
-    /// number of blobs deleted (zero is allowed). Used on session
-    /// teardown.
+    /// Delete every blob owned by `brain_session_id`. Returns deleted
+    /// blob count and reclaimed bytes (zero is allowed). Used on
+    /// session teardown.
     async fn delete_namespace(
         &self,
         brain_session_id: &BrainSessionId,
-    ) -> Result<usize, StoreError>;
+    ) -> Result<DeleteNamespaceReport, StoreError>;
 
     /// Sweep namespaces whose newest artifact is older than `ttl`.
     /// `FsOutcomeStore` requires `ttl >= 1 day` (Round 9 P2-S3); other

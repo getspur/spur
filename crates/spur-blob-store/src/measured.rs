@@ -11,7 +11,8 @@ use tracing::event;
 
 use crate::trait_def::OutcomeStore;
 use crate::{
-    OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section, StoreError, SweepReport,
+    DeleteNamespaceReport, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section,
+    StoreError, SweepReport,
 };
 
 pub struct MeasuredOutcomeStore<S: OutcomeStore> {
@@ -20,7 +21,8 @@ pub struct MeasuredOutcomeStore<S: OutcomeStore> {
 
 impl<S: OutcomeStore> std::fmt::Debug for MeasuredOutcomeStore<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MeasuredOutcomeStore").finish_non_exhaustive()
+        f.debug_struct("MeasuredOutcomeStore")
+            .finish_non_exhaustive()
     }
 }
 
@@ -112,18 +114,19 @@ impl<S: OutcomeStore> OutcomeStore for MeasuredOutcomeStore<S> {
     async fn delete_namespace(
         &self,
         brain_session_id: &BrainSessionId,
-    ) -> Result<usize, StoreError> {
+    ) -> Result<DeleteNamespaceReport, StoreError> {
         let start = Instant::now();
         let result = self.inner.delete_namespace(brain_session_id).await;
         let elapsed_us = start.elapsed().as_micros() as u64;
         match &result {
-            Ok(n) => event!(
+            Ok(report) => event!(
                 target: "spur.metrics.blob_store",
                 tracing::Level::INFO,
                 op = "delete_namespace",
                 outcome = "ok",
                 elapsed_us,
-                blobs_removed = *n,
+                blobs_removed = report.count,
+                total_bytes = report.total_bytes,
             ),
             Err(e) => event!(
                 target: "spur.metrics.blob_store",

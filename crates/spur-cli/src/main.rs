@@ -951,18 +951,18 @@ async fn run_gc_outcomes(
             return Ok(());
         }
 
-        let removed = store.delete_namespace(&session_id).await?;
-        // total_bytes is intentionally omitted: delete_namespace returns a
-        // count, not byte size, and emitting a literal 0 would skew metric
-        // averages. Spec §10.1 lists total_bytes as a field; surfacing it
-        // requires a trait-level change deferred to a follow-up.
+        let report = store.delete_namespace(&session_id).await?;
         tracing::info!(
             target: "spur.metrics.outcome_namespace_deleted",
             brain_session_id = %session_id,
-            artifact_count = removed,
+            artifact_count = report.count,
+            total_bytes = report.total_bytes,
             source = "cli.gc_outcomes",
         );
-        println!("Deleted {removed} blobs in namespace {session_id}");
+        println!(
+            "Deleted {} blobs ({} bytes) in namespace {session_id}",
+            report.count, report.total_bytes,
+        );
         return Ok(());
     }
 

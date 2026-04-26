@@ -36,8 +36,8 @@ use tokio::fs;
 
 use crate::trait_def::OutcomeStore;
 use crate::{
-    BackendTag, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, Section, StoreError,
-    SweepReport,
+    BackendTag, DeleteNamespaceReport, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef,
+    Section, StoreError, SweepReport,
 };
 
 const MIN_TTL_SECS: u64 = 86_400;
@@ -199,18 +199,18 @@ impl OutcomeStore for FsOutcomeStore {
     async fn delete_namespace(
         &self,
         brain_session_id: &BrainSessionId,
-    ) -> Result<usize, StoreError> {
+    ) -> Result<DeleteNamespaceReport, StoreError> {
         Self::validate_uuid(
             brain_session_id.as_session_id().0.as_str(),
             "brain_session_id",
         )?;
         let session_dir = self.root.join(brain_session_id.as_session_id().0.as_str());
         if !session_dir.exists() {
-            return Ok(0);
+            return Ok(DeleteNamespaceReport::default());
         }
-        let count = count_blobs(&session_dir).await?;
+        let report = collect_delete_namespace_report(&session_dir).await?;
         fs::remove_dir_all(&session_dir).await?;
-        Ok(count)
+        Ok(report)
     }
 
     async fn sweep_older_than(&self, ttl: Duration) -> Result<SweepReport, StoreError> {
@@ -255,8 +255,10 @@ struct NamespaceStats {
     bytes: u64,
 }
 
-async fn count_blobs(session_dir: &Path) -> Result<usize, StoreError> {
-    let mut count = 0usize;
+async fn collect_delete_namespace_report(
+    session_dir: &Path,
+) -> Result<DeleteNamespaceReport, StoreError> {
+    let mut report = DeleteNamespaceReport::default();
     let mut delegation_dirs = fs::read_dir(session_dir).await?;
     while let Some(d) = delegation_dirs.next_entry().await? {
         if !d.path().is_dir() {
@@ -264,12 +266,16 @@ async fn count_blobs(session_dir: &Path) -> Result<usize, StoreError> {
         }
         let mut files = fs::read_dir(d.path()).await?;
         while let Some(f) = files.next_entry().await? {
-            if f.path().extension().and_then(|s| s.to_str()) == Some("meta") {
-                count += 1;
+            let p = f.path();
+            if f.file_type().await?.is_file() {
+                report.total_bytes += f.metadata().await?.len();
+            }
+            if p.extension().and_then(|s| s.to_str()) == Some("meta") {
+                report.count += 1;
             }
         }
     }
-    Ok(count)
+    Ok(report)
 }
 
 async fn newest_meta_in(session_dir: &Path) -> Result<Option<DateTime<chrono::Utc>>, StoreError> {
@@ -430,14 +436,37 @@ mod tests {
         store.put(&k_a, &body, &metadata(&body)).await.unwrap();
         store.put(&k_b, &body, &metadata(&body)).await.unwrap();
 
-        let removed = store
+        let report = store
             .delete_namespace(&BrainSessionId::new(SessionId(session_a.into())))
             .await
             .unwrap();
-        assert_eq!(removed, 1);
+        assert_eq!(report.count, 1);
 
         assert!(store.get(&k_a, None).await.is_err());
         assert!(store.get(&k_b, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fs_store_delete_namespace_reports_total_bytes() {
+        let td = TempDir::new().unwrap();
+        let store = FsOutcomeStore::new(td.path().to_path_buf());
+        let session = "550e8400-e29b-41d4-a716-446655440000";
+        let k = key(session, "deadbeef-1111-2222-3333-444455556666", 1);
+        let bytes = b"x".repeat(1_024);
+        let metadata = metadata(&bytes);
+
+        store.put(&k, &bytes, &metadata).await.unwrap();
+
+        let report = store
+            .delete_namespace(&BrainSessionId::new(SessionId(session.into())))
+            .await
+            .unwrap();
+        assert_eq!(report.count, 1);
+        assert!(
+            report.total_bytes >= 1_024,
+            "expected >=1024, got {}",
+            report.total_bytes
+        );
     }
 
     #[tokio::test]

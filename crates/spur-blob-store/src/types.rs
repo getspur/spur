@@ -71,6 +71,15 @@ pub struct SweepReport {
     pub effective_ttl: Duration,
 }
 
+/// Result of `OutcomeStore::delete_namespace`. Phase 4 added `total_bytes`
+/// per spec §10.1 so the `outcome_namespace_deleted` metric can report
+/// reclaimed disk usage.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeleteNamespaceReport {
+    pub count: usize,
+    pub total_bytes: u64,
+}
+
 /// All errors `OutcomeStore` impls can return.
 #[derive(Debug, Error)]
 pub enum StoreError {
