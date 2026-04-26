@@ -208,6 +208,11 @@ impl FeatureKey {
     pub const PM_CORE_BEADS_GRAPH_ADAPTER: Self = Self("pm_core_beads_graph_adapter");
     pub const PM_PRO_BEADS_ADVANCED: Self = Self("pm_pro_beads_advanced");
 
+    // --- spur-cost (3) ---
+    pub const COST_CORE_SESSION_DISPLAY: Self = Self("cost_core_session_display");
+    pub const COST_CORE_PRICING_REGISTRY: Self = Self("cost_core_pricing_registry");
+    pub const COST_PRO_PER_PROJECT_TRACKING: Self = Self("cost_pro_per_project_tracking");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -474,6 +479,13 @@ impl FeatureKey {
             Some(Self::PM_CORE_BEADS_GRAPH_ADAPTER)
         } else if bytes_eq(b, b"pm_pro_beads_advanced") {
             Some(Self::PM_PRO_BEADS_ADVANCED)
+        // spur-cost
+        } else if bytes_eq(b, b"cost_core_session_display") {
+            Some(Self::COST_CORE_SESSION_DISPLAY)
+        } else if bytes_eq(b, b"cost_core_pricing_registry") {
+            Some(Self::COST_CORE_PRICING_REGISTRY)
+        } else if bytes_eq(b, b"cost_pro_per_project_tracking") {
+            Some(Self::COST_PRO_PER_PROJECT_TRACKING)
         } else {
             None
         }
@@ -940,6 +952,17 @@ mod tests {
             "pm_core_pr",
             "pm_core_beads_graph_adapter",
             "pm_pro_beads_advanced",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_cost_keys_registered() {
+        for s in &[
+            "cost_core_session_display",
+            "cost_core_pricing_registry",
+            "cost_pro_per_project_tracking",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
