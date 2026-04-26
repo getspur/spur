@@ -3907,13 +3907,12 @@ impl Orchestrator {
                 let limits = bundle.router.limits();
                 let quiet_window = std::time::Duration::from_millis(limits.drain_quiet_window_ms);
                 let drain_max_total = std::time::Duration::from_millis(limits.drain_max_total_ms);
-                let brain_session_id_for_drain = brain_session_id.to_string();
                 drain_peer_acks_with_timeout(
                     bundle,
                     &spur_acp::domain::delegation::DelegationId(request_id.clone()),
                     quiet_window,
                     drain_max_total,
-                    &brain_session_id_for_drain,
+                    &brain_session_id,
                     &funnel,
                     ack_rx,
                 )
@@ -5250,13 +5249,12 @@ async fn run_one_worker_attempt(
 /// The drain is also bounded by `max_total`. After either deadline elapses,
 /// delivered non-terminal peer messages are forced to `Ignored` with a reason
 /// that classifies the exit path.
-#[allow(clippy::while_let_loop)]
 async fn drain_peer_acks_with_timeout(
     bundle: &crate::peer_mailbox::PeerMailboxBundle,
     delegation_id: &spur_acp::domain::delegation::DelegationId,
     quiet_window: std::time::Duration,
     max_total: std::time::Duration,
-    brain_session_id: &str,
+    brain_session_id: &spur_acp::BrainSessionId,
     funnel: &crate::event_funnel::FunnelHandle,
     mut ack_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
@@ -6133,6 +6131,9 @@ mod peer_mailbox_drain_tests {
         funnel: crate::event_funnel::FunnelHandle,
         ack_rx: UnboundedReceiver<()>,
     ) -> tokio::task::JoinHandle<Duration> {
+        let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::types::SessionId(
+            brain_session_id.into(),
+        ));
         let start = tokio::time::Instant::now();
         let handle = tokio::spawn(async move {
             drain_peer_acks_with_timeout(
@@ -6140,7 +6141,7 @@ mod peer_mailbox_drain_tests {
                 &target,
                 quiet_window,
                 max_total,
-                brain_session_id,
+                &brain_session_id,
                 &funnel,
                 ack_rx,
             )
