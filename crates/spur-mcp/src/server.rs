@@ -2808,7 +2808,9 @@ impl McpCallbackServer {
             .contains(&delegation_id)
         {
             if let Some(ref cc) = self.cancellation_control {
-                let outcome = cc.cancel(delegation_id.as_str()).await;
+                let outcome = cc
+                    .cancel_with_reason(delegation_id.as_str(), "brain requested cancel".into())
+                    .await;
                 info!(delegation_id = %delegation_id, ?outcome, "Cancellation requested via CancellationControl");
                 match outcome {
                     CancelOutcome::Cancelled => {
