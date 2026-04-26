@@ -4,6 +4,22 @@
 //! Adding a feature = adding a `pub const` here. Underlying string is what
 //! the policy file and LicenseSeat catalog speak; this newtype exists to
 //! make callers typo-safe.
+//!
+//! ## Naming convention (post-2026-04-26 tier revamp)
+//!
+//! New keys follow `<crate>_<tier>_<capability>` where:
+//! - `<crate>` ∈ {acp, core, mcp, tui, cli, pm, cost, worktree, license, bot,
+//!   interactive, blob, ctx, skills, notif}
+//! - `<tier>` ∈ {core (Free baseline), pro (Pro upsell), team (Team v2-deferred)}
+//! - `<capability>` is a single atomic capability, lowercase snake_case
+//!
+//! Const name is UPPER_SNAKE_CASE of the underlying string. Grep
+//! `pm_pro_*` to find every Pro PM gate. The legacy keys above (BRAIN_SESSION
+//! etc.) remain during the v0 → v1 transition; Plan B removes them after
+//! callers migrate.
+//!
+//! See `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md`
+//! §4 for the full 135-key registry.
 
 use std::sync::Arc;
 
@@ -376,5 +392,63 @@ mod tests {
         let unk = UnknownFeatureKey::new("experimental_thing");
         assert_eq!(unk.as_str(), "experimental_thing");
         assert_eq!(format!("{}", unk), "experimental_thing");
+    }
+
+    /// Guards against accidental removal of registered keys.
+    /// Bump the expected count when adding new keys via dedicated tasks.
+    #[test]
+    fn registered_key_count_matches_expected() {
+        const EXPECTED_TOTAL_KEYS: usize = 36;
+        let mut count = 0usize;
+        for s in &[
+            // Community (11)
+            "brain_session",
+            "single_worker",
+            "worktree_isolation",
+            "manual_review",
+            "event_persistence",
+            "basic_lineage",
+            "tui_dashboard",
+            "basic_cost_display",
+            "basic_notifications",
+            "local_config",
+            "mcp_standard_tools",
+            // Pro (8)
+            "parallel_workers",
+            "auto_review_policies",
+            "session_resume",
+            "advanced_cost_analytics",
+            "custom_worktree_policies",
+            "custom_notifications",
+            "extended_retention",
+            "tui_session_detail",
+            // Team (7)
+            "pm_integration",
+            "shared_lineage",
+            "team_cost_dashboard",
+            "centralized_config",
+            "rbac",
+            "shared_review_queue",
+            "pm_webhooks",
+            // Enterprise (6)
+            "sso_saml",
+            "audit_logs",
+            "custom_policies",
+            "custom_mcp_tools",
+            "dedicated_support",
+            "sla_guarantee",
+            // G2 flags (4)
+            "kill_advanced_planner",
+            "enable_browser_tool",
+            "enable_compaction_v2",
+            "enable_telemetry",
+        ] {
+            assert!(
+                FeatureKey::from_known(s).is_some(),
+                "key {s:?} not parseable",
+            );
+            count += 1;
+        }
+        assert_eq!(count, EXPECTED_TOTAL_KEYS, "key count mismatch");
     }
 }
