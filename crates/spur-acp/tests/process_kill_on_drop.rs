@@ -78,3 +78,22 @@ async fn cli_wrap_dies_on_drop() {
     }
     panic!("cli_wrap child {pid} still alive 500ms after Drop");
 }
+
+#[tokio::test]
+async fn stream_json_dies_on_drop() {
+    use spur_acp::connection::stream_json_adapter::spawn_stream_json_for_test;
+    let child = spawn_stream_json_for_test("/bin/sh", &["-c", "sleep 60"])
+        .await
+        .expect("spawn child");
+    let pid = child.id().expect("pid present");
+    assert!(pid_alive(pid).await);
+    drop(child);
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        if !pid_alive(pid).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("stream_json child {pid} still alive 500ms after Drop");
+}
