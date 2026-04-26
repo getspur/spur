@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -1892,6 +1892,23 @@ impl View for SessionDetailView {
         );
     }
 }
+
+fn build_auth_banner_widget<'a>(message: &'a str) -> Paragraph<'a> {
+    Paragraph::new(message)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::NONE)
+                .title("Authentication required"),
+        )
+}
+
 impl SessionDetailView {
     fn render_inner(
         &mut self,
@@ -1963,20 +1980,7 @@ impl SessionDetailView {
         };
 
         if let (Some(banner_area), Some(msg)) = (banner_area, self.auth_error.as_ref()) {
-            use ratatui::widgets::{Block, Borders, Wrap};
-            let banner = Paragraph::new(msg.as_str())
-                .style(
-                    Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .wrap(Wrap { trim: false })
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Authentication required"),
-                );
+            let banner = build_auth_banner_widget(msg.as_str());
             frame.render_widget(banner, banner_area);
         }
 
@@ -2290,6 +2294,77 @@ fn format_diff_truncated(path: &str, old: Option<&str>, new_: &str) -> String {
         out.push_str(&format!("... ({} more lines)\n", truncated_count));
     }
     out
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
+
+    fn render_auth_banner(message: &str, area: Rect) -> Buffer {
+        let banner = super::build_auth_banner_widget(message);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| f.render_widget(banner, area)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn rendered_text(buf: &Buffer) -> String {
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map(|cell| cell.symbol().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn auth_banner_renders_title_body_and_full_red_bg_with_no_pipe_glyph() {
+        let area = Rect::new(0, 0, 64, 3);
+        let message = "Run `spur login` to continue";
+        let buf = render_auth_banner(message, area);
+        let rendered = rendered_text(&buf);
+
+        assert!(
+            rendered.contains("Authentication required"),
+            "auth banner title must appear. Rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(message),
+            "auth banner body must appear. Rendered:\n{rendered}"
+        );
+
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buf.cell((x, y)).expect("cell should exist in banner area");
+                assert_eq!(
+                    cell.bg,
+                    Color::Red,
+                    "cell ({x}, {y}) should have red background"
+                );
+                assert_eq!(
+                    cell.fg,
+                    Color::White,
+                    "cell ({x}, {y}) should have white foreground"
+                );
+                assert!(
+                    cell.modifier.contains(Modifier::BOLD),
+                    "cell ({x}, {y}) should be bold"
+                );
+                assert_ne!(
+                    cell.symbol(),
+                    "│",
+                    "cell ({x}, {y}) should not render a vertical border glyph"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "markdown"))]
