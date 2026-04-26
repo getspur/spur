@@ -626,6 +626,12 @@ pub struct Orchestrator {
     /// Feature gate for dynamic quota/feature enforcement.
     feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
     pub(crate) peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
+    /// Abort handle for the production peer-mailbox reconciler task spawned
+    /// by `Orchestrator::new` when `peer_mailbox_enabled = true`. Stored
+    /// directly so introspection does not depend on `background_tasks`
+    /// insertion order. The task itself is still tracked in
+    /// `background_tasks` for `Drop` to abort.
+    pub(crate) peer_mailbox_reconciler_abort: Option<tokio::task::AbortHandle>,
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -821,6 +827,7 @@ impl Orchestrator {
             continuation_overflow: None,
             feature_gate,
             peer_mailbox: None,
+            peer_mailbox_reconciler_abort: None,
         };
 
         let ttl_days: u64 = match std::env::var("SPUR_OUTCOME_TTL_DAYS") {
@@ -887,6 +894,7 @@ impl Orchestrator {
                 orchestrator.funnel.clone(),
                 session_slot,
             ));
+            orchestrator.peer_mailbox_reconciler_abort = Some(reconciler_handle.abort_handle());
             orchestrator.background_tasks.push(reconciler_handle);
         }
 
@@ -917,17 +925,25 @@ impl Orchestrator {
         self.peer_mailbox = Some(bundle);
     }
 
-    /// Expose the production peer-mailbox bundle for integration tests and
-    /// diagnostic callers that need to inspect opt-in state.
+    /// Expose the production peer-mailbox bundle.
+    ///
+    /// For integration tests and diagnostic introspection (e.g. health checks,
+    /// admin RPCs, metrics exporters). Returns `None` when
+    /// `peer_mailbox_enabled = false`. Not currently used by `spur-tui` /
+    /// `spur-cli`; kept `pub` so future production callers do not need to
+    /// reach into private orchestrator state.
     pub fn peer_mailbox_bundle(&self) -> Option<&crate::peer_mailbox::PeerMailboxBundle> {
         self.peer_mailbox.as_ref()
     }
 
     /// Return the reconciler task abort handle when the production peer mailbox
-    /// is attached. The reconciler is pushed immediately after bundle creation.
+    /// is attached.
+    ///
+    /// For integration tests and graceful-shutdown callers. The handle is a
+    /// clone of the one stored in `background_tasks`; aborting via either path
+    /// is equivalent. Returns `None` when `peer_mailbox_enabled = false`.
     pub fn peer_mailbox_reconciler_abort_handle(&self) -> Option<tokio::task::AbortHandle> {
-        self.peer_mailbox.as_ref()?;
-        self.background_tasks.last().map(JoinHandle::abort_handle)
+        self.peer_mailbox_reconciler_abort.clone()
     }
 
     /// Build a `DetachedContinuationCtx` for `McpCallbackServer::new`.
