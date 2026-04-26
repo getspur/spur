@@ -145,13 +145,18 @@ Risk-blocked features cite the relevant Risk # from `architecture.md` §8.
 | `core_pro_peer_mailbox_stranded_recon` | P | **v1.1** | Background reconciler forcibly transitioning orphans to `Undeliverable` |
 
 #### System events
+**Revised 2026-04-26 (Wave 4 gate-review pass).** Per gemini findings:
+- Removed `core_core_license_event_broadcast` (system wiring required for tier transitions to propagate \u2014 gating it is circular nonsense; the broadcast is intrinsic to the licensing layer).
+- Renamed `core_core_ext_notification` \u2192 `core_core_agent_notification` (drops impl-leak `ext_` prefix from `AgentExtNotification` enum name).
+
+Net 4 Free keys (was 5).
+
 | Key | Tier | Status | Description |
 |---|---|---|---|
 | `core_core_conflict_detection` | F | v1 | `ConflictDetected` event emission + frontend surfacing |
-| `core_core_rate_limit_detection` | F | v1 | `RateLimitDetected` event emission for ACP throttling |
-| `core_core_license_event_broadcast` | F | v1 | `LicenseUpdated` subscription via `broadcast(LicenseEvent)` |
-| `core_core_permission_request_prompt` | F | v1 | One-shot `PermissionRequest` modals from orchestrator |
-| `core_core_ext_notification` | F | v1 | `AgentExtNotification` boundary injection (incl. `_spur/peer_message` routing) |
+| `core_core_rate_limit_detection` | F | v1 | `RateLimitDetected` event emission for ACP throttling (prevents runaway billing) |
+| `core_core_permission_request_prompt` | F | v1 | One-shot `PermissionRequest` modals from orchestrator (security baseline) |
+| `core_core_agent_notification` | F | v1 | Agent-originated out-of-band notifications: progress, rate-limit, intent-to-send (advanced peer-payload routing gated separately by `core_pro_peer_mailbox_router`) |
 
 #### Reliability & lifecycle
 **Revised 2026-04-26 (Wave 4 gate-review pass).** Per gemini findings symmetric with Task 7 review-key revision: dropped `basic_` prefix (impl leak); moved `plan_orphan_recovery` (Risk #13 safety baseline) and `background_task_tracker` (Risk #6 lifecycle hygiene) from Pro to Free. Free users persisting plans must not lose work to startup-time orphans; Rust async hygiene is not a premium feature. Pro retains `event_replay` as the only true upsell (full lineage rebuild beyond live re-attach).
@@ -169,7 +174,7 @@ Risk-blocked features cite the relevant Risk # from `architecture.md` §8.
 | Key | Tier | Status | Description |
 |---|---|---|---|
 | `mcp_core_server_dispatch` | F | v1 | MCP server tool dispatch loop |
-| `mcp_core_delegate_basic` | F | v1 | `delegate_to_worker`, `delegate_parallel`, `cancel_delegation`, `list_available_workers` |
+| `mcp_core_delegate` | F | v1 | `delegate_to_worker`, `delegate_parallel`, `cancel_delegation`, `list_available_workers` (renamed from `_delegate_basic` per gemini gate-review: no `_advanced` Pro counterpart \u2014 advanced delegation behaviors are gated by `pm_pro_*` and `mcp_pro_mutation_executor`) |
 | `mcp_core_outcome_fetch` | F | v1 | `fetch_outcome_artifact`, `get_task_diff` |
 | `mcp_core_pm_basic` | F | v1 | `get_issue`, `list_issues`, `create_issue`, `update_issue` (acting on `pm_core_*`) |
 | `mcp_core_pr_manual` | F | v1 | `create_pr` user-initiated via MCP tool |
@@ -382,12 +387,11 @@ Issued by `spur-policy-2026-04` Ed25519 key. Compile-time check via `build.rs` p
         "skills_core_registry", "skills_core_atomic_installation",
         "skills_core_render_per_vendor",
         "core_core_conflict_detection", "core_core_rate_limit_detection",
-        "core_core_license_event_broadcast",
-        "core_core_permission_request_prompt", "core_core_ext_notification",
+        "core_core_permission_request_prompt", "core_core_agent_notification",
         "core_core_session_resume", "core_core_plan_persistence",
         "core_core_plan_orphan_recovery", "core_core_background_task_tracker",
 
-        "mcp_core_server_dispatch", "mcp_core_delegate_basic",
+        "mcp_core_server_dispatch", "mcp_core_delegate",
         "mcp_core_outcome_fetch", "mcp_core_pm_basic",
         "mcp_core_pr_manual", "mcp_core_plan_ephemeral",
         "mcp_core_outcome_materializer",
