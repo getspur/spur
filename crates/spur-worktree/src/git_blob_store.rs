@@ -333,7 +333,19 @@ impl OutcomeStore for GitBlobOutcomeStore {
 
         let mut report = DeleteNamespaceReport::default();
         for r in &refs {
-            report.total_bytes += self.ref_byte_size(r).await?;
+            // Best-effort sizing: a single corrupt blob (e.g., ref points
+            // at an object git can't read) must NOT abort delete_namespace
+            // and leave the namespace half-deleted. Match the legacy-ref
+            // handling pattern below.
+            match self.ref_byte_size(r).await {
+                Ok(size) => report.total_bytes += size,
+                Err(e) => tracing::warn!(
+                    target: "spur.metrics.blob_store",
+                    ref_name = %r,
+                    error = %e,
+                    "delete_namespace: failed to size ref; treating as 0",
+                ),
+            }
             if r.ends_with(".meta") {
                 report.count += 1;
             }
