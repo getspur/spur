@@ -73,6 +73,15 @@ pub mod test_support {
         crate::app::App::new(None, false)
     }
 
+    /// Build a fresh `App` with a live user-input channel for UAT tests.
+    pub fn app_with_user_input_tx() -> (
+        crate::app::App,
+        tokio::sync::mpsc::Receiver<crate::app::UserInput>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::app::UserInput>(64);
+        (crate::app::App::new(Some(tx), false), rx)
+    }
+
     /// Dispatch a `SpurEvent` into the app exactly as the runtime loop would.
     pub fn push_event(app: &mut crate::app::App, ev: SpurEvent) {
         app.handle_spur_event(ev);
