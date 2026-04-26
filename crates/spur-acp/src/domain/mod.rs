@@ -15,8 +15,9 @@ pub use continuation::{
 };
 
 pub use delegation::{
-    CancelOutcome, CancellationControl, DelegationId, DelegationPlan, DelegationResult,
-    DelegationStatus, PlanCandidate, PlanSubtask, TimeoutFallback,
+    CancelOutcome, CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationId,
+    DelegationPlan, DelegationResult, DelegationStatus, PlanCandidate, PlanSubtask,
+    TimeoutFallback,
 };
 pub use events::{
     HistoryEntry, IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan,
