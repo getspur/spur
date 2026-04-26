@@ -9,7 +9,7 @@
 
 ## 1. Goal
 
-Codex-acp exposes mid-session model and reasoning-effort switching via the standard ACP `session/set_session_config_option` RPC, returning a list of available choices in `NewSessionResponse.config_options`. Spur currently drops that payload on the floor and has no slash command for either knob. This spec adds the smallest end-to-end path that:
+Codex-acp exposes mid-session model and reasoning-effort switching via the standard ACP `session/set_config_option` RPC, returning a list of available choices in `NewSessionResponse.config_options`. Spur currently drops that payload on the floor and has no slash command for either knob. This spec adds the smallest end-to-end path that:
 
 1. captures the advertised choices per session,
 2. surfaces them as `/model` and `/effort` slash commands with fuzzy-searchable arg pickers, and
@@ -32,8 +32,8 @@ The design is **vendor-neutral** at every layer: the orchestrator caches raw `Ve
 Reviewed at <https://github.com/zed-industries/codex-acp> HEAD (codex-acp v0.12.0, pinned against codex-rs `rust-v0.124.0`):
 
 - `NewSessionResponse.config_options: Vec<SessionConfigOption>` — codex returns `mode`, `model`, and (when applicable) `reasoning_effort` as `select` shapes with `current_value` and a list of `(id, name, description?)` choices. (`thread.rs:2837-2929`)
-- `session/set_session_config_option` mutates the live session via `Op::OverrideTurnContext { model, effort }` and returns the updated `Vec<SessionConfigOption>`. (`thread.rs:2967-3019`)
-- `session/set_session_model` accepts a compact `"<preset>/<effort>"` ID. We expose this on the trait for completeness but route v1 user-facing flows through `set_session_config_option` so model and effort stay orthogonal.
+- `session/set_config_option` mutates the live session via `Op::OverrideTurnContext { model, effort }` and returns the updated `Vec<SessionConfigOption>`. (`thread.rs:2951-2964` typed handler; `:2967-3019` underlying mutation)
+- `session/set_model` accepts a compact `"<preset>/<effort>"` ID. We expose this on the trait for completeness but route v1 user-facing flows through `set_config_option` so model and effort stay orthogonal.
 
 ### 3.2 Spur surface (verified)
 
@@ -94,7 +94,7 @@ NewSessionResponse{config_options} ◄───│   on the session record
                                        │ AgentConnection::
                                        │   set_session_config_option
                                        │   {config_id:"model", value:"gpt-5-codex"}
-session/set_session_config_option ◄────┤
+session/set_config_option ◄────────────┤
 SetSessionConfigOptionResponse ───────►│ updated config_options replace cache
    {config_options:[...]}              │ → registry rebuilds
                                        │ → next /model picker reflects new
