@@ -125,6 +125,12 @@ impl FeatureKey {
     pub const CORE_CORE_NOTIFICATION_PUMP: Self = Self("core_core_notification_pump");
     pub const CORE_PRO_BROADCAST_LAGGED_RECOVERY: Self = Self("core_pro_broadcast_lagged_recovery");
 
+    // --- spur-core: peer mailbox (3) ---
+    pub const CORE_PRO_PEER_MAILBOX_ROUTER: Self = Self("core_pro_peer_mailbox_router");
+    pub const CORE_PRO_PEER_MAILBOX_LEDGER: Self = Self("core_pro_peer_mailbox_ledger");
+    pub const CORE_PRO_PEER_MAILBOX_STRANDED_RECON: Self =
+        Self("core_pro_peer_mailbox_stranded_recon");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -260,6 +266,13 @@ impl FeatureKey {
             Some(Self::CORE_CORE_NOTIFICATION_PUMP)
         } else if bytes_eq(b, b"core_pro_broadcast_lagged_recovery") {
             Some(Self::CORE_PRO_BROADCAST_LAGGED_RECOVERY)
+        // spur-core: peer mailbox
+        } else if bytes_eq(b, b"core_pro_peer_mailbox_router") {
+            Some(Self::CORE_PRO_PEER_MAILBOX_ROUTER)
+        } else if bytes_eq(b, b"core_pro_peer_mailbox_ledger") {
+            Some(Self::CORE_PRO_PEER_MAILBOX_LEDGER)
+        } else if bytes_eq(b, b"core_pro_peer_mailbox_stranded_recon") {
+            Some(Self::CORE_PRO_PEER_MAILBOX_STRANDED_RECON)
         } else {
             None
         }
@@ -593,6 +606,17 @@ mod tests {
             "core_core_executor_lineage_projection",
             "core_core_notification_pump",
             "core_pro_broadcast_lagged_recovery",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_core_peer_mailbox_keys_registered() {
+        for s in &[
+            "core_pro_peer_mailbox_router",
+            "core_pro_peer_mailbox_ledger",
+            "core_pro_peer_mailbox_stranded_recon",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
