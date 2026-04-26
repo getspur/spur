@@ -139,6 +139,14 @@ pub struct RunResult {
     pub total_cost_usd: f64,
 }
 
+/// Holds the active brain transport along with metadata that must
+/// share its lifetime. Future fields (e.g. SessionAttachGuard) are
+/// added here so they cannot accidentally outlive the connection.
+pub struct ActiveConnection {
+    pub transport: Box<dyn AgentConnection>,
+    pub brain_name: String,
+}
+
 /// Holds the state of an active brain session.
 pub struct BrainSession {
     pub connection: Box<dyn AgentConnection>,
@@ -1321,7 +1329,7 @@ impl Orchestrator {
         );
         // Pre-connected (initialized) agent connection, ready for create_brain_session
         // or load_brain_session without re-running connect_brain.
-        let mut agent_connection: Option<(Box<dyn spur_acp::AgentConnection>, String)> = None;
+        let mut agent_connection: Option<ActiveConnection> = None;
 
         let mut reconnect_failures: std::collections::VecDeque<std::time::Instant> =
             std::collections::VecDeque::new();
@@ -1404,7 +1412,10 @@ impl Orchestrator {
                             .await
                         {
                             Ok((conn, brain_name)) => {
-                                agent_connection = Some((conn, brain_name.clone()));
+                                agent_connection = Some(ActiveConnection {
+                                    transport: conn,
+                                    brain_name: brain_name.clone(),
+                                });
                                 self.emit(SpurEvent::now(SpurEventBody::BrainConnected {
                                     brain: brain_name,
                                 }));
@@ -1461,14 +1472,14 @@ impl Orchestrator {
 
                     // ── ListSessions ──────────────────────────────────────
                     InteractiveInput::ListSessions => {
-                        let (mut conn, brain_name) = match agent_connection.take() {
+                        let ActiveConnection { transport: mut conn, brain_name } = match agent_connection.take() {
                             Some(existing) => existing,
                             None => {
                                 match self
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
                                 {
-                                    Ok(pair) => pair,
+                                    Ok((transport, brain_name)) => ActiveConnection { transport, brain_name },
                                     Err(e) => {
                                         error!(error = %e, "Failed to connect brain for list_sessions");
                                         self.emit(SpurEvent::now(
@@ -1506,7 +1517,7 @@ impl Orchestrator {
                             }
                         }
 
-                        agent_connection = Some((conn, brain_name));
+                        agent_connection = Some(ActiveConnection { transport: conn, brain_name });
                     }
 
                     // ── ResumeSession ─────────────────────────────────────
@@ -1521,7 +1532,7 @@ impl Orchestrator {
                         )
                         .await;
 
-                        let (connection, brain_name) = match agent_connection.take() {
+                        let ActiveConnection { transport: connection, brain_name } = match agent_connection.take() {
                             Some(existing) => existing,
                             None => {
                                 // Emit BrainConnecting before attempting spawn so the
@@ -1534,7 +1545,7 @@ impl Orchestrator {
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
                                 {
-                                    Ok(pair) => pair,
+                                    Ok((transport, brain_name)) => ActiveConnection { transport, brain_name },
                                     Err(e) => {
                                         let error_message = format_error_chain(&e);
                                         error!(error = %error_message, "Failed to connect brain for resume");
@@ -1891,7 +1902,7 @@ impl Orchestrator {
             // ── Lazy-spawn brain on first turn (or after crash) ─────────
             if brain.is_none() {
                 let result = match agent_connection.take() {
-                    Some((connection, brain_name)) => {
+                    Some(ActiveConnection { transport: connection, brain_name }) => {
                         self.create_brain_session(connection, brain_name, permission_tx.clone())
                             .await
                     }
@@ -2190,7 +2201,7 @@ impl Orchestrator {
             let _ = b.connection.shutdown().await;
         }
         // Drop any pre-connected but unused connection.
-        if let Some((mut conn, _)) = agent_connection.take() {
+        if let Some(ActiveConnection { transport: mut conn, .. }) = agent_connection.take() {
             let _ = conn.shutdown().await;
         }
 
@@ -2353,7 +2364,7 @@ impl Orchestrator {
     async fn retire_active_brain(
         &mut self,
         brain: &mut Option<BrainSession>,
-        agent_connection: &mut Option<(Box<dyn spur_acp::AgentConnection>, String)>,
+        agent_connection: &mut Option<ActiveConnection>,
         scheduler: &mut crate::scheduler::BrainScheduler,
         overflow: &crate::continuation_bridge::OverflowBuf,
         reason: spur_acp::domain::events::BrainRetireReason,
@@ -2428,7 +2439,10 @@ impl Orchestrator {
             None,
         )
         .await;
-        *agent_connection = Some((b.connection, b.brain_name));
+        *agent_connection = Some(ActiveConnection {
+            transport: b.connection,
+            brain_name: b.brain_name,
+        });
 
         // 5. Emit SessionRetireComplete now that teardown is fully done.
         //    `from_session` is guaranteed Some at this point (we would have
