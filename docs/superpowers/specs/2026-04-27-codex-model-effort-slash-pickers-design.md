@@ -107,7 +107,7 @@ SetSessionConfigOptionResponse ───────►│ updated config_option
 2. **`crates/spur-acp/src/connection/mod.rs` + `native.rs`** — extend `AgentConnection` trait with `set_session_model` and `set_session_config_option`; add `AcpCommand::SetSessionModel` and `AcpCommand::SetSessionConfigOption` channel variants; mirror the `SetSessionMode` plumbing pattern.
 3. **`crates/spur-acp/src/adapter/config_options.rs`** *(new)* — pure synthesizer. Defines vendor-neutral `AdvertisedCommand` and `AdvertisedChoice` types and the allow-list constant.
 4. **`crates/spur-core/src/orchestrator.rs`** — capture `NewSessionResponse.config_options` onto the session record around L2966; refresh from every `SetSessionConfigOptionResponse`. Expose `session_config_options(session_id)` and `replace_session_config_options(session_id, opts)` getters/setters. Vendor-neutral; orchestrator never calls `synthesize`.
-5. **`crates/spur-tui/`** — extend `Dispatch` and `CommandSource` enums; add `commands/advertised.rs`; extend `TriggerKind` with `SlashArg{command, config_id}`; extend `CommandRegistry::arg_picker(name)`; add `components/config_option_query_source.rs`.
+5. **`crates/spur-tui/`** — extend `Dispatch` and `CommandSource` enums; add `commands/advertised.rs`; extend `TriggerKind` with `SlashArg{command_name}` (v2-aligned shape); add `CommandRegistry::arg_picker_spec(name) -> Option<ArgPickerSpec>`; add `components/config_option_query_source.rs`. The `ArgPickerSpec` and `ArgPickerHint` types live in `crates/spur-acp/src/adapter/arg_picker_hint.rs` (vendor-neutral, shared with v2).
 
 ### 5.3 Boundary discipline
 
@@ -191,24 +191,32 @@ fn replace_session_config_options(&self, session_id: &SessionId, opts: Vec<Sessi
 
 ### 6.4 `spur-tui` registry, trigger, and query source
 
+**Note (architectural alignment with v2):** v1 introduces the `ArgPickerSpec` / `ArgPickerHint` shapes the v2-revamped spec (`2026-04-27-acp-first-arg-pickers-v2-design.md`) generalises. v1 ships only the `ConfigOption` `ArgPickerHint` variant; v2 adds `GitRef` and the `_meta`-driven dispatch. By starting from v2's shapes, v1 incurs zero rework when v2 PRs land.
+
 ```rust
 // crates/spur-tui/src/commands/entry.rs
 pub enum Dispatch {
     SpurLocal(Action),
     PromptText { /* unchanged */ },
     VendorExec { /* unchanged */ },
-    SetSessionConfigOption { config_id: String },   // NEW
+    SetSessionConfigOption { config_id: String },   // NEW — v1 dispatch for /model and /effort
 }
 
 pub enum CommandSource {
     Spur,
     Agent,
-    Advertised,                                     // NEW
+    Advertised,                                     // NEW — synthesized from config_options
 }
 
 // crates/spur-tui/src/commands/advertised.rs (NEW)
 pub struct AdvertisedSource;
 impl AdvertisedSource {
+    /// Synthesizes CommandEntry rows from cached config_options.
+    /// Each entry's `arg_picker_spec` is set to:
+    ///   ArgPickerSpec {
+    ///       free_text_hint: "",   // config_options-derived; no free-text fallback
+    ///       typed_hint: Some(ArgPickerHint::ConfigOption { config_id }),
+    ///   }
     pub fn entries(opts: &[SessionConfigOption]) -> Vec<CommandEntry>;
 }
 
@@ -216,15 +224,35 @@ impl AdvertisedSource {
 pub enum TriggerKind {
     Mention,
     Slash,
-    SlashArg { command: String, config_id: String }, // NEW
+    /// SlashArg carries only the command name. The picker kind is resolved by
+    /// InputCompletionPort via `CommandRegistry::arg_picker_spec(command_name)`.
+    /// This matches the v2 shape so v1's commands (/model, /effort) and v2's
+    /// commands (/review, /review-branch) share the same trigger state.
+    SlashArg { command_name: String },              // v2-aligned shape
+}
+
+// crates/spur-acp/src/adapter/arg_picker_hint.rs (NEW — vendor-neutral types)
+// (Same module v2 introduces; v1 lands the type definitions and the
+// ConfigOption variant; v2 adds GitRef and the cmd.input/cmd.meta parser.)
+pub struct ArgPickerSpec {
+    pub free_text_hint: String,
+    pub typed_hint: Option<ArgPickerHint>,
+}
+
+pub enum ArgPickerHint {
+    /// v1: picker reads choices from the agent's cached SessionConfigOption
+    /// select. Used by synthetic /model and /effort slash commands.
+    ConfigOption { config_id: String },
+    // v2 will add: GitRef { kind: GitRefKind }, etc.
 }
 
 // crates/spur-tui/src/commands/registry.rs
-pub enum ArgPickerKind {
-    ConfigOption { config_id: String },
-}
 impl CommandRegistry {
-    pub fn arg_picker(&self, command_name: &str) -> Option<ArgPickerKind>;
+    /// Returns the parsed ArgPickerSpec for the named command, if it requires
+    /// an arg picker. Used by TriggerDetector to decide whether `^/<cmd>\s+`
+    /// transitions to SlashArg, and by InputCompletionPort to instantiate the
+    /// matching QuerySource.
+    pub fn arg_picker_spec(&self, command_name: &str) -> Option<ArgPickerSpec>;
 }
 
 // crates/spur-tui/src/components/config_option_query_source.rs (NEW)
@@ -234,6 +262,23 @@ pub struct ConfigOptionQuerySource {
     pub choices: Vec<AdvertisedChoice>,
 }
 impl QuerySource for ConfigOptionQuerySource { /* nucleo filter; ReplaceTriggerToken */ }
+```
+
+InputCompletionPort dispatches on `spec.typed_hint`:
+
+```rust
+match spec.typed_hint {
+    Some(ArgPickerHint::ConfigOption { config_id }) => {
+        // v1: pull cached choices, instantiate ConfigOptionQuerySource
+        Box::new(ConfigOptionQuerySource::new(cmd_name, config_id, cached_choices))
+    }
+    // v2 will add: Some(GitRef { kind }) => Box::new(GitRefQuerySource::new(...)),
+    None => {
+        // v1: unreachable for /model, /effort (always typed). v2 uses this for
+        // free-text fallback when an agent advertises Unstructured arg.
+        Box::new(CommandInputQuerySource::new(cmd_name, spec.free_text_hint))
+    }
+}
 ```
 
 ### 6.5 Naming convention
@@ -282,7 +327,7 @@ We rename `reasoning_effort` → `effort` at the slash surface only. The `Advert
 | Class | Trigger | Catch site | User feedback |
 |---|---|---|---|
 | **E1** Agent has no `config_options` | `synthesize()` returns empty | `AdvertisedSource::entries` returns empty | Silent absence — no `/model` in popup. Correct UX. |
-| **E2** Command typed but unknown to current session | `CommandRegistry::arg_picker(name)` returns `None` | `TriggerDetector::step` does not transition to `SlashArg` | Falls back to plain text submit; agent rejects. |
+| **E2** Command typed but unknown to current session | `CommandRegistry::arg_picker_spec(name)` returns `None` | `TriggerDetector::step` does not transition to `SlashArg` | Falls back to plain text submit; agent rejects. |
 | **E3** Arg value not in cached choice list | User pastes `/model bogus` and submits | `submit_router` validates against cache | Toast: `unknown model 'bogus'. options: gpt-5-codex, gpt-5, o4-mini`. Never crosses wire. |
 | **E4** ACP RPC fails | `set_session_config_option` returns `AcpError` | Orchestrator's existing toast path (mirrors SetSessionMode) | `Failed to set <config_id>: <error>`. Cache **not** updated. |
 | **E5** SDK feature flag missing | `unstable_session_model` not enabled | `cargo check` (compile error on import) | Caught by CI before merge. |
