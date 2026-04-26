@@ -31,8 +31,8 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use spur_acp::BrainSessionId;
 use spur_blob_store::{
-    BackendTag, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef, OutcomeStore, Section,
-    StoreError, SweepReport,
+    BackendTag, DeleteNamespaceReport, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef,
+    OutcomeStore, Section, StoreError, SweepReport,
 };
 use tokio::process::Command;
 
@@ -168,6 +168,17 @@ impl GitBlobOutcomeStore {
         let meta: OutcomeMetadata = serde_json::from_slice(&raw)
             .map_err(|e| StoreError::Backend(format!("corrupt meta sidecar: {e}")))?;
         Ok(Some(meta))
+    }
+
+    async fn ref_byte_size(&self, ref_name: &str) -> Result<u64, StoreError> {
+        let sha_out = self.run_git(&["rev-parse", "--verify", ref_name]).await?;
+        let sha = String::from_utf8_lossy(&sha_out).trim().to_string();
+        let size_out = self.run_git(&["cat-file", "-s", &sha]).await?;
+        let size = String::from_utf8_lossy(&size_out)
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| StoreError::Backend(format!("git cat-file size parse: {e}")))?;
+        Ok(size)
     }
 }
 
@@ -305,7 +316,7 @@ impl OutcomeStore for GitBlobOutcomeStore {
     async fn delete_namespace(
         &self,
         brain_session_id: &BrainSessionId,
-    ) -> Result<usize, StoreError> {
+    ) -> Result<DeleteNamespaceReport, StoreError> {
         Self::validate_uuid(
             Self::brain_session_str(brain_session_id),
             "brain_session_id",
@@ -320,17 +331,20 @@ impl OutcomeStore for GitBlobOutcomeStore {
         let listing_str = String::from_utf8_lossy(&listing);
         let refs: Vec<&str> = listing_str.lines().filter(|l| !l.is_empty()).collect();
 
+        let mut report = DeleteNamespaceReport::default();
+        for r in &refs {
+            report.total_bytes += self.ref_byte_size(r).await?;
+            if r.ends_with(".meta") {
+                report.count += 1;
+            }
+        }
+
         // Each (blob,meta) pair is one logical blob. Best-effort:
         // continue on individual failures so a single jammed ref does
         // not leave the namespace half-deleted.
-        let mut count = 0usize;
         for r in &refs {
             match self.run_git(&["update-ref", "-d", r]).await {
-                Ok(_) => {
-                    if r.ends_with(".meta") {
-                        count += 1;
-                    }
-                }
+                Ok(_) => {}
                 Err(e) => tracing::warn!(
                     target: "spur.metrics.blob_store",
                     ref_name = %r,
@@ -346,9 +360,13 @@ impl OutcomeStore for GitBlobOutcomeStore {
             "refs/spur/artifacts/{}",
             Self::brain_session_str(brain_session_id)
         );
+        if let Ok(size) = self.ref_byte_size(&legacy).await {
+            report.count += 1;
+            report.total_bytes += size;
+        }
         let _ = self.run_git(&["update-ref", "-d", &legacy]).await;
 
-        Ok(count)
+        Ok(report)
     }
 
     async fn sweep_older_than(&self, ttl: Duration) -> Result<SweepReport, StoreError> {

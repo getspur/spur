@@ -125,11 +125,12 @@ async fn git_blob_store_namespace_isolation() {
     store.put(&k_a, b"A", &metadata(b"A")).await.unwrap();
     store.put(&k_b, b"B", &metadata(b"B")).await.unwrap();
 
-    let removed = store
+    let report = store
         .delete_namespace(&BrainSessionId::new(SessionId(session_a.into())))
         .await
         .unwrap();
-    assert_eq!(removed, 1);
+    assert_eq!(report.count, 1);
+    assert!(report.total_bytes >= 1);
     assert!(store.get(&k_a, None).await.is_err());
     assert!(store.get(&k_b, None).await.is_ok());
 }
