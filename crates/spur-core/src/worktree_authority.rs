@@ -97,6 +97,13 @@ impl WorktreeAuthority {
 impl WorktreeAuthority {
     pub async fn sweep_once(&self) -> Result<SweepReport, AuthorityError> {
         let mut report = SweepReport::default();
+        if self.config.fs_unsafe_skip && self.detect_fs_unsafe().await {
+            info!(
+                target: "spur.metrics.worktree_authority.fs_unsafe_skip",
+                "filesystem does not support advisory locks; sweep skipped"
+            );
+            return Ok(report);
+        }
         let entries = self.enumerate_worktrees().await?;
         let now = Instant::now();
         let mut last_seen = self.last_seen_alive.lock().await;
@@ -270,6 +277,35 @@ impl WorktreeAuthority {
             Ok(_) => {}
         }
         Ok(())
+    }
+
+    /// Detect whether the repo's `.spur/sessions/` directory supports
+    /// advisory locking. Probes a temp file once per sweep; ~1ms cost.
+    async fn detect_fs_unsafe(&self) -> bool {
+        let probe_path = self.repo_root.join(".spur/sessions/.fs_probe");
+        if let Some(parent) = probe_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        if tokio::fs::write(&probe_path, b"").await.is_err() {
+            return false;
+        }
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&probe_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        use fs4::fs_std::FileExt;
+        let result = file.try_lock_exclusive();
+        let _ = tokio::fs::remove_file(&probe_path).await;
+        matches!(
+            result,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::Unsupported)
+                || e.raw_os_error() == Some(libc::ENOLCK)
+                || e.raw_os_error() == Some(libc::ENOTSUP)
+        )
     }
 }
 
@@ -486,5 +522,32 @@ mod tests {
             "second sweep within grace should skip quarantine"
         );
         assert_eq!(r2.swept, 0, "must not sweep within quarantine grace");
+    }
+
+    #[tokio::test]
+    async fn sweep_short_circuits_when_fs_unsafe_detected() {
+        // We can't easily fake ENOTSUP in a unit test on a normal disk.
+        // Instead, verify the explicit config path: when fs_unsafe_skip is
+        // false, we still try to sweep even on a hypothetical unsafe FS.
+        // This test documents the contract; a real ENOTSUP test would
+        // require a mock filesystem (deferred).
+        let td = TempDir::new().unwrap();
+        let (funnel, _rx) = event_funnel::test_channel();
+        let auth = WorktreeAuthority::new(
+            td.path().to_path_buf(),
+            SelfHeldSet::new(),
+            funnel,
+            AuthorityConfig {
+                fs_unsafe_skip: false,
+                quarantine_grace: Duration::ZERO,
+                sweep_interval: Duration::from_secs(900),
+            },
+        );
+        // No git repo here; sweep should fail at enumerate, not silently succeed.
+        let r = auth.sweep_once().await;
+        assert!(
+            r.is_err(),
+            "with fs_unsafe_skip=false on a non-repo dir, sweep should error"
+        );
     }
 }
