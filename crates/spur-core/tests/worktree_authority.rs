@@ -82,3 +82,119 @@ async fn self_held_session_prevents_sweep_during_active_use() {
     assert_eq!(report.swept, 0, "must NOT sweep self-held session");
     assert!(wt.exists(), "worktree dir must still exist on disk");
 }
+
+#[tokio::test]
+async fn two_orchestrators_do_not_sweep_each_others_worktrees() {
+    use fs4::fs_std::FileExt;
+    use std::fs::OpenOptions;
+    use tokio::process::Command;
+
+    let td = TempDir::new().unwrap();
+
+    // Set up a repo with TWO v2 worktrees, owned by different brains.
+    let _ = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    let _ = Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    tokio::fs::write(td.path().join("a"), b"x").await.unwrap();
+    let _ = Command::new("git")
+        .args(["add", "a"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    let _ = Command::new("git")
+        .args(["commit", "-q", "-m", "base"])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+
+    let brain_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    let brain_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    let worker_a = "11111111-1111-1111-1111-111111111111";
+    let worker_b = "22222222-2222-2222-2222-222222222222";
+    let branch_a = format!("spur/worker/v2/codex/{brain_a}/{worker_a}");
+    let branch_b = format!("spur/worker/v2/codex/{brain_b}/{worker_b}");
+    let wt_a = td.path().join(".spur/worktrees/wa");
+    let wt_b = td.path().join(".spur/worktrees/wb");
+    let _ = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            wt_a.to_str().unwrap(),
+            "-b",
+            &branch_a,
+            "main",
+        ])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+    let _ = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            wt_b.to_str().unwrap(),
+            "-b",
+            &branch_b,
+            "main",
+        ])
+        .current_dir(td.path())
+        .output()
+        .await
+        .unwrap();
+
+    // Simulate orchestrator A: holds session A's lockfile.
+    std::fs::create_dir_all(td.path().join(".spur/sessions")).unwrap();
+    let lock_a = td
+        .path()
+        .join(".spur/sessions")
+        .join(format!("{brain_a}.lock"));
+    std::fs::write(&lock_a, b"").unwrap();
+    let held_a = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_a)
+        .unwrap();
+    held_a.try_lock_exclusive().unwrap();
+
+    // Orchestrator B (does NOT hold A's lock) sweeps.
+    let self_held_b = SelfHeldSet::new();
+    self_held_b.insert(spur_acp::BrainSessionId::new(spur_acp::SessionId(
+        brain_b.into(),
+    )));
+    let (funnel, _rx) = event_funnel::test_channel();
+    let auth_b = WorktreeAuthority::new(
+        td.path().to_path_buf(),
+        self_held_b,
+        funnel,
+        AuthorityConfig {
+            quarantine_grace: Duration::ZERO,
+            ..AuthorityConfig::default()
+        },
+    );
+    let report = auth_b.sweep_once().await.expect("sweep");
+
+    assert_eq!(report.skipped_live, 1, "B must see A's session as Live");
+    assert_eq!(report.skipped_self, 1, "B must skip its own session");
+    assert_eq!(report.swept, 0, "B must not delete anything");
+    assert!(wt_a.exists(), "A's worktree must still exist on disk");
+    assert!(wt_b.exists(), "B's worktree must still exist on disk");
+
+    drop(held_a);
+}
