@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use spur_tui::components::input_bar::{InputBar, ProtectedRange};
+use spur_tui::components::input_bar::{InputBar, ProtectedRange, RangeKind};
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 
 fn press(bar: &mut InputBar, code: KeyCode) {
@@ -201,6 +201,7 @@ fn history_prev_restores_protected_ranges() {
         vec![ProtectedRange {
             start: 5,
             end: 16,
+            kind: RangeKind::Atom,
             uri: "file:///abs/src/foo.rs".into(),
             name: "src/foo.rs".into(),
         }],

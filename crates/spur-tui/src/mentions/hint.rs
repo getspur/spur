@@ -47,6 +47,8 @@ pub fn prepend_worker_hint(
 mod tests {
     use super::*;
 
+    use crate::components::input_bar::RangeKind;
+
     fn known(names: &[&str]) -> HashSet<String> {
         names.iter().map(|s| s.to_string()).collect()
     }
@@ -55,6 +57,7 @@ mod tests {
         ProtectedRange {
             start: 0,
             end: 0,
+            kind: RangeKind::Atom,
             uri: uri.into(),
             name: String::new(),
         }

@@ -177,8 +177,7 @@ fn ctrl_u_removes_deleted_atom_and_keeps_later_atom_shifted() {
 #[test]
 fn ctrl_k_keeps_later_line_atom_and_shifts_it() {
     let mut b = InputBar::new();
-    type_str(&mut b, "hello");
-    b.insert_paste("\n");
+    b.set_text("hello\n".to_string(), "hello\n".len());
     b.insert_atom("@b.rs", "file:///b".into(), "b.rs".into());
 
     b.set_text_cursor_for_test(2);
