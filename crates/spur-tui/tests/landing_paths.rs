@@ -37,15 +37,15 @@ fn landing_show_picker_opens_picker() {
         None,
         true, // start_in_picker
         std::sync::Arc::new(spur_acp::SpurConfig::default()),
-        LandingDecision::ShowPicker,
+        LandingDecision::ShowPicker { preselect: None },
     );
     assert_eq!(*app.current_view(), spur_tui::action::ViewId::SessionPicker);
 }
 
 #[test]
 fn landing_auto_resume_defaults_to_dashboard_before_spawn() {
-    // AutoResume landing starts in Dashboard view; the SessionDetail
-    // (and resume banner) are created later when BrainSpawned fires.
+    // App's legacy constructor still starts Dashboard unless the caller passes
+    // the picker startup flag; CLI is responsible for using that flag.
     let app = App::new_with_config(
         None,
         false,

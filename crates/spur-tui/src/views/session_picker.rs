@@ -17,11 +17,7 @@ use crate::session_metadata::SessionMetadata;
 
 use super::View;
 
-fn footer_hint(
-    state: &PickerState,
-    rename_active: bool,
-    confirm_active: bool,
-) -> &'static str {
+fn footer_hint(state: &PickerState, rename_active: bool, confirm_active: bool) -> &'static str {
     if confirm_active {
         return "y/Enter confirm \u{00b7} n/Esc cancel";
     }
@@ -139,6 +135,10 @@ pub struct SessionPickerView {
     /// `Some` when the confirm-switch banner is up. Encodes what to do on
     /// `y`/`Enter` confirm: resume the given id, or start a new session.
     confirm_switch: Option<ConfirmSwitchTarget>,
+    /// When set by landing, preselect this ACP session on first population
+    /// and render a top banner. This never auto-fires Enter.
+    preselect: Option<String>,
+    preselect_consumed: bool,
 }
 
 impl Default for SessionPickerView {
@@ -159,6 +159,15 @@ impl SessionPickerView {
             current_session_with_draft: None,
             current_session_id: None,
             confirm_switch: None,
+            preselect: None,
+            preselect_consumed: false,
+        }
+    }
+
+    pub fn with_preselect(preselect: Option<String>) -> Self {
+        Self {
+            preselect,
+            ..Self::new()
         }
     }
 
@@ -192,10 +201,7 @@ impl SessionPickerView {
 
     pub fn toggle_show_archived(&mut self) {
         let prev_highlight = self.highlighted_session_id();
-        let prev_cursor_was_new = matches!(
-            &self.state,
-            PickerState::Populated { cursor: 0, .. }
-        );
+        let prev_cursor_was_new = matches!(&self.state, PickerState::Populated { cursor: 0, .. });
         self.show_archived = !self.show_archived;
         if let PickerState::Populated {
             sessions,
@@ -245,29 +251,41 @@ impl SessionPickerView {
         // were already Populated. Captured here so it sees the *previous*
         // state before we overwrite it.
         let prev_highlight = self.highlighted_session_id();
-        let prev_cursor_was_new = matches!(
-            &self.state,
-            PickerState::Populated { cursor: 0, .. }
-        );
+        let prev_cursor_was_new = matches!(&self.state, PickerState::Populated { cursor: 0, .. });
         let prev_filter = match &self.state {
             PickerState::Populated { filter, .. } => filter.clone(),
             _ => String::new(),
         };
 
-        let indices = Self::filtered_indices(
-            &sessions,
-            &prev_filter,
-            &self.metadata,
-            self.show_archived,
-        );
+        let indices =
+            Self::filtered_indices(&sessions, &prev_filter, &self.metadata, self.show_archived);
 
-        let cursor = Self::project_cursor(
-            &sessions,
-            &indices,
-            &self.metadata,
-            prev_highlight.as_deref(),
-            prev_cursor_was_new,
-        );
+        let cursor = if !self.preselect_consumed {
+            if let Some(target) = self.preselect.as_ref() {
+                indices
+                    .iter()
+                    .position(|&i| sessions[i].session_id.0.as_ref() == target)
+                    .map(|p| p + 1)
+                    .unwrap_or(0)
+            } else {
+                Self::project_cursor(
+                    &sessions,
+                    &indices,
+                    &self.metadata,
+                    prev_highlight.as_deref(),
+                    prev_cursor_was_new,
+                )
+            }
+        } else {
+            Self::project_cursor(
+                &sessions,
+                &indices,
+                &self.metadata,
+                prev_highlight.as_deref(),
+                prev_cursor_was_new,
+            )
+        };
+        self.preselect_consumed = self.preselect.is_some();
 
         self.state = PickerState::Populated {
             agent,
@@ -580,6 +598,39 @@ impl SessionPickerView {
         render_footer_hint(frame, chunks[2], footer_hint(&self.state, false, false));
     }
 
+    fn build_preselect_banner(&self, acp_id: &str) -> Line<'static> {
+        if let PickerState::Populated { sessions, .. } = &self.state {
+            if let Some(session) = sessions.iter().find(|s| s.session_id.0.as_ref() == acp_id) {
+                let label = Self::resolved_title(session, &self.metadata, false);
+                return Line::from(vec![
+                    Span::raw(" Last: "),
+                    Span::styled(
+                        label,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  ·  "),
+                    Span::styled("[Enter] resume", Style::default().fg(Color::Green)),
+                    Span::raw("  ·  "),
+                    Span::styled("[n] new", Style::default().fg(Color::DarkGray)),
+                ]);
+            }
+
+            let short = acp_id[..8.min(acp_id.len())].to_string();
+            return Line::from(vec![
+                Span::styled(" Session ", Style::default().fg(Color::Red)),
+                Span::styled(short, Style::default().fg(Color::Yellow)),
+                Span::styled(" not found  ·  ", Style::default().fg(Color::Red)),
+                Span::styled("[Enter] new", Style::default().fg(Color::Green)),
+                Span::raw("  ·  "),
+                Span::styled("[Esc] cancel", Style::default().fg(Color::DarkGray)),
+            ]);
+        }
+
+        Line::from(format!(" Loading session list for {acp_id}..."))
+    }
+
     // Refactoring to a props struct is deferred — the signature is stable and
     // every caller already passes every arg. See `StatusBarProps` for the
     // pattern if/when we do fold these.
@@ -721,7 +772,10 @@ impl SessionPickerView {
                 },
             ));
             if pinned {
-                spans.push(Span::styled("\u{2b50} ", Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled(
+                    "\u{2b50} ",
+                    Style::default().fg(Color::Yellow),
+                ));
             }
             spans.push(Span::styled(display, title_style));
             spans.push(Span::styled(cwd_suffix, muted_style));
@@ -1111,9 +1165,8 @@ impl View for SessionPickerView {
                             }
                             KeyCode::Char('n') => {
                                 if current_session_with_draft.is_some() {
-                                    post = Post::StartConfirmSwitch(
-                                        ConfirmSwitchTarget::NewSession,
-                                    );
+                                    post =
+                                        Post::StartConfirmSwitch(ConfirmSwitchTarget::NewSession);
                                     None
                                 } else {
                                     Some(Action::NewSessionRequested)
@@ -1198,9 +1251,7 @@ impl View for SessionPickerView {
                                 }
                                 None
                             }
-                            KeyCode::Char('y') => hl_session_id
-                                .clone()
-                                .map(Action::CopySessionId),
+                            KeyCode::Char('y') => hl_session_id.clone().map(Action::CopySessionId),
                             _ => None,
                         }
                     }
@@ -1236,9 +1287,18 @@ impl View for SessionPickerView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
+        let (banner_area, content_area) = if let Some(acp_id) = self.preselect.as_deref() {
+            let [banner, content] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+            frame.render_widget(Paragraph::new(self.build_preselect_banner(acp_id)), banner);
+            (Some(banner), content)
+        } else {
+            (None, area)
+        };
+        let _ = banner_area;
         match &self.state {
             PickerState::Loading => {
-                self.render_loading(frame, area, ctx.license_badge, ctx.flag_summary)
+                self.render_loading(frame, content_area, ctx.license_badge, ctx.flag_summary)
             }
             PickerState::Populated {
                 agent,
@@ -1248,7 +1308,7 @@ impl View for SessionPickerView {
                 filter,
             } => self.render_populated(
                 frame,
-                area,
+                content_area,
                 ctx.license_badge,
                 ctx.flag_summary,
                 agent,
@@ -1257,9 +1317,13 @@ impl View for SessionPickerView {
                 *search_focused,
                 filter,
             ),
-            PickerState::Error { message } => {
-                self.render_error(frame, area, message, ctx.license_badge, ctx.flag_summary)
-            }
+            PickerState::Error { message } => self.render_error(
+                frame,
+                content_area,
+                message,
+                ctx.license_badge,
+                ctx.flag_summary,
+            ),
         }
     }
 
@@ -1346,6 +1410,28 @@ mod current_session_shortcut_tests {
             }
             other => panic!("expected ResumeSession(B), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn preselect_jumps_cursor_to_matching_session() {
+        let mut picker = SessionPickerView::with_preselect(Some("B".into()));
+        picker.set_sessions(
+            "test-brain".into(),
+            vec![make_session("A"), make_session("B")],
+        );
+
+        assert_eq!(picker.cursor(), 2);
+    }
+
+    #[test]
+    fn unknown_preselect_leaves_cursor_on_new_session_row() {
+        let mut picker = SessionPickerView::with_preselect(Some("missing".into()));
+        picker.set_sessions(
+            "test-brain".into(),
+            vec![make_session("A"), make_session("B")],
+        );
+
+        assert_eq!(picker.cursor(), 0);
     }
 
     #[test]
