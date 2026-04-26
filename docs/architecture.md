@@ -2,7 +2,7 @@
 
 > Grounded 2026-04-26. Covers all 13 workspace crates, ~100k lines of Rust.
 >
-> **Map–territory note:** This document was re-evaluated against actual code paths (not commit messages). Where the map diverged from the territory, the territory wins. Updated 2026-04-26 to reflect bd-arch.21 (peer mailbox production wire-up; closes Risk #21), bd-arch.23 (cancellable permit acquire + heartbeat watchdog; closes Risk #23), and post-arch commits through `c75e4586` (single-attach session lock, `--session` CLI flag, picker preselect, paste-as-atom).
+> **Map–territory note:** This document was re-evaluated against actual code paths (not commit messages). Where the map diverged from the territory, the territory wins. Updated 2026-04-26 to reflect bd-arch.21 (peer mailbox production wire-up; closes Risk #21), bd-arch.23 (cancellable permit acquire + heartbeat watchdog; closes Risk #23), bd-arch.26 (WorktreeAuthority with `SessionLivenessProbe` + startup/periodic sweep; partially addresses Risk #4), and post-arch commits through `c75e4586` (single-attach session lock, `--session` CLI flag, picker preselect, paste-as-atom).
 
 ## 1. Component Architecture
 
@@ -20,7 +20,7 @@ graph TB
     end
 
     subgraph "Orchestration"
-        CORE["spur-core<br/><i>Orchestrator engine<br/>Event pipeline · Review loop<br/>Lineage projection · Skills system<br/>Brain scheduler · Continuation bridge<br/>Peer mailbox · Outcome GC</i>"]
+        CORE["spur-core<br/><i>Orchestrator engine<br/>Event pipeline · Review loop<br/>Lineage projection · Skills system<br/>Brain scheduler · Continuation bridge<br/>Peer mailbox · WorktreeAuthority<br/>Outcome GC</i>"]
         MCP["spur-mcp<br/><i>MCP server<br/>Brain→SPUR tool bridge<br/>Persisted plan reconciler<br/>Outcome materializer</i>"]
     end
 
@@ -77,7 +77,7 @@ graph TB
 | Crate | Lines | Role | Key Types |
 |---|---|---|---|
 | `spur-acp` | ~9.7k | Protocol foundation | `AgentConnection`, `SpurEvent`, `SpurEventBody`, `DelegationStatus`, `SpurConfig`, `OutcomeKey`, `OutcomeRef`, `SessionAttachGuard` |
-| `spur-core` | ~19.5k | Orchestration engine | `Orchestrator`, `BrainScheduler`, `ContinuationBridge`, `EventFunnel`, `ReviewSink`, `ExecutorLineage`, `SkillRegistry`, `PeerMailboxRouter`, `PeerMailboxLedger` |
+| `spur-core` | ~19.5k | Orchestration engine | `Orchestrator`, `BrainScheduler`, `ContinuationBridge`, `EventFunnel`, `ReviewSink`, `ExecutorLineage`, `SkillRegistry`, `PeerMailboxRouter`, `PeerMailboxLedger`, `WorktreeAuthority` |
 | `spur-mcp` | ~18k | Brain→SPUR bridge + durable plans | MCP `Server`, `Reconciler`, `PlanProjectionStore`, `MutationExecutor`, `OutcomeMaterializer` |
 | `spur-tui` | ~33.7k | Terminal interface | `App`, `DashboardView`, `SessionDetailView`, `PlanInspectorView`, `PaletteOverlay`, `IssueBrowserView`, `LandingDecision`, `CollisionModal` |
 | `spur-cli` | ~2.6k | Binary entry point | CLI args, `tui` command, `bot telegram`, `profile`, `--new`, `--session`, landing dispatch |
@@ -140,6 +140,7 @@ flowchart LR
         BRIDGE[ContinuationBridge]
         SKILLS[SkillRegistry]
         PEER[PeerMailbox<br/>Router · Ledger · Reconciler]
+        AUTH[WorktreeAuthority<br/><i>lease-aware GC</i>]
     end
 
     subgraph MCP_LAYER["spur-mcp"]
@@ -235,6 +236,7 @@ flowchart LR
     ORCH --> COST_SVC
     ORCH --> LIC_SVC
     ORCH --> BLOB_SVC
+    ORCH -.->|"spawn sweep"| AUTH
     MCPS -->|"plan CRUD + audit"| PM_SVC
     MCPS -->|"PR creation only"| PM_SVC
     WT_SVC --> BLOB_SVC
@@ -520,7 +522,74 @@ flowchart LR
 
 ---
 
-## 7. Outcome Storage & Brain Continuations
+## 7. Worktree Authority
+
+`WorktreeAuthority` provides lease-aware garbage collection for orphaned git worktrees. It replaces the unsafe per-delegation `cleanup_orphans` with cross-process liveness detection via `SessionLivenessProbe` (bd-arch.26).
+
+```mermaid
+flowchart LR
+    subgraph AUTHORITY["WorktreeAuthority"]
+        ENUM["enumerate_worktrees()<br/>git worktree list --porcelain"]
+        PROBE["SessionLivenessProbe<br/>fs4 advisory lock"]
+        SWEEP["sweep_once()"]
+        PERIODIC["spawn_periodic()<br/>15 min + jitter"]
+    end
+
+    subgraph STATE["Authority State"]
+        SELF["self_held<br/>SelfHeldSet"]
+        LAST["last_seen_alive<br/>HashMap&lt;BrainSessionId, Instant&gt;"]
+    end
+
+    subgraph PROBE_RESULTS["Probe Results"]
+        SELF_R["Self_<br/>skip"]
+        LIVE["Live<br/>skip + prime last_seen"]
+        MISSING["Missing<br/>sweep if quarantine expired"]
+        DEAD["DeadAcquired(guard)<br/>sweep if quarantine expired"]
+        FSUNSAFE["FsUnsafe<br/>skip entire sweep"]
+    end
+
+    PERIODIC --> SWEEP
+    SWEEP --> ENUM
+    ENUM --> PROBE
+    PROBE --> SELF_R
+    PROBE --> LIVE
+    PROBE --> MISSING
+    PROBE --> DEAD
+    PROBE --> FSUNSAFE
+    LIVE --> LAST
+    SELF_R --> SELF
+    MISSING --> LAST
+    DEAD --> LAST
+
+    style SWEEP fill:#e94560,stroke:#e94560,color:#fff
+    style PROBE fill:#0f3460,stroke:#0f3460,color:#fff
+```
+
+### Authority Algorithm
+
+1. **Enumerate** all worktrees via `git worktree list --porcelain`, skipping the main repo root.
+2. **Filter** to v2 worker namespace only (`refs/heads/spur/worker/v2/...`). Legacy and user branches are never touched.
+3. **Parse** the branch to extract the `BrainSessionId` owner triple.
+4. **Probe** liveness by attempting an exclusive `fs4` lock on `.spur/sessions/<brain_session_id>.lock`:
+   - `Self_` — the local orchestrator owns this session; skip.
+   - `Live` — another process holds the lock; skip and prime `last_seen_alive`.
+   - `Missing` — no lockfile exists; sweep if quarantine grace (default 30 s) has expired since last `Live` observation.
+   - `DeadAcquired(guard)` — lock acquired successfully, meaning the session is dead; sweep if quarantine expired, then `drop(guard)` to release the lock.
+   - `FsUnsafe` — filesystem does not support advisory locks; skip the **entire** sweep to avoid destroying live worktrees from other processes.
+5. **Prune** via `git worktree prune` after all sweeps.
+6. **Emit** telemetry via `tracing` (future: `SpurEventBody::WorktreeAuthoritySweep`).
+
+### Key Invariants
+
+- **Quarantine grace prevents restart races** — a fast orchestrator restart re-creates the lockfile before the authority's next sweep, but the 30-second quarantine ensures the old worktree isn't deleted mid-restart.
+- **Self-held set prevents self-harm** — even if the local orchestrator momentarily unlinks its lockfile during `retire_active_brain`, `self_held` keeps the authority from sweeping its own active worktrees.
+- **Namespace isolation** — only `spur/worker/v2/...` branches are ever removed. User branches, snapshot branches, and legacy pre-v2 namespaces are explicitly skipped.
+- **fs_unsafe fail-closed** — when advisory locks are unavailable (NFS/sshfs), the authority skips entirely rather than risk deleting live worktrees from other hosts. This is a safety trade-off that leaves orphan accumulation unaddressed on network filesystems (see Risk #41).
+- **Periodic + startup sweep** — `Orchestrator::new` spawns an immediate startup sweep (`tokio::spawn`) plus a periodic background task (`spawn_periodic`, 15 min interval + address-space jitter). Both handles are tracked in `background_tasks` and aborted on `Drop`.
+
+---
+
+## 8. Outcome Storage & Brain Continuations
 
 Delegation results are persisted before being handed back to the brain scheduler. This separates the **full result** (potentially large) from the **lean continuation envelope** (bounded by `MERGE_BUDGET`).
 
@@ -563,7 +632,7 @@ flowchart TB
 
 ---
 
-## 8. Architectural Assessment
+## 9. Architectural Assessment
 
 ### Strengths
 
