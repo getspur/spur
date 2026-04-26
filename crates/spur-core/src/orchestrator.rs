@@ -18,6 +18,7 @@ use spur_acp::connection::{
     AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter,
 };
 use spur_acp::registry::AgentRegistry;
+use spur_acp::session_lock::{AcquireOutcome, SessionAttachGuard};
 use spur_acp::types::*;
 use spur_acp::{
     CancellationControl, DelegationAbortReason, DelegationResult, DelegationStatus, LifecycleState,
@@ -87,6 +88,92 @@ pub fn normalize_agent_name(name: &str) -> String {
     lower
 }
 
+#[cfg(test)]
+mod session_attach_guard_transfer_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use std::path::PathBuf;
+    use std::pin::Pin;
+
+    struct NoopConnection;
+
+    #[async_trait]
+    impl AgentConnection for NoopConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<agent_client_protocol::InitializeResponse> {
+            unimplemented!()
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<agent_client_protocol::NewSessionResponse> {
+            unimplemented!()
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_guard_moves_from_brain_session_to_active_connection() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let attach_guard = match SessionAttachGuard::try_acquire(tmp.path(), "retire-transfer-test")
+        {
+            AcquireOutcome::Acquired(guard) => Some(guard),
+            other => panic!(
+                "expected Acquired, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+
+        let mut brain = BrainSession {
+            connection: Box::new(NoopConnection),
+            acp_session_id: "retire-transfer-test".to_string(),
+            spur_session_id: SessionId("spur-session".to_string()),
+            brain_name: "test-brain".to_string(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+        };
+
+        let mut active = ActiveConnection {
+            transport: brain.connection,
+            brain_name: brain.brain_name,
+            attach_guard: brain.attach_guard.take(),
+            fs_unsafe: brain.fs_unsafe,
+        };
+
+        assert!(active.attach_guard.is_some());
+        active.transport.shutdown().await.unwrap();
+    }
+}
+
 /// Format a worker task string with an optional `## Relevant Files`
 /// section prepended.
 ///
@@ -145,6 +232,11 @@ pub struct RunResult {
 pub struct ActiveConnection {
     pub transport: Box<dyn AgentConnection>,
     pub brain_name: String,
+    /// `None` only when no ACP session has been attached yet or when attached
+    /// under DegradedNoLock (NFS/sshfs).
+    pub attach_guard: Option<SessionAttachGuard>,
+    /// True when this attachment is unprotected (multi-window unsafe).
+    pub fs_unsafe: bool,
 }
 
 /// Holds the state of an active brain session.
@@ -169,10 +261,26 @@ pub struct BrainSession {
     /// reused connection keeps emitting events tagged with this
     /// (now-stale) `spur_session_id`.
     pub notification_pump_handle: Option<JoinHandle<()>>,
+    /// Holds the attach lock while the transport lives on this active session.
+    /// Moves back to `ActiveConnection` when the transport is cached.
+    pub attach_guard: Option<SessionAttachGuard>,
+    /// Mirrors `ActiveConnection.fs_unsafe` for the active transport.
+    pub fs_unsafe: bool,
     /// Wall-clock instant this session was created. Used by
     /// `retire_active_brain` to record session duration in the cost
     /// ledger on close-out.
     pub started_at: std::time::Instant,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadBrainSessionError {
+    #[error("session {acp_id} is already attached")]
+    AlreadyAttached {
+        acp_id: String,
+        holder: spur_acp::session_lock::HolderInfo,
+    },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 async fn abort_mcp_handle(handle: AbortOnDropHandle<()>) {
@@ -1417,6 +1525,8 @@ impl Orchestrator {
                                 agent_connection = Some(ActiveConnection {
                                     transport: conn,
                                     brain_name: brain_name.clone(),
+                                    attach_guard: None,
+                                    fs_unsafe: false,
                                 });
                                 self.emit(SpurEvent::now(SpurEventBody::BrainConnected {
                                     brain: brain_name,
@@ -1474,14 +1584,24 @@ impl Orchestrator {
 
                     // ── ListSessions ──────────────────────────────────────
                     InteractiveInput::ListSessions => {
-                        let ActiveConnection { transport: mut conn, brain_name } = match agent_connection.take() {
+                        let ActiveConnection {
+                            transport: mut conn,
+                            brain_name,
+                            attach_guard,
+                            fs_unsafe,
+                        } = match agent_connection.take() {
                             Some(existing) => existing,
                             None => {
                                 match self
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
                                 {
-                                    Ok((transport, brain_name)) => ActiveConnection { transport, brain_name },
+                                    Ok((transport, brain_name)) => ActiveConnection {
+                                        transport,
+                                        brain_name,
+                                        attach_guard: None,
+                                        fs_unsafe: false,
+                                    },
                                     Err(e) => {
                                         error!(error = %e, "Failed to connect brain for list_sessions");
                                         self.emit(SpurEvent::now(
@@ -1519,7 +1639,12 @@ impl Orchestrator {
                             }
                         }
 
-                        agent_connection = Some(ActiveConnection { transport: conn, brain_name });
+                        agent_connection = Some(ActiveConnection {
+                            transport: conn,
+                            brain_name,
+                            attach_guard,
+                            fs_unsafe,
+                        });
                     }
 
                     // ── ResumeSession ─────────────────────────────────────
@@ -1534,7 +1659,12 @@ impl Orchestrator {
                         )
                         .await;
 
-                        let ActiveConnection { transport: connection, brain_name } = match agent_connection.take() {
+                        let ActiveConnection {
+                            transport: connection,
+                            brain_name,
+                            attach_guard,
+                            fs_unsafe,
+                        } = match agent_connection.take() {
                             Some(existing) => existing,
                             None => {
                                 // Emit BrainConnecting before attempting spawn so the
@@ -1547,7 +1677,12 @@ impl Orchestrator {
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
                                 {
-                                    Ok((transport, brain_name)) => ActiveConnection { transport, brain_name },
+                                    Ok((transport, brain_name)) => ActiveConnection {
+                                        transport,
+                                        brain_name,
+                                        attach_guard: None,
+                                        fs_unsafe: false,
+                                    },
                                     Err(e) => {
                                         let error_message = format_error_chain(&e);
                                         error!(error = %error_message, "Failed to connect brain for resume");
@@ -1575,6 +1710,8 @@ impl Orchestrator {
                                 session_id,
                                 None,
                                 false,
+                                attach_guard,
+                                fs_unsafe,
                             )
                             .await
                         {
@@ -1632,7 +1769,14 @@ impl Orchestrator {
                                     session: spur_id,
                                 }));
                             }
-                            Err(e) => {
+                            Err(LoadBrainSessionError::AlreadyAttached { acp_id, holder }) => {
+                                self.emit(SpurEvent::now(SpurEventBody::SessionAttachRejected {
+                                    acp_session_id: acp_id,
+                                    holder,
+                                    fs_unsafe: false,
+                                }));
+                            }
+                            Err(LoadBrainSessionError::Other(e)) => {
                                 let error_message = format_error_chain(&e);
                                 error!(error = %error_message, "Failed to load brain session");
                                 self.emit(SpurEvent::now(SpurEventBody::BrainError {
@@ -1904,9 +2048,20 @@ impl Orchestrator {
             // ── Lazy-spawn brain on first turn (or after crash) ─────────
             if brain.is_none() {
                 let result = match agent_connection.take() {
-                    Some(ActiveConnection { transport: connection, brain_name }) => {
-                        self.create_brain_session(connection, brain_name, permission_tx.clone())
-                            .await
+                    Some(ActiveConnection {
+                        transport: connection,
+                        brain_name,
+                        attach_guard,
+                        fs_unsafe,
+                    }) => {
+                        self.create_brain_session(
+                            connection,
+                            brain_name,
+                            permission_tx.clone(),
+                            attach_guard,
+                            fs_unsafe,
+                        )
+                        .await
                     }
                     None => {
                         self.spawn_brain_session(brain_override.as_deref(), permission_tx.clone())
@@ -2203,7 +2358,11 @@ impl Orchestrator {
             let _ = b.connection.shutdown().await;
         }
         // Drop any pre-connected but unused connection.
-        if let Some(ActiveConnection { transport: mut conn, .. }) = agent_connection.take() {
+        if let Some(ActiveConnection {
+            transport: mut conn,
+            ..
+        }) = agent_connection.take()
+        {
             let _ = conn.shutdown().await;
         }
 
@@ -2444,6 +2603,8 @@ impl Orchestrator {
         *agent_connection = Some(ActiveConnection {
             transport: b.connection,
             brain_name: b.brain_name,
+            attach_guard: b.attach_guard.take(),
+            fs_unsafe: b.fs_unsafe,
         });
 
         // 5. Emit SessionRetireComplete now that teardown is fully done.
@@ -2493,6 +2654,54 @@ impl Orchestrator {
         Ok((connection, brain_name))
     }
 
+    fn acquire_attach_guard_for_load(
+        &self,
+        acp_session_id: &str,
+    ) -> std::result::Result<(Option<SessionAttachGuard>, bool), LoadBrainSessionError> {
+        match SessionAttachGuard::try_acquire(&self.repo_root, acp_session_id) {
+            AcquireOutcome::Acquired(guard) => Ok((Some(guard), false)),
+            AcquireOutcome::DegradedNoLock { reason } => {
+                tracing::warn!(
+                    acp_id = %acp_session_id,
+                    reason = %reason,
+                    "flock unsupported on this volume; multi-instance protection disabled"
+                );
+                Ok((None, true))
+            }
+            AcquireOutcome::Rejected { holder } => Err(LoadBrainSessionError::AlreadyAttached {
+                acp_id: acp_session_id.to_string(),
+                holder,
+            }),
+            AcquireOutcome::Io(e) => Err(LoadBrainSessionError::Other(anyhow::Error::from(e))),
+        }
+    }
+
+    fn acquire_attach_guard_for_new(
+        &self,
+        acp_session_id: &str,
+    ) -> Result<(Option<SessionAttachGuard>, bool)> {
+        match SessionAttachGuard::try_acquire(&self.repo_root, acp_session_id) {
+            AcquireOutcome::Acquired(guard) => Ok((Some(guard), false)),
+            AcquireOutcome::DegradedNoLock { reason } => {
+                tracing::warn!(
+                    acp_id = %acp_session_id,
+                    reason = %reason,
+                    "flock unsupported on this volume; multi-instance protection disabled"
+                );
+                Ok((None, true))
+            }
+            AcquireOutcome::Rejected { holder } => {
+                tracing::error!(
+                    acp_id = %acp_session_id,
+                    ?holder,
+                    "newly-created session id is already locked; proceeding without protection"
+                );
+                Ok((None, true))
+            }
+            AcquireOutcome::Io(e) => Err(anyhow::Error::from(e)),
+        }
+    }
+
     /// Create a full brain session from an already-initialized connection.
     ///
     /// Emits BrainSpawned, starts MCP callback server, logs session start,
@@ -2504,7 +2713,13 @@ impl Orchestrator {
         _permission_tx: Option<
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
+        existing_attach_guard: Option<SessionAttachGuard>,
+        _existing_fs_unsafe: bool,
     ) -> Result<BrainSession> {
+        // A cached transport may be carrying the previous session's guard from
+        // `retire_active_brain`. A new ACP session receives a new ACP id, so the
+        // old guard must be released before acquiring the new id's lock.
+        drop(existing_attach_guard);
         let session_id = SessionId::new();
 
         info!(brain = %brain_name, session = %session_id, "Creating brain session");
@@ -2607,6 +2822,9 @@ impl Orchestrator {
         })
         .await?;
 
+        let (attach_guard, fs_unsafe) =
+            self.acquire_attach_guard_for_new(&session_response.session_id.to_string())?;
+
         // Spawn delegation handler.
         let max_concurrent = self
             .feature_gate
@@ -2679,6 +2897,7 @@ impl Orchestrator {
             brain: brain_name.clone(),
             resumed: false,
             cancel_mode: cancel_mode_for(brain_cfg.transport),
+            fs_unsafe,
         }));
 
         Ok(BrainSession {
@@ -2691,6 +2910,8 @@ impl Orchestrator {
             mcp_server: Some(mcp_server),
             mcp_guard: Some(mcp_handle),
             started_at: std::time::Instant::now(),
+            attach_guard,
+            fs_unsafe,
         })
     }
 
@@ -2708,14 +2929,29 @@ impl Orchestrator {
         acp_session_id: String,
         preserve_spur_session_id: Option<SessionId>,
         force_new_session: bool,
-    ) -> Result<(
-        BrainSession,
-        std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
-        spur_acp::LoadOutcome,
-    )> {
+        existing_attach_guard: Option<SessionAttachGuard>,
+        existing_fs_unsafe: bool,
+    ) -> std::result::Result<
+        (
+            BrainSession,
+            std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>,
+            spur_acp::LoadOutcome,
+        ),
+        LoadBrainSessionError,
+    > {
         let (session_id, is_reconnect) = match preserve_spur_session_id {
             Some(sid) => (sid, true),
             None => (SessionId::new(), false),
+        };
+        let requested_acp_session_id = acp_session_id.clone();
+
+        let (mut attach_guard, mut fs_unsafe) = if force_new_session {
+            drop(existing_attach_guard);
+            (None, false)
+        } else if let Some(guard) = existing_attach_guard {
+            (Some(guard), existing_fs_unsafe)
+        } else {
+            self.acquire_attach_guard_for_load(&acp_session_id)?
         };
 
         info!(brain = %brain_name, session = %session_id, acp_session = %acp_session_id, "Loading brain session");
@@ -2879,6 +3115,11 @@ impl Orchestrator {
         })
         .await?;
 
+        if final_acp_session_id != requested_acp_session_id {
+            drop(attach_guard.take());
+            (attach_guard, fs_unsafe) = self.acquire_attach_guard_for_new(&final_acp_session_id)?;
+        }
+
         // Spawn delegation handler.
         let max_concurrent = self
             .feature_gate
@@ -2949,6 +3190,7 @@ impl Orchestrator {
             brain: brain_name.clone(),
             resumed,
             cancel_mode: cancel_mode_for(brain_cfg.transport),
+            fs_unsafe,
         }));
 
         let brain_session = BrainSession {
@@ -2961,6 +3203,8 @@ impl Orchestrator {
             mcp_server: Some(mcp_server),
             mcp_guard: Some(mcp_handle),
             started_at: std::time::Instant::now(),
+            attach_guard,
+            fs_unsafe,
         };
 
         // Return an empty stream if we fell back to new_session.
@@ -3000,6 +3244,8 @@ impl Orchestrator {
         let acp_session_id = dead_brain.acp_session_id.clone();
         let preserve_spur_id = dead_brain.spur_session_id.clone();
         let brain_name_hint = dead_brain.brain_name.clone();
+        let existing_attach_guard = dead_brain.attach_guard.take();
+        let existing_fs_unsafe = dead_brain.fs_unsafe;
 
         // Drop the dead session: abort helper tasks, close stdio.
         dead_brain.delegation_handle.abort();
@@ -3029,6 +3275,8 @@ impl Orchestrator {
                 acp_session_id,
                 Some(preserve_spur_id),
                 force_new_session,
+                existing_attach_guard,
+                existing_fs_unsafe,
             )
             .await
             .with_context(|| {
@@ -3139,7 +3387,7 @@ impl Orchestrator {
         let (connection, brain_name) = self
             .connect_brain(brain_override, permission_tx.clone())
             .await?;
-        self.create_brain_session(connection, brain_name, permission_tx)
+        self.create_brain_session(connection, brain_name, permission_tx, None, false)
             .await
     }
 

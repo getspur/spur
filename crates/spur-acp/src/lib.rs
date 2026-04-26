@@ -6,6 +6,7 @@ pub mod domain;
 pub mod ext;
 pub mod protocol;
 pub mod registry;
+pub mod session_lock;
 pub mod types;
 
 pub use config::{
