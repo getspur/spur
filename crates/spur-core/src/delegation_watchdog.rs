@@ -41,6 +41,12 @@ pub fn maybe_spawn_heartbeat_watchdog(
     let (stop_tx, stop_rx) = oneshot::channel();
     let timeout_secs = config.worker_heartbeat_timeout_secs;
     let initial_grace_secs = config.worker_heartbeat_initial_grace_secs;
+    tracing::info!(
+        request_id = %request_id,
+        timeout_secs,
+        initial_grace_secs,
+        "heartbeat watchdog spawned"
+    );
     tokio::spawn(run_heartbeat_watchdog(
         request_id,
         abort_handle,
@@ -108,6 +114,12 @@ pub async fn run_heartbeat_watchdog(
                     Some(executor_id) => (executor_id, steady_timeout.as_secs()),
                     None => ("<not-dispatched>".into(), initial_grace.as_secs()),
                 };
+                tracing::warn!(
+                    request_id = %request_id,
+                    executor_id = %executor_id,
+                    idle_for_secs,
+                    "heartbeat watchdog timeout fired"
+                );
                 abort_handle
                     .request_abort(DelegationAbortReason::WorkerHeartbeatTimeout {
                         executor_id,
