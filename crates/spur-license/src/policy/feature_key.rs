@@ -208,6 +208,11 @@ impl FeatureKey {
     pub const PM_CORE_BEADS_GRAPH_ADAPTER: Self = Self("pm_core_beads_graph_adapter");
     pub const PM_PRO_BEADS_ADVANCED: Self = Self("pm_pro_beads_advanced");
 
+    // --- spur-context (3) ---
+    pub const CTX_PRO_DUCKDB_ENGINE: Self = Self("ctx_pro_duckdb_engine");
+    pub const CTX_PRO_DAILY_REPORT: Self = Self("ctx_pro_daily_report");
+    pub const CTX_PRO_WEEKLY_REPORT: Self = Self("ctx_pro_weekly_report");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -474,6 +479,13 @@ impl FeatureKey {
             Some(Self::PM_CORE_BEADS_GRAPH_ADAPTER)
         } else if bytes_eq(b, b"pm_pro_beads_advanced") {
             Some(Self::PM_PRO_BEADS_ADVANCED)
+        // spur-context
+        } else if bytes_eq(b, b"ctx_pro_duckdb_engine") {
+            Some(Self::CTX_PRO_DUCKDB_ENGINE)
+        } else if bytes_eq(b, b"ctx_pro_daily_report") {
+            Some(Self::CTX_PRO_DAILY_REPORT)
+        } else if bytes_eq(b, b"ctx_pro_weekly_report") {
+            Some(Self::CTX_PRO_WEEKLY_REPORT)
         } else {
             None
         }
@@ -940,6 +952,17 @@ mod tests {
             "pm_core_pr",
             "pm_core_beads_graph_adapter",
             "pm_pro_beads_advanced",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_context_keys_registered() {
+        for s in &[
+            "ctx_pro_duckdb_engine",
+            "ctx_pro_daily_report",
+            "ctx_pro_weekly_report",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
