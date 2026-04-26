@@ -269,7 +269,6 @@ fn render_inline_image(
 
 impl ReactTrace {
     fn build_trace_block<'a>(
-        &self,
         title_str: &'a str,
         accent: Color,
         following_indicator: &'static str,
@@ -298,7 +297,7 @@ impl ReactTrace {
         };
 
         let (title_str, accent) = self.pane_title_and_color();
-        let block = self.build_trace_block(&title_str, accent, following_indicator);
+        let block = Self::build_trace_block(&title_str, accent, following_indicator);
 
         let inner = block.inner(area);
         let effective_width = inner.width;
@@ -406,7 +405,7 @@ impl ReactTrace {
         };
 
         let (title_str, accent) = self.pane_title_and_color();
-        let block = self.build_trace_block(&title_str, accent, following_indicator);
+        let block = Self::build_trace_block(&title_str, accent, following_indicator);
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
