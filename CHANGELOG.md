@@ -1,5 +1,16 @@
 ## Unreleased
 
+### Changed
+- **Peer mailbox reconciler now emits `WorkerPeerMessageAuditFailed`** on
+  non-terminal transition errors during startup reconciliation. The
+  `WorkerPeerMailboxReconciled.audit_failed_emitted` counter, which was
+  always `0` prior to this release, may now report non-zero values when
+  the persistent ledger introduces transition failures. Dashboards and
+  alerts that filter `audit_failed_emitted == 0` as a "no anomalies"
+  signal should switch to alerting on the
+  `WorkerPeerMessageAuditFailed { transition_kind: "reconcile_to_delivered" }`
+  event directly. (bd-cpf.5b)
+
 ### Added
 - **Spur Way skill bundle.** Six bundled skills harden brain-worker-beads
   collaboration: `spur-way` (beads-first invariant), `beads-lifecycle`
