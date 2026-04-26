@@ -30,7 +30,7 @@ When content overflows but the viewport is at the absolute top.
  codex 12:03 (only horizontal `─` glyphs at top/bottom rows
  codex 12:04 which are benign in pasted text)
  codex 12:05 ...
-─ ▼ following ────────────────────────────────────────── · 1/27 · 0% ─
+─ ▼ following ────────────────────────────────────────── · 6/27 · 22% ─
 ```
 
 ### C. Overflow mid-content (offset = mid)
@@ -42,7 +42,7 @@ When content overflows but the viewport is at the absolute top.
  codex 12:06 mid content
  codex 12:07 more mid content
  codex 12:08 almost there
-─ ▼ following ───────────────────────────────────────── · 12/27 · 45% ─
+─ ▼ following ───────────────────────────────────────── · 12/27 · 44% ─
 ```
 
 ### D. Overflow at bottom (offset = end)
@@ -54,9 +54,9 @@ When content overflows but the viewport is at the absolute top.
  codex 12:25 almost at the bottom
  codex 12:26 the end
  codex 12:27 final line of trace
-─ ▼ following ─────────────────────────────────────── · 22/27 · 100% ─
+─ ▼ following ─────────────────────────────────────── · 27/27 · 100% ─
 ```
-*(Note: 22/27 indicates the top visible line is 22, with a 5-line viewport height bringing the bottom to line 27).*
+*(Note: 27/27 = bottom of viewport reaches line 27, the end of content).*
 
 ## 3. Industry references
 
