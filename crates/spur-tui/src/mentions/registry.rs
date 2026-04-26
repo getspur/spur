@@ -28,9 +28,32 @@ struct CachedIndex {
     built_at: Instant,
 }
 
+/// Scope for completion cache lookup. Dashboard pre-session composition
+/// has no real ACP session id yet, while session-detail composition does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionScope<'a> {
+    PreSession,
+    Session(&'a SessionId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CompletionScopeKey {
+    PreSession,
+    Session(SessionId),
+}
+
+impl From<CompletionScope<'_>> for CompletionScopeKey {
+    fn from(scope: CompletionScope<'_>) -> Self {
+        match scope {
+            CompletionScope::PreSession => CompletionScopeKey::PreSession,
+            CompletionScope::Session(session) => CompletionScopeKey::Session(session.clone()),
+        }
+    }
+}
+
 pub struct MentionRegistry {
     sources: Vec<Box<dyn MentionSource>>,
-    cache: HashMap<String, CachedIndex>,
+    cache: HashMap<CompletionScopeKey, CachedIndex>,
 }
 
 impl MentionRegistry {
@@ -72,12 +95,12 @@ impl MentionRegistry {
 
     pub fn query(
         &mut self,
-        session: &SessionId,
+        scope: CompletionScope<'_>,
         cwd: &std::path::Path,
         query: &str,
         limit: usize,
     ) -> Vec<MentionEntry> {
-        let key = session_key(session);
+        let key = CompletionScopeKey::from(scope);
         let needs_rebuild = match self.cache.get(&key) {
             Some(c) => c.built_at.elapsed() > CACHE_TTL,
             None => true,
@@ -165,8 +188,4 @@ impl Default for MentionRegistry {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn session_key(session: &SessionId) -> String {
-    session.0.clone()
 }

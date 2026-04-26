@@ -61,6 +61,10 @@ pub struct DashboardView {
     activity_log: ActivityLog,
     detail_pane: DetailPane,
     input_bar: InputBar,
+    completion: crate::components::input_completion::InputCompletionPort,
+    command_registry: crate::commands::CommandRegistry,
+    mention_registry: std::rc::Rc<std::cell::RefCell<crate::mentions::MentionRegistry>>,
+    cwd: std::path::PathBuf,
     focused_panel: Panel,
     focused_node: Option<ExecutorId>,
     verbose: bool,
@@ -142,6 +146,12 @@ impl DashboardView {
             activity_log,
             detail_pane: DetailPane::new(),
             input_bar: InputBar::new(),
+            completion: crate::components::input_completion::InputCompletionPort::new(),
+            command_registry: crate::commands::CommandRegistry::new(),
+            mention_registry: std::rc::Rc::new(std::cell::RefCell::new(
+                crate::mentions::MentionRegistry::new(),
+            )),
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             focused_panel: Panel::Log,
             focused_node: None,
             verbose: false,
@@ -562,7 +572,12 @@ impl DashboardView {
         self.render_input_hint(frame, area, input_bar_area, lineage);
         self.input_bar
             .set_active(self.mode == DashboardMode::Compose);
-        self.input_bar.render(frame, input_bar_area);
+        if self.completion.is_active() {
+            self.input_bar.render_inert(frame, input_bar_area);
+        } else {
+            self.input_bar.render(frame, input_bar_area);
+        }
+        self.completion.render(frame, input_bar_area, area);
         StatusBar::render(
             frame,
             chunks[status_chunk],
@@ -662,7 +677,12 @@ impl DashboardView {
         self.render_input_hint(frame, area, input_bar_area, lineage);
         self.input_bar
             .set_active(self.mode == DashboardMode::Compose);
-        self.input_bar.render(frame, input_bar_area);
+        if self.completion.is_active() {
+            self.input_bar.render_inert(frame, input_bar_area);
+        } else {
+            self.input_bar.render(frame, input_bar_area);
+        }
+        self.completion.render(frame, input_bar_area, area);
         StatusBar::render(
             frame,
             chunks[2],
@@ -799,7 +819,12 @@ impl DashboardView {
 
         let input_bar_area = chunks[1];
         self.input_bar.set_active(false);
-        self.input_bar.render(frame, input_bar_area);
+        if self.completion.is_active() {
+            self.input_bar.render_inert(frame, input_bar_area);
+        } else {
+            self.input_bar.render(frame, input_bar_area);
+        }
+        self.completion.render(frame, input_bar_area, area);
         StatusBar::render(
             frame,
             chunks[2],
@@ -828,6 +853,7 @@ impl DashboardView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyOwner {
     Composer,
+    Picker,
     View,
 }
 
@@ -841,6 +867,25 @@ impl DashboardView {
     /// The only exceptions are global bypasses (Ctrl+P/N/O, Alt+i) and
     /// Esc which exits Compose mode.
     fn key_owner(&self, key: KeyEvent) -> KeyOwner {
+        if let Some(query_mode) = self.completion.query_mode() {
+            use crate::components::query_source::QueryMode;
+            let is_trigger_driven = query_mode == QueryMode::ReadFromInputBar;
+            let shell_consumes = if is_trigger_driven {
+                matches!(
+                    key.code,
+                    KeyCode::Up | KeyCode::Down | KeyCode::Esc | KeyCode::Tab | KeyCode::Enter
+                ) || ((key.code == KeyCode::Char('c')
+                    || key.code == KeyCode::Char('p')
+                    || key.code == KeyCode::Char('n'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+            } else {
+                true
+            };
+            if shell_consumes {
+                return KeyOwner::Picker;
+            }
+        }
+
         // Global bypasses work in both modes.
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
@@ -1388,6 +1433,10 @@ impl DashboardView {
         let owner = self.key_owner(key);
 
         match owner {
+            KeyOwner::Picker => {
+                let _ = self.completion.handle_picker_key(key, &mut self.input_bar);
+                None
+            }
             KeyOwner::Composer => {
                 // Enter Compose mode when typing in Navigate mode.
                 if self.mode == DashboardMode::Navigate {
@@ -1396,9 +1445,28 @@ impl DashboardView {
                 match self.input_bar.handle_key(key) {
                     HandleOutcome::Submit(text, interrupt) => {
                         self.mode = DashboardMode::Navigate;
-                        let blocks = vec![spur_acp::ContentBlock::Text(
-                            spur_acp::TextContent::new(text),
-                        )];
+                        let env = crate::components::input_completion::CompletionEnv {
+                            command_registry: &self.command_registry,
+                            mention_registry: &self.mention_registry,
+                            cwd: &self.cwd,
+                            scope: crate::mentions::CompletionScope::PreSession,
+                        };
+                        self.completion.dispatch(
+                            crate::components::completion_trigger::IntentEvent::Submitted,
+                            &mut self.input_bar,
+                            &env,
+                        );
+                        let blocks = self
+                            .input_bar
+                            .take_submit_capture()
+                            .map(|(captured, ranges, _)| {
+                                crate::commands::submit_router::assemble_blocks(&captured, &ranges)
+                            })
+                            .unwrap_or_else(|| {
+                                vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(
+                                    text,
+                                ))]
+                            });
                         if self.session_attached {
                             Some(Action::SendMessage {
                                 session: spur_acp::SessionId(String::new()),
@@ -1409,7 +1477,16 @@ impl DashboardView {
                             Some(Action::NewSessionWithMessage { blocks, interrupt })
                         }
                     }
-                    _ => None,
+                    HandleOutcome::Key(intent) => {
+                        let env = crate::components::input_completion::CompletionEnv {
+                            command_registry: &self.command_registry,
+                            mention_registry: &self.mention_registry,
+                            cwd: &self.cwd,
+                            scope: crate::mentions::CompletionScope::PreSession,
+                        };
+                        self.completion.dispatch(intent, &mut self.input_bar, &env);
+                        None
+                    }
                 }
             }
             KeyOwner::View => {
