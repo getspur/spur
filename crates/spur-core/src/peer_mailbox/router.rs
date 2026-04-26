@@ -57,7 +57,6 @@ pub struct PeerMailboxRouter {
     funnel: FunnelHandle,
     reconciler_tx: UnboundedSender<StrandedMessage>,
     limits: Limits,
-    brain_session_id: String,
 }
 
 impl PeerMailboxRouter {
@@ -66,7 +65,6 @@ impl PeerMailboxRouter {
         funnel: FunnelHandle,
         reconciler_tx: UnboundedSender<StrandedMessage>,
         limits: Limits,
-        brain_session_id: String,
     ) -> Self {
         assert!(
             limits.drain_max_total_ms > 0,
@@ -84,7 +82,6 @@ impl PeerMailboxRouter {
             funnel,
             reconciler_tx,
             limits,
-            brain_session_id,
         }
     }
 
@@ -94,27 +91,40 @@ impl PeerMailboxRouter {
 
     pub async fn accept_or_reject(
         &self,
+        brain_session_id: &str,
         request: PeerMessageEnvelope,
         snapshot: &PlanScopeSnapshot,
     ) -> Result<Acceptance, RouterError> {
         // Body size cap is checked before any other validation or funnel emit.
         if request.body.len() > self.limits.max_peer_message_size {
-            return Err(self.reject(request, "body_size_exceeded"));
+            return Err(self.reject(brain_session_id, request, "body_size_exceeded"));
         }
 
         if request.plan_version != snapshot.plan_version {
-            return Err(self.reject(request, "plan_version_changed"));
+            return Err(self.reject(brain_session_id, request, "plan_version_changed"));
         }
 
         match snapshot.check_peer_edge(&request.source_delegation_id, &request.target_delegation_id)
         {
             EdgeCheck::Allowed => {}
-            EdgeCheck::NotInDag => return Err(self.reject(request, "not_in_dag")),
-            EdgeCheck::SourceMissing => return Err(self.reject(request, "source_missing")),
-            EdgeCheck::TargetMissing => return Err(self.reject(request, "target_missing")),
-            EdgeCheck::SourceSuperseded => return Err(self.reject(request, "source_superseded")),
-            EdgeCheck::TargetSuperseded => return Err(self.reject(request, "target_superseded")),
-            EdgeCheck::SourceTerminal => return Err(self.reject(request, "source_terminal")),
+            EdgeCheck::NotInDag => {
+                return Err(self.reject(brain_session_id, request, "not_in_dag"))
+            }
+            EdgeCheck::SourceMissing => {
+                return Err(self.reject(brain_session_id, request, "source_missing"))
+            }
+            EdgeCheck::TargetMissing => {
+                return Err(self.reject(brain_session_id, request, "target_missing"))
+            }
+            EdgeCheck::SourceSuperseded => {
+                return Err(self.reject(brain_session_id, request, "source_superseded"))
+            }
+            EdgeCheck::TargetSuperseded => {
+                return Err(self.reject(brain_session_id, request, "target_superseded"))
+            }
+            EdgeCheck::SourceTerminal => {
+                return Err(self.reject(brain_session_id, request, "source_terminal"))
+            }
         }
 
         let envelope = request.clone();
@@ -123,7 +133,7 @@ impl PeerMailboxRouter {
         match accept_outcome {
             AcceptOutcome::Created => {
                 self.funnel.emit(SpurEventBody::WorkerPeerMessageAccepted {
-                    brain_session_id: self.brain_session_id.clone(),
+                    brain_session_id: brain_session_id.to_string(),
                     message_id: envelope.message_id,
                     source_delegation_id: envelope.source_delegation_id.clone(),
                     target_delegation_id: envelope.target_delegation_id.clone(),
@@ -148,9 +158,14 @@ impl PeerMailboxRouter {
         }
     }
 
-    fn reject(&self, request: PeerMessageEnvelope, reason: &str) -> RouterError {
+    fn reject(
+        &self,
+        brain_session_id: &str,
+        request: PeerMessageEnvelope,
+        reason: &str,
+    ) -> RouterError {
         self.funnel.emit(SpurEventBody::WorkerPeerMessageRejected {
-            brain_session_id: self.brain_session_id.clone(),
+            brain_session_id: brain_session_id.to_string(),
             message_id: request.message_id,
             source_delegation_id: request.source_delegation_id,
             target_delegation_id: request.target_delegation_id,
@@ -163,6 +178,7 @@ impl PeerMailboxRouter {
 
     pub async fn record_terminal(
         &self,
+        brain_session_id: &str,
         message_id: &PeerMessageId,
         outcome: TerminalOutcome,
     ) -> Result<(), RouterError> {
@@ -207,30 +223,30 @@ impl PeerMailboxRouter {
             let target_delegation_id = entry.envelope.target_delegation_id;
             let body = match outcome {
                 TerminalOutcome::Consumed => SpurEventBody::WorkerPeerMessageConsumed {
-                    brain_session_id: self.brain_session_id.clone(),
+                    brain_session_id: brain_session_id.to_string(),
                     message_id: *message_id,
                     target_delegation_id,
                 },
                 TerminalOutcome::Ignored { reason } => SpurEventBody::WorkerPeerMessageIgnored {
-                    brain_session_id: self.brain_session_id.clone(),
+                    brain_session_id: brain_session_id.to_string(),
                     message_id: *message_id,
                     target_delegation_id,
                     reason,
                 },
                 TerminalOutcome::Expired => SpurEventBody::WorkerPeerMessageExpired {
-                    brain_session_id: self.brain_session_id.clone(),
+                    brain_session_id: brain_session_id.to_string(),
                     message_id: *message_id,
                     target_delegation_id,
                 },
                 TerminalOutcome::Dropped { reason } => SpurEventBody::WorkerPeerMessageDropped {
-                    brain_session_id: self.brain_session_id.clone(),
+                    brain_session_id: brain_session_id.to_string(),
                     message_id: *message_id,
                     target_delegation_id,
                     reason,
                 },
                 TerminalOutcome::Undeliverable { reason } => {
                     SpurEventBody::WorkerPeerMessageUndeliverable {
-                        brain_session_id: self.brain_session_id.clone(),
+                        brain_session_id: brain_session_id.to_string(),
                         message_id: *message_id,
                         target_delegation_id,
                         reason,
@@ -303,8 +319,7 @@ mod tests {
         let ledger = Arc::new(InMemoryLedger::new());
         let (funnel, event_rx) = crate::event_funnel::test_channel();
         let (tx, _rx) = unbounded_channel();
-        let router =
-            PeerMailboxRouter::new(ledger.clone(), funnel, tx, Limits::default(), "bs".into());
+        let router = PeerMailboxRouter::new(ledger.clone(), funnel, tx, Limits::default());
         (router, ledger, event_rx)
     }
 
@@ -337,7 +352,7 @@ mod tests {
         let snap = snapshot_allowing("src", "tgt");
         let env = envelope("src", "tgt");
 
-        let guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
+        let guard = unwrap_created(router.accept_or_reject("bs", env, &snap).await.unwrap());
 
         guard
             .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
@@ -351,7 +366,7 @@ mod tests {
         snap.peer_edges.clear();
         let env = envelope("src", "tgt");
 
-        let err = match router.accept_or_reject(env, &snap).await {
+        let err = match router.accept_or_reject("bs", env, &snap).await {
             Ok(_) => panic!("expected not_in_dag rejection"),
             Err(err) => err,
         };
@@ -372,7 +387,7 @@ mod tests {
         let mut env = envelope("src", "tgt");
         env.body = "x".repeat(100_000);
 
-        let err = match router.accept_or_reject(env, &snap).await {
+        let err = match router.accept_or_reject("bs", env, &snap).await {
             Ok(_) => panic!("expected body_size_exceeded rejection"),
             Err(err) => err,
         };
@@ -395,10 +410,18 @@ mod tests {
         let snap = snapshot_allowing("src", "tgt");
         let env = envelope("src", "tgt");
 
-        let first = unwrap_created(router.accept_or_reject(env.clone(), &snap).await.unwrap());
+        let first = unwrap_created(
+            router
+                .accept_or_reject("bs", env.clone(), &snap)
+                .await
+                .unwrap(),
+        );
         // Don't finalize first yet — simulate the original handler still
         // working when the replay arrives.
-        let replay = router.accept_or_reject(env.clone(), &snap).await.unwrap();
+        let replay = router
+            .accept_or_reject("bs", env.clone(), &snap)
+            .await
+            .unwrap();
         assert!(matches!(replay, Acceptance::AlreadyAccepted));
 
         // Now finalize first; no orphaned stranded enqueue should fire.
@@ -425,7 +448,7 @@ mod tests {
         let mut env = envelope("src", "tgt");
         env.body = "x".repeat(100_000);
 
-        let err = router.accept_or_reject(env, &snap).await.unwrap_err();
+        let err = router.accept_or_reject("bs", env, &snap).await.unwrap_err();
         assert_eq!(
             err,
             RouterError::Rejected {
@@ -441,7 +464,7 @@ mod tests {
         let env = envelope("src", "tgt");
         let message_id = env.message_id;
 
-        let guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
+        let guard = unwrap_created(router.accept_or_reject("bs", env, &snap).await.unwrap());
         ledger
             .transition(&message_id, LedgerState::Queued)
             .await
@@ -460,12 +483,12 @@ mod tests {
             .await;
 
         router
-            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .record_terminal("bs", &message_id, TerminalOutcome::Consumed)
             .await
             .unwrap();
         // Replay: must be a no-op (Unchanged path).
         router
-            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .record_terminal("bs", &message_id, TerminalOutcome::Consumed)
             .await
             .unwrap();
 
@@ -484,13 +507,14 @@ mod tests {
         let env = envelope("src", "tgt");
         let message_id = env.message_id;
 
-        let guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
+        let guard = unwrap_created(router.accept_or_reject("bs", env, &snap).await.unwrap());
         guard
             .finalize(GuardOutcome::Terminal(TerminalOutcome::Consumed))
             .await;
 
         router
             .record_terminal(
+                "bs",
                 &message_id,
                 TerminalOutcome::Undeliverable {
                     reason: "test_path".into(),
@@ -515,7 +539,7 @@ mod tests {
         let unknown: PeerMessageId =
             serde_json::from_str("\"00000000-0000-0000-0000-000000000999\"").unwrap();
         let err = router
-            .record_terminal(&unknown, TerminalOutcome::Consumed)
+            .record_terminal("bs", &unknown, TerminalOutcome::Consumed)
             .await
             .unwrap_err();
         assert!(matches!(err, RouterError::Ledger(_)));
@@ -528,7 +552,7 @@ mod tests {
         let env = envelope("src", "tgt");
         let message_id = env.message_id;
 
-        let _guard = unwrap_created(router.accept_or_reject(env, &snap).await.unwrap());
+        let _guard = unwrap_created(router.accept_or_reject("bs", env, &snap).await.unwrap());
         ledger
             .transition(&message_id, LedgerState::Queued)
             .await
@@ -543,6 +567,7 @@ mod tests {
             .unwrap();
         router
             .record_terminal(
+                "bs",
                 &message_id,
                 TerminalOutcome::Ignored {
                     reason: "ignored".into(),
@@ -552,7 +577,7 @@ mod tests {
             .unwrap();
 
         let err = router
-            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .record_terminal("bs", &message_id, TerminalOutcome::Consumed)
             .await
             .unwrap_err();
 
@@ -575,7 +600,12 @@ mod tests {
         let env = envelope("src", "tgt");
         let message_id = env.message_id;
 
-        let _guard = unwrap_created(router.accept_or_reject(env.clone(), &snap).await.unwrap());
+        let _guard = unwrap_created(
+            router
+                .accept_or_reject("bs", env.clone(), &snap)
+                .await
+                .unwrap(),
+        );
         ledger
             .transition(&message_id, LedgerState::Queued)
             .await
@@ -589,11 +619,11 @@ mod tests {
             .await
             .unwrap();
         router
-            .record_terminal(&message_id, TerminalOutcome::Consumed)
+            .record_terminal("bs", &message_id, TerminalOutcome::Consumed)
             .await
             .unwrap();
 
-        let err = router.accept_or_reject(env, &snap).await.unwrap_err();
+        let err = router.accept_or_reject("bs", env, &snap).await.unwrap_err();
 
         match err {
             RouterError::Ledger(crate::peer_mailbox::ledger::LedgerError::AlreadyTerminal {

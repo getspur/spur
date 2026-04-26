@@ -4,6 +4,7 @@ use spur_acp::domain::events::SpurEventBody;
 use spur_acp::domain::peer_message::{LedgerState, PeerMessageId, TerminalOutcome};
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::RwLock;
 
 /// Sent to the reconciler when a `PeerMessageGuard` drops without finalize.
 ///
@@ -102,7 +103,7 @@ pub async fn run_reconciler_loop(
     mut rx: UnboundedReceiver<StrandedMessage>,
     ledger: Arc<dyn PeerMailboxLedger>,
     funnel: FunnelHandle,
-    brain_session_id: String,
+    session_slot: Arc<RwLock<Option<String>>>,
 ) {
     while let Some(stranded) = rx.recv().await {
         let reason = match &stranded.default_outcome {
@@ -122,8 +123,13 @@ pub async fn run_reconciler_loop(
         {
             Ok(TransitionOutcome::Changed { .. }) => {
                 if let Some(entry) = ledger.get(&stranded.message_id).await {
+                    let brain_session_id = session_slot
+                        .read()
+                        .await
+                        .clone()
+                        .unwrap_or_else(|| "<no-active-session>".into());
                     funnel.emit(SpurEventBody::WorkerPeerMessageUndeliverable {
-                        brain_session_id: brain_session_id.clone(),
+                        brain_session_id,
                         message_id: stranded.message_id,
                         target_delegation_id: entry.envelope.target_delegation_id,
                         reason,

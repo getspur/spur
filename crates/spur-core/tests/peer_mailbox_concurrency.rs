@@ -9,6 +9,7 @@ use spur_acp::domain::peer_message::{
     LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
 };
 use spur_core::event_funnel::FunnelHandle;
+use spur_core::peer_mailbox::guard::PeerMessageGuard;
 use spur_core::peer_mailbox::ledger::{InjectionOutcome, LedgerError, TransitionOutcome};
 use spur_core::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
 use spur_core::peer_mailbox::router::Acceptance;
@@ -92,7 +93,6 @@ fn fixture() -> (
         funnel.clone(),
         recon_tx,
         Limits::default(),
-        "brain-session".into(),
     ));
     (ledger, router, funnel, events)
 }
@@ -110,7 +110,6 @@ fn bundle_fixture() -> (
         funnel.clone(),
         recon_tx,
         Limits::default(),
-        "brain-session".into(),
     ));
     let builder = Arc::new(PeerPromptContextBuilder::new(ledger.clone()));
 
@@ -119,6 +118,7 @@ fn bundle_fixture() -> (
             router,
             builder,
             ledger,
+            brain_session_id_slot: Arc::new(tokio::sync::RwLock::new(Some("brain-session".into()))),
         },
         funnel,
         events,
@@ -135,6 +135,16 @@ fn drain_events(events: &mut UnboundedReceiver<SpurEventBody>) -> Vec<SpurEventB
         out.push(event);
     }
     out
+}
+
+fn expect_created(acceptance: Acceptance) -> PeerMessageGuard {
+    if let Acceptance::AlreadyAccepted = acceptance {
+        panic!("expected fresh acceptance");
+    }
+    if let Acceptance::Created(guard) = acceptance {
+        return guard;
+    }
+    panic!("unexpected Acceptance variant");
 }
 
 fn distinct_accept_stress_n() -> usize {
@@ -158,7 +168,9 @@ async fn run_distinct_accept_race(n: usize, id_base: u128) {
         let env = envelope(id(id_base + index as u128), "tgt", index as u64);
         set.spawn(async move {
             barrier.wait().await;
-            router.accept_or_reject(env, &snapshot).await
+            router
+                .accept_or_reject("brain-session", env, &snapshot)
+                .await
         });
     }
 
@@ -204,7 +216,9 @@ async fn n_task_accept_race_with_same_envelope() {
         let barrier = barrier.clone();
         set.spawn(async move {
             barrier.wait().await;
-            router.accept_or_reject(env, &snapshot).await
+            router
+                .accept_or_reject("brain-session", env, &snapshot)
+                .await
         });
     }
 
@@ -213,10 +227,11 @@ async fn n_task_accept_race_with_same_envelope() {
     let mut created = Vec::new();
     let mut already_accepted = 0;
     for result in set.join_all().await {
-        match result.expect("accept should succeed") {
-            Acceptance::Created(guard) => created.push(guard),
-            Acceptance::AlreadyAccepted => already_accepted += 1,
-            _ => panic!("unexpected Acceptance variant"),
+        let acceptance = result.expect("accept should succeed");
+        if let Acceptance::AlreadyAccepted = acceptance {
+            already_accepted += 1;
+        } else {
+            created.push(expect_created(acceptance));
         }
     }
 
@@ -439,36 +454,30 @@ async fn sequential_replay_after_acceptance_returns_already_accepted() {
     let ledger = Arc::new(InMemoryLedger::new());
     let (funnel, mut events) = spur_core::event_funnel::test_channel();
     let (recon_tx, _recon_rx) = unbounded_channel();
-    let router = PeerMailboxRouter::new(
-        ledger.clone(),
-        funnel.clone(),
-        recon_tx,
-        Limits::default(),
-        "brain-session".into(),
-    );
+    let router =
+        PeerMailboxRouter::new(ledger.clone(), funnel.clone(), recon_tx, Limits::default());
     let snapshot = snapshot_for_targets(&["tgt"]);
     let env = envelope(id(0x3_100), "tgt", 1);
 
-    let guard = match router
-        .accept_or_reject(env.clone(), &snapshot)
-        .await
-        .expect("first accept should succeed")
-    {
-        Acceptance::Created(guard) => guard,
-        Acceptance::AlreadyAccepted => panic!("first accept should create guard"),
-        _ => panic!("unexpected Acceptance variant"),
-    };
+    let guard = expect_created(
+        router
+            .accept_or_reject("brain-session", env.clone(), &snapshot)
+            .await
+            .expect("first accept should succeed"),
+    );
     drop(guard);
 
     for _ in 0..N {
-        match router
-            .accept_or_reject(env.clone(), &snapshot)
+        let acceptance = router
+            .accept_or_reject("brain-session", env.clone(), &snapshot)
             .await
-            .expect("replay accept should succeed")
-        {
-            Acceptance::AlreadyAccepted => {}
-            Acceptance::Created(_) => panic!("replay returned a second guard"),
-            _ => panic!("replay returned an unexpected Acceptance variant"),
+            .expect("replay accept should succeed");
+        if let Acceptance::Created(_) = &acceptance {
+            panic!("replay returned a second guard");
+        }
+        if let Acceptance::AlreadyAccepted = &acceptance {
+        } else {
+            panic!("replay returned an unexpected Acceptance variant");
         }
     }
 
@@ -488,15 +497,12 @@ async fn concurrent_record_terminal_does_not_double_emit() {
     let snapshot = snapshot_for_targets(&["tgt"]);
     let message_id = id(0x3_200);
     let env = envelope(message_id, "tgt", 1);
-    let guard = match router
-        .accept_or_reject(env, &snapshot)
-        .await
-        .expect("accept should succeed")
-    {
-        Acceptance::Created(guard) => guard,
-        Acceptance::AlreadyAccepted => panic!("first accept should create guard"),
-        _ => panic!("unexpected Acceptance variant"),
-    };
+    let guard = expect_created(
+        router
+            .accept_or_reject("brain-session", env, &snapshot)
+            .await
+            .expect("accept should succeed"),
+    );
     ledger
         .transition(&message_id, LedgerState::Queued)
         .await
@@ -518,7 +524,7 @@ async fn concurrent_record_terminal_does_not_double_emit() {
         set.spawn(async move {
             barrier.wait().await;
             router
-                .record_terminal(&message_id, TerminalOutcome::Consumed)
+                .record_terminal("brain-session", &message_id, TerminalOutcome::Consumed)
                 .await
         });
     }
@@ -564,11 +570,12 @@ async fn reconciler_does_not_race_with_concurrent_workers() {
         ids.push((message_id, index % 2 == 0));
         set.spawn(async move {
             let env = envelope(message_id, "tgt", index as u64);
-            let guard = match router.accept_or_reject(env, &snapshot).await.unwrap() {
-                Acceptance::Created(guard) => guard,
-                Acceptance::AlreadyAccepted => panic!("distinct message should be created"),
-                _ => panic!("unexpected Acceptance variant"),
-            };
+            let guard = expect_created(
+                router
+                    .accept_or_reject("brain-session", env, &snapshot)
+                    .await
+                    .unwrap(),
+            );
             ready.wait().await;
             ledger
                 .transition(&message_id, LedgerState::Queued)
@@ -585,7 +592,7 @@ async fn reconciler_does_not_race_with_concurrent_workers() {
                 .await
                 .expect("inflight transition should succeed");
             let _ = router
-                .record_terminal(&message_id, TerminalOutcome::Consumed)
+                .record_terminal("brain-session", &message_id, TerminalOutcome::Consumed)
                 .await;
             drop(guard);
         });
