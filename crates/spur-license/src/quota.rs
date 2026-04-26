@@ -6,6 +6,7 @@ pub enum QuotaKey {
     EventRetentionBytes,
     MaxTeamMembers,
     MinSeats,
+    BrainFailoverChainDepth,
 }
 
 impl QuotaKey {
@@ -15,6 +16,7 @@ impl QuotaKey {
             Self::EventRetentionBytes => "event_retention_bytes",
             Self::MaxTeamMembers => "max_team_members",
             Self::MinSeats => "min_seats",
+            Self::BrainFailoverChainDepth => "brain_failover_chain_depth",
         }
     }
 
@@ -24,6 +26,7 @@ impl QuotaKey {
             "event_retention_bytes" => Some(Self::EventRetentionBytes),
             "max_team_members" => Some(Self::MaxTeamMembers),
             "min_seats" => Some(Self::MinSeats),
+            "brain_failover_chain_depth" => Some(Self::BrainFailoverChainDepth),
             _ => None,
         }
     }
@@ -86,5 +89,17 @@ mod tests {
     fn quota_value_as_bytes() {
         assert_eq!(QuotaValue::Bytes(1024).as_bytes(), Some(1024));
         assert_eq!(QuotaValue::Count(1).as_bytes(), None);
+    }
+
+    #[test]
+    fn quota_key_brain_failover_chain_depth_roundtrips() {
+        assert_eq!(
+            QuotaKey::BrainFailoverChainDepth.as_str(),
+            "brain_failover_chain_depth"
+        );
+        assert_eq!(
+            QuotaKey::from_known("brain_failover_chain_depth"),
+            Some(QuotaKey::BrainFailoverChainDepth)
+        );
     }
 }
