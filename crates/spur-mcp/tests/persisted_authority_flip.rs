@@ -274,7 +274,7 @@ async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
         CompletionAuditFields {
             worker_branch: Some("feat/task".into()),
             result_summary: Some("worker finished".into()),
-            artifact_uri: None,
+            ..Default::default()
         },
     )
     .await
@@ -602,7 +602,7 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
         CompletionAuditFields {
             worker_branch: Some("feat/stale".into()),
             result_summary: Some("late completion".into()),
-            artifact_uri: None,
+            ..Default::default()
         },
     )
     .await

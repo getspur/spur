@@ -203,10 +203,10 @@ async fn plan_audit_coverage_all_four_sentinels() {
         &delegation_id,
         CompletionState::AwaitingReview,
         false,
-        &CompletionAuditFields {
+        CompletionAuditFields {
             worker_branch: Some("feat/worker-branch-1".into()),
             result_summary: Some("3 files changed".into()),
-            artifact_uri: None,
+            ..Default::default()
         },
     )
     .await;
@@ -452,7 +452,7 @@ async fn completion_success_writes_ready_for_review_and_completion_audit() {
         CompletionAuditFields {
             worker_branch: Some("feat/task".into()),
             result_summary: Some("worker finished cleanly".into()),
-            artifact_uri: None,
+            ..Default::default()
         },
     )
     .await
@@ -519,9 +519,8 @@ async fn completion_failed_closes_issue_and_emits_completion_audit() {
         "del-fail",
         CompletionState::Failed,
         CompletionAuditFields {
-            worker_branch: None,
             result_summary: Some("worker failed".into()),
-            artifact_uri: None,
+            ..Default::default()
         },
     )
     .await
@@ -595,9 +594,8 @@ async fn completion_cancelled_closes_issue_and_emits_completion_audit() {
         "del-cancel",
         CompletionState::Cancelled,
         CompletionAuditFields {
-            worker_branch: None,
             result_summary: Some("worker cancelled".into()),
-            artifact_uri: None,
+            ..Default::default()
         },
     )
     .await

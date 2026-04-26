@@ -33,8 +33,20 @@ pub enum EpicCompletionOutcome {
 /// localize future field additions to one struct.
 #[derive(Debug, Default, Clone)]
 pub struct CompletionAuditFields {
+    /// Worker's git branch name for the delegation. Carried verbatim from
+    /// `DelegationResult.worker_branch` (NOT the materializer's clipped copy)
+    /// so operators see the original branch in audit comments.
     pub worker_branch: Option<String>,
+    /// Human-visible summary line. For non-Superseded paths this is the
+    /// materializer's CLIPPED summary (post `clip_with_ellipsis`). For
+    /// Superseded — where the materializer is bypassed — it falls back to
+    /// the unclipped `DelegationResult.summary`.
     pub result_summary: Option<String>,
+    /// `Some(_)` when `OutcomeMaterializer::materialize` succeeded, formatted
+    /// `spur://outcome/{brain_session}/{delegation}/{attempt}`. Operators
+    /// extract this URI and resolve via `fetch_outcome_artifact` to inspect
+    /// the full delegation result. `None` for the Superseded path (the
+    /// materializer is skipped to avoid emitting stale-attempt artifacts).
     pub artifact_uri: Option<String>,
 }
 
