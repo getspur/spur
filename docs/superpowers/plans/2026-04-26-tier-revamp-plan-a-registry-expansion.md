@@ -728,9 +728,15 @@ Parser arms:
 
 ---
 
-## Task 10: Add spur-core system events keys (5)
+## Task 10: Add spur-core system events keys (4)
 
-Adds: conflict_detection, rate_limit_detection, license_event_broadcast, permission_request_prompt, ext_notification.
+**REVISED 2026-04-26 (Wave 4 gate-review pass).** Per gemini findings:
+- Removed `license_event_broadcast` (system wiring required for tier transitions \u2014 gating it is circular)
+- Renamed `ext_notification` \u2192 `agent_notification` (drops impl-leak `ext_` prefix)
+
+Net 4 Free keys (was 5).
+
+Adds: conflict_detection, rate_limit_detection, permission_request_prompt, agent_notification.
 
 - [ ] **Step 1: Write failing test**
 
@@ -740,9 +746,8 @@ Adds: conflict_detection, rate_limit_detection, license_event_broadcast, permiss
         for s in &[
             "core_core_conflict_detection",
             "core_core_rate_limit_detection",
-            "core_core_license_event_broadcast",
             "core_core_permission_request_prompt",
-            "core_core_ext_notification",
+            "core_core_agent_notification",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
@@ -753,12 +758,12 @@ Adds: conflict_detection, rate_limit_detection, license_event_broadcast, permiss
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-core: system events (5) ---
+    // --- spur-core: system events (4) ---
     pub const CORE_CORE_CONFLICT_DETECTION: Self = Self("core_core_conflict_detection");
     pub const CORE_CORE_RATE_LIMIT_DETECTION: Self = Self("core_core_rate_limit_detection");
-    pub const CORE_CORE_LICENSE_EVENT_BROADCAST: Self = Self("core_core_license_event_broadcast");
-    pub const CORE_CORE_PERMISSION_REQUEST_PROMPT: Self = Self("core_core_permission_request_prompt");
-    pub const CORE_CORE_EXT_NOTIFICATION: Self = Self("core_core_ext_notification");
+    pub const CORE_CORE_PERMISSION_REQUEST_PROMPT: Self =
+        Self("core_core_permission_request_prompt");
+    pub const CORE_CORE_AGENT_NOTIFICATION: Self = Self("core_core_agent_notification");
 ```
 
 Parser arms:
@@ -769,16 +774,14 @@ Parser arms:
             Some(Self::CORE_CORE_CONFLICT_DETECTION)
         } else if bytes_eq(b, b"core_core_rate_limit_detection") {
             Some(Self::CORE_CORE_RATE_LIMIT_DETECTION)
-        } else if bytes_eq(b, b"core_core_license_event_broadcast") {
-            Some(Self::CORE_CORE_LICENSE_EVENT_BROADCAST)
         } else if bytes_eq(b, b"core_core_permission_request_prompt") {
             Some(Self::CORE_CORE_PERMISSION_REQUEST_PROMPT)
-        } else if bytes_eq(b, b"core_core_ext_notification") {
-            Some(Self::CORE_CORE_EXT_NOTIFICATION)
+        } else if bytes_eq(b, b"core_core_agent_notification") {
+            Some(Self::CORE_CORE_AGENT_NOTIFICATION)
 ```
 
 - [ ] **Step 4-5: Run test (PASS), build (PASS).**
-- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-core system events keys (5) for tier revamp Plan A`
+- [ ] **Step 6: Commit:** `feat(spur-license): registry add spur-core system events keys (4) for tier revamp Plan A`
 
 ---
 
@@ -851,7 +854,7 @@ Per spec §4.3: 7 Free + 7 Pro.
     fn spur_mcp_keys_registered() {
         for s in &[
             "mcp_core_server_dispatch",
-            "mcp_core_delegate_basic",
+            "mcp_core_delegate",
             "mcp_core_outcome_fetch",
             "mcp_core_pm_basic",
             "mcp_core_pr_manual",
@@ -876,7 +879,7 @@ Per spec §4.3: 7 Free + 7 Pro.
 ```rust
     // --- spur-mcp (14: 7 Free + 7 Pro) ---
     pub const MCP_CORE_SERVER_DISPATCH: Self = Self("mcp_core_server_dispatch");
-    pub const MCP_CORE_DELEGATE_BASIC: Self = Self("mcp_core_delegate_basic");
+    pub const MCP_CORE_DELEGATE: Self = Self("mcp_core_delegate");
     pub const MCP_CORE_OUTCOME_FETCH: Self = Self("mcp_core_outcome_fetch");
     pub const MCP_CORE_PM_BASIC: Self = Self("mcp_core_pm_basic");
     pub const MCP_CORE_PR_MANUAL: Self = Self("mcp_core_pr_manual");
@@ -897,8 +900,8 @@ Parser arms:
         // spur-mcp
         } else if bytes_eq(b, b"mcp_core_server_dispatch") {
             Some(Self::MCP_CORE_SERVER_DISPATCH)
-        } else if bytes_eq(b, b"mcp_core_delegate_basic") {
-            Some(Self::MCP_CORE_DELEGATE_BASIC)
+        } else if bytes_eq(b, b"mcp_core_delegate") {
+            Some(Self::MCP_CORE_DELEGATE)
         } else if bytes_eq(b, b"mcp_core_outcome_fetch") {
             Some(Self::MCP_CORE_OUTCOME_FETCH)
         } else if bytes_eq(b, b"mcp_core_pm_basic") {
