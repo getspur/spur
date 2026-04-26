@@ -4,7 +4,7 @@ use spur_acp::domain::peer_message::{
     LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
 };
 use spur_acp::SpurEventBody;
-use spur_core::peer_mailbox::guard::GuardOutcome;
+use spur_core::peer_mailbox::guard::{GuardOutcome, PeerMessageGuard};
 use spur_core::peer_mailbox::ledger::{InjectionOutcome, LedgerError, TransitionOutcome};
 use spur_core::peer_mailbox::limits::{
     aggregate_budget_for_context_window, effective_max_message_size,
@@ -65,7 +65,7 @@ fn router_with_broadcast(
     let seq = Arc::new(AtomicU64::new(0));
     let funnel = spur_core::event_funnel::spawn_funnel(bcast_tx.clone(), seq);
     let (recon_tx, _recon_rx) = unbounded_channel();
-    let router = PeerMailboxRouter::new(ledger, funnel, recon_tx, Limits::default(), "bs".into());
+    let router = PeerMailboxRouter::new(ledger, funnel, recon_tx, Limits::default());
     (router, bcast_rx)
 }
 
@@ -84,7 +84,6 @@ fn bundle_with_broadcast() -> (
         funnel.clone(),
         recon_tx,
         Limits::default(),
-        "bs".into(),
     ));
     let builder = Arc::new(PeerPromptContextBuilder::new(ledger.clone()));
 
@@ -93,6 +92,7 @@ fn bundle_with_broadcast() -> (
             router,
             builder,
             ledger,
+            brain_session_id_slot: Arc::new(tokio::sync::RwLock::new(Some("bs".into()))),
         },
         bcast_rx,
         funnel,
@@ -113,17 +113,29 @@ async fn drain_broadcast_events(
     out
 }
 
+fn expect_created(acceptance: Acceptance) -> PeerMessageGuard {
+    if let Acceptance::AlreadyAccepted = acceptance {
+        panic!("expected fresh acceptance");
+    }
+    if let Acceptance::Created(guard) = acceptance {
+        return guard;
+    }
+    panic!("unexpected Acceptance variant");
+}
+
 #[tokio::test]
 async fn worker_ack_during_accepted_state_consumes_message() {
     let (bundle, mut bcast_rx, funnel) = bundle_with_broadcast();
     let snap = snapshot();
     let env = envelope("Worker B: consume this during prompt");
     let mid = env.message_id;
-    let _guard = match bundle.router.accept_or_reject(env, &snap).await.unwrap() {
-        Acceptance::Created(guard) => guard,
-        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
-        _ => panic!("unexpected Acceptance variant"),
-    };
+    let _guard = expect_created(
+        bundle
+            .router
+            .accept_or_reject("bs", env, &snap)
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         bundle.ledger.get(&mid).await.unwrap().state,
         LedgerState::Accepted
@@ -171,22 +183,20 @@ async fn post_prompt_skip_via_error_arm_does_not_emit_audit_failed() {
         "sequence": 1
     });
 
-    let guard = match spur_core::spur_ext_interp::interpret_peer_message(
-        &bundle.router,
-        &snap,
-        DelegationId("src".into()),
-        "ex".into(),
-        "i1".into(),
-        "ta".into(),
-        payload,
-    )
-    .await
-    .unwrap()
-    {
-        Acceptance::Created(guard) => guard,
-        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
-        _ => panic!("unexpected Acceptance variant"),
-    };
+    let guard = expect_created(
+        spur_core::spur_ext_interp::interpret_peer_message(
+            &bundle.router,
+            &snap,
+            DelegationId("src".into()),
+            "ex".into(),
+            "i1".into(),
+            "ta".into(),
+            "bs",
+            payload,
+        )
+        .await
+        .unwrap(),
+    );
 
     let (ack_tx, mut ack_rx) = unbounded_channel();
     spur_core::spur_ext_interp::interpret_peer_message_terminal(
@@ -242,11 +252,7 @@ async fn full_stage1_flow_accept_inject_consume() {
 
     let env = envelope("Worker B: please handle config validation");
     let mid = env.message_id;
-    let guard = match router.accept_or_reject(env, &snap).await.unwrap() {
-        Acceptance::Created(g) => g,
-        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
-        _ => panic!("unexpected Acceptance variant"),
-    };
+    let guard = expect_created(router.accept_or_reject("bs", env, &snap).await.unwrap());
     assert_eq!(ledger.get(&mid).await.unwrap().state, LedgerState::Accepted);
 
     let ctx = builder
@@ -291,7 +297,7 @@ async fn full_stage1_flow_accept_inject_consume() {
     ));
 
     router
-        .record_terminal(&mid, TerminalOutcome::Consumed)
+        .record_terminal("bs", &mid, TerminalOutcome::Consumed)
         .await
         .unwrap();
     assert_eq!(ledger.get(&mid).await.unwrap().state, LedgerState::Consumed);
@@ -315,11 +321,13 @@ async fn reconcile_advance_to_delivered_then_worker_ack_consumes() {
     let snap = snapshot();
     let env = envelope("Worker B: recover this after crash");
     let mid = env.message_id;
-    let guard = match bundle.router.accept_or_reject(env, &snap).await.unwrap() {
-        Acceptance::Created(guard) => guard,
-        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
-        _ => panic!("unexpected Acceptance variant"),
-    };
+    let guard = expect_created(
+        bundle
+            .router
+            .accept_or_reject("bs", env, &snap)
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         bundle.ledger.get(&mid).await.unwrap().state,
         LedgerState::Accepted
@@ -434,11 +442,7 @@ async fn carry_forward_re_injects_after_pre_delivery_failure() {
     let body = format!("retry budget marker {}TAIL_BEYOND_CAP", "X".repeat(450));
     let env = envelope(&body);
     let mid = env.message_id;
-    let guard1 = match router.accept_or_reject(env, &snap).await.unwrap() {
-        Acceptance::Created(g) => g,
-        Acceptance::AlreadyAccepted => panic!("expected fresh acceptance"),
-        _ => panic!("unexpected Acceptance variant"),
-    };
+    let guard1 = expect_created(router.accept_or_reject("bs", env, &snap).await.unwrap());
     assert_eq!(ledger.get(&mid).await.unwrap().state, LedgerState::Accepted);
 
     let ctx1 = builder.build_for_target(&target, 32_000, 8, 2_048).await;
@@ -502,7 +506,7 @@ async fn rejected_message_is_not_in_pending() {
     snap.peer_edges.clear();
 
     let err = router
-        .accept_or_reject(envelope("blocked"), &snap)
+        .accept_or_reject("bs", envelope("blocked"), &snap)
         .await
         .unwrap_err();
     assert_eq!(

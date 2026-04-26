@@ -12,6 +12,16 @@
   event directly. (bd-cpf.5b)
 
 ### Added
+- **Peer mailbox production wire-up (Stage-1).** The peer mailbox subsystem
+  (hardened in bd-cpf.1–7) is now constructed and attached when
+  `peer_mailbox_enabled = true` is set in config. A long-lived reconciler
+  task drains stranded peer messages and emits audit events. Startup
+  reconcile runs at brain session boundaries. Default is `false`; no
+  behavioral change for existing deployments. Operators who opt in should
+  monitor for `WorkerPeerMessageUndeliverable` events and be aware that
+  the in-memory ledger does not prune entries (Risk #22). To disable,
+  set `peer_mailbox_enabled = false` and restart SPUR — runtime toggle
+  is not supported. (bd-arch.21)
 - **Peer mailbox drain lifecycle events.** `WorkerPeerMessageDrainStarted`
   and `WorkerPeerMessageDrainTimedOut` add symmetric observability to the
   post-prompt ack drain. `DrainStarted` carries the candidate-set size
@@ -43,6 +53,14 @@
   explicitly. New `Adapter::Kimi` renders to `.kimi/skills/`, closing the
   gap where Kimi workers accidentally relied on `.claude/skills/` fallback.
   See `docs/superpowers/specs/2026-04-22-multi-agent-skill-embedding-research.md`.
+
+### Fixed
+- **Architecture Risk #21.** The peer mailbox reconciler is now spawned
+  at orchestrator boot and aborted on shutdown via `Orchestrator::drop`.
+  Previously the receiver was dropped immediately after construction,
+  causing stranded messages to be silently lost — but the surrounding
+  wire-up was also missing in production, so the entire subsystem (62
+  tests, bd-cpf.1–7 hardening) was inert. (bd-arch.21)
 
 ## v0.4.5 — 2026-04-19
 
