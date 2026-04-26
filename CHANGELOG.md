@@ -15,14 +15,14 @@
 - **Peer mailbox drain lifecycle events.** `WorkerPeerMessageDrainStarted`
   and `WorkerPeerMessageDrainTimedOut` add symmetric observability to the
   post-prompt ack drain. `DrainStarted` carries the candidate-set size
-  and the cap/quiet-window limits in effect; `DrainTimedOut` mirrors the
-  existing `WorkerPeerMessageDrainCappedOut` payload (with
-  `quiet_window_ms` replacing nothing — both fields are present so
-  dashboards can reuse panel queries). `DrainTimedOut` is emitted only
-  when the quiet-window exit leaves remaining non-terminal messages;
-  clean-exit drains (`remaining_messages == 0`) emit no exit event.
-  Diagnostic-only — message loss continues to be tracked per-message
-  via `WorkerPeerMessageIgnored`. (bd-cpf.7)
+  and the cap/quiet-window limits in effect; `DrainTimedOut` carries the
+  same payload shape as `WorkerPeerMessageDrainCappedOut` plus
+  `quiet_window_ms`, so dashboards can reuse panel queries across both
+  exit events. `DrainTimedOut` is emitted only when the quiet-window
+  exit leaves remaining non-terminal messages; clean-exit drains
+  (`remaining_messages == 0`) emit no exit event. Diagnostic-only —
+  message loss continues to be tracked per-message via
+  `WorkerPeerMessageIgnored`. (bd-cpf.7)
 - **`WorkerPeerMailboxReconciled.inflight_already_delivered` counter.**
   Tracks benign idempotent races during startup reconciliation where an
   entry was already in `Delivered` state when the reconciler attempted
